@@ -19,6 +19,7 @@ use std::time::Duration;
 
 use tokio::io::{AsyncRead, AsyncWrite};
 
+pub mod ancestry;
 pub mod bundled_conpty;
 mod bundled_conpty_pins;
 pub mod capture;

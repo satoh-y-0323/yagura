@@ -910,17 +910,22 @@ fn peer_pid(_conn: &UnixStream) -> Option<u32> {
 }
 
 /// Reads the peer's executable through [`peer_pid`].
-#[cfg(target_os = "linux")]
 fn peer_executable_path(conn: &UnixStream) -> Option<PathBuf> {
-    let pid = peer_pid(conn)?;
+    executable_path(peer_pid(conn)?)
+}
+
+/// The executable the process `pid` runs; `None` when it cannot be read.
+#[cfg(target_os = "linux")]
+pub(crate) fn executable_path(pid: u32) -> Option<PathBuf> {
     std::fs::read_link(format!("/proc/{pid}/exe")).ok()
 }
 
+/// The executable the process `pid` runs; `None` when it cannot be read.
 #[cfg(target_os = "macos")]
-fn peer_executable_path(conn: &UnixStream) -> Option<PathBuf> {
+pub(crate) fn executable_path(pid: u32) -> Option<PathBuf> {
     use std::os::unix::ffi::OsStringExt;
 
-    let pid = libc::pid_t::try_from(peer_pid(conn)?).ok()?;
+    let pid = libc::pid_t::try_from(pid).ok()?;
     let mut buffer = vec![0u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
     // SAFETY: `buffer` is a live allocation of the length passed as
     // `buffersize`, which is the contract proc_pidpath(3) documents; it
@@ -937,7 +942,7 @@ fn peer_executable_path(conn: &UnixStream) -> Option<PathBuf> {
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-fn peer_executable_path(_conn: &UnixStream) -> Option<PathBuf> {
+pub(crate) fn executable_path(_pid: u32) -> Option<PathBuf> {
     None
 }
 

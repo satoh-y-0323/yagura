@@ -92,6 +92,18 @@ pub(crate) fn process_facts(pid: u32) -> io::Result<Option<ProcessFacts>> {
     platform::facts_of(pid)
 }
 
+/// The creation time of the process `pid` as the raw 100 ns ticks, which
+/// order processes, and as its start; `None` when no process has that id.
+///
+/// # Errors
+///
+/// Returns the operating system's error when the process is there but its
+/// creation time cannot be read.
+#[cfg(windows)]
+pub(crate) fn process_creation(pid: u32) -> io::Result<Option<(u64, ProcessStart)>> {
+    platform::creation_of(pid).map(|read| read.map(|(ticks, start)| (ticks, ProcessStart(start))))
+}
+
 /// A handle on one running process, opened by its id and checked against
 /// its start: its liveness, the wait for its end and its kill all go
 /// through the same handle, so none of them reaches a process that took
@@ -220,8 +232,16 @@ mod platform {
         HANDLE(handle.as_raw_handle() as isize)
     }
 
-    /// The process's creation time, in 100 ns ticks.
+    /// The process's start: its creation time, in 100 ns ticks.
     fn created(handle: &OwnedHandle) -> io::Result<String> {
+        created_ticks(handle).map(start_text)
+    }
+
+    fn start_text(ticks: u64) -> String {
+        ticks.to_string()
+    }
+
+    fn created_ticks(handle: &OwnedHandle) -> io::Result<u64> {
         let mut creation = FILETIME::default();
         let mut exit = FILETIME::default();
         let mut kernel = FILETIME::default();
@@ -238,8 +258,7 @@ mod platform {
             )
         }
         .map_err(|error| win32_error_to_io(&error))?;
-        let ticks = u64::from(creation.dwHighDateTime) << 32 | u64::from(creation.dwLowDateTime);
-        Ok(ticks.to_string())
+        Ok(u64::from(creation.dwHighDateTime) << 32 | u64::from(creation.dwLowDateTime))
     }
 
     fn wait_for(handle: &OwnedHandle) -> io::Result<()> {
@@ -274,6 +293,13 @@ mod platform {
     pub(super) fn start_of(pid: u32) -> io::Result<Option<String>> {
         match open_process(pid, PROCESS_QUERY_LIMITED_INFORMATION)? {
             Some(handle) => created(&handle).map(Some),
+            None => Ok(None),
+        }
+    }
+
+    pub(super) fn creation_of(pid: u32) -> io::Result<Option<(u64, String)>> {
+        match open_process(pid, PROCESS_QUERY_LIMITED_INFORMATION)? {
+            Some(handle) => created_ticks(&handle).map(|ticks| Some((ticks, start_text(ticks)))),
             None => Ok(None),
         }
     }
