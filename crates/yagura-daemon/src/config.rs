@@ -389,6 +389,9 @@ pub struct DaemonConfig {
     /// opens without the injections those paths belong to. Shorter than
     /// `mcp_registration_timeout` because the window waits on it. Defaults to
     /// 10 seconds, which covers a WSL distribution's cold start.
+    /// Reading a guest's state base for a window's wake file
+    /// (`[host_paths] state_base`) waits on the same cold start, so it shares
+    /// this bound: a shorter one leaves such windows without a wake file too.
     pub mcp_listing_timeout: Duration,
 
     /// The `yagura-holder` executable every window is kept by. The daemon

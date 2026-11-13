@@ -672,6 +672,10 @@ pub struct InjectionSpec {
     /// that, when present, takes the injection out of a launch. Always `None`
     /// for `[hooks]`.
     pub absent: Option<AbsentGuard>,
+    /// A `[hooks]` table's `answers`: hook event name to the text a window's
+    /// open leaves beside its credentials file for the hook's answer door,
+    /// with `{wake_paths}` filled ([`crate::wake_file`]). Empty for `[mcp]`.
+    pub answers: BTreeMap<String, String>,
 }
 
 /// Where the CLI's own settings would already name the server an `[mcp]`
@@ -893,6 +897,11 @@ pub enum InjectionSpecError {
     /// `{server}`.
     #[error("the absent guard is not usable")]
     InvalidAbsent,
+    /// `answers` is on an `[mcp]` table or a profile whose credentials are
+    /// not `launch`, names a key that is no hook event name, or a text names
+    /// a placeholder other than `{wake_paths}`.
+    #[error("the answers table is not usable")]
+    InvalidAnswers,
 }
 
 /// The schema version [`ProfileParseError::UnsupportedSchema`] rejected.
@@ -1127,6 +1136,8 @@ struct RawInjection {
     config_dir: Option<BTreeMap<String, String>>,
     #[serde(default)]
     absent: Option<RawAbsentGuard>,
+    #[serde(default)]
+    answers: Option<BTreeMap<String, String>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2026,11 +2037,31 @@ fn parse_injection_spec(
         Some(_) => return Err(invalid(InjectionSpecError::InvalidAbsent)),
         None => None,
     };
+    // The answers sit beside the credentials file, so only a `launch`
+    // window's hooks have them.
+    let answers = match raw.answers {
+        Some(answers)
+            if kind == TableKind::Hooks
+                && credentials_file_known
+                && answers.iter().all(|(name, text)| {
+                    crate::profile_hook_events::is_hook_event_name(name)
+                        && !contains_placeholder_outside(
+                            text,
+                            &[crate::wake_file::WAKE_PATHS_PLACEHOLDER],
+                        )
+                }) =>
+        {
+            answers
+        }
+        Some(_) => return Err(invalid(InjectionSpecError::InvalidAnswers)),
+        None => BTreeMap::new(),
+    };
     Ok(Some(InjectionSpec {
         args,
         config_file: raw.config_file,
         config_dir: raw.config_dir,
         absent,
+        answers,
     }))
 }
 
@@ -2321,6 +2352,13 @@ pub struct UnrenderedInjection {
 }
 
 impl UnrenderedInjection {
+    /// The answers a window's open leaves for this table's hooks
+    /// ([`InjectionSpec::answers`]).
+    #[must_use]
+    pub fn answers(&self) -> &BTreeMap<String, String> {
+        &self.spec.answers
+    }
+
     /// The table this injection comes from.
     #[must_use]
     pub fn kind(&self) -> InjectionKind {

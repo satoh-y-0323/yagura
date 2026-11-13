@@ -50,6 +50,7 @@ pub mod ticket_store;
 pub mod token;
 pub mod toml_set;
 pub mod waiter;
+pub mod wake_file;
 pub mod window;
 mod window_table;
 pub mod workspace;

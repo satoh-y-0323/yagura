@@ -13,7 +13,7 @@
 //! `--playbook` / `--profiles-dir` / `--approver-exe` / `--roles` /
 //! `--tickets` configure the daemon itself and are ignored on the client-side paths -- `--emit-status`,
 //! `--deliver-context`, `--deliver-take`, `--deliver-wait`, `--report-session`,
-//! `--hook` and `--shutdown` -- none of which starts a detection engine or an approval gate,
+//! `--hook`, `--print-answer` and `--shutdown` -- none of which starts a detection engine or an approval gate,
 //! just as `--source` qualifies `--emit-status` only.
 
 use std::ffi::OsString;
@@ -126,6 +126,12 @@ pub enum CliCommand {
     /// daemon from what the stdin holds (`--launch-overlay`). Not a hook
     /// door: every failure ends it non-zero.
     LaunchOverlay,
+    /// Print the answer the window's open left beside its credentials file
+    /// for the named hook event (`--print-answer <Event>`), asking no daemon.
+    PrintAnswer {
+        /// The hook event the answer is for.
+        name: String,
+    },
 }
 
 impl CliCommand {
@@ -142,7 +148,11 @@ impl CliCommand {
             | Self::DeliverWait { skip_if }
             | Self::ReportSession { skip_if, .. } => skip_if.as_deref(),
             // The pointer of a `--hook` door is profile data, never an argument.
-            Self::Run { .. } | Self::Shutdown | Self::Hook { .. } | Self::LaunchOverlay => None,
+            Self::Run { .. }
+            | Self::Shutdown
+            | Self::Hook { .. }
+            | Self::LaunchOverlay
+            | Self::PrintAnswer { .. } => None,
         }
     }
 
@@ -156,13 +166,17 @@ impl CliCommand {
                 Some(HookEffect::Deliver)
             }
             Self::ReportSession { .. } => Some(HookEffect::Session),
-            Self::Run { .. } | Self::Shutdown | Self::Hook { .. } | Self::LaunchOverlay => None,
+            Self::Run { .. }
+            | Self::Shutdown
+            | Self::Hook { .. }
+            | Self::LaunchOverlay
+            | Self::PrintAnswer { .. } => None,
         }
     }
 }
 
 /// Whether `args` name a hook door (`--emit-status`, `--deliver-*`,
-/// `--report-session`, `--hook`). Decided on the raw arguments, before
+/// `--report-session`, `--hook`, `--print-answer`). Decided on the raw arguments, before
 /// [`parse_args`], so that a hook outside a window stays silent even when a copy
 /// of the binary older than the hook file does not know one of its other
 /// arguments.
@@ -177,6 +191,7 @@ pub fn names_hook_door(args: &[String]) -> bool {
                 | "--deliver-wait"
                 | "--report-session"
                 | "--hook"
+                | "--print-answer"
         )
     })
 }
@@ -249,7 +264,7 @@ pub enum CliError {
     /// Two mutually exclusive commands were requested at once.
     #[error(
         "only one of --shutdown, --emit-status, --deliver-context, --deliver-take, \
-         --deliver-wait, --report-session and --hook may be given"
+         --deliver-wait, --report-session, --hook and --print-answer may be given"
     )]
     ConflictingCommands,
 }
@@ -340,6 +355,17 @@ pub fn parse_args(args: &[String]) -> Result<CliCommand, CliError> {
                         event: event.clone(),
                         guest: None,
                     },
+                )?;
+            }
+            "--print-answer" => {
+                let name = next_value(&mut remaining, "--print-answer")?;
+                // The name becomes part of a file name beside the credentials.
+                if !is_hook_event_name(name) {
+                    return Err(invalid("--print-answer", name));
+                }
+                set_hook_door(
+                    &mut hook_door,
+                    CliCommand::PrintAnswer { name: name.clone() },
                 )?;
             }
             "--deliver-context" => {
@@ -443,8 +469,13 @@ pub fn parse_args(args: &[String]) -> Result<CliCommand, CliError> {
         return Err(CliError::UnknownArgument(GUEST_ROOT_FLAG.to_string()));
     }
     if let Some(door) = hook_door {
-        // The pointers of a `--hook` door come from its profile alone.
-        if matches!(door, CliCommand::Hook { .. }) && skip_if.is_some() {
+        // The pointers of a `--hook` door come from its profile alone; the
+        // answer door asks the daemon nothing a pointer could narrow.
+        if matches!(
+            door,
+            CliCommand::Hook { .. } | CliCommand::PrintAnswer { .. }
+        ) && skip_if.is_some()
+        {
             return Err(CliError::UnknownArgument("--skip-if".to_string()));
         }
         if let CliCommand::Hook { profile, event, .. } = door {

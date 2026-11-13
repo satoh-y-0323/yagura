@@ -5841,6 +5841,8 @@ async fn open_planned(
     // A CLI the daemon converts paths for runs in another environment.
     let runs_in_guest = planned.host_paths.is_some();
     let credentials_dir = plan_window_credentials(config, &mut planned);
+    let mut answers = hook_answers_of(&planned);
+    let state_base = wake_state_base(&planned, &answers, credentials_dir.is_some());
     // A table whose path cannot be converted is left out here; a `[hooks]`
     // table left out this way settles as left out at spawn.
     let mut injections = mcp_registration::render_profile_injections(
@@ -5886,13 +5888,28 @@ async fn open_planned(
     }
     // A window whose directory cannot be resolved is refused by the open
     // below, so its listing is skipped rather than run somewhere else.
-    if let Some(scan) = planned.bridge_scan.take()
-        && let Some(window_cwd) = window_cwd_of(config, &planned.request).await
-        && let Some(disable) =
-            mcp_registration::disable_other_bridges(config, scan, window_cwd).await
-    {
+    let bridge_scan = planned.bridge_scan.take();
+    let disable_bridges = async {
+        let scan = bridge_scan?;
+        let window_cwd = window_cwd_of(config, &planned.request).await?;
+        mcp_registration::disable_other_bridges(config, scan, window_cwd).await
+    };
+    // The answers ride on the hooks: a window whose `[hooks]` were left out
+    // has nothing to read them, and no wake record.
+    let state_base = state_base.filter(|_| hooks_in_argv);
+    if !hooks_in_argv {
+        answers = crate::wake_file::HookAnswers::default();
+    }
+    // Both run the CLI's environment's tools as the window opens, so they
+    // run side by side.
+    let (disable, wake) = tokio::join!(
+        disable_bridges,
+        wake_place(config, &planned.launch.profile, state_base)
+    );
+    if let Some(disable) = disable {
         insert_before_launch_prompt(&mut planned.injections, disable);
     }
+    answers.wake = wake;
     let provenance = WindowProvenance {
         launch: Some(planned.launch),
         delivery: planned.delivery,
@@ -5900,9 +5917,11 @@ async fn open_planned(
         wake_command: planned.wake_command,
         credentials: planned.credentials,
         credentials_dir,
+        hook_answers: answers,
         facts: WindowFacts {
             runs_in_guest: Some(runs_in_guest),
             overlay,
+            wake: None,
         },
         lineage: LineageRule::for_window(planned.process_image, runs_in_guest),
         launch_overlay: planned.launch_overlay,
@@ -5932,6 +5951,65 @@ async fn open_planned(
         None => {}
     }
     Ok(opened)
+}
+
+/// The answers of the `[hooks]` injection of the window `planned` opens,
+/// before where its wake file goes is decided.
+fn hook_answers_of(planned: &PlannedOpen) -> crate::wake_file::HookAnswers {
+    let texts = planned
+        .profile_injections
+        .iter()
+        .find(|injection| injection.kind() == crate::window::InjectionKind::Hooks)
+        .map(|injection| injection.answers().clone())
+        .unwrap_or_default();
+    crate::wake_file::HookAnswers { texts, wake: None }
+}
+
+/// How the wake file of the window `planned` opens is placed, decided before
+/// its paths are converted: `None` when it gets none (its hooks are not
+/// injected, no answer names its wake paths, or it has no credentials
+/// folder), `Some(None)` for a CLI the daemon runs directly, and
+/// `Some(Some(tool))` for one in another environment, whose state base the
+/// tool prints. A guest profile without `state_base` has no place for one.
+fn wake_state_base(
+    planned: &PlannedOpen,
+    answers: &crate::wake_file::HookAnswers,
+    has_folder: bool,
+) -> Option<Option<crate::wake_file::StateBaseTool>> {
+    if planned.hooks != HooksRoute::Injection || !answers.names_wake_paths() || !has_folder {
+        return None;
+    }
+    let Some(conversion) = planned.host_paths.as_ref() else {
+        return Some(None);
+    };
+    let Some(argv) = conversion.host_paths.state_base() else {
+        tracing::warn!(
+            profile = %planned.launch.profile,
+            "the profile names no guest state base; the window opens without a wake file, so a \
+             message for it waits for its CLI's next event"
+        );
+        return None;
+    };
+    Some(Some(crate::wake_file::StateBaseTool {
+        argv: argv.to_vec(),
+        env: conversion.env.clone(),
+        permits: Arc::clone(&conversion.permits),
+    }))
+}
+
+/// Where the wake file of a window goes, from [`wake_state_base`]'s plan:
+/// a guest's state base is read here.
+async fn wake_place(
+    config: &DaemonConfig,
+    profile: &str,
+    state_base: Option<Option<crate::wake_file::StateBaseTool>>,
+) -> Option<crate::wake_file::WakePlace> {
+    match state_base? {
+        None => Some(crate::wake_file::WakePlace::Folder),
+        Some(tool) => crate::wake_file::read_guest_base(config, profile, tool)
+            .await
+            .map(crate::wake_file::WakePlace::Guest),
+    }
 }
 
 /// Whether the launch overlay of the window `planned` opens is made, `None`

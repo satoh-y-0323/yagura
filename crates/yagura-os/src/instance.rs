@@ -244,8 +244,18 @@ pub fn resolve_startup_env(
 /// Windows.
 ///
 /// The one place an instance's directory name is joined to a caller-supplied
-/// directory.
+/// directory of this host ([`guest_instance_dir`] joins one of a guest's).
 #[must_use]
 pub fn instance_dir(base: &Path, namespace: &InstanceNamespace) -> PathBuf {
     base.join(&namespace.dir_name)
+}
+
+/// The directory this instance owns under `base`, a directory of a Linux
+/// guest spelled with `separator` (`/` as the guest names it, `\` in the
+/// UNC path a Windows host names it by): `<base>/yagura` or
+/// `<base>/yagura-<id>`, the name a Linux daemon of the instance gives it,
+/// whichever host composes it.
+#[must_use]
+pub fn guest_instance_dir(base: &str, separator: char, namespace: &InstanceNamespace) -> String {
+    format!("{base}{separator}{}", namespace.name)
 }

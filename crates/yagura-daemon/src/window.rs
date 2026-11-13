@@ -382,6 +382,10 @@ pub struct WindowProvenance {
     /// ([`plan_credentials_folder`]); the open creates it there. `None` when
     /// the window has no usable place for one.
     pub credentials_dir: Option<PathBuf>,
+    /// What the open leaves beside a `launch` window's credentials file for
+    /// its hooks, and where its wake file goes. Empty for a window taken
+    /// back: its folder already holds them.
+    pub hook_answers: crate::wake_file::HookAnswers,
     /// What the open settled about the window for its whole life; a window
     /// taken back has what its row or launch record kept.
     pub facts: WindowFacts,
@@ -1742,6 +1746,8 @@ pub struct WindowRegistry {
     /// Serializes writing MCP settings files, so two opens needing the same
     /// file never race on one temporary file name.
     mcp_config_write: AsyncMutex<()>,
+    /// The guest wake slots this daemon's windows hold.
+    wake_slots: crate::wake_file::WakeSlots,
     /// Windows whose id and token already exist but whose open has not yet
     /// registered them or failed. A child can identify as early as it is
     /// spawned, so an `identify` for one of these waits instead of answering
@@ -1803,6 +1809,7 @@ impl WindowRegistry {
             notice_launcher: Mutex::new(None),
             workspace_walks,
             mcp_config_write: AsyncMutex::new(()),
+            wake_slots: crate::wake_file::WakeSlots::default(),
             opening: Mutex::new(HashMap::new()),
             shutting_down: AtomicBool::new(false),
             participation: Arc::default(),
@@ -1895,7 +1902,7 @@ impl WindowRegistry {
         req: OpenWindowRequest,
         extra_profile_env: &[(String, String)],
         injections: Vec<CliInjection>,
-        provenance: WindowProvenance,
+        mut provenance: WindowProvenance,
     ) -> Result<OpenedWindow, WindowOpenError> {
         let OpenWindowRequest {
             command,
@@ -1956,6 +1963,13 @@ impl WindowRegistry {
         let credentials_folder = self
             .create_credentials_folder(provenance.credentials, provenance.credentials_dir.clone())
             .await;
+        // Before the window's values are taken from the facts, and before its
+        // CLI can run a hook asking for an answer.
+        let answers = std::mem::take(&mut provenance.hook_answers);
+        provenance.facts.wake = match credentials_folder.as_ref() {
+            Some(folder) => self.leave_answers(folder, answers).await,
+            None => None,
+        };
 
         // Written outside `open_lock`, after the early rejection: a request
         // over the limit never touches the disk, and one slow write never
@@ -2010,6 +2024,7 @@ impl WindowRegistry {
         let palette = self.default_palette_for(vendor.as_deref());
         let settled = |hooks: HooksRoute| WindowValues {
             hooks: Some(hooks),
+            facts: values.facts.clone().settled(hooks),
             ..values.clone()
         };
         let writer = row.writer();
@@ -2051,6 +2066,7 @@ impl WindowRegistry {
         // nor take part in delivery.
         let provenance = WindowProvenance {
             hooks,
+            facts: provenance.facts.clone().settled(hooks),
             ..provenance
         };
         if provenance.hooks.reaches() {
@@ -2302,6 +2318,44 @@ impl WindowRegistry {
                 None
             }
             Err(_) => None,
+        }
+    }
+
+    /// Leaves `answers` beside the credentials file in `folder`, with the wake
+    /// record they name; returns the record, `None` when the window has none
+    /// or the answers cannot be written (its CLI then learns of no wake file).
+    async fn leave_answers(
+        &self,
+        folder: &CredentialsFolder,
+        answers: crate::wake_file::HookAnswers,
+    ) -> Option<crate::wake_file::WakeRecord> {
+        let crate::wake_file::HookAnswers { texts, wake } = answers;
+        let record = wake.and_then(|place| self.wake_slots.record(&place, &folder.dir));
+        let record = record.map(|(record, slot)| {
+            if let Some(slot) = slot {
+                folder.wake.keep(slot);
+            }
+            record
+        });
+        if texts.is_empty() {
+            return record;
+        }
+        let rendered = crate::wake_file::rendered_answers(&texts, record.as_ref());
+        let dir = folder.dir.clone();
+        let written =
+            tokio::task::spawn_blocking(move || crate::wake_file::write_answers(&dir, &rendered))
+                .await
+                .unwrap_or_else(|err| Err(std::io::Error::other(err.to_string())));
+        match written {
+            Ok(()) => record,
+            Err(err) => {
+                tracing::warn!(
+                    error = %err,
+                    "could not write the answers of the window's hooks; the window opens without \
+                     a wake file"
+                );
+                None
+            }
         }
     }
 
@@ -3011,9 +3065,21 @@ impl WindowRegistry {
         .map_err(|err| WindowOpenError::SpawnFailed(err.to_string()))?;
         let session = Arc::new(session);
         // The folder goes once the window ends, as for a window opened here:
-        // closed, its child exited, or its holder found gone.
-        if let Some(dir) = credentials {
-            remove_credentials_when_exited(&session, CredentialsFolder { dir });
+        // closed, its child exited, or its holder found gone. Its wake slot
+        // goes with it, held again from the values kept.
+        let wake = credentials.map(|dir| {
+            let wake = crate::wake_file::WakeHold::default();
+            remove_credentials_when_exited(
+                &session,
+                CredentialsFolder {
+                    dir,
+                    wake: wake.clone(),
+                },
+            );
+            wake
+        });
+        if !needs_values {
+            self.hold_wake_slot(wake.as_ref(), &values.facts);
         }
         let (entry, detector_handle, detected_rx) = self
             .taken_back_entry(&window_id, values, known, &session, status_token, row)
@@ -3028,6 +3094,7 @@ impl WindowRegistry {
                 let Some(registry) = registry.upgrade() else {
                     return;
                 };
+                registry.hold_wake_slot(wake.as_ref(), &welcome.values.facts);
                 if registry.fill_taken_back(&entry, welcome.values).await
                     && let Some(token) = welcome.token
                 {
@@ -3036,6 +3103,18 @@ impl WindowRegistry {
             });
         }
         Ok(())
+    }
+
+    /// Holds again, in `hold`, the wake slot a window taken back keeps in
+    /// `facts`; a hold already given back with its folder gives it back at
+    /// once.
+    fn hold_wake_slot(&self, hold: Option<&crate::wake_file::WakeHold>, facts: &WindowFacts) {
+        if let (Some(hold), Some(id)) = (
+            hold,
+            facts.wake.as_ref().and_then(|wake| wake.slot.as_ref()),
+        ) {
+            hold.keep(self.wake_slots.hold(id));
+        }
     }
 
     /// Replaces `placeholder`, a window taken back without a row, with the
@@ -3154,6 +3233,7 @@ impl WindowRegistry {
             credentials: credentials_mode(values.credentials),
             // Only an open creates the folder; a window taken back has its own.
             credentials_dir: None,
+            hook_answers: crate::wake_file::HookAnswers::default(),
             // A row or record older than the fact: the window is taken to run
             // in another environment when its profile converts paths for one.
             lineage: LineageRule::for_window(
@@ -3660,6 +3740,8 @@ const CREDENTIALS_FOLDER_PREFIX: &str = "credentials-";
 /// with everything in it, so every way a window's open or life ends clears it.
 struct CredentialsFolder {
     dir: PathBuf,
+    /// The wake slot the window holds, given back with the folder.
+    wake: crate::wake_file::WakeHold,
 }
 
 impl CredentialsFolder {
@@ -3667,7 +3749,10 @@ impl CredentialsFolder {
     /// owner-only.
     fn create_at(dir: PathBuf) -> std::io::Result<Self> {
         // Owns the path before anything exists, so a partial creation is cleared.
-        let folder = Self { dir };
+        let folder = Self {
+            dir,
+            wake: crate::wake_file::WakeHold::default(),
+        };
         let base = folder.dir.parent().and_then(Path::parent);
         yagura_os::secure_owned_dir(base.unwrap_or(&folder.dir), &folder.dir)
             .map_err(std::io::Error::other)?;
@@ -3699,7 +3784,13 @@ pub(crate) fn plan_credentials_folder(config_dir: &Path) -> std::io::Result<Path
 /// both Windows and Git Bash read. `None` when it holds a character that would
 /// break out of a JSON string, a TOML string or a single-quoted shell word.
 pub(crate) fn credentials_file_argument(dir: &Path) -> Option<String> {
-    let path = dir.join(CREDENTIALS_FILE_NAME).to_str()?.to_string();
+    folder_file_argument(dir, CREDENTIALS_FILE_NAME)
+}
+
+/// The path of the file `file_name` in the folder `dir`, named as
+/// [`credentials_file_argument`] names the credentials file.
+pub(crate) fn folder_file_argument(dir: &Path, file_name: &str) -> Option<String> {
+    let path = dir.join(file_name).to_str()?.to_string();
     let path = if cfg!(windows) {
         path.replace('\\', "/")
     } else {
@@ -3710,6 +3801,9 @@ pub(crate) fn credentials_file_argument(dir: &Path) -> Option<String> {
 
 impl Drop for CredentialsFolder {
     fn drop(&mut self) {
+        // Before the folder goes: a window opened once it is gone may take
+        // the slot again.
+        self.wake.release();
         if let Err(err) = std::fs::remove_dir_all(&self.dir)
             && err.kind() != std::io::ErrorKind::NotFound
         {

@@ -7,7 +7,8 @@
 //! Every property is measured through a real spawned child (`argv_probe`):
 //! the argv the child received and the file its argv names are what a CLI
 //! would see. The table's keys are `args` (required), `config_file`
-//! (optional) and the placeholder `{hooks_config_file}`.
+//! (optional) and the placeholder `{hooks_config_file}`. A `launch` window's open also
+//! leaves the table's `answers` beside its credentials file, with its wake path.
 
 use crate::common;
 
@@ -690,4 +691,507 @@ mod shim {
         );
         assert!(!text.contains("--mcp-config"), "{text:?}");
     }
+}
+
+// =============================================================================
+// The answers a window's open leaves for its hooks, and its wake path
+// =============================================================================
+
+/// The answer claude's `SessionStart` hook prints: the paths the CLI watches to wake.
+pub(crate) const WAKE_ANSWER: &str = "{\"hookSpecificOutput\":{\"hookEventName\":\
+     \"SessionStart\",\"watchPaths\":{wake_paths}}}";
+
+/// An answer naming no placeholder, left as written.
+pub(crate) const PLAIN_ANSWER: &str = "a plain answer, \"quoted\" as written";
+
+/// The second line a WSL guest's `wslpath -w` prints for its state base.
+pub(crate) const UNC_BASE: &str = "\\\\wsl.localhost\\yagura-no-such-distro\\home\\u\\state";
+
+/// How a guest profile's `[host_paths] state_base` prints the guest's state base: the
+/// `mcp_cli_stub` `probe` subcommand, printing `printed` and ending with `exit_code`, after
+/// sleeping `delay_ms` when given.
+pub(crate) struct StateBase {
+    pub(crate) printed: String,
+    pub(crate) exit_code: i32,
+    pub(crate) delay_ms: Option<u64>,
+}
+
+impl StateBase {
+    /// A tool printing `printed`, its lines, and ending with 0.
+    pub(crate) fn lines(printed: impl Into<String>) -> Self {
+        Self {
+            printed: printed.into(),
+            exit_code: 0,
+            delay_ms: None,
+        }
+    }
+}
+
+/// The profile `id` of a `launch` window running `cli`, whose `[hooks]` hands the CLI its
+/// credentials file and declares `answers`. `guest` makes its CLI one in another
+/// environment: `[host_paths]` with a `convert` that changes nothing, and `state_base` when
+/// one is given.
+pub(crate) fn wake_profile(
+    id: &str,
+    cli: &[String],
+    answers: &[(&str, &str)],
+    guest: Option<Option<StateBase>>,
+) -> String {
+    use toml::Value;
+    let strings =
+        |items: &[String]| Value::Array(items.iter().cloned().map(Value::String).collect());
+    let table = |pairs: Vec<(&str, Value)>| {
+        Value::Table(
+            pairs
+                .into_iter()
+                .map(|(key, value)| (key.to_string(), value))
+                .collect(),
+        )
+    };
+    let mut document = toml::Table::new();
+    document.insert("schema".into(), Value::Integer(1));
+    document.insert("display_name".into(), Value::String(id.to_string()));
+    document.insert("command".into(), table(vec![("default", strings(cli))]));
+    document.insert(
+        "credentials".into(),
+        table(vec![("mode", Value::String("launch".into()))]),
+    );
+    let answers = answers
+        .iter()
+        .map(|(name, text)| (*name, Value::String((*text).to_string())))
+        .collect();
+    document.insert(
+        "hooks".into(),
+        table(vec![
+            (
+                "args",
+                strings(&["--creds".to_string(), "{credentials_file}".to_string()]),
+            ),
+            ("answers", table(answers)),
+        ]),
+    );
+    if let Some(state_base) = guest {
+        let mut host_paths = vec![(
+            "convert",
+            strings(&crate::credentials_launch::unchanged_convert()),
+        )];
+        let mut env = Vec::new();
+        if let Some(state_base) = state_base {
+            host_paths.push((
+                "state_base",
+                strings(&[
+                    common::mcp_cli_stub_path().display().to_string(),
+                    "probe".to_string(),
+                    "state".to_string(),
+                ]),
+            ));
+            env.push((
+                "MCP_CLI_STUB_PROBE_OUTPUT",
+                Value::String(state_base.printed),
+            ));
+            env.push((
+                "MCP_CLI_STUB_PROBE_EXIT_CODE",
+                Value::String(state_base.exit_code.to_string()),
+            ));
+            if let Some(delay_ms) = state_base.delay_ms {
+                env.push(("MCP_CLI_STUB_DELAY_MS", Value::String(delay_ms.to_string())));
+            }
+        }
+        document.insert("host_paths".into(), table(host_paths));
+        document.insert("env".into(), table(env));
+    }
+    toml::to_string(&document).expect("serialize the profile")
+}
+
+/// Blocking: the folder under `root` (at any depth) of the credentials file naming
+/// `window_id`, found by its shape (`window_credentials` in `yagura-protocol`) rather
+/// than its name.
+pub(crate) fn credentials_folder_of(root: &Path, window_id: &str) -> Option<PathBuf> {
+    let entries = std::fs::read_dir(root).ok()?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Ok(kind) = entry.file_type() else {
+            continue;
+        };
+        if kind.is_dir() {
+            if let Some(found) = credentials_folder_of(&path, window_id) {
+                return Some(found);
+            }
+        } else if kind.is_file()
+            && entry.metadata().is_ok_and(|meta| meta.len() <= 4096)
+            && std::fs::read(&path)
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+                .is_some_and(|value| {
+                    // The shape of a credentials file: these two fields and nothing else.
+                    value.as_object().is_some_and(|fields| fields.len() == 2)
+                        && value["window_id"] == window_id
+                        && value["token"].is_string()
+                })
+        {
+            return path.parent().map(Path::to_path_buf);
+        }
+    }
+    None
+}
+
+/// The answer `name` the open of `window_id` left beside its credentials file under
+/// `root`; `None` when it left none.
+pub(crate) fn answer_of(root: &Path, window_id: &str, name: &str) -> Option<String> {
+    let folder = credentials_folder_of(root, window_id)
+        .unwrap_or_else(|| panic!("no credentials file names {window_id} under {root:?}"));
+    std::fs::read_to_string(folder.join(format!("answer-{name}"))).ok()
+}
+
+/// The wake paths the `SessionStart` answer ([`WAKE_ANSWER`]) of `window_id` hands its
+/// CLI; `None` when its open left no such answer.
+pub(crate) fn wake_paths_of(root: &Path, window_id: &str) -> Option<Vec<String>> {
+    let answer = answer_of(root, window_id, "SessionStart")?;
+    let value: serde_json::Value = serde_json::from_str(&answer)
+        .unwrap_or_else(|err| panic!("the answer must read as JSON ({err}): {answer:?}"));
+    let paths = value["hookSpecificOutput"]["watchPaths"]
+        .as_array()
+        .unwrap_or_else(|| panic!("the wake paths must be a JSON array: {answer:?}"));
+    Some(
+        paths
+            .iter()
+            .map(|path| {
+                path.as_str()
+                    .unwrap_or_else(|| panic!("each wake path is a string: {answer:?}"))
+                    .to_string()
+            })
+            .collect(),
+    )
+}
+
+/// The CLI's path of the wake file in the slot `slot` under the guest state base `linux`,
+/// for the instance `instance` (`None`: the default one).
+pub(crate) fn guest_wake_path(linux: &str, instance: Option<&str>, slot: u32) -> String {
+    let namespace = instance.map_or_else(|| "yagura".to_string(), |id| format!("yagura-{id}"));
+    format!("{linux}/{namespace}/host-wake/{slot}/yagura_wake")
+}
+
+/// Waits until the folder `folder` is gone, as a window's credentials folder is once its
+/// child has ended.
+pub(crate) async fn until_gone(folder: &Path) {
+    let deadline = tokio::time::Instant::now() + yagura_test_support::HANG_GUARD;
+    while folder.exists() {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "{folder:?} outlived its window"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+}
+
+/// A config for the wake cases: [`daemon_config`] whose playbook also lets a window close.
+fn wake_config(profiles_dir: PathBuf, config_dir: &Path) -> DaemonConfig {
+    DaemonConfig {
+        approval_policy: Some(common::policy(&["open_window", "close_window"])),
+        ..daemon_config(profiles_dir, Some(config_dir), None)
+    }
+}
+
+async fn close(client: &mut Connection, window_id: &str) {
+    send(
+        client,
+        &ClientMessage::CloseWindow {
+            window_id: window_id.to_string(),
+            force: None,
+        },
+    )
+    .await;
+    match read_response(client).await {
+        DaemonMessage::WindowClosed { .. } => {}
+        other => panic!("expected window_closed, got {other:?}"),
+    }
+}
+
+/// A `launch` window's open leaves each answer of its `[hooks]` beside its credentials file,
+/// a text naming no placeholder as written, and `{wake_paths}` filled once with the JSON
+/// array of its wake path: `yagura_wake` in its credentials folder, named as its
+/// credentials file is (with `/` on Windows), whose characters (a space and the
+/// placeholder's own spelling here) stay as they are. The open makes no wake file itself.
+#[tokio::test]
+async fn a_launch_windows_answers_are_left_beside_its_credentials_with_its_wake_path_as_json() {
+    let tree = TempDir::new("yagura-cli-test", "wake-answers");
+    let profiles_dir = tree.make_dir("profiles");
+    let config_dir = tree.make_dir("mcp {wake_paths} x");
+    let cli = crate::credentials_launch::quiet_cli(&tree.make_dir("logs"));
+    write_profile(
+        &profiles_dir,
+        "wake-native",
+        &wake_profile(
+            "wake-native",
+            &cli,
+            &[("SessionStart", WAKE_ANSWER), ("Plain", PLAIN_ANSWER)],
+            None,
+        ),
+    );
+    let h = Harness::start("wake-answers", wake_config(profiles_dir, &config_dir)).await;
+    let mut client = h.connect().await;
+
+    let window_id = open_from_profile(&mut client, "wake-native", None).await;
+    let folder = credentials_folder_of(&config_dir, &window_id)
+        .expect("a launch window has its credentials folder");
+    assert_eq!(
+        answer_of(&config_dir, &window_id, "Plain").as_deref(),
+        Some(PLAIN_ANSWER),
+        "an answer naming no placeholder is left as written"
+    );
+    let folder_arg = folder.to_str().expect("a UTF-8 folder");
+    let folder_arg = if cfg!(windows) {
+        folder_arg.replace('\\', "/")
+    } else {
+        folder_arg.to_string()
+    };
+    assert_eq!(
+        wake_paths_of(&config_dir, &window_id),
+        Some(vec![format!("{folder_arg}/yagura_wake")]),
+        "{{wake_paths}} is filled with the wake path in the window's credentials folder"
+    );
+    assert!(
+        !folder.join("yagura_wake").exists(),
+        "the open names the wake file and makes none"
+    );
+    h.registry.terminate_all().await;
+}
+
+/// A window whose CLI runs in another environment has its wake file in a slot under the
+/// guest's state base its `[host_paths] state_base` prints (`<line 1>/yagura/host-wake/
+/// <slot>/yagura_wake` for the CLI): the lowest slot no living or opening window holds. A
+/// second window takes the next one; a window opened once the first has ended takes the
+/// first's again; an open that fails half-way gives its slot back. Characters a JSON string
+/// escapes stay as they are in the path the CLI is handed.
+#[tokio::test]
+async fn a_guest_windows_wake_path_is_in_the_lowest_slot_no_living_window_holds() {
+    const LINUX_BASE: &str = "/home/u \"q\" \\b {wake_paths}/state";
+    let tree = TempDir::new("yagura-cli-test", "wake-slots");
+    let profiles_dir = tree.make_dir("profiles");
+    let config_dir = tree.make_dir("mcp");
+    let cli = crate::credentials_launch::quiet_cli(&tree.make_dir("logs"));
+    let printed = format!("{LINUX_BASE}\n{UNC_BASE}");
+    let answers = [("SessionStart", WAKE_ANSWER)];
+    write_profile(
+        &profiles_dir,
+        "wake-guest",
+        &wake_profile(
+            "wake-guest",
+            &cli,
+            &answers,
+            Some(Some(StateBase::lines(printed.clone()))),
+        ),
+    );
+    let broken = tree.make_dir("broken").join(if cfg!(windows) {
+        "broken.exe"
+    } else {
+        "broken"
+    });
+    std::fs::write(&broken, b"this is not an executable image\n").unwrap();
+    write_profile(
+        &profiles_dir,
+        "wake-broken",
+        &wake_profile(
+            "wake-broken",
+            &[broken.display().to_string()],
+            &answers,
+            Some(Some(StateBase::lines(printed))),
+        ),
+    );
+    let h = Harness::start("wake-slots", wake_config(profiles_dir, &config_dir)).await;
+    let mut client = h.connect().await;
+    let slot = |n| Some(vec![guest_wake_path(LINUX_BASE, None, n)]);
+
+    let first = open_from_profile(&mut client, "wake-guest", None).await;
+    assert_eq!(
+        wake_paths_of(&config_dir, &first),
+        slot(0),
+        "the first window"
+    );
+    let second = open_from_profile(&mut client, "wake-guest", None).await;
+    assert_eq!(
+        wake_paths_of(&config_dir, &second),
+        slot(1),
+        "a second window while the first lives"
+    );
+
+    let first_folder = credentials_folder_of(&config_dir, &first).unwrap();
+    close(&mut client, &first).await;
+    until_gone(&first_folder).await;
+    let third = open_from_profile(&mut client, "wake-guest", None).await;
+    assert_eq!(
+        wake_paths_of(&config_dir, &third),
+        slot(0),
+        "a window opened once the first has ended takes its slot again"
+    );
+
+    send(
+        &mut client,
+        &ClientMessage::OpenWindowFromProfile {
+            profile: "wake-broken".to_string(),
+            cwd: None,
+            name: None,
+            model: None,
+            effort: None,
+            on_name_taken: Default::default(),
+        },
+    )
+    .await;
+    let failed = read_response(&mut client).await;
+    assert!(
+        !matches!(failed, DaemonMessage::WindowOpened { .. }),
+        "a window whose program cannot run fails to open, got {failed:?}"
+    );
+    let fourth = open_from_profile(&mut client, "wake-guest", None).await;
+    assert_eq!(
+        wake_paths_of(&config_dir, &fourth),
+        slot(2),
+        "an open that failed half-way gave its slot back"
+    );
+    h.registry.terminate_all().await;
+}
+
+/// A window whose CLI runs in another environment has no wake record, and so no
+/// `{wake_paths}` answer and no slot, when its state base cannot be had: the second line
+/// is no `\\wsl.localhost\` or `\\wsl$\` path, the first does not start with `/`, a line
+/// holds a control character, the tool fails or outlasts the open's bound, or the profile
+/// has no `state_base`; nor when no answer names `{wake_paths}`. Each window opens all the
+/// same, with its other answers. A `\\wsl$\` base is one.
+#[tokio::test]
+async fn a_guest_window_whose_state_base_cannot_be_had_opens_with_no_wake_record() {
+    let usable = format!("/home/u/state\n{UNC_BASE}");
+    let cases: Vec<(&str, Option<StateBase>, bool)> = vec![
+        (
+            "base-not-unc",
+            Some(StateBase::lines("/home/u/state\nD:\\wsl\\state")),
+            true,
+        ),
+        (
+            "base-not-absolute",
+            Some(StateBase::lines(format!("home/u/state\n{UNC_BASE}"))),
+            true,
+        ),
+        (
+            "base-control-linux",
+            Some(StateBase::lines(format!("/home/u\u{1}/state\n{UNC_BASE}"))),
+            true,
+        ),
+        (
+            "base-control-unc",
+            Some(StateBase::lines(format!("/home/u/state\n{UNC_BASE}\u{1}"))),
+            true,
+        ),
+        (
+            "base-fails",
+            Some(StateBase {
+                printed: usable.clone(),
+                exit_code: 1,
+                delay_ms: None,
+            }),
+            true,
+        ),
+        ("base-absent", None, true),
+        (
+            "wake-unnamed",
+            Some(StateBase::lines(usable.clone())),
+            false,
+        ),
+    ];
+    let tree = TempDir::new("yagura-cli-test", "wake-unusable");
+    let profiles_dir = tree.make_dir("profiles");
+    let config_dir = tree.make_dir("mcp");
+    let cli = crate::credentials_launch::quiet_cli(&tree.make_dir("logs"));
+    let named = [("SessionStart", WAKE_ANSWER), ("Plain", PLAIN_ANSWER)];
+    let unnamed = [("Plain", PLAIN_ANSWER)];
+    let mut ids = Vec::new();
+    for (id, state_base, names_wake) in cases {
+        let answers: &[(&str, &str)] = if names_wake { &named } else { &unnamed };
+        write_profile(
+            &profiles_dir,
+            id,
+            &wake_profile(id, &cli, answers, Some(state_base)),
+        );
+        ids.push(id);
+    }
+    let wsl_dollar = UNC_BASE.replace("wsl.localhost", "wsl$");
+    for (id, printed) in [
+        ("wake-dollar", format!("/home/u/dollar\n{wsl_dollar}")),
+        ("wake-usable", usable.clone()),
+    ] {
+        write_profile(
+            &profiles_dir,
+            id,
+            &wake_profile(id, &cli, &named, Some(Some(StateBase::lines(printed)))),
+        );
+    }
+    let h = Harness::start(
+        "wake-unusable",
+        wake_config(profiles_dir.clone(), &config_dir),
+    )
+    .await;
+    let mut client = h.connect().await;
+
+    let dollar = open_from_profile(&mut client, "wake-dollar", None).await;
+    assert_eq!(
+        wake_paths_of(&config_dir, &dollar),
+        Some(vec![guest_wake_path("/home/u/dollar", None, 0)]),
+        "a wsl$ base is one"
+    );
+    let dollar_folder = credentials_folder_of(&config_dir, &dollar).unwrap();
+    close(&mut client, &dollar).await;
+    until_gone(&dollar_folder).await;
+    for id in &ids {
+        let window_id = open_from_profile(&mut client, id, None).await;
+        assert_eq!(
+            answer_of(&config_dir, &window_id, "Plain").as_deref(),
+            Some(PLAIN_ANSWER),
+            "{id}: the window opens with its other answers"
+        );
+        assert_eq!(
+            wake_paths_of(&config_dir, &window_id),
+            None,
+            "{id}: a window without a wake record is left no {{wake_paths}} answer"
+        );
+    }
+    let usable_window = open_from_profile(&mut client, "wake-usable", None).await;
+    assert_eq!(
+        wake_paths_of(&config_dir, &usable_window),
+        Some(vec![guest_wake_path("/home/u/state", None, 0)]),
+        "no window above took a slot"
+    );
+    h.registry.terminate_all().await;
+
+    // A tool outlasting the open's bound, with a daemon whose bound is short. A delay rather
+    // than a hold: the file releasing a hold goes with this test's tree, which may be gone
+    // before the tool looks for it.
+    write_profile(
+        &profiles_dir,
+        "base-held",
+        &wake_profile(
+            "base-held",
+            &cli,
+            &named,
+            Some(Some(StateBase {
+                printed: usable,
+                exit_code: 0,
+                delay_ms: Some(6000),
+            })),
+        ),
+    );
+    let mut config = wake_config(profiles_dir, &config_dir);
+    config.mcp_listing_timeout = std::time::Duration::from_millis(2000);
+    let h = Harness::start("wake-unusable-held", config).await;
+    let mut client = h.connect().await;
+    let held = open_from_profile(&mut client, "base-held", None).await;
+    assert_eq!(
+        answer_of(&config_dir, &held, "Plain").as_deref(),
+        Some(PLAIN_ANSWER),
+        "base-held: the window opens with its other answers"
+    );
+    assert_eq!(
+        wake_paths_of(&config_dir, &held),
+        None,
+        "base-held: a state base outlasting the bound gives no wake record"
+    );
+    h.registry.terminate_all().await;
 }

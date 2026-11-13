@@ -4194,3 +4194,148 @@ async fn a_guest_window_makes_its_overlay_through_its_door_as_a_direct_one_would
         sandbox.daemon_log()
     );
 }
+
+// --- a guest window's wake slot is a fact of the window ---------------------------------
+
+/// The guest state base the wake profile's `state_base` prints first.
+const WAKE_LINUX_BASE: &str = "/home/u/state";
+
+/// The migration that keeps a window's wake record, and every later one, are numbered from
+/// here.
+const WAKE_RECORD_MIGRATION: u32 = 24;
+
+/// Writes the profile `id`: a `launch` window whose CLI keeps it open and runs in another
+/// environment, with a `{wake_paths}` answer and a `state_base` printing a usable base.
+fn write_wake_profile(sandbox: &Sandbox, id: &str) {
+    use crate::hooks_injection::{StateBase, UNC_BASE, WAKE_ANSWER, wake_profile};
+    let cli = crate::credentials_launch::quiet_cli(&sandbox.tree.make_dir(&format!("logs-{id}")));
+    common::write_profile(
+        &sandbox.profiles_dir,
+        id,
+        &wake_profile(
+            id,
+            &cli,
+            &[("SessionStart", WAKE_ANSWER)],
+            Some(Some(StateBase::lines(format!(
+                "{WAKE_LINUX_BASE}\n{UNC_BASE}"
+            )))),
+        ),
+    );
+}
+
+/// The wake paths the window `window_id` of the sandbox was handed at its open.
+fn sandbox_wake_paths(sandbox: &Sandbox, window_id: &str) -> Option<Vec<String>> {
+    crate::hooks_injection::wake_paths_of(sandbox.tree.path(), window_id)
+}
+
+/// The wake paths of the slot `slot` under the sandbox's instance.
+fn wake_slot(sandbox: &Sandbox, slot: u32) -> Option<Vec<String>> {
+    Some(vec![crate::hooks_injection::guest_wake_path(
+        WAKE_LINUX_BASE,
+        Some(&sandbox.instance),
+        slot,
+    )])
+}
+
+/// Closes the window `window_id` and waits until its credentials folder is gone.
+async fn close_and_wait_for_credentials(
+    daemon: &mut RunningDaemon,
+    sandbox: &Sandbox,
+    window_id: &str,
+) {
+    let folder = crate::hooks_injection::credentials_folder_of(sandbox.tree.path(), window_id)
+        .expect("a launch window has its credentials folder");
+    send(
+        &mut daemon.client,
+        &ClientMessage::CloseWindow {
+            window_id: window_id.to_owned(),
+            force: None,
+        },
+    )
+    .await;
+    match read_response(&mut daemon.client).await {
+        DaemonMessage::WindowClosed { .. } => {}
+        other => panic!("expected window_closed, got {other:?}"),
+    }
+    crate::hooks_injection::until_gone(&folder).await;
+}
+
+/// A guest window taken back by the next daemon keeps the wake slot its open took, with its
+/// row or from its holder's launch record when the row is gone: a window the next daemon
+/// opens takes a slot neither holds, and takes each one's again once that window has ended.
+#[tokio::test]
+async fn a_taken_back_guest_window_keeps_its_wake_slot_until_it_ends() {
+    const WAKE: &str = "wake-kept";
+    let sandbox = Sandbox::new("recover-wake");
+    write_wake_profile(&sandbox, WAKE);
+
+    let mut first = start_with_token(&sandbox).await;
+    let with_row = first.open_profile_window(&sandbox, WAKE).await;
+    let rowless = first.open_profile_window(&sandbox, WAKE).await;
+    assert_eq!(
+        sandbox_wake_paths(&sandbox, &with_row),
+        wake_slot(&sandbox, 0)
+    );
+    assert_eq!(
+        sandbox_wake_paths(&sandbox, &rowless),
+        wake_slot(&sandbox, 1)
+    );
+    until_rows_settled(&sandbox, &[&with_row, &rowless]).await;
+    first.kill_keeping_windows();
+    {
+        let db = rusqlite::Connection::open(store_db(&sandbox)).unwrap();
+        db.execute("DELETE FROM windows WHERE window_id = ?1", [&rowless])
+            .unwrap();
+    }
+
+    let mut next = start_with_token(&sandbox).await;
+    listed(&mut next, &sandbox, &with_row).await;
+    listed(&mut next, &sandbox, &rowless).await;
+    let third = next.open_profile_window(&sandbox, WAKE).await;
+    assert_eq!(
+        sandbox_wake_paths(&sandbox, &third),
+        wake_slot(&sandbox, 2),
+        "the windows taken back hold their slots; daemon log:\n{}",
+        sandbox.daemon_log()
+    );
+    close_and_wait_for_credentials(&mut next, &sandbox, &with_row).await;
+    let fourth = next.open_profile_window(&sandbox, WAKE).await;
+    assert_eq!(
+        sandbox_wake_paths(&sandbox, &fourth),
+        wake_slot(&sandbox, 0),
+        "a window taken back with its row gives its slot back at its end"
+    );
+    close_and_wait_for_credentials(&mut next, &sandbox, &rowless).await;
+    let fifth = next.open_profile_window(&sandbox, WAKE).await;
+    assert_eq!(
+        sandbox_wake_paths(&sandbox, &fifth),
+        wake_slot(&sandbox, 1),
+        "a window taken back from its launch record gives its slot back at its end"
+    );
+}
+
+/// A window whose row was written before its wake record was kept is taken back with none,
+/// so it holds no slot.
+#[tokio::test]
+async fn a_window_whose_row_predates_the_wake_record_holds_no_wake_slot() {
+    const WAKE: &str = "wake-old";
+    let sandbox = Sandbox::new("recover-wake-old");
+    write_wake_profile(&sandbox, WAKE);
+
+    let mut first = start_with_token(&sandbox).await;
+    let older = first.open_profile_window(&sandbox, WAKE).await;
+    assert_eq!(sandbox_wake_paths(&sandbox, &older), wake_slot(&sandbox, 0));
+    until_rows_settled(&sandbox, &[&older]).await;
+    first.kill_keeping_windows();
+    store_before_migration(&sandbox, WAKE_RECORD_MIGRATION);
+
+    let mut next = start_with_token(&sandbox).await;
+    listed(&mut next, &sandbox, &older).await;
+    let later = next.open_profile_window(&sandbox, WAKE).await;
+    assert_eq!(
+        sandbox_wake_paths(&sandbox, &later),
+        wake_slot(&sandbox, 0),
+        "an older row holds no wake record and so no slot; daemon log:\n{}",
+        sandbox.daemon_log()
+    );
+}

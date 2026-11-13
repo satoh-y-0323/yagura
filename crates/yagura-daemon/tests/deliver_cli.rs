@@ -6,7 +6,8 @@
 
 //! Integration test: the `yagura-daemon` commands a CLI's hook runs to read a window's
 //! inbox (`--deliver-context`, `--deliver-take`, `--deliver-wait`) and to tell the daemon
-//! the CLI's session (`--report-session <pointer>`).
+//! the CLI's session (`--report-session <pointer>`), and the one that prints what a
+//! window's open left beside its credentials file without a daemon (`--print-answer`).
 //!
 //! Every spawn sets `YAGURA_INSTANCE` to an identifier of this test's own, so the endpoint
 //! it connects to is the in-process daemon's and never a running daemon of the user, and
@@ -68,32 +69,7 @@ impl Setup {
     }
 
     fn command(&self, args: &[&str], window_id: Option<&str>, token: Option<&str>) -> Command {
-        let mut command = Command::new(daemon_bin());
-        command
-            .args(args)
-            .env("YAGURA_INSTANCE", &self.instance)
-            .env("YAGURA_LOG", "trace")
-            .env_remove("YAGURA_STORE_DB")
-            .env_remove(WINDOW_ID_VAR)
-            .env_remove(STATUS_TOKEN_VAR);
-        if cfg!(windows) {
-            command
-                .env("LOCALAPPDATA", self.bases.make_dir("local"))
-                .env("APPDATA", self.bases.make_dir("roaming"));
-        } else {
-            command
-                .env("XDG_DATA_HOME", self.bases.make_dir("data"))
-                .env("XDG_STATE_HOME", self.bases.make_dir("state"))
-                .env("XDG_CONFIG_HOME", self.bases.make_dir("config"))
-                .env("HOME", self.bases.make_dir("home"));
-        }
-        if let Some(window_id) = window_id {
-            command.env(WINDOW_ID_VAR, window_id);
-        }
-        if let Some(token) = token {
-            command.env(STATUS_TOKEN_VAR, token);
-        }
-        command
+        door_command(&self.instance, &self.bases, args, window_id, token)
     }
 
     fn spawn(&self, args: &[&str], window_id: &str, token: &str) -> Child {
@@ -131,6 +107,44 @@ impl Setup {
     }
 }
 
+/// The `yagura-daemon` binary run as a hook of `instance` with `args`, its data, state
+/// and config bases under `bases`, and the window credentials in its environment that
+/// `window_id` and `token` give.
+fn door_command(
+    instance: &str,
+    bases: &TempDir,
+    args: &[&str],
+    window_id: Option<&str>,
+    token: Option<&str>,
+) -> Command {
+    let mut command = Command::new(daemon_bin());
+    command
+        .args(args)
+        .env("YAGURA_INSTANCE", instance)
+        .env("YAGURA_LOG", "trace")
+        .env_remove("YAGURA_STORE_DB")
+        .env_remove(WINDOW_ID_VAR)
+        .env_remove(STATUS_TOKEN_VAR);
+    if cfg!(windows) {
+        command
+            .env("LOCALAPPDATA", bases.make_dir("local"))
+            .env("APPDATA", bases.make_dir("roaming"));
+    } else {
+        command
+            .env("XDG_DATA_HOME", bases.make_dir("data"))
+            .env("XDG_STATE_HOME", bases.make_dir("state"))
+            .env("XDG_CONFIG_HOME", bases.make_dir("config"))
+            .env("HOME", bases.make_dir("home"));
+    }
+    if let Some(window_id) = window_id {
+        command.env(WINDOW_ID_VAR, window_id);
+    }
+    if let Some(token) = token {
+        command.env(STATUS_TOKEN_VAR, token);
+    }
+    command
+}
+
 async fn finish(child: Child) -> Output {
     tokio::task::spawn_blocking(move || child.wait_with_output().expect("wait for the child"))
         .await
@@ -156,6 +170,7 @@ async fn every_inbox_command_is_silent_and_succeeds_outside_a_window() {
         &["--deliver-take"],
         &["--deliver-wait"],
         &["--report-session", "/session_id"],
+        &["--print-answer", "SessionStart"],
     ] {
         for (window_id, token) in [(None, None), (Some("w-1"), None), (None, Some(token))] {
             let output = setup
@@ -740,5 +755,126 @@ async fn a_window_the_profile_did_not_open_keeps_the_daemons_defaults() {
         out(&output).contains("AAAAAAAAAAAAAAA") && out(&output).contains("BBBBBBBBBBBBBBB"),
         "{}",
         out(&output)
+    );
+}
+
+// --- the answer door -------------------------------------------------------------
+
+/// What a window's open leaves beside its credentials file for the answer door to print:
+/// bytes a shell or a code page would change, so only a copy byte for byte equals them.
+const ANSWER: &str = "{\"hookSpecificOutput\":{\"hookEventName\":\"SessionStart\",\
+     \"watchPaths\":[\"C:/a b/\\\"q\\\"/yagura_wake\"]}}\n\u{3042}";
+
+/// Runs `command` with `stdin` written to it from a thread of its own, returning what it
+/// printed and whether all of `stdin` was taken.
+fn run_with_stdin(mut command: Command, stdin: Vec<u8>) -> (Output, std::io::Result<()>) {
+    let mut child = command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn the yagura-daemon binary");
+    let mut input = child.stdin.take().expect("piped stdin");
+    let writer = std::thread::spawn(move || input.write_all(&stdin));
+    let output = child.wait_with_output().expect("wait for the door");
+    let written = writer.join().expect("the stdin writer must not panic");
+    (output, written)
+}
+
+/// `--credentials <file> --print-answer <name>` prints the file `answer-<name>` beside a
+/// credentials file that reads as credentials, byte for byte, takes all of its input and
+/// ends with 0, while no daemon serves its instance: it asks the daemon nothing. It prints
+/// nothing for a name without such a file, for a name failing the check a `--hook` event
+/// name passes, or beside a file that does not read as credentials, even when its
+/// environment holds credentials; without credentials it is silent and ends with 0.
+#[test]
+fn the_answer_door_prints_the_answer_beside_its_credentials_file_with_no_daemon_there() {
+    let tree = TempDir::new("yagura-deliver", "answer-door");
+    let bases = TempDir::new("yagura-deliver", "answer-door-bases");
+    // No daemon serves this instance, so a door that asked one would get no answer.
+    let instance = format!(
+        "ans{:x}{}",
+        std::process::id(),
+        COUNTER.fetch_add(1, Ordering::Relaxed)
+    );
+    let token = "00112233445566778899aabbccddeeff";
+    let folder = tree.make_dir("window");
+    let credentials = folder.join("credentials.json");
+    std::fs::write(
+        &credentials,
+        format!("{{\"window_id\":\"w-answer\",\"token\":\"{token}\"}}"),
+    )
+    .unwrap();
+    std::fs::write(folder.join("answer-SessionStart"), ANSWER).unwrap();
+    // A folder a `..` in a name could step back out through.
+    std::fs::create_dir_all(folder.join("answer-x")).unwrap();
+    let too_long = "a".repeat(65);
+    std::fs::write(folder.join(format!("answer-{too_long}")), ANSWER).unwrap();
+    let unread = tree.make_dir("unread");
+    let not_credentials = unread.join("credentials.json");
+    std::fs::write(&not_credentials, "not credentials").unwrap();
+    std::fs::write(unread.join("answer-SessionStart"), ANSWER).unwrap();
+
+    let door = |file: &Path, name: &str, env: bool| {
+        let file = file.to_str().expect("a UTF-8 path");
+        let args = ["--credentials", file, "--print-answer", name];
+        if env {
+            door_command(&instance, &bases, &args, Some("w-answer"), Some(token))
+        } else {
+            door_command(&instance, &bases, &args, None, None)
+        }
+    };
+
+    let input = vec![b'{'; 1 << 20];
+    let (printed, taken) = run_with_stdin(door(&credentials, "SessionStart", false), input);
+    assert!(taken.is_ok(), "the door takes all of its input: {taken:?}");
+    assert_eq!(printed.status.code(), Some(0), "stderr: {}", err(&printed));
+    assert_eq!(
+        out(&printed),
+        ANSWER,
+        "the door prints the answer beside its credentials file byte for byte; stderr: {}",
+        err(&printed)
+    );
+
+    let (missing, _) = run_with_stdin(door(&credentials, "CwdChanged", false), Vec::new());
+    assert_eq!(missing.status.code(), Some(0), "stderr: {}", err(&missing));
+    assert!(
+        missing.stdout.is_empty(),
+        "a name without an answer prints nothing: {}",
+        out(&missing)
+    );
+
+    for name in [
+        "x/../answer-SessionStart",
+        "x\\..\\answer-SessionStart",
+        too_long.as_str(),
+    ] {
+        let (stepped, _) = run_with_stdin(door(&credentials, name, false), Vec::new());
+        assert!(
+            stepped.stdout.is_empty(),
+            "{name:?} fails the event-name check and prints nothing: {}",
+            out(&stepped)
+        );
+    }
+
+    let (beside_env, _) = run_with_stdin(door(&not_credentials, "SessionStart", true), Vec::new());
+    assert!(
+        beside_env.stdout.is_empty(),
+        "beside a file that is no credentials file nothing is printed, whatever the \
+         environment holds: {}",
+        out(&beside_env)
+    );
+    let (outside, _) = run_with_stdin(door(&not_credentials, "SessionStart", false), Vec::new());
+    assert_eq!(
+        outside.status.code(),
+        Some(0),
+        "without credentials the door is a hook outside a window; stderr: {}",
+        err(&outside)
+    );
+    assert!(
+        outside.stdout.is_empty() && outside.stderr.is_empty(),
+        "outside a window the door prints nothing: {} / {}",
+        out(&outside),
+        err(&outside)
     );
 }

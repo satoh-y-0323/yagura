@@ -2719,3 +2719,98 @@ fn daemon_in_a_command_is_read_only_as_a_whole_element() {
         );
     }
 }
+
+// --- the answers a window's open leaves for its hooks ---------------------------------
+
+/// `[hooks] answers` names, per hook event, a text the window's open leaves beside its
+/// credentials file, in which `{wake_paths}` alone is filled. It is read only on a
+/// `launch` profile's `[hooks]`, with names that pass the check a `--hook` event name
+/// passes, and texts naming no placeholder but `{wake_paths}`.
+#[test]
+fn answers_are_read_only_from_a_launch_profiles_hooks_with_event_names_and_wake_paths_alone() {
+    const HEAD: &str =
+        "schema = 1\ndisplay_name = \"Wake\"\n\n[command]\ndefault = [\"wake-cli\"]\n";
+    const LAUNCH: &str = "[credentials]\nmode = \"launch\"\n\n";
+    const SESSION: &str =
+        r#"'{"hookSpecificOutput":{"hookEventName":"SessionStart","watchPaths":{wake_paths}}}'"#;
+    let hooks = |answers: &str| {
+        format!(
+            "[hooks]\nargs = [\"--c\", \"{{credentials_file}}\"]\n\n[hooks.answers]\n{answers}\n"
+        )
+    };
+    let read = format!(
+        "{HEAD}\n{LAUNCH}{}",
+        hooks(&format!(
+            "SessionStart = {SESSION}\nCwdChanged = {}\nPlain = 'nothing to fill'\n",
+            SESSION.replace("SessionStart", "CwdChanged")
+        ))
+    );
+    if let Err(err) = parse_profile("wake", &read) {
+        panic!("a launch profile's [hooks] answers are read: {err:?}");
+    }
+
+    let mcp = format!(
+        "{HEAD}\n{LAUNCH}[mcp]\nargs = [\"--c\", \"{{credentials_file}}\"]\n\n\
+         [mcp.answers]\nSessionStart = {SESSION}\n"
+    );
+    assert!(
+        parse_profile("wake-mcp", &mcp).is_err(),
+        "answers belong to [hooks] alone"
+    );
+    for mode in ["", "[credentials]\nmode = \"env\"\n\n"] {
+        let env = format!(
+            "{HEAD}\n{mode}{}",
+            hooks(&format!("SessionStart = {SESSION}\n"))
+        );
+        assert!(
+            parse_profile("wake-env", &env).is_err(),
+            "answers are read only where the profile is launch: {mode:?}"
+        );
+    }
+    let too_long = format!("\"{}\"", "a".repeat(65));
+    for key in ["\"..\"", "\"a/b\"", "\"a b\"", "\"\"", too_long.as_str()] {
+        let source = format!("{HEAD}\n{LAUNCH}{}", hooks(&format!("{key} = 'text'\n")));
+        assert!(
+            parse_profile("wake-key", &source).is_err(),
+            "{key} fails the check a --hook event name passes"
+        );
+    }
+    for placeholder in ["{credentials_file}", "{hooks_config_file}", "{wake_path}"] {
+        let source = format!(
+            "{HEAD}\n{LAUNCH}{}",
+            hooks(&format!("SessionStart = '[{placeholder}]'\n"))
+        );
+        assert!(
+            parse_profile("wake-text", &source).is_err(),
+            "an answer naming {placeholder} is refused"
+        );
+    }
+}
+
+/// `[host_paths] state_base` is the tool printing the guest's state base: an argv naming no
+/// placeholder, which a shell's own `${...}` is not.
+#[test]
+fn a_host_paths_state_base_is_read_only_as_an_argv_naming_no_placeholder() {
+    let profile = |state_base: &str| {
+        format!(
+            "schema = 1\ndisplay_name = \"Guest\"\n\n[command]\ndefault = [\"wsl\", \"cli\"]\n\n\
+             [host_paths]\nconvert = [\"wsl\", \"-e\", \"wslpath\", \"-u\", \"{{path}}\"]\n\
+             state_base = {state_base}\n"
+        )
+    };
+    let shipped = r#"["wsl", "-e", "sh", "-c", 'b="${XDG_STATE_HOME:-$HOME/.local/state}"; printf "%s\n" "$b"; wslpath -w "$b"']"#;
+    if let Err(err) = parse_profile("guest", &profile(shipped)) {
+        panic!("[host_paths] state_base is read: {err:?}");
+    }
+    for (what, state_base) in [
+        ("an empty argv", "[]"),
+        ("a NUL element", "[\"wsl\", \"a\\u0000b\"]"),
+        ("the convert placeholder", "[\"wsl\", \"{path}\"]"),
+        ("an unknown placeholder", "[\"wsl\", \"{state}\"]"),
+    ] {
+        assert!(
+            parse_profile("guest", &profile(state_base)).is_err(),
+            "a state_base with {what} is refused"
+        );
+    }
+}

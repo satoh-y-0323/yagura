@@ -67,6 +67,11 @@ pub struct WindowFacts {
     /// Whether the launch overlay of a window whose profile declares one was
     /// made; `None` for a window whose profile declared none when it opened.
     pub overlay: Option<OverlayFact>,
+    /// Where the window's wake file is: the daemon can ask the window's CLI
+    /// to wait again only through it. `None` for a window whose hooks were
+    /// not injected, whose answers name no `{wake_paths}`, or whose open
+    /// found no place for the file.
+    pub wake: Option<crate::wake_file::WakeRecord>,
 }
 
 impl WindowFacts {
@@ -76,6 +81,17 @@ impl WindowFacts {
         Self {
             runs_in_guest: self.runs_in_guest.or(other.runs_in_guest),
             overlay: self.overlay.or(other.overlay),
+            wake: self.wake.or(other.wake),
+        }
+    }
+
+    /// `self` for a window whose hooks settled on `route` at spawn: its CLI
+    /// learns of its wake file only through the injected hooks.
+    #[must_use]
+    pub(crate) fn settled(self, route: HooksRoute) -> Self {
+        Self {
+            wake: self.wake.filter(|_| route == HooksRoute::Injection),
+            ..self
         }
     }
 }
@@ -474,7 +490,7 @@ fn read_rows(conn: &Connection) -> rusqlite::Result<Vec<StoredWindow>> {
     let mut statement = conn.prepare_fixed(
         "SELECT window_id, state, name, cwd, vendor, command_json, detection, profile, model, \
          effort, layout_json, session_id, opener, task_plan_id, task_id, credentials, \
-         child_scope, hooks, guest, overlay FROM windows ORDER BY opened_seq",
+         child_scope, hooks, guest, overlay, wake FROM windows ORDER BY opened_seq",
     )?;
     let rows = statement.query_map([], |row| {
         let Some(window_id) = text_of(row.get_ref(0)?) else {
@@ -546,6 +562,9 @@ fn row_values(row: &rusqlite::Row<'_>) -> rusqlite::Result<WindowValues> {
             overlay: text_of(row.get_ref(19)?)
                 .as_deref()
                 .and_then(OverlayFact::named),
+            wake: text_of(row.get_ref(20)?)
+                .as_deref()
+                .and_then(crate::wake_file::WakeRecord::named),
         },
     })
 }
@@ -671,13 +690,14 @@ fn insert_opening(
 ) -> rusqlite::Result<usize> {
     let command_json = serde_json::to_string(&values.command)
         .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+    let wake = wake_text(values)?;
     conn.execute_fixed(
         "INSERT INTO windows \
          (window_id, name, cwd, vendor, command_json, detection, profile, model, effort, \
          layout_json, session_id, opener, task_plan_id, task_id, credentials, child_scope, \
-         hooks, guest, overlay, state) \
+         hooks, guest, overlay, wake, state) \
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, \
-         ?18, ?19, 'opening') \
+         ?18, ?19, ?20, 'opening') \
          ON CONFLICT(window_id) DO NOTHING",
         params![
             window_id,
@@ -699,6 +719,7 @@ fn insert_opening(
             values.hooks,
             values.facts.runs_in_guest,
             values.facts.overlay,
+            wake,
         ],
     )
 }
@@ -710,11 +731,12 @@ fn update_values(
 ) -> rusqlite::Result<usize> {
     let command_json = serde_json::to_string(&values.command)
         .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+    let wake = wake_text(values)?;
     conn.execute_fixed(
         "UPDATE windows SET name = ?2, cwd = ?3, vendor = ?4, command_json = ?5, \
          detection = ?6, profile = ?7, model = ?8, effort = ?9, layout_json = ?10, \
          session_id = ?11, opener = ?12, task_plan_id = ?13, task_id = ?14, credentials = ?15, \
-         hooks = ?16, guest = ?17, overlay = ?18 \
+         hooks = ?16, guest = ?17, overlay = ?18, wake = ?19 \
          WHERE window_id = ?1",
         params![
             window_id,
@@ -735,8 +757,20 @@ fn update_values(
             values.hooks,
             values.facts.runs_in_guest,
             values.facts.overlay,
+            wake,
         ],
     )
+}
+
+/// The spelling of `values`' wake record in the table, `None` without one.
+fn wake_text(values: &WindowValues) -> rusqlite::Result<Option<String>> {
+    values
+        .facts
+        .wake
+        .as_ref()
+        .map(crate::wake_file::WakeRecord::spelled)
+        .transpose()
+        .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))
 }
 
 /// A window's row, from its `opening` write until it is removed. Dropped

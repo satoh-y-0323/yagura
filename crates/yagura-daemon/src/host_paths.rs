@@ -24,6 +24,7 @@ const FILE_PLACEHOLDER: &str = "{file}";
 pub struct HostPaths {
     convert: Vec<String>,
     files: Option<FileTools>,
+    state_base: Option<Vec<String>>,
 }
 
 impl HostPaths {
@@ -42,6 +43,14 @@ impl HostPaths {
     #[must_use]
     pub fn file_tools(&self) -> Option<&FileTools> {
         self.files.as_ref()
+    }
+
+    /// The command that prints the CLI environment's state base: the path its
+    /// own environment names it by on the first line, the path the daemon
+    /// reaches it by on the second. `None` when the table declares none.
+    #[must_use]
+    pub fn state_base(&self) -> Option<&[String]> {
+        self.state_base.as_deref()
     }
 }
 
@@ -127,6 +136,10 @@ pub enum HostPathsError {
     /// `replace` or `absent_exit` is declared without the `read` tool.
     #[error("`replace` and `absent_exit` need `read`")]
     FileToolsWithoutRead,
+    /// `state_base` is empty, has an empty or NUL-holding element, or names
+    /// a placeholder.
+    #[error("`state_base` must be a non-empty argv naming no placeholder")]
+    InvalidStateBase,
 }
 
 /// A `[host_paths]` table before validation.
@@ -140,6 +153,8 @@ pub(crate) struct RawHostPaths {
     replace: Option<Vec<String>>,
     #[serde(default)]
     absent_exit: Option<i32>,
+    #[serde(default)]
+    state_base: Option<Vec<String>>,
 }
 
 /// Validates `raw` into a [`HostPaths`] (`None` in, `None` out).
@@ -162,6 +177,15 @@ pub(crate) fn parse_host_paths(
     if !raw.convert.iter().any(|arg| arg.contains(PATH_PLACEHOLDER)) {
         return Err(HostPathsError::MissingPath);
     }
+    if let Some(state_base) = &raw.state_base
+        && (state_base.is_empty()
+            || yagura_protocol::validate_argv_elements(state_base).is_err()
+            || state_base
+                .iter()
+                .any(|arg| profile::contains_placeholder_outside(arg, &[])))
+    {
+        return Err(HostPathsError::InvalidStateBase);
+    }
     let files = match raw.read {
         Some(read) => Some(FileTools::new(read, raw.replace, raw.absent_exit)?),
         None if raw.replace.is_some() || raw.absent_exit.is_some() => {
@@ -172,5 +196,6 @@ pub(crate) fn parse_host_paths(
     Ok(Some(HostPaths {
         convert: raw.convert,
         files,
+        state_base: raw.state_base,
     }))
 }

@@ -1307,3 +1307,70 @@ fn launch_overlay_reads_as_the_overlay_door_and_is_no_hook_door() {
         "the overlay door is no hook door"
     );
 }
+
+/// `--print-answer <name>` is a hook door beside `--credentials`: its name passes the check
+/// a `--hook` event name passes, and, as for `--hook`, `--skip-if` is refused with it, since
+/// the door asks the daemon nothing a pointer could narrow. The command is named through its
+/// debug form so that this file builds before it exists.
+#[test]
+fn print_answer_reads_as_a_hook_door_whose_name_is_checked_and_which_takes_no_skip_if() {
+    let door = |tail: &[&str]| {
+        let mut with = vec!["--credentials", "/tmp/c.json", "--print-answer"];
+        with.extend(tail);
+        parse_args(&args(&with))
+    };
+    let longest = "a".repeat(64);
+    for name in [
+        "SessionStart",
+        "CwdChanged",
+        "Cwd-Changed_2",
+        longest.as_str(),
+    ] {
+        assert_eq!(
+            format!("{:?}", door(&[name])),
+            format!("Ok(PrintAnswer {{ name: {name:?} }})"),
+            "--print-answer {name} reads as the answer door"
+        );
+    }
+    let too_long = "a".repeat(65);
+    for name in [
+        "..",
+        "a/b",
+        "x/../answer-SessionStart",
+        "x\\..\\answer-SessionStart",
+        "a b",
+        "",
+        too_long.as_str(),
+    ] {
+        assert!(
+            door(&[name]).is_err(),
+            "{name:?} fails the check a --hook event name passes"
+        );
+    }
+    assert!(door(&[]).is_err(), "--print-answer takes its name");
+    assert_eq!(
+        door(&["SessionStart", "--skip-if", "/agent_id"]),
+        Err(CliError::UnknownArgument("--skip-if".to_string())),
+        "--skip-if is refused beside the answer door"
+    );
+    assert_eq!(
+        parse_args(&args(&[
+            "--hook",
+            "claude-code",
+            "Stop",
+            "--skip-if",
+            "/agent_id"
+        ])),
+        Err(CliError::UnknownArgument("--skip-if".to_string())),
+        "control: the same refusal beside --hook"
+    );
+    assert_eq!(
+        parse_args(&args(&["--print-answer", "SessionStart", "--deliver-wait"])),
+        Err(CliError::ConflictingCommands),
+        "the answer door is one door of a command line"
+    );
+    assert!(
+        yagura_daemon::cli::names_hook_door(&args(&["--print-answer", "SessionStart"])),
+        "the answer door is a hook door, silent outside a window"
+    );
+}

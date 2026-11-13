@@ -3,7 +3,8 @@
 //! platform's local transport ([`yagura_os`]).
 //!
 //! Execution order is fixed: argument parsing (`--shutdown`,
-//! `--emit-status`, the `--deliver-*` doors, `--report-session`) -> instance identifier resolution -> the children's base
+//! `--emit-status`, the `--deliver-*` doors, `--report-session`; the answer
+//! door `--print-answer` ends here, asking no daemon) -> instance identifier resolution -> the children's base
 //! environment -> multi-instance prevention -> connection acceptance. The
 //! daemon starts with no window: every window is opened by a client, so none
 //! is spawned before the endpoint is protected and a losing multi-instance
@@ -107,6 +108,10 @@ fn main() -> Result<ExitCode> {
         }
         Err(error) => return Err(error).context("invalid command line"),
     };
+    // Answers what the window's open left, so it answers while no daemon runs.
+    if let CliCommand::PrintAnswer { name } = &command {
+        return Ok(print_answer(&args, name));
+    }
 
     // Before any thread or child exists: a daemon holds a few descriptors for
     // every window, more than a default soft limit allows for many windows.
@@ -132,6 +137,24 @@ fn raise_descriptor_limit() -> Option<std::io::Result<u64>> {
 #[cfg(not(unix))]
 fn raise_descriptor_limit() -> Option<std::io::Result<u64>> {
     None
+}
+
+/// The answer door: prints the answer for the hook event `name` the window's
+/// open left beside the `--credentials` file in `args`, asking no daemon.
+/// The file itself must read as a window's credentials file: credentials in
+/// the environment do not vouch for a folder the arguments name. Prints
+/// nothing when there is no such answer, and always ends with 0, as a hook
+/// door does.
+fn print_answer(args: &[String], name: &str) -> ExitCode {
+    let drained = drain_hook_stdin();
+    let answer = yagura_protocol::credentials_path_arg(args)
+        .and_then(|file| yagura_daemon::wake_file::answer_beside(&file, name));
+    if let Some(answer) = answer {
+        let mut stdout = std::io::stdout().lock();
+        let _ = stdout.write_all(&answer).and_then(|()| stdout.flush());
+    }
+    let _ = drained.recv_timeout(HOOK_STDIN_DRAIN_GRACE);
+    ExitCode::SUCCESS
 }
 
 /// Leaves a command line this copy cannot read unanswered: one warning in the
@@ -211,6 +234,9 @@ async fn async_main(
         // Run by `main` before anything else.
         CliCommand::LaunchOverlay => {
             anyhow::bail!("--launch-overlay is not run as one of the daemon's commands")
+        }
+        CliCommand::PrintAnswer { .. } => {
+            anyhow::bail!("--print-answer is not run as one of the daemon's commands")
         }
         // `--detection` / `--detection-dir` / `--playbook` /
         // `--profiles-dir` / `--approver-exe` / `--roles` / `--tickets`

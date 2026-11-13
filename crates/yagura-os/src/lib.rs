@@ -48,8 +48,9 @@ pub use capture::{
 pub use file_replace::replace_existing_file;
 pub use hook_path::{SpacelessPathError, spaceless_path, spaceless_path_from};
 pub use instance::{
-    APP_IDENTIFIER, InstanceIdError, InstanceNamespace, StartupEnvError, instance_dir,
-    resolve_instance_from, resolve_startup_env, store_override_conflicts, validate_instance_id,
+    APP_IDENTIFIER, InstanceIdError, InstanceNamespace, StartupEnvError, guest_instance_dir,
+    instance_dir, resolve_instance_from, resolve_startup_env, store_override_conflicts,
+    validate_instance_id,
 };
 pub use mcp_bridge::{merge_wslenv, resolve_sibling_executable, to_plain_path};
 pub use process_identity::{
