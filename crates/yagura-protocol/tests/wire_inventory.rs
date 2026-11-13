@@ -79,9 +79,9 @@ use yagura_protocol::{
     ApprovalTarget, AssignmentSource, AwaitingWindow, CellAttr, CellColor, CellFlag, CellPosition,
     ChatDeliveryInfo, ChatHalt, ChatMessage, ChatParticipant, ChatRoomInfo, ClientMessage,
     ColorOverride, CursorShape, CursorState, DaemonMessage, DaemonProblem, DaemonProblemKind,
-    DefaultPalettes, DeliveryState, DeliveryStream, Frame, FrameLine, FrameRun, HookInputValue,
-    HookPointer, HookPointerKind, InstructionNotice, InstructionNoticeState, Key, KeyInput,
-    LaunchOptionAlias, LaunchOptionInfo, McpRegistrationAction, McpRegistrationCommand,
+    Declaration, DefaultPalettes, DeliveryState, DeliveryStream, Frame, FrameLine, FrameRun,
+    HookInputValue, HookPointer, HookPointerKind, InstructionNotice, InstructionNoticeState, Key,
+    KeyInput, LaunchOptionAlias, LaunchOptionInfo, McpRegistrationAction, McpRegistrationCommand,
     McpRegistrationEntry, McpRegistrationRow, McpRegistrationState, McpRegistrationStatusInfo,
     McpRegistrationStep, McpRegistrationTomlSet, McpRegistrationTomlValue, MilestoneInfo,
     ModelChoice, ModelChoiceSource, Modifiers, NamedKey, OnNameTaken, Palette, PaletteSlot,
@@ -258,6 +258,7 @@ wire_sample!(enum CellFlag => Bold);
 wire_sample!(enum CursorShape => Block);
 wire_sample!(enum HookPointerKind => Presence);
 wire_sample!(struct HookPointer { pointer, kind, value });
+wire_sample!(struct Declaration { profile });
 
 /// Hand-written for the same reason as `Key`'s: `HookInputValue` carries data
 /// in one variant.
@@ -681,7 +682,11 @@ fn client_message_corpus() -> Vec<ClientMessage> {
             effort,
             on_name_taken,
         }),
-        wire_sample!(ClientMessage::Identify { window_id, token }),
+        wire_sample!(ClientMessage::Identify {
+            window_id,
+            token,
+            declaration,
+        }),
         wire_sample!(ClientMessage::RegisterApprover),
         wire_sample!(ClientMessage::SendHandoff {
             window_id,

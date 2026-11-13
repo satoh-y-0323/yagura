@@ -183,6 +183,10 @@ async fn a_relay_started_with_both_identity_variables_names_that_window_before_a
 
     let hello = daemon.accept().await.hello().await;
     assert_names_the_window(&hello);
+    assert_eq!(
+        hello.declaration, None,
+        "a relay started without its profile declares none: {hello:?}"
+    );
 }
 
 // A registered entry outside a window can only spell its identity as empty.
@@ -235,6 +239,57 @@ async fn a_relay_given_a_missing_credentials_file_names_no_window() {
     relay.send(&initialize_line(1)).await;
     let hello = daemon.accept().await.hello().await;
     assert_names_no_window(&hello, "a missing credentials file");
+}
+
+/// The profile id a window's relay is started with is declared in every `relay_hello`,
+/// the first and each one after the connection is lost.
+#[tokio::test]
+async fn a_window_relay_given_its_profile_declares_it_on_every_connection() {
+    const INSTANCE: &str = "mcprelay-declare";
+    const PROFILE: &str = "grok-build";
+    let files = TempDir::new("yagura-mcp-credentials", "files");
+    let path = files.path().join("credentials.json");
+    std::fs::write(
+        &path,
+        json!({"window_id": WINDOW, "token": TOKEN}).to_string(),
+    )
+    .expect("write the credentials file");
+    let mut daemon = FakeDaemon::bind(INSTANCE).await;
+    let _relay = spawn_relay(
+        INSTANCE,
+        &[],
+        &[
+            OsStr::new("--profile"),
+            OsStr::new(PROFILE),
+            OsStr::new("--credentials"),
+            path.as_os_str(),
+        ],
+    );
+
+    let mut first = daemon.accept().await;
+    let hello = first.hello().await;
+    assert_names_the_window(&hello);
+    assert_eq!(
+        hello
+            .declaration
+            .as_ref()
+            .map(|declared| declared.profile.as_str()),
+        Some(PROFILE),
+        "the first relay_hello declares the profile: {hello:?}"
+    );
+    first.welcome("tools-1").await;
+    drop(first);
+
+    let hello = daemon.accept().await.hello().await;
+    assert_names_the_window(&hello);
+    assert_eq!(
+        hello
+            .declaration
+            .as_ref()
+            .map(|declared| declared.profile.as_str()),
+        Some(PROFILE),
+        "a relay_hello after the connection was lost declares the same profile: {hello:?}"
+    );
 }
 
 // --- the requests a lost connection leaves open --------------------------
@@ -503,6 +558,7 @@ async fn a_relay_outside_a_window_answers_at_once_daemon_unavailable_while_no_da
         Some(RelayFrame::Hello {
             window_id: None,
             token: None,
+            declaration: None,
             ..
         }) => {}
         other => panic!("the relay tried the endpoint, naming no window: {other:?}"),

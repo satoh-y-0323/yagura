@@ -2342,11 +2342,21 @@ pub async fn open_marked_delivering_window(
 /// one) relies on [`VALID_TOKEN`] being injected via [`approver_base_config`]
 /// or [`handoff_profile_config`].
 pub async fn identify(client: &mut Connection, window_id: &str) {
+    identify_declaring(client, window_id, None).await;
+}
+
+/// [`identify`], declaring `profile` the way a bridge started with
+/// `--profile <id>` does: what a window opened from a profile whose hooks the
+/// daemon arranged needs of its claimant.
+pub async fn identify_declaring(client: &mut Connection, window_id: &str, profile: Option<&str>) {
     send(
         client,
         &ClientMessage::Identify {
             window_id: window_id.to_string(),
             token: VALID_TOKEN.to_string(),
+            declaration: profile.map(|profile| yagura_protocol::Declaration {
+                profile: profile.to_string(),
+            }),
         },
     )
     .await;

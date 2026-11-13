@@ -118,6 +118,7 @@ async fn send_identify(client: &mut Connection, window_id: &str, token: &str) ->
         &ClientMessage::Identify {
             window_id: window_id.to_string(),
             token: token.to_string(),
+            declaration: None,
         },
     )
     .await;

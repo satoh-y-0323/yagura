@@ -42,7 +42,7 @@ args = ["--effort", "{value}"]
 mode = "launch"
 
 [mcp]
-args = ["--mcp-config", '{"mcpServers":{"{server}":{"command":"${YAGURA_MCP_BRIDGE}","args":["--credentials","{credentials_file}"]}}}']
+args = ["--mcp-config", '{"mcpServers":{"{server}":{"command":"${YAGURA_MCP_BRIDGE}","args":["--profile","wsl-claude-code","--credentials","{credentials_file}"]}}}']
 
 # Each hook event reports the turn's start, a permission prompt, or its end to
 # the daemon, each door handed the credentials file (verified with Claude Code
@@ -87,7 +87,7 @@ absent_exit = 3
 # because they have nothing to do with launching the CLI itself.
 [mcp_registration]
 group = "WSL"
-add = ["mcp", "add", "--scope", "user", "{env_args}", "{server}", "--", "{bridge}"]
+add = ["mcp", "add", "--scope", "user", "{env_args}", "{server}", "--", "{bridge}", "--profile", "wsl-claude-code"]
 remove = ["mcp", "remove", "--scope", "user", "{server}"]
 env_arg = ["--env={env}"]
 env_forward = { name = "WSLENV", separator = ":" }
@@ -96,5 +96,6 @@ env_forward = { name = "WSLENV", separator = ":" }
 args = ["mcp", "get", "{server}"]
 format = "lines"
 command = "Command:"
+args_line = "Args:"
 require = { "Scope:" = "User" }
 absent = "No MCP server named"

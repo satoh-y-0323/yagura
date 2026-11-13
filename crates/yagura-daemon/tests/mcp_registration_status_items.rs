@@ -15,10 +15,16 @@ use yagura_os::program::Platform;
 const BRIDGE: &str = "/opt/yagura/yagura-mcp";
 
 fn profile_source(status_keys: &str) -> String {
+    profile_source_with_args("", status_keys)
+}
+
+/// [`profile_source`] whose `add` passes `bridge_args` (TOML array elements, each
+/// followed by a comma) after the bridge.
+fn profile_source_with_args(bridge_args: &str, status_keys: &str) -> String {
     format!(
         "schema = 1\ndisplay_name = \"Neutral Cli\"\n\n[command]\ndefault = [\"neutral-cli\"]\n\n\
          [mcp_registration]\n\
-         add = [\"mcp\", \"add\", \"{{server}}\", \"--\", \"{{bridge}}\"]\n\
+         add = [\"mcp\", \"add\", \"{{server}}\", \"--\", \"{{bridge}}\", {bridge_args}]\n\
          remove = [\"mcp\", \"remove\", \"{{server}}\"]\n\n\
          [mcp_registration.status]\n\
          args = [\"mcp\", \"list\", \"--json\"]\n\
@@ -28,7 +34,11 @@ fn profile_source(status_keys: &str) -> String {
 }
 
 fn spec(status_keys: &str) -> McpRegistrationSpec {
-    parse_profile("neutral-cli", &profile_source(status_keys))
+    spec_of(&profile_source(status_keys))
+}
+
+fn spec_of(source: &str) -> McpRegistrationSpec {
+    parse_profile("neutral-cli", source)
         .unwrap_or_else(|err| panic!("the fixture profile must parse: {err:?}"))
         .mcp_registration
         .expect("the fixture profile carries a registration table")
@@ -122,6 +132,25 @@ fn command_and_args_pointers_are_read_from_the_element() {
     ]});
     let derived = derive(&spec, None, &leftover);
     assert_eq!(derived.state, RegistrationState::Differs, "{derived:?}");
+
+    // With arguments after the bridge, the element's arguments must be those.
+    let naming = spec_of(&profile_source_with_args(
+        "\"--profile\", \"neutral-cli\",",
+        "items = \"/servers\"\nname = \"/id\"\ncommand = \"/spec/command\"\nargs_pointer = \"/spec/args\"",
+    ));
+    let named = json!({ "servers": [
+        { "id": "yagura", "spec": { "command": BRIDGE, "args": ["--profile", "neutral-cli"] } },
+    ]});
+    assert_eq!(
+        derive(&naming, None, &named).state,
+        RegistrationState::Registered
+    );
+    let older = derive(&naming, None, &bare);
+    assert_eq!(older.state, RegistrationState::Differs, "{older:?}");
+    assert!(
+        !older.differs_in.is_empty() && !older.differs_in.contains(&"command".to_string()),
+        "the arguments differ, not the command: {older:?}"
+    );
 }
 
 #[test]

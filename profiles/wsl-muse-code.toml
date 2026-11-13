@@ -42,7 +42,7 @@ mode = "launch"
 # server of the same name in the user's settings also makes Muse refuse the
 # launch, so `absent` drops this injection in that case.
 [mcp]
-args = ["-c", "mcpServers.{server}={\"transport\":\"stdio\",\"command\":{bridge_json},\"args\":[\"--credentials\",\"{credentials_file}\"],\"env\":{env_refs},\"mode\":\"optional\"}"]
+args = ["-c", "mcpServers.{server}={\"transport\":\"stdio\",\"command\":{bridge_json},\"args\":[\"--profile\",\"wsl-muse-code\",\"--credentials\",\"{credentials_file}\"],\"env\":{env_refs},\"mode\":\"optional\"}"]
 absent = { file = ".config/muse/settings.json", pointer = "/mcpServers/{server}" }
 
 # This file is read only through this launch's -c, so its commands need no

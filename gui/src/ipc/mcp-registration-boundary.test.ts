@@ -83,13 +83,13 @@ describe('the registration state of a status push', () => {
       request_id: 1,
       status: statusInfoWire({
         state: 'differs',
-        differs_in: ['command'],
+        differs_in: ['command', 'args', 'a-part-this-build-does-not-name'],
         reason: 'why',
         add: commandWire(),
         remove: commandWire({ program_at: 0 }),
       }),
     });
-    expect(status.differsIn).toEqual(['command']);
+    expect(status.differsIn).toEqual(['command', 'args', 'a-part-this-build-does-not-name']);
     expect(status.reason).toBe('why');
     expect(status.add).toEqual({ argv: ['alpha', 'mcp', 'add'], programAt: 1 });
     expect(status.remove).toEqual({ argv: ['alpha', 'mcp', 'add'], programAt: 0 });

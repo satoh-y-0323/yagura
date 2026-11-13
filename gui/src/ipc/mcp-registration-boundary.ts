@@ -91,7 +91,10 @@ export interface McpRegistrationsListed {
   rows: McpRegistrationRow[];
 }
 
-/** How one profile's registration currently reads, `differsIn` empty unless `state` is `'differs'`. */
+/**
+ * How one profile's registration currently reads, `differsIn` empty unless `state` is `'differs'`.
+ * `differsIn` keeps every part the daemon names, including ones this build has no wording for.
+ */
 export interface McpRegistrationStatusInfo {
   profile: string;
   state: McpRegistrationState;

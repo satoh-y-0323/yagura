@@ -35,8 +35,8 @@ use yagura_protocol::relay::{
     SUPPORTED_CONTRACTS, is_one_line, parse_line, rpc_error_line, tool_call_error_line,
 };
 use yagura_protocol::{
-    ClientMessage, DaemonMessage, FrameError, decode_daemon_message, encode_client_message,
-    frame_decode, frame_encode,
+    ClientMessage, DaemonMessage, Declaration, FrameError, decode_daemon_message,
+    encode_client_message, frame_decode, frame_encode,
 };
 
 use super::server::YaguraMcpServer;
@@ -235,6 +235,7 @@ pub(crate) async fn serve<S>(
         window_id,
         token,
         resume,
+        declaration,
     })) = frames.next().await
     else {
         return;
@@ -267,7 +268,9 @@ pub(crate) async fn serve<S>(
     }
 
     let identity = match (window_id, token) {
-        (Some(window_id), Some(token)) => identify(&server, &verified, window_id, token).await,
+        (Some(window_id), Some(token)) => {
+            identify(&server, &verified, window_id, token, declaration).await
+        }
         _ => Identity::none(),
     };
     let bucket = match &identity.origin {
@@ -337,16 +340,22 @@ impl Identity {
 /// Identifies as `window_id` through `identify` on a connection of the
 /// session's own, so the claim passes the same checks and counts its failures
 /// the same way; the connection is kept, and holds the claim, when accepted.
+/// The relay's `declaration` goes into the claim as it came, judged only there.
 async fn identify(
     server: &Arc<IpcServer>,
     verified: &VerifiedPeer,
     window_id: String,
     token: String,
+    declaration: Option<Declaration>,
 ) -> Identity {
     let mut connection = server.open_internal_connection(verified, RequestOrigin::External, None);
     let reply = exchange(
         &mut connection,
-        &ClientMessage::Identify { window_id, token },
+        &ClientMessage::Identify {
+            window_id,
+            token,
+            declaration,
+        },
     )
     .await;
     match reply {

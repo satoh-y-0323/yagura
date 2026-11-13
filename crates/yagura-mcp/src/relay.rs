@@ -33,7 +33,7 @@ use yagura_protocol::relay::{
     is_one_line, read_line, rpc_error_line, tool_call_error_line,
 };
 use yagura_protocol::{
-    FrameError, MAX_FRAME_BODY_LEN, WindowCredentials, frame_decode, frame_encode,
+    Declaration, FrameError, MAX_FRAME_BODY_LEN, WindowCredentials, frame_decode, frame_encode,
 };
 
 /// How long a window's relay that is not connected waits after one attempt to
@@ -161,11 +161,12 @@ pub enum RelayEnd {
 }
 
 /// Relays between the CLI on `input` and `output` and the daemon at
-/// `endpoint`, naming `window` when there is one, until one of the
-/// [`RelayEnd`] events.
+/// `endpoint`, naming `window` when there is one and stating `declaration` on
+/// every connection, until one of the [`RelayEnd`] events.
 pub async fn run<R, W>(
     endpoint: String,
     window: Option<WindowCredentials>,
+    declaration: Option<Declaration>,
     input: R,
     mut output: W,
 ) -> RelayEnd
@@ -179,7 +180,7 @@ where
         lines_tx,
     ))]);
     let (events_tx, mut events) = mpsc::unbounded_channel();
-    let mut relay = Relay::new(endpoint, window, events_tx);
+    let mut relay = Relay::new(endpoint, window, declaration, events_tx);
     if relay.window.is_some() {
         relay.start_attempt();
     }
@@ -529,6 +530,7 @@ fn spawn_writer(
 struct Relay {
     endpoint: String,
     window: Option<WindowCredentials>,
+    declaration: Option<Declaration>,
     events: mpsc::UnboundedSender<Event>,
     link: Link,
     next_link: u64,
@@ -559,11 +561,13 @@ impl Relay {
     fn new(
         endpoint: String,
         window: Option<WindowCredentials>,
+        declaration: Option<Declaration>,
         events: mpsc::UnboundedSender<Event>,
     ) -> Self {
         Self {
             endpoint,
             window,
+            declaration,
             events,
             link: Link::Down { after_limit: false },
             next_link: 0,
@@ -628,6 +632,7 @@ impl Relay {
             window_id: self.window.as_ref().map(|window| window.window_id.clone()),
             token: self.window.as_ref().map(|window| window.token.clone()),
             resume,
+            declaration: self.declaration.clone(),
         })
     }
 

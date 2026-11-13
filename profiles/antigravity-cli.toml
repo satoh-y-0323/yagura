@@ -41,7 +41,7 @@ launch_prompt = ["-i", "{prompt}"]
 # agy keeps its registrations in a settings file, not behind a status
 # command, so the daemon reads that file directly.
 [mcp_registration]
-add = ["mcp", "add", "{env_args}", "{server}", "--", "{bridge}"]
+add = ["mcp", "add", "{env_args}", "{server}", "--", "{bridge}", "--profile", "antigravity-cli"]
 remove = ["mcp", "remove", "{server}"]
 env_arg = ["--env={env}"]
 
@@ -49,6 +49,7 @@ env_arg = ["--env={env}"]
 file = ".gemini/config/mcp_config.json"
 format = "json"
 command = "/mcpServers/{server}/command"
+args_pointer = "/mcpServers/{server}/args"
 
 # agy takes no hooks at launch, only from its own hooks file, so
 # registration adds yagura's entry there and removal takes it out (checked

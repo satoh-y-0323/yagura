@@ -1457,6 +1457,7 @@ async fn a_transport_that_lost_its_connection_claims_its_window_again_on_the_nex
             .round_trip(ClientMessage::Identify {
                 window_id: window_id.clone(),
                 token: WRONG_TOKEN.to_string(),
+                declaration: None,
             })
             .await
         {

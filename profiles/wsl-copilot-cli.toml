@@ -35,7 +35,7 @@ mode = "launch"
 # converted the bridge's path. `timeout` is in milliseconds (one day): Copilot
 # cuts a tool call off after 180 seconds by default.
 [mcp]
-args = ["--additional-mcp-config", '{"mcpServers":{"{server}":{"type":"local","command":"${YAGURA_MCP_BRIDGE}","args":["--credentials","{credentials_file}"],"tools":["*"],"timeout":86400000}}}']
+args = ["--additional-mcp-config", '{"mcpServers":{"{server}":{"type":"local","command":"${YAGURA_MCP_BRIDGE}","args":["--profile","wsl-copilot-cli","--credentials","{credentials_file}"],"tools":["*"],"timeout":86400000}}}']
 
 # Copilot takes launch-time hooks only from a plugin directory (see
 # copilot-cli.toml). Inside WSL the hooks run under the `bash` key, and the
@@ -73,7 +73,7 @@ convert = ["wsl", "-e", "wslpath", "-u", "{path}"]
 # the CLI's own output, so no file tool is needed.
 [mcp_registration]
 group = "WSL"
-add = ["mcp", "add", "--timeout", "86400000", "{env_args}", "{server}", "--", "{bridge}"]
+add = ["mcp", "add", "--timeout", "86400000", "{env_args}", "{server}", "--", "{bridge}", "--profile", "wsl-copilot-cli"]
 remove = ["mcp", "remove", "{server}"]
 env_arg = ["--env={env}"]
 env_forward = { name = "WSLENV", separator = ":" }
@@ -82,6 +82,7 @@ env_forward = { name = "WSLENV", separator = ":" }
 args = ["mcp", "get", "{server}", "--json"]
 format = "json"
 command = "/{server}/command"
+args_pointer = "/{server}/args"
 absent = "not found"
 
 # Read for every window this profile opens (see copilot-cli.toml).

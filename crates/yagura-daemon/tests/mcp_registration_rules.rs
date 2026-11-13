@@ -158,13 +158,19 @@ fn json_status(command: &str, args: serde_json::Value, timeout: serde_json::Valu
 
 /// A line-shaped status as the host CLI prints it for a registered server.
 fn lines_status(scope: &str, command: &str, newline: &str) -> String {
+    lines_status_with_args(scope, command, "", newline)
+}
+
+/// [`lines_status`] for a server registered with `args`, which the CLI prints on one
+/// line joined by single spaces.
+fn lines_status_with_args(scope: &str, command: &str, args: &str, newline: &str) -> String {
     [
         "yagura:".to_string(),
         format!("  Scope: {scope}"),
         "  Status: \u{2714} Connected".to_string(),
         "  Type: stdio".to_string(),
         format!("  Command: {command}"),
-        "  Args: ".to_string(),
+        format!("  Args: {args}"),
         "  Environment:".to_string(),
         String::new(),
     ]
@@ -365,7 +371,7 @@ fn a_matching_json_status_is_registered() {
 }
 
 #[test]
-fn a_different_bridge_or_leftover_args_differs_in_command() {
+fn a_different_bridge_differs_in_command_and_leftover_args_in_the_arguments() {
     let other = derive(
         JSON_TABLE,
         &exited(
@@ -385,8 +391,16 @@ fn a_different_bridge_or_leftover_args_differs_in_command() {
         BRIDGE,
         Platform::Windows,
     );
-    assert_state(&args, RegistrationState::Differs, "leftover args");
-    assert_eq!(args.differs_in, strings(&["command"]));
+    assert_differs_in_the_arguments_only(&args, "leftover args");
+}
+
+/// `derived` differs, and what differs is named, but not as the command.
+fn assert_differs_in_the_arguments_only(derived: &DerivedStatus, context: &str) {
+    assert_state(derived, RegistrationState::Differs, context);
+    assert!(
+        !derived.differs_in.is_empty() && !derived.differs_in.contains(&"command".to_string()),
+        "{context}: the arguments differ, not the command: {derived:?}"
+    );
 }
 
 #[test]
@@ -451,6 +465,173 @@ fn a_matching_lines_status_is_registered() {
             Platform::Windows,
         );
         assert_state(&derived, RegistrationState::Registered, "lines match");
+    }
+}
+
+// ---------------------------------------------------------------------
+// The registered arguments against the ones `add` renders
+// ---------------------------------------------------------------------
+
+/// [`JSON_TABLE`] whose `add` names the profile after the bridge, as a bundled profile's
+/// registration does.
+fn json_table_naming_the_profile() -> String {
+    JSON_TABLE.replace(
+        r#""--", "{bridge}"]"#,
+        r#""--", "{bridge}", "--profile", "neutral-cli"]"#,
+    )
+}
+
+/// [`LINES_TABLE`] whose `add` passes `args` after the bridge, and whose status reads the
+/// arguments from the line `Args:`.
+fn lines_table_with(args: &str) -> String {
+    LINES_TABLE
+        .replace(
+            r#""--", "{bridge}"]"#,
+            &format!(r#""--", "{{bridge}}", {args}]"#),
+        )
+        .replace(
+            "command = \"Command:\"\n",
+            "command = \"Command:\"\nargs_line = \"Args:\"\n",
+        )
+}
+
+#[test]
+fn registered_arguments_are_compared_with_the_ones_add_renders_element_by_element() {
+    let table = json_table_naming_the_profile();
+    let status = |command: &str, args: serde_json::Value| {
+        derive(
+            &table,
+            &exited(0, &json_status(command, args, json!(86400.0)), ""),
+            BRIDGE,
+            Platform::Windows,
+        )
+    };
+
+    let same = status(BRIDGE, json!(["--profile", "neutral-cli"]));
+    assert_state(&same, RegistrationState::Registered, "the same arguments");
+    assert!(same.differs_in.is_empty(), "{same:?}");
+
+    for (context, args) in [
+        ("an older registration without them", json!([])),
+        ("another profile", json!(["--profile", "other-cli"])),
+        (
+            "one more argument",
+            json!(["--profile", "neutral-cli", "--x"]),
+        ),
+        (
+            "the same elements in another order",
+            json!(["neutral-cli", "--profile"]),
+        ),
+    ] {
+        assert_differs_in_the_arguments_only(&status(BRIDGE, args), context);
+    }
+
+    let moved = status(
+        r"D:\old\yagura-mcp.exe",
+        json!(["--profile", "neutral-cli"]),
+    );
+    assert_state(&moved, RegistrationState::Differs, "another bridge");
+    assert_eq!(moved.differs_in, strings(&["command"]));
+}
+
+#[test]
+fn a_bridge_rendered_into_the_arguments_is_compared_as_a_path() {
+    // The CLI is registered to run a shell that runs the bridge.
+    let table = JSON_TABLE.replace(
+        r#""--", "{bridge}"]"#,
+        r#""--", "bash", "-c", "exec \"$0\" \"$@\"", "{bridge}", "--profile", "neutral-cli"]"#,
+    );
+    let status = |args: serde_json::Value| {
+        derive(
+            &table,
+            &exited(0, &json_status("bash", args, json!(86400.0)), ""),
+            BRIDGE,
+            Platform::Windows,
+        )
+    };
+    let script = "exec \"$0\" \"$@\"";
+
+    let same = status(json!([
+        "-c",
+        script,
+        "c:/tools/YAGURA/yagura-mcp.exe",
+        "--profile",
+        "neutral-cli"
+    ]));
+    assert_state(
+        &same,
+        RegistrationState::Registered,
+        "the bridge's path, spelled otherwise",
+    );
+
+    let moved = status(json!([
+        "-c",
+        script,
+        r"D:\old\yagura-mcp.exe",
+        "--profile",
+        "neutral-cli"
+    ]));
+    assert_state(
+        &moved,
+        RegistrationState::Differs,
+        "another bridge in the arguments",
+    );
+}
+
+#[test]
+fn a_lines_status_compares_the_arguments_line_with_the_rendered_arguments_joined_by_spaces() {
+    let table = lines_table_with(r#""--profile", "neutral-cli""#);
+    let status = |args: &str| {
+        derive(
+            &table,
+            &exited(
+                0,
+                &lines_status_with_args(
+                    "User config (available in all your projects)",
+                    BRIDGE,
+                    args,
+                    "\n",
+                ),
+                "",
+            ),
+            BRIDGE,
+            Platform::Windows,
+        )
+    };
+
+    assert_state(
+        &status("--profile neutral-cli"),
+        RegistrationState::Registered,
+        "the same arguments",
+    );
+    for (context, args) in [
+        ("an older registration without them", ""),
+        ("another profile", "--profile other-cli"),
+        ("one more argument", "--profile neutral-cli --x"),
+    ] {
+        assert_differs_in_the_arguments_only(&status(args), context);
+    }
+}
+
+/// A line joins the arguments with spaces, so it cannot tell an argument holding a space
+/// apart from two, nor compare the bridge's path as a path.
+#[test]
+fn a_lines_status_may_not_expect_an_argument_it_cannot_tell_apart() {
+    assert_accepted(
+        "arguments without spaces",
+        &lines_table_with(r#""--profile", "neutral-cli""#),
+    );
+    for (context, args) in [
+        (
+            "the bridge among the arguments",
+            r#""--profile", "{bridge}""#,
+        ),
+        (
+            "an argument holding a space",
+            r#""--profile", "neutral cli""#,
+        ),
+    ] {
+        assert_table_rejected(context, &lines_table_with(args));
     }
 }
 

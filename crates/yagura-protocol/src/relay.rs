@@ -11,9 +11,10 @@
 //!
 //! The contract is versioned by [`RelayFrame::Hello::contract`], not by
 //! [`crate::PROTOCOL_REVISION`]: changing the IPC does not change this
-//! contract. Frames only ever gain fields: a later version may add one but
-//! never removes one or changes its meaning, and a reader ignores fields it
-//! does not know. A relay ignores a frame whose `type` it does not know (the
+//! contract. Frames only ever gain fields, and a reader ignores fields it
+//! does not know. A field whose absence already has a settled meaning is
+//! added without changing the version; changing what a field, or its
+//! absence, means takes a new version. No field is ever removed. A relay ignores a frame whose `type` it does not know (the
 //! IPC framing still delimits it, so it is skipped by its length). A daemon
 //! speaks the current contract and the one before it ([`SUPPORTED_CONTRACTS`]).
 
@@ -81,6 +82,11 @@ pub enum RelayFrame {
         /// without a window.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         resume: Option<RelayResume>,
+        /// What the relay states about itself, carried into the window's
+        /// claim unread. Absent declares nothing, as a relay of a
+        /// registration older than the field does.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        declaration: Option<crate::Declaration>,
     },
     /// Sent by the daemon when it accepts the session.
     #[serde(rename = "relay_welcome")]

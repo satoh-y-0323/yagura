@@ -52,7 +52,7 @@ launch_context = ["--rules", "{context}"]
 launch_prompt = ["--", "{prompt}"]
 
 [mcp_registration]
-add = ["mcp", "add", "{env_args}", "{server}", "--", "{bridge}"]
+add = ["mcp", "add", "{env_args}", "{server}", "--", "{bridge}", "--profile", "grok-build"]
 remove = ["mcp", "remove", "{server}"]
 env_arg = ["--env={env}"]
 notice = "While this is registered, Grok Build asks whether to trust every folder it starts in outside your home directory, including sessions you start yourself. Answering yes also lets that folder's own hooks, MCP servers and instructions run."
@@ -63,6 +63,7 @@ format = "json"
 items = ""
 name = "/name"
 command = "/command"
+args_pointer = "/args"
 
 # Every grok session sees every registered server; a window turns off the
 # ones of other instances. A denied server's tools still show by name in

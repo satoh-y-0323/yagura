@@ -20,7 +20,7 @@ use std::time::Duration;
 
 use common::real_daemon::{RunningDaemon, Sandbox, daemon_bin};
 use common::{VALID_TOKEN, launch_args_logged_in, read_response, send};
-use yagura_protocol::{ClientMessage, DaemonMessage, WindowStatus};
+use yagura_protocol::{ClientMessage, DaemonMessage, Declaration, WindowStatus};
 use yagura_test_support::process::{
     COMPOSER_CONTINUATION_PREFIX, COMPOSER_MARKER, COMPOSER_SEPARATOR, argv_probe_path,
     env_probe_path,
@@ -253,20 +253,49 @@ async fn the_credentials_file_is_an_absolute_path_naming_the_window_and_a_token_
         serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
     assert_eq!(contents["window_id"], window_id);
     let token = contents["token"].as_str().unwrap_or_default().to_string();
-    for (candidate, accepted) in [(token.as_str(), true), (VALID_TOKEN, false)] {
+    // The window was opened from `launch`, whose hooks the daemon arranged, so only a
+    // claim that declares that profile is the window's.
+    let declaring = |profile: &str| {
+        Some(Declaration {
+            profile: profile.to_string(),
+        })
+    };
+    for (what, candidate, declaration, accepted) in [
+        (
+            "its token, declaring its profile",
+            token.as_str(),
+            declaring("launch"),
+            true,
+        ),
+        ("another token", VALID_TOKEN, declaring("launch"), false),
+        (
+            "its token, declaring another profile",
+            token.as_str(),
+            declaring("other"),
+            false,
+        ),
+        (
+            "its token, declaring no profile",
+            token.as_str(),
+            None,
+            false,
+        ),
+    ] {
+        let mut client = yagura_test_support::ipc::connect_with_retry(sandbox.endpoint()).await;
         send(
-            &mut daemon.client,
+            &mut client,
             &ClientMessage::Identify {
                 window_id: window_id.clone(),
                 token: candidate.to_string(),
+                declaration,
             },
         )
         .await;
-        let reply = read_response(&mut daemon.client).await;
+        let reply = read_response(&mut client).await;
         assert_eq!(
             matches!(reply, DaemonMessage::Identified { .. }),
             accepted,
-            "the token {candidate:?} must {}be the window's own; reply {reply:?}",
+            "{what}: the claim must {}be the window's; reply {reply:?}",
             if accepted { "" } else { "not " }
         );
     }

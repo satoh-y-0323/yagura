@@ -178,6 +178,7 @@ fn one_message_per_variant_without_launch_option() -> Vec<ClientMessage> {
         ClientMessage::Identify {
             window_id: "w1".to_string(),
             token: "tok".to_string(),
+            declaration: None,
         },
         ClientMessage::RegisterApprover,
         ClientMessage::SendHandoff {

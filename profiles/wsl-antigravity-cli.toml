@@ -61,7 +61,7 @@ absent_exit = 3
 # than running a status command.
 [mcp_registration]
 group = "WSL"
-add = ["mcp", "add", "{env_args}", "{server}", "--", "{bridge}"]
+add = ["mcp", "add", "{env_args}", "{server}", "--", "{bridge}", "--profile", "wsl-antigravity-cli"]
 remove = ["mcp", "remove", "{server}"]
 env_arg = ["--env={env}"]
 env_forward = { name = "WSLENV", separator = ":" }
@@ -70,6 +70,7 @@ env_forward = { name = "WSLENV", separator = ":" }
 file = ".gemini/config/mcp_config.json"
 format = "json"
 command = "/mcpServers/{server}/command"
+args_pointer = "/mcpServers/{server}/args"
 
 # agy takes no hooks at launch, only from its own hooks file, so
 # registration adds yagura's entry there and removal takes it out (checked

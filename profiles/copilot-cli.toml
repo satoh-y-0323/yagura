@@ -30,7 +30,7 @@ mode = "launch"
 # `timeout` is in milliseconds (one day): Copilot cuts a tool call off after
 # 180 seconds by default, which is shorter than the waits the tools allow.
 [mcp]
-config_file = '{"mcpServers":{"{server}":{"type":"local","command":"${YAGURA_MCP_BRIDGE}","args":["--credentials","{credentials_file}"],"tools":["*"],"timeout":86400000}}}'
+config_file = '{"mcpServers":{"{server}":{"type":"local","command":"${YAGURA_MCP_BRIDGE}","args":["--profile","copilot-cli","--credentials","{credentials_file}"],"tools":["*"],"timeout":86400000}}}'
 args = ["--additional-mcp-config", "@{mcp_config_file}"]
 
 # Copilot takes launch-time hooks only from a plugin directory: a
@@ -60,7 +60,7 @@ block = '{"decision":"block","reason":{text}}'
 
 # `copilot mcp get --json` prints one table keyed by the server's name.
 [mcp_registration]
-add = ["mcp", "add", "--timeout", "86400000", "{env_args}", "{server}", "--", "{bridge}"]
+add = ["mcp", "add", "--timeout", "86400000", "{env_args}", "{server}", "--", "{bridge}", "--profile", "copilot-cli"]
 remove = ["mcp", "remove", "{server}"]
 env_arg = ["--env={env}"]
 
@@ -68,6 +68,7 @@ env_arg = ["--env={env}"]
 args = ["mcp", "get", "{server}", "--json"]
 format = "json"
 command = "/{server}/command"
+args_pointer = "/{server}/args"
 absent = "not found"
 
 # Read for every window this profile opens: the bridge registrations of the

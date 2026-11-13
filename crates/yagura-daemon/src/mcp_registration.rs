@@ -139,9 +139,13 @@ struct StatusSpec {
     /// `json`: a JSON Pointer (may contain `{server}`) to the registered
     /// executable. `lines`: the line prefix preceding it.
     command: String,
-    /// `json` only: a JSON Pointer to the registered arguments, checked for
-    /// being empty.
+    /// `json` only: a JSON Pointer (may contain `{server}`) to the
+    /// registered arguments, compared with the ones the registration renders
+    /// after the server's command.
     args_pointer: Option<String>,
+    /// `lines` only: the line prefix preceding the registered arguments,
+    /// which the CLI prints joined by single spaces.
+    args_line: Option<String>,
     /// `lines` only: line prefix -> the word its value must start with.
     require: BTreeMap<String, String>,
     /// `args`-sourced status only: a substring whose presence in the output
@@ -336,6 +340,8 @@ struct BridgeEntry {
     items: String,
     /// JSON Pointer, inside one such entry, to the string holding `{bridge}`.
     command: String,
+    /// The arguments beside `command` (its sibling `args`), as templates.
+    args: Vec<String>,
     /// Whether the entry carries the instance's variables (`{env_refs}`).
     carries_env: bool,
 }
@@ -896,6 +902,9 @@ pub struct McpRegistrationSpec {
     toml_set: Option<TomlSetSpec>,
     json_entry: Option<JsonEntrySpec>,
     list: Option<ListSpec>,
+    /// The argv the registration has the CLI run as its server, as
+    /// templates ([`server_argv_template`]).
+    server_argv: Vec<String>,
 }
 
 /// The CLI's own commands for registering and unregistering a server. A
@@ -1007,14 +1016,32 @@ impl McpRegistrationSpec {
             if element == "{env_args}" {
                 argv.extend(env_args.iter().cloned());
             } else {
-                argv.push(
-                    element
-                        .replace("{server}", target.server())
-                        .replace("{bridge}", bridge),
-                );
+                argv.push(render_element(element, target, bridge));
             }
         }
         Ok(argv)
+    }
+
+    /// The argv the registration of `target` with `bridge` has the CLI run as
+    /// its server, rendered the way [`Self::render_add`] renders it; empty
+    /// when the table names none.
+    fn render_server_argv(&self, target: &RegistrationTarget, bridge: &str) -> Vec<ServerArg> {
+        let mut argv = Vec::with_capacity(self.server_argv.len());
+        for element in &self.server_argv {
+            if element == "{env_args}" {
+                let env_args = self.render_env_args(target).unwrap_or_default();
+                argv.extend(env_args.into_iter().map(|text| ServerArg {
+                    text,
+                    bridge: false,
+                }));
+            } else {
+                argv.push(ServerArg {
+                    text: render_element(element, target, bridge),
+                    bridge: element == "{bridge}",
+                });
+            }
+        }
+        argv
     }
 
     /// Renders the command that unregisters `target`; empty when the table has
@@ -1201,13 +1228,18 @@ pub enum RegistrationState {
 pub struct DerivedStatus {
     /// The state.
     pub state: RegistrationState,
-    /// The names of the parts that differ (`"command"`, a `require` key with
-    /// its trailing `:` stripped, or a `toml_set.confirm` key), empty unless
-    /// `state` is [`RegistrationState::Differs`].
+    /// The names of the parts that differ (`"command"`, [`DIFFERS_IN_ARGS`],
+    /// a `require` key with its trailing `:` stripped, or a
+    /// `toml_set.confirm` key), empty unless `state` is
+    /// [`RegistrationState::Differs`].
     pub differs_in: Vec<String>,
     /// Why the state is [`RegistrationState::Unknown`], `None` otherwise.
     pub reason: Option<String>,
 }
+
+/// The [`DerivedStatus::differs_in`] name of the server's registered
+/// arguments.
+pub const DIFFERS_IN_ARGS: &str = "args";
 
 const REASON_UNREADABLE_OUTPUT: &str = "the output could not be read as the profile's declared \
                                          format";
@@ -1414,18 +1446,30 @@ fn derive_from_output(
                     None => return unknown(REASON_COMMAND_UNREADABLE),
                 },
             };
-            if command_matches(expected_bridge, actual, has_probe, platform) {
-                if let Some(args_pointer) = &status.args_pointer {
-                    let leftover = document
-                        .pointer(args_pointer)
-                        .and_then(JsonValue::as_array)
-                        .is_some_and(|args| !args.is_empty());
-                    if leftover {
-                        differs_in.push("command".to_string());
-                    }
-                }
-            } else {
+            let argv = spec.render_server_argv(target, expected_bridge);
+            let command_same = match argv.first() {
+                Some(first) => first.matches(actual, has_probe, platform),
+                None => command_matches(expected_bridge, actual, has_probe, platform),
+            };
+            if !command_same {
                 differs_in.push("command".to_string());
+            }
+            if let Some(args_pointer) = &status.args_pointer {
+                // A CLI may leave out an empty argument list.
+                let registered: Vec<String> = document
+                    .pointer(&args_pointer.replace("{server}", target.server()))
+                    .and_then(JsonValue::as_array)
+                    .map(|args| args.iter().map(json_text).collect())
+                    .unwrap_or_default();
+                let expected = argv.get(1..).unwrap_or_default();
+                let same = registered.len() == expected.len()
+                    && expected
+                        .iter()
+                        .zip(&registered)
+                        .all(|(want, got)| want.matches(got, has_probe, platform));
+                if !same {
+                    differs_in.push(DIFFERS_IN_ARGS.to_string());
+                }
             }
             Some(document)
         }
@@ -1438,6 +1482,19 @@ fn derive_from_output(
             };
             if !command_matches(expected_bridge, actual, has_probe, platform) {
                 differs_in.push("command".to_string());
+            }
+            if let Some(args_line) = &status.args_line {
+                let argv = spec.render_server_argv(target, expected_bridge);
+                let expected = argv
+                    .get(1..)
+                    .unwrap_or_default()
+                    .iter()
+                    .map(|arg| arg.text.as_str())
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                if find_labeled_value(&lines, args_line).unwrap_or_default() != expected {
+                    differs_in.push(DIFFERS_IN_ARGS.to_string());
+                }
             }
             for (label, expected) in &status.require {
                 let satisfied = find_labeled_value(&lines, label)
@@ -1685,6 +1742,8 @@ struct RawStatusTable {
     #[serde(default)]
     args_pointer: Option<String>,
     #[serde(default)]
+    args_line: Option<String>,
+    #[serde(default)]
     require: Option<BTreeMap<String, String>>,
     #[serde(default)]
     absent: Option<String>,
@@ -1851,6 +1910,17 @@ fn build_spec(
         return Err(invalid());
     }
     let list = raw.list.map(build_list).transpose()?;
+    let server_argv = server_argv_template(commands.as_ref(), json_entry.as_ref());
+    // One line joins the arguments by spaces: it cannot tell an argument
+    // holding one from two, nor compare a bridge's path as a path.
+    if status.args_line.is_some()
+        && server_argv
+            .iter()
+            .skip(1)
+            .any(|element| element.contains("{bridge}") || element.contains(' '))
+    {
+        return Err(invalid());
+    }
 
     Ok(McpRegistrationSpec {
         group: raw.group,
@@ -1867,7 +1937,76 @@ fn build_spec(
         toml_set,
         json_entry,
         list,
+        server_argv,
     })
+}
+
+/// The argv a registration has the CLI run as its server, as templates: what
+/// follows `--` in `add` (or, without one, `add` from the element naming the
+/// bridge), else the bridge entry's command and its arguments. Empty when the
+/// table names none.
+fn server_argv_template(
+    commands: Option<&RegistrationCommands>,
+    json_entry: Option<&JsonEntrySpec>,
+) -> Vec<String> {
+    if let Some(commands) = commands {
+        let add = &commands.add;
+        let start = match add.iter().position(|element| element == "--") {
+            Some(at) => Some(at + 1),
+            None => add.iter().position(|element| element.contains("{bridge}")),
+        };
+        return start.map_or_else(Vec::new, |start| add[start..].to_vec());
+    }
+    json_entry
+        .and_then(|entry| entry.bridge_entry.as_ref())
+        .map(|entry| {
+            std::iter::once("{bridge}".to_string())
+                .chain(entry.args.iter().cloned())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The array beside the string `command` points to inside `value`: its
+/// sibling `args`.
+fn sibling_args<'a>(value: &'a JsonValue, command: &str) -> Option<&'a Vec<JsonValue>> {
+    let (parent, _) = command.rsplit_once('/')?;
+    value.pointer(&format!("{parent}/args"))?.as_array()
+}
+
+/// A JSON value as an argument: a string as itself, anything else as its JSON
+/// text, so a non-string never reads as equal to a string argument.
+fn json_text(value: &JsonValue) -> String {
+    value
+        .as_str()
+        .map_or_else(|| value.to_string(), str::to_string)
+}
+
+/// One element of `add` with `{server}` and `{bridge}` filled in.
+fn render_element(element: &str, target: &RegistrationTarget, bridge: &str) -> String {
+    element
+        .replace("{server}", target.server())
+        .replace("{bridge}", bridge)
+}
+
+/// One rendered element of the argv a registration has the CLI run.
+#[derive(Debug, Clone)]
+struct ServerArg {
+    text: String,
+    /// Rendered from an element that is exactly `{bridge}`, so it is compared
+    /// as the bridge's path ([`command_matches`]).
+    bridge: bool,
+}
+
+impl ServerArg {
+    /// Whether `actual`, as the CLI reports it, is this element.
+    fn matches(&self, actual: &str, has_probe: bool, platform: Platform) -> bool {
+        if self.bridge {
+            command_matches(&self.text, actual, has_probe, platform)
+        } else {
+            self.text == actual
+        }
+    }
 }
 
 /// Validates `list`: arguments without placeholders, JSON Pointers for the
@@ -1929,9 +2068,13 @@ fn build_json_entry(raw: RawJsonEntries) -> Result<JsonEntrySpec, McpRegistratio
         .and_then(|(key, value)| {
             let command = bridge_pointer(value)?;
             let items = key.strip_suffix(SERVER_PLACEHOLDER)?;
+            let args = sibling_args(value, &command)
+                .map(|args| args.iter().map(json_text).collect())
+                .unwrap_or_default();
             Some(BridgeEntry {
                 items: items.strip_suffix('/').unwrap_or(items).to_string(),
                 command,
+                args,
                 carries_env: json_contains(value, ENV_REFS_PLACEHOLDER),
             })
         });
@@ -2127,6 +2270,9 @@ fn build_status(raw: RawStatusTable) -> Result<StatusSpec, McpRegistrationError>
         }),
         _ => return Err(invalid()),
     };
+    if format == StatusFormat::Json && raw.args_line.is_some() {
+        return Err(invalid());
+    }
     if format == StatusFormat::Json {
         let pointers = [
             Some(&raw.command),
@@ -2151,6 +2297,7 @@ fn build_status(raw: RawStatusTable) -> Result<StatusSpec, McpRegistrationError>
         servers,
         command: raw.command,
         args_pointer: raw.args_pointer,
+        args_line: raw.args_line,
         require: raw.require.unwrap_or_default(),
         absent: raw.absent,
     })

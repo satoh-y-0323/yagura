@@ -637,6 +637,7 @@ async fn identify_with_the_correct_window_and_token_unlocks_that_windows_own_ope
         &ClientMessage::Identify {
             window_id: window_id.clone(),
             token: VALID_TOKEN.to_string(),
+            declaration: None,
         },
     )
     .await;
@@ -672,6 +673,7 @@ async fn identify_twice_to_the_same_window_is_idempotent() {
             &ClientMessage::Identify {
                 window_id: window_id.clone(),
                 token: VALID_TOKEN.to_string(),
+                declaration: None,
             },
         )
         .await;
@@ -694,6 +696,7 @@ async fn identify_to_a_different_window_after_already_identified_is_invalid_stat
         &ClientMessage::Identify {
             window_id: window_a.clone(),
             token: VALID_TOKEN.to_string(),
+            declaration: None,
         },
     )
     .await;
@@ -707,6 +710,7 @@ async fn identify_to_a_different_window_after_already_identified_is_invalid_stat
         &ClientMessage::Identify {
             window_id: window_b,
             token: VALID_TOKEN.to_string(),
+            declaration: None,
         },
     )
     .await;
@@ -740,6 +744,7 @@ async fn identify_with_another_windows_real_token_is_auth_failed() {
         &ClientMessage::Identify {
             window_id: window_b,
             token: token_a.clone(),
+            declaration: None,
         },
     )
     .await;
@@ -752,6 +757,7 @@ async fn identify_with_another_windows_real_token_is_auth_failed() {
         &ClientMessage::Identify {
             window_id: window_a.clone(),
             token: token_a,
+            declaration: None,
         },
     )
     .await;
@@ -772,6 +778,7 @@ async fn identify_with_a_malformed_token_is_auth_failed() {
         &ClientMessage::Identify {
             window_id,
             token: "not-a-valid-token-shape".to_string(),
+            declaration: None,
         },
     )
     .await;
@@ -796,6 +803,7 @@ async fn identify_with_an_unknown_window_id_is_window_not_found_and_does_not_cou
             &ClientMessage::Identify {
                 window_id: "does-not-exist".to_string(),
                 token: VALID_TOKEN.to_string(),
+                declaration: None,
             },
         )
         .await;
@@ -808,6 +816,7 @@ async fn identify_with_an_unknown_window_id_is_window_not_found_and_does_not_cou
         &ClientMessage::Identify {
             window_id,
             token: VALID_TOKEN.to_string(),
+            declaration: None,
         },
     )
     .await;
@@ -831,6 +840,7 @@ async fn three_auth_failed_identifies_close_the_connection() {
             &ClientMessage::Identify {
                 window_id: window_id.clone(),
                 token: WRONG_TOKEN.to_string(),
+                declaration: None,
             },
         )
         .await;
@@ -860,6 +870,7 @@ async fn a_failed_identify_leaves_the_connections_origin_external() {
         &ClientMessage::Identify {
             window_id: window_id.clone(),
             token: WRONG_TOKEN.to_string(),
+            declaration: None,
         },
     )
     .await;
@@ -991,6 +1002,7 @@ async fn identify_still_succeeds_after_a_register_approver_auth_failure() {
         &ClientMessage::Identify {
             window_id: window_id.clone(),
             token: VALID_TOKEN.to_string(),
+            declaration: None,
         },
     )
     .await;
@@ -1018,6 +1030,7 @@ async fn send_text_to_an_unknown_window_is_status_unknown_even_for_the_windows_o
         &ClientMessage::Identify {
             window_id: window_id.clone(),
             token: VALID_TOKEN.to_string(),
+            declaration: None,
         },
     )
     .await;
@@ -2874,6 +2887,7 @@ async fn registering_as_approver_from_a_window_identified_connection_is_invalid_
         &ClientMessage::Identify {
             window_id,
             token: VALID_TOKEN.to_string(),
+            declaration: None,
         },
     )
     .await;
@@ -2901,6 +2915,7 @@ async fn identify_from_an_approver_registered_connection_is_invalid_state() {
         &ClientMessage::Identify {
             window_id,
             token: VALID_TOKEN.to_string(),
+            declaration: None,
         },
     )
     .await;
@@ -3255,6 +3270,7 @@ async fn send_text_from_an_identified_window_to_another_window_is_pending_with_f
         &ClientMessage::Identify {
             window_id: window_a.clone(),
             token: VALID_TOKEN.to_string(),
+            declaration: None,
         },
     )
     .await;

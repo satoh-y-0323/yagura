@@ -1674,8 +1674,12 @@ impl IpcServer {
                 .await;
                 FrameOutcome::Continue
             }
-            Ok(ClientMessage::Identify { window_id, token }) => {
-                self.handle_identify(outbound, state, &window_id, &token)
+            Ok(ClientMessage::Identify {
+                window_id,
+                token,
+                declaration,
+            }) => {
+                self.handle_identify(outbound, state, &window_id, &token, declaration.as_ref())
                     .await
             }
             Ok(ClientMessage::RegisterApprover) => {
@@ -3695,16 +3699,22 @@ impl IpcServer {
     /// it presents.
     ///
     /// Checked in the same order as `status_event`: token shape -> window
-    /// resolution -> that window's own token. A naming mistake
-    /// (`window_not_found`) is kept apart from a credential failure, so only
+    /// resolution -> that window's own token, then what `declaration` states
+    /// against the window ([`WindowEntry::named_profile`]). A naming mistake
+    /// (`window_not_found`) and a declaration the window does not take
+    /// (`profile_mismatch`) are kept apart from a credential failure, so only
     /// the latter counts toward [`IDENTIFY_FAILURE_LIMIT`] and every refusal
     /// leaves the origin untouched.
+    ///
+    /// The one place a claim's declaration is judged: a relay carries its
+    /// own into here unread.
     async fn handle_identify(
         &self,
         outbound: &Outbound,
         state: &mut ConnectionState,
         window_id: &str,
         token: &str,
+        declaration: Option<&yagura_protocol::Declaration>,
     ) -> FrameOutcome {
         let well_formed = StatusToken::is_well_formed(token);
         if !well_formed {
@@ -3727,6 +3737,21 @@ impl IpcServer {
             outbound.reply(&window_not_found_msg());
             return FrameOutcome::Continue;
         };
+        if let Some(own) = entry.named_profile()
+            && declaration.is_none_or(|declared| declared.profile != own)
+        {
+            // A nested CLI's bridge, or one of a registration older than the
+            // declaration, claims every time it connects.
+            tracing::debug!(
+                window_id = %entry.window_id(),
+                "refusing an identify that does not declare the window's profile"
+            );
+            outbound.reply(&error_msg(
+                "profile_mismatch",
+                "the claim does not declare the profile the window was opened from",
+            ));
+            return FrameOutcome::Continue;
+        }
 
         match &state.origin {
             // Re-claiming the same window is the same statement twice, not a
@@ -6089,7 +6114,7 @@ mod tests {
         let mut state = ConnectionState::new(0, None);
         let opening = registry.begin_opening("w-pending", "pending");
 
-        let identify = server.handle_identify(&outbound, &mut state, "w-pending", TOKEN);
+        let identify = server.handle_identify(&outbound, &mut state, "w-pending", TOKEN, None);
         tokio::pin!(identify);
         assert!(
             tokio::time::timeout(UNTIL_IDLE, &mut identify)

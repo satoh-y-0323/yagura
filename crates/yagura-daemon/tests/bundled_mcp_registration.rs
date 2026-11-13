@@ -441,10 +441,16 @@ fn wsl_file_tools_run_inside_wsl_and_take_the_file_as_one_positional_argument() 
 // =============================================================================
 
 /// The canonical `add` for `form`: `mcp add [scope] [--env=pair ...] <server>
-/// -- <bridge>`. Every flag precedes the name, as each CLI's usage line has it
-/// (`agy` rejects a flag after the name), and carries its value in the same
+/// -- <bridge> --profile <id>`. Every flag precedes the name, as each CLI's usage line has
+/// it (`agy` rejects a flag after the name), and carries its value in the same
 /// argument, since `claude`'s variadic `-e <value>` would take the name too.
-fn expected_add(form: CliForm, server: &str, env_pairs: &[&str], bridge: &str) -> Vec<String> {
+fn expected_add(
+    form: CliForm,
+    id: &str,
+    server: &str,
+    env_pairs: &[&str],
+    bridge: &str,
+) -> Vec<String> {
     let mut argv = strings(&["mcp", "add"]);
     argv.extend(strings(form.scope));
     argv.extend(strings(form.add_options));
@@ -454,6 +460,7 @@ fn expected_add(form: CliForm, server: &str, env_pairs: &[&str], bridge: &str) -
     argv.push(server.to_string());
     argv.push("--".to_string());
     argv.push(bridge.to_string());
+    argv.extend(strings(&["--profile", id]));
     argv
 }
 
@@ -474,7 +481,7 @@ fn the_default_instance_renders_each_clis_canonical_add_and_remove() {
             .unwrap_or_else(|err| panic!("{id} must render add for the default instance: {err}"));
         assert_eq!(
             add,
-            expected_add(*form, "yagura", &[], bridge),
+            expected_add(*form, id, "yagura", &[], bridge),
             "{id}: the default instance registers as `yagura` with no environment"
         );
         assert_eq!(
@@ -502,7 +509,7 @@ fn a_named_instance_carries_its_instance_variable_and_wsl_rows_also_forward_it()
         };
         assert_eq!(
             add,
-            expected_add(*form, &server, &pairs, bridge),
+            expected_add(*form, id, &server, &pairs, bridge),
             "{id}: a named instance must reach its own daemon, not the default one"
         );
         assert_eq!(
@@ -569,8 +576,8 @@ fn exited(code: i32, stdout: &str, stderr: &str) -> StatusObservation {
     }
 }
 
-/// What `mcp get <server> --json` prints for a registered server.
-fn json_command_status(command: &str, tool_timeout: serde_json::Value) -> String {
+/// What `mcp get <server> --json` prints for a server registered for the profile `id`.
+fn json_command_status(id: &str, command: &str, tool_timeout: serde_json::Value) -> String {
     json!({
         "name": "yagura",
         "enabled": true,
@@ -578,7 +585,7 @@ fn json_command_status(command: &str, tool_timeout: serde_json::Value) -> String
         "transport": {
             "type": "stdio",
             "command": command,
-            "args": [],
+            "args": ["--profile", id],
             "env": null,
             "env_vars": [],
             "cwd": null
@@ -589,19 +596,20 @@ fn json_command_status(command: &str, tool_timeout: serde_json::Value) -> String
     .to_string()
 }
 
-/// What `mcp get <server>` prints for a registered server, line by line. It
-/// exits 0 even when the server cannot be reached.
-fn lines_status(scope: &str, command: &str) -> String {
+/// What `mcp get <server>` prints for a server registered for the profile `id`, line by
+/// line. It exits 0 even when the server cannot be reached.
+fn lines_status(id: &str, scope: &str, command: &str) -> String {
     format!(
         "yagura:\n  Scope: {scope}\n  Status: \u{2718} Failed to connect\n  Type: stdio\n  \
-         Command: {command}\n  Args: \n  Environment:\n\nTo remove this server, run: mcp remove \
-         \"yagura\" -s user\n"
+         Command: {command}\n  Args: --profile {id}\n  Environment:\n\nTo remove this server, \
+         run: mcp remove \"yagura\" -s user\n"
     )
 }
 
-/// The JSON settings file listing registered servers.
-fn json_settings(server: &str, command: &str) -> String {
-    json!({ "mcpServers": { server: { "command": command, "args": [], "env": {} } } }).to_string()
+/// The JSON settings file listing servers registered for the profile `id`.
+fn json_settings(id: &str, server: &str, command: &str) -> String {
+    json!({ "mcpServers": { server: { "command": command, "args": ["--profile", id], "env": {} } } })
+        .to_string()
 }
 
 struct Derived {
@@ -650,7 +658,7 @@ fn the_json_command_form_reads_not_registered_registered_and_differs() {
             RegistrationState::NotRegistered,
         );
 
-        let registered = exited(0, &json_command_status(bridge, json!(86400.0)), "");
+        let registered = exited(0, &json_command_status(id, bridge, json!(86400.0)), "");
         assert_state(
             id,
             "registered, the timeout read back as a float",
@@ -658,12 +666,12 @@ fn the_json_command_form_reads_not_registered_registered_and_differs() {
             RegistrationState::Registered,
         );
 
-        let other_bridge = exited(0, &json_command_status(other, json!(86400.0)), "");
+        let other_bridge = exited(0, &json_command_status(id, other, json!(86400.0)), "");
         let derived = derive(id, &other_bridge, bridge);
         assert_state(id, "another bridge", &derived, RegistrationState::Differs);
         assert_eq!(derived.differs_in, strings(&["command"]), "{id}");
 
-        let default_timeout = exited(0, &json_command_status(bridge, json!(60.0)), "");
+        let default_timeout = exited(0, &json_command_status(id, bridge, json!(60.0)), "");
         let derived = derive(id, &default_timeout, bridge);
         assert_state(
             id,
@@ -699,7 +707,7 @@ fn the_lines_form_reads_not_registered_registered_and_differs() {
             RegistrationState::NotRegistered,
         );
 
-        let registered = exited(0, &lines_status(user_scope, bridge), "");
+        let registered = exited(0, &lines_status(id, user_scope, bridge), "");
         assert_state(
             id,
             "registered in the user scope, unreachable or not",
@@ -707,14 +715,14 @@ fn the_lines_form_reads_not_registered_registered_and_differs() {
             RegistrationState::Registered,
         );
 
-        let other_bridge = exited(0, &lines_status(user_scope, other), "");
+        let other_bridge = exited(0, &lines_status(id, user_scope, other), "");
         let derived = derive(id, &other_bridge, bridge);
         assert_state(id, "another bridge", &derived, RegistrationState::Differs);
         assert_eq!(derived.differs_in, strings(&["command"]), "{id}");
 
         let project_scope = exited(
             0,
-            &lines_status("Project config (shared via .mcp.json)", bridge),
+            &lines_status(id, "Project config (shared via .mcp.json)", bridge),
             "",
         );
         let derived = derive(id, &project_scope, bridge);
@@ -753,7 +761,7 @@ fn the_json_file_form_reads_not_registered_registered_and_differs() {
             RegistrationState::NotRegistered,
         );
 
-        let other_server = exited(0, &json_settings("some-other-server", bridge), "");
+        let other_server = exited(0, &json_settings(id, "some-other-server", bridge), "");
         assert_state(
             id,
             "a settings file without this server",
@@ -761,7 +769,7 @@ fn the_json_file_form_reads_not_registered_registered_and_differs() {
             RegistrationState::NotRegistered,
         );
 
-        let registered = exited(0, &json_settings("yagura", bridge), "");
+        let registered = exited(0, &json_settings(id, "yagura", bridge), "");
         assert_state(
             id,
             "registered",
@@ -769,7 +777,7 @@ fn the_json_file_form_reads_not_registered_registered_and_differs() {
             RegistrationState::Registered,
         );
 
-        let other_bridge = exited(0, &json_settings("yagura", other), "");
+        let other_bridge = exited(0, &json_settings(id, "yagura", other), "");
         let derived = derive(id, &other_bridge, bridge);
         assert_state(id, "another bridge", &derived, RegistrationState::Differs);
         assert_eq!(derived.differs_in, strings(&["command"]), "{id}");
@@ -890,7 +898,15 @@ async fn a_placed_profile_without_the_table_is_listed_with_the_shipped_table_and
     assert_eq!(
         host.add,
         Some(McpRegistrationCommand {
-            argv: placed_argv(&["mcp", "add", "yagura", "--", "{bridge}"]),
+            argv: placed_argv(&[
+                "mcp",
+                "add",
+                "yagura",
+                "--",
+                "{bridge}",
+                "--profile",
+                "codex-cli"
+            ]),
             program_at: 0,
         }),
         "the shipped table renders after the placed profile's own launch argv"
@@ -919,7 +935,15 @@ async fn a_placed_profile_without_the_table_is_listed_with_the_shipped_table_and
     assert_eq!(wsl.group.as_deref(), Some("WSL"));
     assert_eq!(
         wsl.add.as_ref().map(|add| add.argv.clone()),
-        Some(placed_argv(&["mcp", "add", "yagura", "--", "{bridge}"]))
+        Some(placed_argv(&[
+            "mcp",
+            "add",
+            "yagura",
+            "--",
+            "{bridge}",
+            "--profile",
+            "wsl-antigravity-cli"
+        ]))
     );
     assert_eq!(wsl.toml_set, None);
 

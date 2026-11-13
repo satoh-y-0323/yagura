@@ -51,6 +51,7 @@ block = '{"decision":"block","reason":{text}}'
 file = ".config/muse/settings.json"
 format = "json"
 command = "/mcpServers/{server}/command"
+args_pointer = "/mcpServers/{server}/args"
 
 # `managed_hooks_path` holds a single file, so it is claimed: a different
 # value of the user's own is never overwritten. It and the variables below are
@@ -61,7 +62,7 @@ file = ".config/muse/settings.json"
 claim = "/managed_hooks_path"
 
 [mcp_registration.json_entry.entries]
-"/mcpServers/{server}" = { transport = "stdio", command = "{bridge}", args = [], env = "{env_refs}", mode = "optional", tool_timeout_sec = 86400 }
+"/mcpServers/{server}" = { transport = "stdio", command = "{bridge}", args = ["--profile", "muse-code"], env = "{env_refs}", mode = "optional", tool_timeout_sec = 86400 }
 "/managed_hooks_path" = "yagura-managed-hooks.json"
 "/managed_hooks_env_vars" = ["YAGURA_WINDOW_ID", "YAGURA_STATUS_TOKEN", "YAGURA_INSTANCE"]
 

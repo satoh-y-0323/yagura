@@ -266,7 +266,11 @@ fn registration_carries_the_instance_blocks_other_instances_and_warns_about_trus
             add.iter().any(|arg| arg == "--env=YAGURA_INSTANCE=dev"),
             "{id}: the instance must reach the bridge as one --env argument: {add:?}"
         );
-        assert_eq!(add[add.len() - 3..], ["yagura-dev", "--", "BRIDGE"], "{id}");
+        assert_eq!(
+            add[add.len() - 5..],
+            ["yagura-dev", "--", "BRIDGE", "--profile", id],
+            "{id}"
+        );
         assert_eq!(
             spec.list()
                 .expect("a list table")

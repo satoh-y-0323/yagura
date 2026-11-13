@@ -50,7 +50,7 @@ launch_args = [
 [mcp]
 args = [
   "-c", "mcp_servers.{server}.command={bridge_toml}",
-  "-c", "mcp_servers.{server}.args=[]",
+  "-c", "mcp_servers.{server}.args=['--profile','codex-cli']",
   "-c", "mcp_servers.{server}.env_vars={env_names_toml}",
   # Codex's own 60-second default would end a call before the daemon's deadlines do.
   "-c", "mcp_servers.{server}.tool_timeout_sec=86400",
@@ -94,7 +94,7 @@ url = "https://learn.chatgpt.com/docs/codex/cli.md"
 # any hand-written key -- including `tool_timeout_sec` -- so it is written
 # back once as a settings-file edit right after add.
 [mcp_registration]
-add = ["mcp", "add", "{env_args}", "{server}", "--", "{bridge}"]
+add = ["mcp", "add", "{env_args}", "{server}", "--", "{bridge}", "--profile", "codex-cli"]
 remove = ["mcp", "remove", "{server}"]
 env_arg = ["--env={env}"]
 

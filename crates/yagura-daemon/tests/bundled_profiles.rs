@@ -15,13 +15,15 @@
 use crate::common;
 
 use common::docs::read_doc_verbatim;
-use yagura_daemon::mcp_registration::{EntryVars, RegistrationTarget};
+use yagura_daemon::mcp_registration::{
+    EntryVars, RegistrationState, RegistrationTarget, StatusObservation, derive_status,
+};
 use yagura_daemon::profile::{
     InjectedPaths, JsonFilter, ModelChoicesSpec, OutputFormat, Profile, ProfileCommand, ProfileOs,
-    argv_for_os, parse_profile, prepare_hooks_injection, render_hooks_args,
+    argv_for_os, parse_profile, prepare_hooks_injection, prepare_mcp_injection, render_hooks_args,
 };
 use yagura_daemon::profile_hook_events::{HookDeliver, HookEvent};
-use yagura_os::program::HostOs;
+use yagura_os::program::{HostOs, Platform};
 use yagura_protocol::WindowStatus;
 
 /// Reads and parses one of the repository's own shipped profiles by id
@@ -952,7 +954,7 @@ const HOOK_REGISTRATION_TEXT_SHA256: &[(&str, &str)] = &[
     ),
     (
         "muse-code",
-        "17c850dac4eaa24c95fd3488397832d8267da9357d7c7b6d540b9a6314c8fd7e",
+        "1ee610f53e526888b150516e98a0c98897523d37edce399602a84f52fb87112c",
     ),
     (
         "wsl-antigravity-cli",
@@ -1159,4 +1161,255 @@ async fn the_daemon_names_each_hook_door_the_time_its_registration_gives_the_cli
             }
         }
     }
+}
+
+// ---------------------------------------------------------------------
+// The profile id each bundled bridge is started with
+// ---------------------------------------------------------------------
+
+/// The bridge path the daemon is taken to render into each profile's tables.
+const RENDERED_BRIDGE: &str = "/yagura/yagura-mcp";
+
+/// Whether `args` names the profile `id` the way a relay reads it.
+fn names_profile(args: &[String], id: &str) -> bool {
+    args.windows(2)
+        .any(|pair| pair[0] == "--profile" && pair[1] == id)
+}
+
+fn json_strings(value: &serde_json::Value) -> Option<Vec<String>> {
+    value
+        .as_array()?
+        .iter()
+        .map(|item| item.as_str().map(str::to_string))
+        .collect()
+}
+
+/// The bridge's argument lists `piece` -- one argument of a rendered `[mcp]` table, or the
+/// settings file it names -- hands the CLI for the server `server`.
+fn bridge_argument_lists(piece: &str, server: &str) -> Vec<Vec<String>> {
+    // `{env_refs}` is filled in only at spawn, from the window's environment.
+    let piece = piece.replace("{env_refs}", "{}");
+    if let Ok(document) = serde_json::from_str::<serde_json::Value>(&piece) {
+        return json_strings(&document["mcpServers"][server]["args"])
+            .into_iter()
+            .collect();
+    }
+    let Some((key, value)) = piece.split_once('=') else {
+        return Vec::new();
+    };
+    if key == format!("mcp_servers.{server}.args") {
+        let table: toml::Table = format!("args = {value}")
+            .parse()
+            .unwrap_or_else(|err| panic!("{piece} must hold a TOML array: {err}"));
+        let args = table["args"].as_array().expect("an array");
+        return vec![
+            args.iter()
+                .map(|arg| arg.as_str().expect("a string").to_string())
+                .collect(),
+        ];
+    }
+    if key == format!("mcpServers.{server}") {
+        let entry: serde_json::Value = serde_json::from_str(value)
+            .unwrap_or_else(|err| panic!("{piece} must hold a JSON entry: {err}"));
+        return json_strings(&entry["args"]).into_iter().collect();
+    }
+    Vec::new()
+}
+
+/// The arguments the bridge is registered with for `profile`, as the daemon renders the
+/// registration: what follows the bridge in `add`, or the arguments of the settings entry
+/// that runs the bridge.
+fn registered_bridge_args(profile: &Profile) -> Vec<String> {
+    let spec = profile
+        .mcp_registration
+        .as_ref()
+        .expect("a registration table");
+    let target = RegistrationTarget::for_instance(None);
+    let add = spec
+        .render_add(&target, RENDERED_BRIDGE)
+        .expect("add renders for the default instance");
+    if let Some(at) = add.iter().position(|arg| arg == RENDERED_BRIDGE) {
+        return add[at + 1..].to_vec();
+    }
+    let vars = EntryVars {
+        target: &target,
+        os: HostOs::Windows,
+        daemon: Some("/yagura/yagura-daemon"),
+        bridge: Some(RENDERED_BRIDGE),
+    };
+    spec.json_entry()
+        .into_iter()
+        .flat_map(|entries| entries.files())
+        .flat_map(|file| file.entries(&vars).expect("the entries render"))
+        .find(|(_, value)| value["command"] == RENDERED_BRIDGE)
+        .and_then(|(_, value)| json_strings(&value["args"]))
+        .expect("an entry of the registration runs the bridge")
+}
+
+/// Every bundled profile starts the bridge a window's CLI runs -- the `[mcp]` injection
+/// when it has one, the registration otherwise -- with the profile's own id, which is
+/// how the daemon tells the window's bridge from one a nested CLI of another profile runs.
+#[test]
+fn every_bundled_bridge_a_window_runs_names_its_own_profile() {
+    let server = RegistrationTarget::for_instance(None).server().to_string();
+    let config_dir = std::env::temp_dir().join("yagura-bundled-mcp-render");
+    let mut checked = Vec::new();
+    for id in bundled_profile_ids() {
+        let profile = parse_repo_profile(&id);
+        let lists = if let Some(spec) = &profile.mcp {
+            let injection = prepare_mcp_injection(
+                spec,
+                &server,
+                std::path::Path::new(RENDERED_BRIDGE),
+                Some(&config_dir),
+            )
+            .unwrap_or_else(|| panic!("{id}'s [mcp] table renders"));
+            let mut pieces = injection.args.clone();
+            pieces.extend(injection.config_file.map(|file| file.content));
+            pieces
+                .iter()
+                .flat_map(|piece| bridge_argument_lists(piece, &server))
+                .collect::<Vec<_>>()
+        } else if profile.mcp_registration.is_some() {
+            vec![registered_bridge_args(&profile)]
+        } else {
+            continue;
+        };
+        assert!(!lists.is_empty(), "{id}: no bridge arguments were found");
+        for args in &lists {
+            assert!(
+                names_profile(args, &id),
+                "{id}: the bridge must be started with `--profile {id}`, got {args:?}"
+            );
+        }
+        checked.push(id);
+    }
+    assert!(
+        checked.len() > 1,
+        "the bundled profiles that start a bridge were checked: {checked:?}"
+    );
+}
+
+/// The status output a bundled profile's CLI prints (or the settings file it keeps) for
+/// `yagura` registered as `RENDERED_BRIDGE` with `args`, laid out the way the profile's
+/// `[mcp_registration.status]` table reads it: in JSON the arguments are the sibling of
+/// the command, in lines they are the `Args:` line joined by spaces.
+fn status_output(status: &toml::Table, toml_set: Option<&toml::Table>, args: &[String]) -> String {
+    let server = "yagura";
+    let read = |key: &str| status.get(key).and_then(toml::Value::as_str);
+    let command = read("command").expect("the status names the command");
+    if read("format") == Some("lines") {
+        let mut lines = vec![format!("{server}:")];
+        for (label, word) in status
+            .get("require")
+            .and_then(toml::Value::as_table)
+            .into_iter()
+            .flatten()
+        {
+            lines.push(format!("  {label} {}", word.as_str().expect("a word")));
+        }
+        lines.push(format!("  {command} {RENDERED_BRIDGE}"));
+        lines.push(format!("  Args: {}", args.join(" ")));
+        return lines.join("\n") + "\n";
+    }
+    fn set(document: &mut serde_json::Value, pointer: &str, value: serde_json::Value) {
+        let mut at = document;
+        let segments: Vec<&str> = pointer.trim_start_matches('/').split('/').collect();
+        for segment in &segments[..segments.len() - 1] {
+            at = &mut at[*segment];
+        }
+        at[*segments.last().expect("a segment")] = value;
+    }
+    let command = command.replace("{server}", server);
+    let args_at = command
+        .strip_suffix("/command")
+        .map(|parent| format!("{parent}/args"))
+        .expect("the command's pointer ends in /command");
+    let mut element = serde_json::json!({});
+    set(&mut element, &command, serde_json::json!(RENDERED_BRIDGE));
+    set(&mut element, &args_at, serde_json::json!(args));
+    if let Some(toml_set) = toml_set {
+        for (key, pointer) in toml_set
+            .get("confirm")
+            .and_then(toml::Value::as_table)
+            .into_iter()
+            .flatten()
+        {
+            let value = serde_json::to_value(&toml_set["values"][key.as_str()]).expect("a value");
+            set(&mut element, pointer.as_str().expect("a pointer"), value);
+        }
+    }
+    let document = match (read("items"), read("name")) {
+        (Some(items), Some(name)) => {
+            set(&mut element, name, serde_json::json!(server));
+            let mut document = serde_json::json!({});
+            if items.is_empty() {
+                document = serde_json::json!([element]);
+            } else {
+                set(&mut document, items, serde_json::json!([element]));
+            }
+            document
+        }
+        _ => element,
+    };
+    document.to_string()
+}
+
+/// A registration made before the bridge named its profile reads as differing, so the
+/// Integrations row asks for an Update; the one the daemon registers now reads as
+/// registered.
+#[test]
+fn an_older_registration_of_each_bundled_profile_reads_as_differing() {
+    let target = RegistrationTarget::for_instance(None);
+    let mut checked = Vec::new();
+    for id in bundled_profile_ids() {
+        let profile = parse_repo_profile(&id);
+        let Some(spec) = &profile.mcp_registration else {
+            continue;
+        };
+        let source: toml::Table = read_doc_verbatim(&format!("../../profiles/{id}.toml"))
+            .parse()
+            .expect("a bundled profile is TOML");
+        let registration = source["mcp_registration"]
+            .as_table()
+            .expect("a registration table");
+        let status = registration["status"].as_table().expect("a status table");
+        let toml_set = registration.get("toml_set").and_then(toml::Value::as_table);
+        let registered = registered_bridge_args(&profile);
+        assert!(
+            names_profile(&registered, &id),
+            "{id}: the registration names its profile, got {registered:?}"
+        );
+        let derive = |args: &[String]| {
+            derive_status(
+                spec,
+                &StatusObservation::Exited {
+                    code: Some(0),
+                    stdout: status_output(status, toml_set, args).into_bytes(),
+                    stderr: Vec::new(),
+                },
+                &target,
+                RENDERED_BRIDGE,
+                Platform::Windows,
+            )
+        };
+
+        let current = derive(&registered);
+        assert_eq!(
+            current.state,
+            RegistrationState::Registered,
+            "{id}: what the daemon registers reads as registered: {current:?}"
+        );
+        let older = derive(&[]);
+        assert_eq!(
+            older.state,
+            RegistrationState::Differs,
+            "{id}: a registration without the profile's id reads as differing: {older:?}"
+        );
+        checked.push(id);
+    }
+    assert!(
+        checked.len() > 1,
+        "the bundled profiles with a registration were checked: {checked:?}"
+    );
 }

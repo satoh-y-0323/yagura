@@ -17,12 +17,14 @@ use rmcp::transport::async_rw::DEFAULT_MAX_LINE_LENGTH;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
+use crate::hook_events_door::open_launched;
 use common::relay::{
-    RelayClient, cancelled_line, discover_line, hello, initialize_line, initialized_line,
-    roots_list_changed_line, stateless_meta, tool_call_line, tool_json,
+    RelayClient, cancelled_line, discover_line, hello, hello_declaring, initialize_line,
+    initialized_line, roots_list_changed_line, stateless_meta, tool_call_line, tool_json,
 };
 use common::{Harness, VALID_TOKEN, approver_base_config, policy};
 use yagura_daemon::DaemonConfig;
+use yagura_daemon::window::HooksRoute;
 use yagura_protocol::MAX_FRAME_BODY_LEN;
 use yagura_protocol::relay::{
     INVALID_REQUEST, RESOURCE_EXHAUSTED, RelayFrame, RelayRefusedKind, RelayResume,
@@ -217,6 +219,7 @@ async fn a_contract_the_daemon_does_not_speak_is_refused_naming_its_contracts_an
                 window_id: None,
                 token: None,
                 resume: None,
+                declaration: None,
             },
         )
         .await;
@@ -283,6 +286,76 @@ async fn a_relay_hello_with_a_wrong_token_marks_nothing_and_its_tool_answers_car
         Some(false),
         "a refused identification marks no window"
     );
+}
+
+/// A window opened from a profile whose hooks the daemon arranged is claimed only by a
+/// relay that declares the window's own profile. One that declares another profile, or
+/// none (a relay of an older registration), is answered as no window. A window whose hooks
+/// the daemon did not arrange is claimed whatever its relay declares.
+#[tokio::test]
+async fn only_a_relay_declaring_the_windows_own_profile_claims_a_window_the_daemon_arranged_hooks_for()
+ {
+    const LAUNCHED_FROM: &str = "launched-cli";
+    let h = Harness::start("relay-declared-profile", config()).await;
+    let cases = [
+        (
+            "its own profile",
+            HooksRoute::RegisteredEntries,
+            Some(LAUNCHED_FROM),
+            true,
+        ),
+        (
+            "another profile",
+            HooksRoute::RegisteredEntries,
+            Some("other-cli"),
+            false,
+        ),
+        ("no profile", HooksRoute::RegisteredEntries, None, false),
+        (
+            "another profile, hooks left out",
+            HooksRoute::LeftOut,
+            Some("other-cli"),
+            false,
+        ),
+        (
+            "no profile, hooks not arranged",
+            HooksRoute::Unarranged,
+            None,
+            true,
+        ),
+    ];
+    for (id, (what, hooks, declared, claimed)) in (1..).zip(cases) {
+        let window_id = open_launched(&h, LAUNCHED_FROM, hooks, None).await;
+        let spare = h.open(process::echo_child_command(), None).await;
+        let first = match declared {
+            Some(profile) => hello_declaring(&window_id, VALID_TOKEN, profile),
+            None => hello(Some((&window_id, VALID_TOKEN)), None),
+        };
+
+        let (mut client, _) = RelayClient::welcomed(&h.endpoint, first).await;
+
+        assert_eq!(
+            mcp_connected(&h, &window_id),
+            Some(claimed),
+            "{what}: whether the relay claims the window"
+        );
+        if !claimed {
+            initialize(&mut client).await;
+            let seq = client
+                .request(&tool_call_line(
+                    id,
+                    "close_window",
+                    json!({"window_id": spare, "force": true}),
+                    false,
+                ))
+                .await;
+            let closed = tool_json(&client.answer(seq).await);
+            assert_eq!(
+                closed["requester"], "external",
+                "{what}: the relay acts as no window, got {closed}"
+            );
+        }
+    }
 }
 
 // =====================================================================

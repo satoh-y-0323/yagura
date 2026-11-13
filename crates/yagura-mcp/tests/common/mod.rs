@@ -19,7 +19,7 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use yagura_os::{InstanceNamespace, IpcTransport, PeerAuth, PlatformIpc};
 use yagura_protocol::relay::{RelayFrame, RelayRefusedKind, RelayResume};
-use yagura_protocol::{INSTANCE_ENV, frame_decode, frame_encode};
+use yagura_protocol::{Declaration, INSTANCE_ENV, frame_decode, frame_encode};
 use yagura_test_support::HANG_GUARD;
 pub use yagura_test_support::relay_stdio::{RelayProcess, rpc_error_word, tool_call_error};
 
@@ -142,12 +142,13 @@ impl FakeDaemon {
     }
 }
 
-/// The identity and resumption a relay named in its `relay_hello`.
+/// The identity, resumption and declaration a relay named in its `relay_hello`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Hello {
     pub window_id: Option<String>,
     pub token: Option<String>,
     pub resume: Option<RelayResume>,
+    pub declaration: Option<Declaration>,
 }
 
 /// One connection of the relay to the stand-in daemon.
@@ -235,12 +236,14 @@ impl FakeConn {
                 window_id,
                 token,
                 resume,
+                declaration,
             } => {
                 assert_eq!(contract, CONTRACT, "the relay names the contract it speaks");
                 Hello {
                     window_id,
                     token,
                     resume,
+                    declaration,
                 }
             }
             other => panic!("the relay's first frame must be relay_hello, got {other:?}"),

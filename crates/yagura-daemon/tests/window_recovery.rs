@@ -1638,10 +1638,11 @@ async fn report_from(sandbox: &Sandbox, child: &str, summary: &str) -> Option<St
     }
 }
 
-/// A window `opener` opens over a connection identified as it.
-async fn opened_by(sandbox: &Sandbox, opener: &str) -> String {
+/// A window `opener` opens over a connection identified as it, declaring `profile` the
+/// way the bridge of a window opened from it does.
+async fn opened_by(sandbox: &Sandbox, opener: &str, profile: Option<&str>) -> String {
     let mut as_opener = connect(sandbox).await;
-    common::identify(&mut as_opener, opener).await;
+    common::identify_declaring(&mut as_opener, opener, profile).await;
     common::call_open_window(
         &mut as_opener,
         yagura_test_support::process::echo_child_command(),
@@ -1703,7 +1704,7 @@ async fn a_window_rebuilt_from_its_launch_record_numbers_its_reports_on_and_is_n
     let mut first = start_hooked(&sandbox, &detections).await;
     let parent = first.open_profile_window(&sandbox, HOOKED_PROFILE).await;
     let parent_name = listed(&mut first, &sandbox, &parent).await.name;
-    let child = opened_by(&sandbox, &parent).await;
+    let child = opened_by(&sandbox, &parent, Some(HOOKED_PROFILE)).await;
     assert_eq!(
         report_from(&sandbox, &child, "KEPT-REPORT")
             .await
@@ -1751,7 +1752,7 @@ async fn a_window_rebuilt_from_its_launch_record_numbers_its_reports_on_and_is_n
         yagura_test_support::process::echo_child_command(),
     )
     .await;
-    let other_child = opened_by(&sandbox, &other_parent).await;
+    let other_child = opened_by(&sandbox, &other_parent, None).await;
     assert_eq!(
         report_from(&sandbox, &other_child, "OTHER-REPORT")
             .await
@@ -1773,7 +1774,7 @@ async fn a_window_rebuilt_from_its_launch_record_numbers_its_reports_on_and_is_n
     );
 
     let mut as_parent = connect(&sandbox).await;
-    common::identify(&mut as_parent, &parent).await;
+    common::identify_declaring(&mut as_parent, &parent, Some(HOOKED_PROFILE)).await;
     send(
         &mut as_parent,
         &ClientMessage::WaitForReport { timeout_sec: 0 },

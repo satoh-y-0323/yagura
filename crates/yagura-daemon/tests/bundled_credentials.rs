@@ -121,8 +121,8 @@ fn the_launch_profiles_hand_every_door_and_the_bridge_the_credentials_file() {
         for bridge in &bridges {
             assert_eq!(
                 bridge["args"],
-                serde_json::json!(["--credentials", CREDENTIALS_FILE]),
-                "{id}: the bridge must be started with the credentials file: {bridge}"
+                serde_json::json!(["--profile", id, "--credentials", CREDENTIALS_FILE]),
+                "{id}: the bridge must be started for its profile with the credentials file: {bridge}"
             );
         }
     }

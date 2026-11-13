@@ -101,6 +101,7 @@ impl DaemonTransport for EndpointTransport {
                 &ClientMessage::Identify {
                     window_id: identity.window_id.clone(),
                     token: identity.token.clone(),
+                    declaration: None,
                 },
             )
             .await?

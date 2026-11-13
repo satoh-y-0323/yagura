@@ -93,6 +93,7 @@ fn client_message_identify_round_trips() {
         ClientMessage::Identify {
             window_id: "w1-abc".to_string(),
             token: "0123456789abcdef0123456789abcdef".to_string(),
+            declaration: None,
         }
     );
 

@@ -164,6 +164,9 @@
         "window_id": "string"
       },
       "identify": {
+        "declaration": {
+          "profile": "string"
+        },
         "token": "string",
         "type": "string",
         "window_id": "string"

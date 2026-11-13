@@ -23,6 +23,7 @@ fn body_of(framed: &[u8]) -> Value {
 
 #[test]
 fn every_relay_frame_has_the_catalogued_type_and_field_names() {
+    use yagura_protocol::Declaration;
     use yagura_protocol::relay::{RelayFrame, RelayRefusedKind, RelayResume};
 
     let cases: Vec<(RelayFrame, Value)> = vec![
@@ -35,6 +36,7 @@ fn every_relay_frame_has_the_catalogued_type_and_field_names() {
                     opening: Some(vec!["{\"id\":1}".to_owned(), "{\"result\":{}}".to_owned()]),
                     tools: "summary".to_owned(),
                 }),
+                declaration: None,
             },
             json!({
                 "type": "relay_hello",
@@ -50,8 +52,27 @@ fn every_relay_frame_has_the_catalogued_type_and_field_names() {
                 window_id: None,
                 token: None,
                 resume: None,
+                declaration: None,
             },
             json!({"type": "relay_hello", "contract": 1}),
+        ),
+        (
+            RelayFrame::Hello {
+                contract: 1,
+                window_id: Some("w1".to_owned()),
+                token: Some("tok".to_owned()),
+                resume: None,
+                declaration: Some(Declaration {
+                    profile: "grok-build".to_owned(),
+                }),
+            },
+            json!({
+                "type": "relay_hello",
+                "contract": 1,
+                "window_id": "w1",
+                "token": "tok",
+                "declaration": {"profile": "grok-build"},
+            }),
         ),
         (
             RelayFrame::Hello {
@@ -62,6 +83,7 @@ fn every_relay_frame_has_the_catalogued_type_and_field_names() {
                     opening: None,
                     tools: "summary".to_owned(),
                 }),
+                declaration: None,
             },
             json!({"type": "relay_hello", "contract": 1, "resume": {"tools": "summary"}}),
         ),
@@ -171,6 +193,22 @@ fn a_reader_ignores_fields_it_does_not_know() {
         "resume": {"tools": "t", "added_later": 1},
     });
     assert!(serde_json::from_value::<RelayFrame>(newer_hello).is_ok());
+
+    // A declaration a later relay adds to is still read for what it holds.
+    let newer_declaration = json!({
+        "type": "relay_hello",
+        "contract": 1,
+        "declaration": {"profile": "grok-build", "added_later": {"nested": true}},
+    });
+    match serde_json::from_value::<RelayFrame>(newer_declaration).unwrap() {
+        RelayFrame::Hello { declaration, .. } => assert_eq!(
+            declaration
+                .map(|declaration| declaration.profile)
+                .as_deref(),
+            Some("grok-build")
+        ),
+        other => panic!("expected relay_hello, got {other:?}"),
+    }
 
     let newer_refused = json!({
         "type": "relay_refused",

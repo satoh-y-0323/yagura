@@ -112,6 +112,17 @@ impl IpcServer {
             ));
             return;
         }
+        if entry.named_profile().is_some_and(|own| own != profile_id) {
+            // A nested CLI runs its hooks every turn, so this is no warning.
+            tracing::debug!(
+                window_id = %entry.window_id(),
+                profile = profile_id,
+                event = name,
+                "run_hook names another profile than its window's; nothing was done"
+            );
+            finish(DoorRead::silent(), None);
+            return;
+        }
         let Some(Resolved {
             event,
             delivery,

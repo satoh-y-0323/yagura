@@ -74,7 +74,7 @@ absent_exit = 3
 
 [mcp_registration]
 group = "WSL"
-add = ["mcp", "add", "{env_args}", "{server}", "--", "{bridge}"]
+add = ["mcp", "add", "{env_args}", "{server}", "--", "{bridge}", "--profile", "wsl-grok-build"]
 remove = ["mcp", "remove", "{server}"]
 env_arg = ["--env={env}"]
 env_forward = { name = "WSLENV", separator = ":" }
@@ -86,6 +86,7 @@ format = "json"
 items = ""
 name = "/name"
 command = "/command"
+args_pointer = "/args"
 
 # Every grok session sees every registered server; a window turns off the
 # ones of other instances. A denied server's tools still show by name in

@@ -7,8 +7,8 @@
 use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-use yagura_protocol::frame_encode;
 use yagura_protocol::relay::{RelayFrame, RelayResume};
+use yagura_protocol::{Declaration, frame_encode};
 use yagura_test_support::HANG_GUARD;
 use yagura_test_support::ipc::Connection;
 
@@ -75,13 +75,29 @@ pub fn tool_call_line(id: u64, name: &str, arguments: Value, stateless: bool) ->
     json!({"jsonrpc": "2.0", "id": id, "method": "tools/call", "params": params})
 }
 
-/// A `relay_hello` for a window (`Some((window_id, token))`) or for no window.
+/// A `relay_hello` for a window (`Some((window_id, token))`) or for no window,
+/// declaring no profile, as a relay of an older registration sends it.
 pub fn hello(identity: Option<(&str, &str)>, resume: Option<RelayResume>) -> RelayFrame {
     RelayFrame::Hello {
         contract: CONTRACT,
         window_id: identity.map(|(window_id, _)| window_id.to_string()),
         token: identity.map(|(_, token)| token.to_string()),
         resume,
+        declaration: None,
+    }
+}
+
+/// A first `relay_hello` for the window `window_id`, declaring the profile `profile`
+/// as a relay started with that profile's id does.
+pub fn hello_declaring(window_id: &str, token: &str, profile: &str) -> RelayFrame {
+    RelayFrame::Hello {
+        contract: CONTRACT,
+        window_id: Some(window_id.to_string()),
+        token: Some(token.to_string()),
+        resume: None,
+        declaration: Some(Declaration {
+            profile: profile.to_string(),
+        }),
     }
 }
 

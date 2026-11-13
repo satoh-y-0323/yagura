@@ -9,9 +9,11 @@
 //! this copy does not know.
 //!
 //! The window is opened with a raw argv, so its own profile has no `[hook_events]`: the
-//! table must come from the profile the hook names. Every spawn sets `YAGURA_INSTANCE` to
-//! an identifier of this test's own and points the data, state and config base directories
-//! into a temporary directory, so it never reaches a running daemon of the user.
+//! table must come from the profile the hook names. A window opened from a profile whose
+//! hooks the daemon arranged answers only a hook naming that profile. Every spawn sets
+//! `YAGURA_INSTANCE` to an identifier of this test's own and points the data, state and
+//! config base directories into a temporary directory, so it never reaches a running daemon
+//! of the user.
 
 use crate::common;
 
@@ -22,6 +24,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 use yagura_daemon::inbox::Parcel;
 use yagura_daemon::profile::parse_profile;
+use yagura_daemon::window::{HooksRoute, LaunchIdentity, WindowProvenance};
 use yagura_protocol::WindowStatus;
 use yagura_test_support::paths::TempDir;
 
@@ -260,11 +263,21 @@ impl Setup {
     }
 
     async fn run(&self, args: &[&str], input: Vec<u8>) -> (Output, std::io::Result<()>) {
+        self.run_in(&self.window_id, args, input).await
+    }
+
+    /// Runs the door `args` in the window `window_id`, with `input` on its stdin.
+    async fn run_in(
+        &self,
+        window_id: &str,
+        args: &[&str],
+        input: Vec<u8>,
+    ) -> (Output, std::io::Result<()>) {
         let command = door_command(
             args,
             &self.instance,
             &self.bases,
-            Some((&self.window_id, VALID_TOKEN)),
+            Some((window_id, VALID_TOKEN)),
         );
         tokio::task::spawn_blocking(move || run_with_input(command, input))
             .await
@@ -372,6 +385,136 @@ async fn a_hook_of_a_profile_the_daemon_does_not_list_prints_nothing_and_exits_z
     );
     assert_eq!(setup.entry().inbox().pending_count(), 1);
     assert_eq!(setup.status().await, WindowStatus::Idle);
+}
+
+// --- a hook names the profile its window was opened from --------------------------------
+
+/// Opens an `echo_child` window as the profile `profile` opens one, its hooks arranged as
+/// `hooks` says, with a `[delivery]` of its own, under the detection definition `detection`.
+pub(crate) async fn open_launched(
+    h: &Harness,
+    profile: &str,
+    hooks: HooksRoute,
+    detection: Option<&str>,
+) -> String {
+    h.registry
+        .open_with_extra_env(
+            yagura_daemon::OpenWindowRequest {
+                command: yagura_test_support::process::echo_child_command(),
+                cwd: None,
+                name: None,
+                vendor: None,
+                detection: detection.map(str::to_string),
+                on_name_taken: Default::default(),
+            },
+            Vec::new(),
+            Vec::new(),
+            WindowProvenance {
+                launch: Some(LaunchIdentity {
+                    profile: profile.to_string(),
+                    model: None,
+                    effort: None,
+                }),
+                delivery: Some(common::wake_none_delivery()),
+                hooks,
+                ..WindowProvenance::default()
+            },
+        )
+        .await
+        .expect("the launched window opens")
+        .window_id
+}
+
+/// In a window opened from a profile whose hooks the daemon arranged, a hook that names
+/// another profile can only come from a CLI the window's own CLI started, so it does
+/// nothing: it prints nothing, exits 0, reports no status, records no session and takes
+/// nothing. A hook naming the window's own profile there, and any hook in a window whose
+/// hooks the daemon did not arrange, still does what its table says.
+#[tokio::test]
+async fn a_hook_naming_another_profile_than_its_windows_does_nothing_where_the_daemon_arranged_hooks()
+ {
+    let setup = Setup::start_without_screen_rules().await;
+    let cases = [
+        (
+            "another profile, registered hooks",
+            EVENT_FORM_PROFILE_ID,
+            HooksRoute::RegisteredEntries,
+            false,
+        ),
+        (
+            "another profile, hooks left out",
+            EVENT_FORM_PROFILE_ID,
+            HooksRoute::LeftOut,
+            false,
+        ),
+        (
+            "the window's own profile",
+            PROFILE_ID,
+            HooksRoute::RegisteredEntries,
+            true,
+        ),
+        (
+            "another profile, hooks not arranged",
+            EVENT_FORM_PROFILE_ID,
+            HooksRoute::Unarranged,
+            true,
+        ),
+    ];
+    for (what, launched_from, hooks, handled) in cases {
+        let window_id =
+            open_launched(&setup.h, launched_from, hooks, Some(NO_RULES_DETECTION)).await;
+        let entry = setup.h.registry.get(&window_id).expect("window exists");
+        entry
+            .inbox()
+            .deposit(Parcel::new("a", "PARCEL-FOR-THE-WINDOW"));
+        let reported_before = entry.status_event_count();
+
+        let (output, written) = setup
+            .run_in(
+                &window_id,
+                &hook_args(),
+                br#"{"session_id":"sess-named"}"#.to_vec(),
+            )
+            .await;
+
+        assert!(written.is_ok(), "{what}: {written:?}");
+        assert_eq!(
+            output.status.code(),
+            Some(0),
+            "{what}: {}",
+            describe(&output)
+        );
+        if handled {
+            assert_eq!(
+                entry.status_event_count(),
+                reported_before + 1,
+                "{what}: the hook reports its status"
+            );
+            assert_eq!(entry.session_id().as_deref(), Some("sess-named"), "{what}");
+            assert_eq!(
+                entry.inbox().pending_count(),
+                0,
+                "{what}: the hook takes the parcel"
+            );
+        } else {
+            assert!(output.stdout.is_empty(), "{what}: {}", describe(&output));
+            assert_eq!(
+                entry.status_event_count(),
+                reported_before,
+                "{what}: the hook reports no status"
+            );
+            assert_eq!(
+                entry.session_id(),
+                None,
+                "{what}: the hook records no session"
+            );
+            assert_eq!(
+                entry.inbox().pending_count(),
+                1,
+                "{what}: the parcel stays in the inbox"
+            );
+        }
+    }
 }
 
 // --- an argument this copy does not know, inside a window ------------------------------

@@ -9,7 +9,7 @@ use std::process::ExitCode;
 
 use yagura_mcp::relay::{self, RelayEnd};
 use yagura_os::{PeerAuth, PlatformIpc, default_endpoint, resolve_instance_from};
-use yagura_protocol::{INSTANCE_ENV, process_window_credentials};
+use yagura_protocol::{INSTANCE_ENV, declaration_arg, process_window_credentials};
 
 fn main() -> ExitCode {
     // Resolved before anything derived from it: the endpoint name carries the
@@ -37,8 +37,11 @@ fn main() -> ExitCode {
     let endpoint = default_endpoint(&user_id, &namespace);
     // The same decision the hook doors make: a partial or empty environment
     // pair is no claim, and `--credentials <path>` names the window otherwise.
+    // `--profile <id>` names the profile whose registration or launch started
+    // this relay, which the daemon matches against the window's.
     let args: Vec<String> = std::env::args().skip(1).collect();
     let window = process_window_credentials(&args);
+    let declaration = declaration_arg(&args);
 
     let runtime = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -53,6 +56,7 @@ fn main() -> ExitCode {
     let end = runtime.block_on(relay::run(
         endpoint,
         window,
+        declaration,
         tokio::io::stdin(),
         tokio::io::stdout(),
     ));

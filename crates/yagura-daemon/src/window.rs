@@ -1134,6 +1134,20 @@ impl WindowEntry {
         takes_delivery(self.provenance.delivery.is_some(), self.provenance.hooks)
     }
 
+    /// The profile a hook of this window, and a bridge claiming it, must
+    /// name: the one it was launched from, once the daemon arranged its
+    /// hooks. `None` for a window it arranged none for (a raw argv, a shell),
+    /// which takes what any CLI started in it names.
+    pub(crate) fn named_profile(&self) -> Option<&str> {
+        if self.provenance.hooks == HooksRoute::Unarranged {
+            return None;
+        }
+        self.provenance
+            .launch
+            .as_ref()
+            .map(|launch| launch.profile.as_str())
+    }
+
     /// The program a wake by command runs, when the profile declares one.
     #[must_use]
     pub fn wake_command(&self) -> Option<&WakeCommand> {

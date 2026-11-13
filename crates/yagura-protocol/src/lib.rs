@@ -477,17 +477,48 @@ impl std::fmt::Debug for WindowCredentials {
     }
 }
 
+/// The argument of the MCP bridge that names the profile it was started for
+/// (see [`Declaration`]).
+pub const PROFILE_FLAG: &str = "--profile";
+
+/// What a process claiming a window states about itself, beside the
+/// credentials that prove the claim. Self-stated: it keeps yagura's own
+/// parts from claiming the wrong window, not a party holding the token.
+///
+/// Fields are only ever added, each optional with its absence meaning
+/// "states nothing about it".
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Declaration {
+    /// The id of the profile whose registration or launch started the
+    /// claimant.
+    pub profile: String,
+}
+
 /// The value of `--credentials` in `args` (the command line without the program
 /// name); `None` when it is absent, empty, repeated or missing its value.
 #[must_use]
 pub fn credentials_path_arg(args: &[String]) -> Option<std::path::PathBuf> {
+    single_flag_value(args, CREDENTIALS_FLAG).map(Into::into)
+}
+
+/// The [`Declaration`] `args` (the command line without the program name)
+/// makes through [`PROFILE_FLAG`]; `None` when the flag is absent, empty,
+/// repeated or missing its value.
+#[must_use]
+pub fn declaration_arg(args: &[String]) -> Option<Declaration> {
+    single_flag_value(args, PROFILE_FLAG).map(|profile| Declaration {
+        profile: profile.clone(),
+    })
+}
+
+fn single_flag_value<'a>(args: &'a [String], flag: &str) -> Option<&'a String> {
     let mut values = args
         .iter()
         .enumerate()
-        .filter(|(_, arg)| *arg == CREDENTIALS_FLAG)
+        .filter(|(_, arg)| *arg == flag)
         .map(|(at, _)| args.get(at + 1));
     match (values.next(), values.next()) {
-        (Some(Some(path)), None) if !path.is_empty() => Some(path.into()),
+        (Some(Some(value)), None) if !value.is_empty() => Some(value),
         _ => None,
     }
 }
@@ -2837,6 +2868,11 @@ pub enum ClientMessage {
         window_id: String,
         /// The window's per-boot status token.
         token: String,
+        /// What the claimant states about itself. A window whose hooks the
+        /// daemon arranged is claimed only by one declaring that window's
+        /// profile; absent declares nothing.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        declaration: Option<Declaration>,
     },
     /// Claims this connection as an approver: a party allowed to decide every
     /// pending [`ApprovalRequest`], and to act on any window without going
