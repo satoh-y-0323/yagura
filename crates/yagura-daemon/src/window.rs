@@ -707,6 +707,10 @@ pub enum WindowOpenError {
     /// total-entry cap, or the workspace-walk permit gate.
     #[error("too many windows are open")]
     ResourceExhausted,
+    /// The daemon is ending every window: an open asked for once that began
+    /// is refused, so no window is left running past it.
+    #[error("the daemon is shutting down")]
+    ShuttingDown,
 }
 
 impl WindowOpenError {
@@ -1282,6 +1286,13 @@ impl WindowEntry {
     #[must_use]
     pub fn wake_record(&self) -> Option<&crate::wake_file::WakeRecord> {
         self.provenance.facts.wake.as_ref()
+    }
+
+    /// The times the window's CLI gives its hooks, as the profile it was
+    /// opened from declared them then; `None` for a window that keeps none.
+    #[must_use]
+    pub fn hook_timeouts(&self) -> Option<&crate::profile::HookTimeouts> {
+        self.provenance.facts.hook_timeouts.as_ref()
     }
 
     /// The program a wake by command runs, when the profile declares one.
@@ -2011,6 +2022,11 @@ impl WindowRegistry {
         // seat and its name from here on, so the lock is not held while the
         // window's holder starts.
         let open_guard = self.open_lock.lock().await;
+        // Under the lock `terminate_all` raises the flag in, so an open either
+        // is among those it waits for or sees the flag here.
+        if self.is_shutting_down() {
+            return Err(WindowOpenError::ShuttingDown);
+        }
         self.enforce_limits_before_open()?;
         let name = {
             let entries = lock_recover(&self.entries);
@@ -3428,8 +3444,24 @@ impl WindowRegistry {
     /// process to end. Statuses converge to `Exited`
     /// asynchronously as each session's exit is observed; this method does
     /// not wait for that convergence.
+    ///
+    /// An open already past its binding decision is waited for first, so its
+    /// window is ended too; an open that reaches the decision afterwards is
+    /// refused with [`WindowOpenError::ShuttingDown`].
     pub async fn terminate_all(&self) {
-        self.shutting_down.store(true, Ordering::SeqCst);
+        let opening: Vec<watch::Receiver<()>> = {
+            let _open_guard = self.open_lock.lock().await;
+            self.shutting_down.store(true, Ordering::SeqCst);
+            lock_recover(&self.opening)
+                .values()
+                .map(|open| open.released.clone())
+                .collect()
+        };
+        for mut released in opening {
+            // Nothing is ever sent, so this returns only once the open ends;
+            // the open's own holder start bounds it.
+            let _closed = released.changed().await;
+        }
         let entries: Vec<Arc<WindowEntry>> = lock_recover(&self.entries).clone();
         for entry in &entries {
             entry

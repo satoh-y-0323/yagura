@@ -23,7 +23,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::oneshot;
 use yagura_protocol::holder::HolderScopes;
 
-use crate::profile::CredentialsMode;
+use crate::profile::{CredentialsMode, HookTimeouts};
 use crate::pty::lock_recover;
 use crate::sql::FixedSql;
 
@@ -72,6 +72,21 @@ pub struct WindowFacts {
     /// not injected, whose answers name no `{wake_paths}`, or whose open
     /// found no place for the file.
     pub wake: Option<crate::wake_file::WakeRecord>,
+    /// The times the window's CLI gives its hooks: the `[hook_timeout]` table
+    /// of the profile the window was opened from, as it was then. `None` for a
+    /// window opened from no profile, or kept before the fact was.
+    #[serde(deserialize_with = "kept_hook_timeouts")]
+    pub hook_timeouts: Option<HookTimeouts>,
+}
+
+/// Reads back a kept `[hook_timeout]` table ([`HookTimeouts::kept`]): one
+/// that breaks the table's rule is no table.
+fn kept_hook_timeouts<'de, D>(deserializer: D) -> Result<Option<HookTimeouts>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let kept = Option::<serde_json::Value>::deserialize(deserializer)?;
+    Ok(kept.and_then(HookTimeouts::kept))
 }
 
 impl WindowFacts {
@@ -82,6 +97,7 @@ impl WindowFacts {
             runs_in_guest: self.runs_in_guest.or(other.runs_in_guest),
             overlay: self.overlay.or(other.overlay),
             wake: self.wake.or(other.wake),
+            hook_timeouts: self.hook_timeouts.or(other.hook_timeouts),
         }
     }
 
@@ -490,7 +506,8 @@ fn read_rows(conn: &Connection) -> rusqlite::Result<Vec<StoredWindow>> {
     let mut statement = conn.prepare_fixed(
         "SELECT window_id, state, name, cwd, vendor, command_json, detection, profile, model, \
          effort, layout_json, session_id, opener, task_plan_id, task_id, credentials, \
-         child_scope, hooks, guest, overlay, wake FROM windows ORDER BY opened_seq",
+         child_scope, hooks, guest, overlay, wake, hook_timeouts FROM windows \
+         ORDER BY opened_seq",
     )?;
     let rows = statement.query_map([], |row| {
         let Some(window_id) = text_of(row.get_ref(0)?) else {
@@ -565,6 +582,9 @@ fn row_values(row: &rusqlite::Row<'_>) -> rusqlite::Result<WindowValues> {
             wake: text_of(row.get_ref(20)?)
                 .as_deref()
                 .and_then(crate::wake_file::WakeRecord::named),
+            hook_timeouts: text_of(row.get_ref(21)?)
+                .and_then(|kept| serde_json::from_str(&kept).ok())
+                .and_then(HookTimeouts::kept),
         },
     })
 }
@@ -691,13 +711,14 @@ fn insert_opening(
     let command_json = serde_json::to_string(&values.command)
         .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
     let wake = wake_text(values)?;
+    let hook_timeouts = hook_timeouts_text(values)?;
     conn.execute_fixed(
         "INSERT INTO windows \
          (window_id, name, cwd, vendor, command_json, detection, profile, model, effort, \
          layout_json, session_id, opener, task_plan_id, task_id, credentials, child_scope, \
-         hooks, guest, overlay, wake, state) \
+         hooks, guest, overlay, wake, hook_timeouts, state) \
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, \
-         ?18, ?19, ?20, 'opening') \
+         ?18, ?19, ?20, ?21, 'opening') \
          ON CONFLICT(window_id) DO NOTHING",
         params![
             window_id,
@@ -720,6 +741,7 @@ fn insert_opening(
             values.facts.runs_in_guest,
             values.facts.overlay,
             wake,
+            hook_timeouts,
         ],
     )
 }
@@ -732,11 +754,12 @@ fn update_values(
     let command_json = serde_json::to_string(&values.command)
         .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
     let wake = wake_text(values)?;
+    let hook_timeouts = hook_timeouts_text(values)?;
     conn.execute_fixed(
         "UPDATE windows SET name = ?2, cwd = ?3, vendor = ?4, command_json = ?5, \
          detection = ?6, profile = ?7, model = ?8, effort = ?9, layout_json = ?10, \
          session_id = ?11, opener = ?12, task_plan_id = ?13, task_id = ?14, credentials = ?15, \
-         hooks = ?16, guest = ?17, overlay = ?18, wake = ?19 \
+         hooks = ?16, guest = ?17, overlay = ?18, wake = ?19, hook_timeouts = ?20 \
          WHERE window_id = ?1",
         params![
             window_id,
@@ -758,8 +781,21 @@ fn update_values(
             values.facts.runs_in_guest,
             values.facts.overlay,
             wake,
+            hook_timeouts,
         ],
     )
+}
+
+/// The spelling of `values`' `[hook_timeout]` table in the table, `None`
+/// without one.
+fn hook_timeouts_text(values: &WindowValues) -> rusqlite::Result<Option<String>> {
+    values
+        .facts
+        .hook_timeouts
+        .as_ref()
+        .map(serde_json::to_string)
+        .transpose()
+        .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))
 }
 
 /// The spelling of `values`' wake record in the table, `None` without one.

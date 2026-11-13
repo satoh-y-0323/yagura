@@ -5,7 +5,8 @@
 //! window's own profile, so a hook written into a CLI's settings keeps working
 //! after the profile changes and for windows opened without that profile. The
 //! request carries no state between its two round trips: the second one is
-//! answered from a fresh read.
+//! answered from a fresh read. The time a door is named is the window's own
+//! ([`WindowEntry::hook_timeouts`]): its CLI was given it when it started.
 
 use std::sync::Arc;
 
@@ -25,24 +26,23 @@ use super::inbox::{HeldSlot, StopEnd, answer_read, answer_read_ending};
 use super::{HookDoor, IpcServer, Outbound, error_msg};
 
 /// What a profile says about one event: the event, how its CLI marks a
-/// subagent's hook, how it wants the text a hook prints, and the time its CLI
-/// gives the hook.
+/// subagent's hook, and how it wants the text a hook prints.
 struct Resolved {
     event: HookEvent,
     subagent: Option<String>,
     delivery: Option<DeliverySpec>,
-    hook_timeout_sec: Option<u64>,
     /// The events of the profile's `[interrupt]` hook form, when it has one.
     stops: Option<HookStops>,
 }
 
 /// How a hook event's read ends.
 pub(super) enum HookRead<'a> {
-    /// A door of revision 34: what the read takes stays in the connection's
-    /// slot for the door's `deliver_printed`.
+    /// A door that reads (from [`yagura_protocol::DOOR_READ_MIN_REVISION`]):
+    /// what the read takes stays in the connection's slot for the door's
+    /// `deliver_printed`.
     Door(&'a HeldSlot),
-    /// A `run_hook` of a door before revision 34, which prints after it took:
-    /// nothing is taken, and the event's status and session are still recorded.
+    /// A `run_hook` of a door that prints after it took: nothing is taken,
+    /// and the event's status and session are still recorded.
     Older,
 }
 
@@ -145,7 +145,6 @@ impl IpcServer {
             event,
             subagent,
             delivery,
-            hook_timeout_sec,
             stops,
         }) = self.resolve_hook_event(profile_id, name).await
         else {
@@ -159,6 +158,9 @@ impl IpcServer {
             return;
         };
 
+        let hook_timeout_sec = entry
+            .hook_timeouts()
+            .and_then(|timeouts| timeouts.for_event(name));
         let pointers = wanted_pointers(subagent.as_deref(), &event);
         let values = match input {
             None if !pointers.is_empty() => {
@@ -201,7 +203,24 @@ impl IpcServer {
             .for_event(name);
         let reads =
             matches!(read, HookRead::Door(_)) && met && HookEffect::Deliver.applies_to(origin);
+        let records_status = event
+            .status
+            .filter(|&status| HookEffect::Status(status).applies_to(origin));
 
+        // A stop leaves the inbox alone: what waits there is the next door's.
+        if let TurnRole::Stop(answer) = role
+            && HookEffect::Stop.applies_to(origin)
+            && entry.turn().stops_now()
+        {
+            if let Some(status) = records_status {
+                self.record_hook_status(&entry, status, profile_id, name);
+            }
+            if answer.ends_turn() && HookEffect::Turn.applies_to(origin) {
+                entry.turn().stop_ended_turn();
+            }
+            finish(DoorRead::printing(answer.render()), hook_timeout_sec);
+            return;
+        }
         if event.deliver == Some(HookDeliver::Block) {
             let block = reads.then(|| entry.inbox().read_block(Some(&spec)));
             if let (Some(block), HookRead::Door(slot)) = (block, &read)
@@ -218,21 +237,8 @@ impl IpcServer {
                 return;
             }
         }
-        if let Some(status) = event.status
-            && HookEffect::Status(status).applies_to(origin)
-        {
+        if let Some(status) = records_status {
             self.record_hook_status(&entry, status, profile_id, name);
-        }
-        // A stop leaves the inbox alone: what waits there is the next door's.
-        if let TurnRole::Stop(answer) = role
-            && HookEffect::Stop.applies_to(origin)
-            && entry.turn().stops_now()
-        {
-            if answer.ends_turn() && HookEffect::Turn.applies_to(origin) {
-                entry.turn().stop_ended_turn();
-            }
-            finish(DoorRead::printing(answer.render()), hook_timeout_sec);
-            return;
         }
         let taken = match event.deliver {
             Some(HookDeliver::Context) if reads => entry
@@ -273,22 +279,11 @@ impl IpcServer {
         None
     }
 
-    /// The time the CLI of `entry`'s profile gives the hook `door` reads for,
-    /// in whole seconds; `None` when the window has no profile, the profile
-    /// cannot be read, or it gives no time for the door. A hook event's read is
-    /// answered from the profile it names instead, in
-    /// [`Self::handle_run_hook`].
-    pub(super) async fn window_hook_timeout(
-        &self,
-        entry: &WindowEntry,
-        door: &Door,
-    ) -> Option<u64> {
-        let profile_id = entry.vendor()?;
-        let door = door.clone();
-        self.read_hook_profile(profile_id, move |listed| {
-            listed.profile.hook_timeouts.for_door(&door)
-        })
-        .await
+    /// The time `entry`'s CLI gives the hook `door` reads for, in whole
+    /// seconds, as the window's open kept it; `None` when the window keeps no
+    /// time for the door.
+    pub(super) fn window_hook_timeout(entry: &WindowEntry, door: &Door) -> Option<u64> {
+        entry.hook_timeouts()?.for_door(door)
     }
 
     /// The `[interrupt]` table of the profile `entry` was launched from.
@@ -300,9 +295,8 @@ impl IpcServer {
             .await
     }
 
-    /// Reads `profile_id` and picks `name` out of its `[hook_events]`, with the
-    /// time its CLI gives that hook. `None` when the profile cannot be read or
-    /// has no such event.
+    /// Reads `profile_id` and picks `name` out of its `[hook_events]`. `None`
+    /// when the profile cannot be read or has no such event.
     async fn resolve_hook_event(&self, profile_id: &str, name: &str) -> Option<Resolved> {
         let name = name.to_string();
         self.read_hook_profile(profile_id, move |listed| {
@@ -310,7 +304,6 @@ impl IpcServer {
             let event = events.get(&name)?.clone();
             let subagent = events.subagent_pointer().map(str::to_string);
             let delivery = listed.profile.delivery.as_ref().map(|d| d.spec());
-            let hook_timeout_sec = listed.profile.hook_timeouts.for_event(&name);
             let stops = match listed.profile.interrupt.as_ref().map(|i| &i.ai) {
                 Some(AiMeans::Hook(stops)) => Some(stops.clone()),
                 _ => None,
@@ -319,7 +312,6 @@ impl IpcServer {
                 event,
                 subagent,
                 delivery,
-                hook_timeout_sec,
                 stops,
             })
         })

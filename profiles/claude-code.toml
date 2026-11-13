@@ -58,12 +58,16 @@ args = ["--settings", "{hooks_config_file}"]
 SessionStart = '{"hookSpecificOutput":{"hookEventName":"SessionStart","watchPaths":{wake_paths}}}'
 CwdChanged = '{"hookSpecificOutput":{"hookEventName":"CwdChanged","watchPaths":{wake_paths}}}'
 
-# The seconds Claude Code gives a hook command that registers a `timeout`: the
-# wait (`asyncRewake`) takes it in `[hooks]` through
-# `{hook_timeout.doors.wait}`. The other doors register none, so the daemon
-# names none for them and a door takes the time it had before revision 34.
+# The seconds Claude Code gives a hook command. The wait (`asyncRewake`)
+# registers its `timeout` in `[hooks]` through `{hook_timeout.doors.wait}`.
+# The other hooks register no `timeout`, so Claude Code's own applies: its
+# documentation (https://code.claude.com/docs/en/hooks, the common field
+# `timeout`) gives 600 seconds for a command hook, and 30 for
+# `UserPromptSubmit`. The daemon names these to a door that asks.
 [hook_timeout]
+default = 600
 doors = { wait = 86400 }
+events = { UserPromptSubmit = 30 }
 
 # How the daemon hands text to this CLI without typing it into the composer.
 # The launch prompt follows `--` because `--mcp-config` takes several values

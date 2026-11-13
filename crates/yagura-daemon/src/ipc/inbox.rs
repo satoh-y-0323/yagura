@@ -9,8 +9,9 @@
 //!
 //! A read's parcels stay with the connection it was answered on until the door
 //! sends `deliver_printed` there; a connection that ends first gives them back.
-//! The reads and the confirmation of a door before revision 34 are answered
-//! with nothing to print and take nothing: such a door prints after it took.
+//! The reads and the confirmation of a door older than
+//! [`yagura_protocol::DOOR_READ_MIN_REVISION`] are answered with nothing to
+//! print and take nothing: such a door prints after it took.
 
 use std::sync::{Arc, Mutex, PoisonError, Weak};
 
@@ -201,14 +202,16 @@ pub(super) async fn handle_printed(slot: &HeldSlot) {
     }
 }
 
-/// Answers a read of a door before revision 34: it prints after it took, so
+/// Answers a read of a door older than
+/// [`yagura_protocol::DOOR_READ_MIN_REVISION`]: it prints after it took, so
 /// letting it take would lose what it took.
 pub(super) fn handle_older_read(outbound: &Outbound) {
     outbound.reply(&silence());
 }
 
-/// Answers the `deliver_done` of a door before revision 34 as withdrawn, which
-/// ends such a door without printing.
+/// Answers the `deliver_done` of a door older than
+/// [`yagura_protocol::DOOR_READ_MIN_REVISION`] as withdrawn, which ends such a
+/// door without printing.
 pub(super) fn handle_older_done(outbound: &Outbound) {
     outbound.reply(&DaemonMessage::DeliverConfirmed { withdrawn: true });
 }
@@ -256,7 +259,7 @@ impl IpcServer {
         else {
             return;
         };
-        let hook_timeout_sec = self.window_hook_timeout(&entry, &door).await;
+        let hook_timeout_sec = Self::window_hook_timeout(&entry, &door);
         match door {
             Door::Context => {
                 let intro = self.chat.intro_for(&entry);

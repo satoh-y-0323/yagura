@@ -148,6 +148,7 @@ pub const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/022_window_guest.sql"),
     include_str!("../migrations/023_window_overlay.sql"),
     include_str!("../migrations/024_window_wake.sql"),
+    include_str!("../migrations/025_window_hook_timeouts.sql"),
 ];
 
 /// The schema version recorded in the database's `user_version`: `0` for a

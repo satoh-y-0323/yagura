@@ -429,8 +429,7 @@ pub const WITHDRAW_MESSAGE_MIN_REVISION: u32 = 34;
 /// launch does not start the CLI.
 pub const LAUNCH_OVERLAY_MIN_REVISION: u32 = 34;
 
-/// How long a hook door waits for one answer of the daemon, and the time it
-/// takes its hook to be given when the daemon names none for it.
+/// How long a hook door waits for one answer of the daemon.
 pub const DOOR_ANSWER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// The most vendors one [`DefaultPalettes`] may assign a palette to; the
@@ -4122,9 +4121,8 @@ pub enum DaemonMessage {
         /// The exit code the hook ends with.
         exit_code: u8,
         /// The whole seconds the CLI gives the hook, which the door measures
-        /// its own end against. Absent when the daemon names none for the
-        /// door; the door then takes the time it had before revision 34
-        /// ([`DOOR_ANSWER_TIMEOUT`]).
+        /// its own end against. Absent: the window's CLI was given no time the
+        /// daemon knows; the door prints without measuring.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         hook_timeout_sec: Option<u64>,
     },

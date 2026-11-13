@@ -51,6 +51,14 @@ args = ["--plugin-dir", "{hooks_config_dir}"]
 "plugin.json" = '{"name":"yagura"}'
 "hooks.json" = '''{"version":1,"hooks":{"sessionStart":[{"type":"command","bash":"yagura-daemon.exe --credentials '{credentials_file}' --hook wsl-copilot-cli sessionStart"}],"userPromptSubmitted":[{"type":"command","bash":"yagura-daemon.exe --credentials '{credentials_file}' --hook wsl-copilot-cli userPromptSubmitted"}],"preToolUse":[{"type":"command","bash":"yagura-daemon.exe --credentials '{credentials_file}' --hook wsl-copilot-cli preToolUse"}],"postToolUse":[{"type":"command","bash":"yagura-daemon.exe --credentials '{credentials_file}' --hook wsl-copilot-cli postToolUse"}],"postToolUseFailure":[{"type":"command","bash":"yagura-daemon.exe --credentials '{credentials_file}' --hook wsl-copilot-cli postToolUseFailure"}],"agentStop":[{"type":"command","bash":"yagura-daemon.exe --credentials '{credentials_file}' --hook wsl-copilot-cli agentStop"}]}}'''
 
+# The seconds Copilot gives a hook command. The hooks above register no
+# `timeoutSec`, so Copilot's own applies: its documentation
+# (https://docs.github.com/en/copilot/reference/hooks-configuration,
+# `timeoutSec`) gives 30 seconds when it is omitted. The daemon names it to a
+# door that asks.
+[hook_timeout]
+default = 30
+
 # How the daemon hands text to this CLI without typing it into the composer.
 # Copilot has no hook that fires on an idle session, so `wake` stays `none`.
 [delivery]

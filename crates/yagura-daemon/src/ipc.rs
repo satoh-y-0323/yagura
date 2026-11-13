@@ -447,6 +447,9 @@ struct PlannedOpen {
     process_image: Vec<yagura_os::ancestry::ImagePattern>,
     /// The profile's `[launch_overlay]` table.
     launch_overlay: Option<crate::launch_overlay::LaunchOverlaySpec>,
+    /// The profile's `[hook_timeout]` table, read with the `[hooks]` texts
+    /// it fills, which the window keeps as a fact.
+    hook_timeouts: crate::profile::HookTimeouts,
     /// How the launch turns the other instances' bridge registrations off,
     /// read right before spawn; `None` when the profile cannot say.
     bridge_scan: Option<mcp_registration::BridgeScan>,
@@ -1896,8 +1899,8 @@ impl IpcServer {
                 .await;
                 FrameOutcome::Continue
             }
-            // The reads of a door before revision 34 take nothing: it prints
-            // after it took, so what it took would be lost.
+            // The reads of a door older than `DOOR_READ_MIN_REVISION` take
+            // nothing: it prints after it took, so what it took would be lost.
             Ok(
                 ClientMessage::DeliverContext {
                     window_id, token, ..
@@ -2964,6 +2967,7 @@ impl IpcServer {
             wake_command,
             process_image: launch.process_image,
             launch_overlay: launch.launch_overlay,
+            hook_timeouts: launch.hook_timeouts,
             bridge_scan,
             limits: launch.limits,
             chat: Arc::clone(&self.chat),
@@ -4363,7 +4367,8 @@ impl IpcServer {
                 if entry.first_lineage_note() {
                     tracing::warn!(
                         window_id,
-                        "the window's holder names no child, so its requests are matched only;                          open the window again to have them traced"
+                        "the window's holder names no child, so its requests are matched only; \
+                         open the window again to have them traced"
                     );
                 }
                 return Ok(());
@@ -6069,6 +6074,7 @@ async fn open_planned(
             runs_in_guest: Some(runs_in_guest),
             overlay,
             wake: None,
+            hook_timeouts: Some(planned.hook_timeouts),
         },
         lineage: LineageRule::for_window(planned.process_image, runs_in_guest),
         launch_overlay: planned.launch_overlay,
@@ -7019,6 +7025,7 @@ fn window_open_error_msg(err: &WindowOpenError) -> DaemonMessage {
             "resource_exhausted",
             "the daemon already holds the maximum number of windows",
         ),
+        WindowOpenError::ShuttingDown => error_msg("invalid_state", "the daemon is shutting down"),
     }
 }
 

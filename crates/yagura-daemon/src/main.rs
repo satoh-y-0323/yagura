@@ -1044,8 +1044,8 @@ async fn run_hook_door(
 /// parcels for the next one, which hands them out again, and none is lost. A
 /// door with less than [`cli::HOOK_DOOR_MARGIN`] left of the time its CLI gives the
 /// hook prints nothing and does not say it did, so the daemon takes the
-/// parcels back. A daemon that names no time is taken to give the hook the
-/// time a door had before revision 34.
+/// parcels back. A daemon that names no time leaves the door unmeasured: it
+/// prints.
 async fn finish_door(
     client: &mut ClientConnection,
     answer: Option<DaemonMessage>,
@@ -1069,8 +1069,9 @@ async fn finish_door(
             let _ = send_hook_request(client, &ClientMessage::DeliverPrinted).await;
             Ok(ExitCode::from(exit_code))
         }
-        // A daemon before revision 34 refuses the read by name and takes
-        // nothing: there is nothing to print, and the text waits for a newer one.
+        // A daemon older than `DOOR_READ_MIN_REVISION` refuses the read by
+        // name and takes nothing: there is nothing to print, and the text
+        // waits for a newer one.
         Some(DaemonMessage::Error { code, .. }) if code == "unknown_type" => Ok(ExitCode::SUCCESS),
         Some(DaemonMessage::Error { code, .. }) => {
             anyhow::bail!("the daemon refused the request: {code}")

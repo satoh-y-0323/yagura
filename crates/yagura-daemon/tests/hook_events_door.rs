@@ -22,12 +22,15 @@ use std::path::PathBuf;
 use std::process::{Command, Output, Stdio};
 use std::sync::atomic::{AtomicU32, Ordering};
 
+use std::time::Duration;
+
+use yagura_daemon::cli::{HOOK_DOOR_MARGIN, door_prints};
 use yagura_daemon::inbox::Parcel;
 use yagura_daemon::mcp_registration::{EntryVars, RegistrationTarget};
 use yagura_daemon::profile::parse_profile;
 use yagura_daemon::window::{HooksRoute, LaunchIdentity, WindowProvenance};
 use yagura_os::program::HostOs;
-use yagura_protocol::WindowStatus;
+use yagura_protocol::{DOOR_ANSWER_TIMEOUT, WindowStatus};
 use yagura_test_support::paths::TempDir;
 
 use common::{
@@ -73,7 +76,7 @@ fn daemon_bin() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_yagura-daemon"))
 }
 
-fn unique_instance() -> String {
+pub(crate) fn unique_instance() -> String {
     format!(
         "hevt{:x}{}",
         std::process::id(),
@@ -1036,12 +1039,32 @@ async fn a_door_left_less_time_than_its_margin_prints_nothing_and_never_says_it_
             "{args:?}: a door that printed nothing must not say it printed"
         );
     }
+    let named = Duration::from_secs(5);
+    for (elapsed, prints) in [
+        (named - HOOK_DOOR_MARGIN, true),
+        (named - HOOK_DOOR_MARGIN + Duration::from_millis(1), false),
+        (named, false),
+    ] {
+        assert_eq!(
+            door_prints(Some(5), elapsed),
+            prints,
+            "a door named 5 seconds, {elapsed:?} after it started: it prints only with its \
+             margin left"
+        );
+    }
 }
 
-/// A daemon that names no deadline is taken to give the time the door had before revision
-/// 34. The door prints, then says so, and ends at once without an answer to that.
+/// A daemon that names no deadline knows no time the window's CLI gives the hook, so the
+/// door does not measure one: it prints however long it has run, then says so, and ends at
+/// once without an answer to that.
 #[tokio::test]
 async fn a_door_whose_daemon_names_no_deadline_prints_then_says_so_and_ends_without_an_answer() {
+    for elapsed in [Duration::ZERO, DOOR_ANSWER_TIMEOUT + Duration::from_secs(1)] {
+        assert!(
+            door_prints(None, elapsed),
+            "a door whose daemon names no time prints {elapsed:?} after it started"
+        );
+    }
     for (args, _) in stand_in_doors() {
         let answer = serde_json::json!({
             "type": "delivery",
@@ -1086,6 +1109,69 @@ async fn a_door_whose_daemon_refuses_its_read_by_name_prints_nothing_and_exits_z
             describe(&output)
         );
         assert_eq!(frame_types(&frames), ["door_read"], "{args:?}");
+    }
+}
+
+/// The time a window's doors are named is the one its CLI was given at the window's open:
+/// the profile rewritten after it, or its `[hook_timeout]` taken out, changes nothing for
+/// that window's `--deliver-context` or `--hook` door. A window opened from no profile was
+/// given no time the daemon knows, so its doors are named none, whatever profile a hook
+/// names.
+#[tokio::test]
+async fn a_windows_doors_are_named_the_time_its_cli_was_given_at_its_open() {
+    const ID: &str = "door-time-at-open";
+    let (h, _instance, profiles_dir) = lineage_daemon().await;
+    let source = |table: &str| {
+        format!(
+            "schema = 1\ndisplay_name = \"{ID}\"\n\n[command]\ndefault = ['{}']\n\n\
+             [delivery]\noutput = '{{\"timeOut\":{{text}}}}'\n\n\
+             [hook_events]\n{EVENT} = {{ status = \"running\", deliver = \"take\" }}\n\n{table}",
+            common::echo_child_path().display()
+        )
+    };
+    write_profile(
+        &profiles_dir,
+        ID,
+        &source(
+            "[hook_timeout]\ndefault = 40\ndoors = { context = 41 }\nevents = { PostToolUse = 42 }\n",
+        ),
+    );
+    let window_id = open_from_profile(&h, ID).await;
+    let bare_id = h
+        .open(yagura_test_support::process::echo_child_command(), None)
+        .await;
+    let context = serde_json::json!({ "kind": "context" });
+    let hook = serde_json::json!({ "kind": "hook", "profile": ID, "name": EVENT });
+    let named = |answer: &serde_json::Value| {
+        assert_eq!(answer["type"], "delivery", "the read is answered: {answer}");
+        answer.get("hook_timeout_sec").cloned()
+    };
+
+    for door in [&context, &hook] {
+        let answer = door_answer(&h.endpoint, &bare_id, VALID_TOKEN, door.clone()).await;
+        assert_eq!(
+            named(&answer),
+            None,
+            "a window opened from no profile is named no time at {door}: {answer}"
+        );
+    }
+    for (table, change) in [
+        (
+            "[hook_timeout]\ndefault = 50\ndoors = { context = 51 }\nevents = { PostToolUse = 52 }\n",
+            "rewritten",
+        ),
+        ("", "without its [hook_timeout]"),
+    ] {
+        write_profile(&profiles_dir, ID, &source(table));
+        for (door, opened) in [(&context, 41), (&hook, 42)] {
+            let answer = door_answer(&h.endpoint, &window_id, VALID_TOKEN, door.clone()).await;
+            assert_eq!(
+                named(&answer),
+                Some(serde_json::json!(opened)),
+                "with the profile {change}, the window is still named the time its CLI was \
+                 given at its open at {door}: {answer}"
+            );
+        }
     }
 }
 
@@ -1718,7 +1804,8 @@ fn write_whole(path: &std::path::Path, text: &str) {
 
 /// Has a CLI of the same image, started by this one, run `task`; returns its result. A
 /// `rooted` one is started the way the window's own CLI was, through the launch statement
-/// of the guest profile in the config, so it is the root of its own environment.
+/// of the guest profile in the config, so it is the root of its own environment. A task
+/// naming an `exe` has that copy of the test binary run it instead, under its own image.
 fn run_nested(
     task: &serde_json::Value,
     config: &serde_json::Value,
@@ -1735,7 +1822,11 @@ fn run_nested(
         command.args(&argv[1..]);
         command
     } else {
-        let mut command = Command::new(std::env::current_exe().expect("current_exe"));
+        let exe = match task["exe"].as_str() {
+            Some(exe) => PathBuf::from(exe),
+            None => std::env::current_exe().expect("current_exe"),
+        };
+        let mut command = Command::new(exe);
         command.args([
             yagura_test_support::process::libtest_name(module_path!(), LINEAGE_ROLE).as_str(),
             "--exact",
@@ -1802,6 +1893,17 @@ fn lineage_task(
     config: &serde_json::Value,
     held: &mut Vec<Held>,
 ) -> serde_json::Value {
+    if let Some(door) = task.get("read") {
+        let endpoint = task["endpoint"].as_str().expect("the daemon's endpoint");
+        let window_id = std::env::var(WINDOW_ID_VAR).expect("the window's id");
+        let token = std::env::var(STATUS_TOKEN_VAR).expect("the window's token");
+        let answer = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("a runtime for the read")
+            .block_on(door_answer(endpoint, &window_id, &token, door.clone()));
+        return serde_json::json!({ "answer": answer });
+    }
     if let Some(args) = task["door"].as_array() {
         let mut command = Command::new(config["door"].as_str().expect("door"));
         command
@@ -1989,6 +2091,23 @@ impl LineageCli {
         result["answer"].as_str().unwrap_or_default().to_string()
     }
 
+    /// What the daemon at `endpoint` answers a read of `door` (its wire form) in the
+    /// window's name, as [`door_answer`] gives it, made by a process the window's CLI
+    /// started: this test binary, whose image is not the CLI's.
+    pub(crate) async fn read(
+        &mut self,
+        endpoint: &str,
+        door: serde_json::Value,
+    ) -> serde_json::Value {
+        let exe = std::env::current_exe().expect("current_exe");
+        let result = self
+            .run(serde_json::json!({
+                "by": By::Nested.name(), "exe": exe, "read": door, "endpoint": endpoint
+            }))
+            .await;
+        result["answer"].clone()
+    }
+
     /// Ends every bridge the CLI started, and every nested CLI holding one.
     pub(crate) async fn end_bridges(&mut self) {
         self.run(serde_json::json!({ "end": true })).await;
@@ -2075,6 +2194,39 @@ impl LineageImage {
         declared: bool,
         tables: &str,
     ) -> LineageCli {
+        let (cli, run) = self.cli_tables(id, instance);
+        let source = format!(
+            "schema = 1\ndisplay_name = \"{id}\"\n\n{run}\n\
+             [delivery]\noutput = '{{\"lineageOut\":{{text}}}}'\n\n\
+             [hook_events]\n{LINEAGE_EVENT} = {{ status = \"running\", deliver = \"take\", \
+             session = \"/session_id\" }}\n{tables}"
+        );
+        let source = if declared {
+            with_declared_image(&source, &self.image())
+        } else {
+            source
+        };
+        write_profile(profiles_dir, id, &source);
+        cli
+    }
+
+    /// Writes a layer over the profile `id` the daemon ships into `profiles_dir`: its
+    /// window's CLI is this copy, reaching the daemon of `instance` and declared as the CLI's
+    /// process image; every other table stays the shipped one's. Returns that window's CLI.
+    pub(crate) fn write_layer(
+        &self,
+        profiles_dir: &std::path::Path,
+        id: &str,
+        instance: &str,
+    ) -> LineageCli {
+        let (cli, run) = self.cli_tables(id, instance);
+        write_profile(profiles_dir, id, &with_declared_image(&run, &self.image()));
+        cli
+    }
+
+    /// The `[command]` and `[env]` tables that run this copy as the window's CLI of the
+    /// profile `id`, reaching the daemon of `instance`, with that CLI.
+    fn cli_tables(&self, id: &str, instance: &str) -> (LineageCli, String) {
         let dir = self.tree.make_dir(id);
         let config = serde_json::json!({
             "instance": instance,
@@ -2095,21 +2247,12 @@ impl LineageImage {
         .map(|arg| format!("'{arg}'"))
         .collect::<Vec<_>>()
         .join(", ");
-        let source = format!(
-            "schema = 1\ndisplay_name = \"{id}\"\n\n[command]\ndefault = [{command}]\n\n\
-             [env]\n{LINEAGE_ROLE_VAR} = \"cli\"\n{LINEAGE_DIR_VAR} = '{}'\n\n\
-             [delivery]\noutput = '{{\"lineageOut\":{{text}}}}'\n\n\
-             [hook_events]\n{LINEAGE_EVENT} = {{ status = \"running\", deliver = \"take\", \
-             session = \"/session_id\" }}\n{tables}",
+        let tables = format!(
+            "[command]\ndefault = [{command}]\n\n\
+             [env]\n{LINEAGE_ROLE_VAR} = \"cli\"\n{LINEAGE_DIR_VAR} = '{}'\n",
             dir.display()
         );
-        let source = if declared {
-            with_declared_image(&source, &self.image())
-        } else {
-            source
-        };
-        write_profile(profiles_dir, id, &source);
-        LineageCli { dir, step: 0 }
+        (LineageCli { dir, step: 0 }, tables)
     }
 }
 
@@ -2133,6 +2276,38 @@ pub(crate) async fn lineage_daemon() -> (Harness, String, PathBuf) {
     };
     let h = Harness::start_on_instance(&instance, config).await;
     (h, instance, profiles_dir)
+}
+
+/// What the daemon at `endpoint` answers a read of `door` (its wire form) in the name of
+/// `window_id` with `token`, as its wire form. A hook asked for values of its input reports
+/// them all absent.
+pub(crate) async fn door_answer(
+    endpoint: &str,
+    window_id: &str,
+    token: &str,
+    door: serde_json::Value,
+) -> serde_json::Value {
+    let read = |input: Option<Vec<serde_json::Value>>| -> yagura_protocol::ClientMessage {
+        let mut door = door.clone();
+        if let Some(input) = input {
+            door["input"] = serde_json::Value::Array(input);
+        }
+        let wire = serde_json::json!({
+            "type": "door_read",
+            "window_id": window_id,
+            "token": token,
+            "door": door,
+        });
+        serde_json::from_value(wire.clone())
+            .unwrap_or_else(|err| panic!("the wire must know a door's read {wire}: {err}"))
+    };
+    let mut client = yagura_test_support::ipc::connect_with_retry(endpoint).await;
+    let mut answer = common::call_door(&mut client, &read(None)).await;
+    if let yagura_protocol::DaemonMessage::HookInputWanted { pointers } = &answer {
+        let input = vec![serde_json::json!("absent"); pointers.len()];
+        answer = common::call_door(&mut client, &read(Some(input))).await;
+    }
+    serde_json::to_value(&answer).expect("a daemon message serializes")
 }
 
 /// Opens a window from the profile `profile` of `h`'s daemon.
@@ -2752,6 +2927,17 @@ impl Turns {
         Self::start_with(profile, common::wake_none_delivery(), Some(TURN_DETECTION)).await
     }
 
+    /// [`Turns::start`] with `layer` laid over the shipped profile.
+    async fn start_layered(profile: &'static str, layer: &str) -> Self {
+        Self::start_in(
+            profile,
+            common::wake_none_delivery(),
+            Some(TURN_DETECTION),
+            layer,
+        )
+        .await
+    }
+
     /// [`Turns::start`] with the window's own `[delivery]`, under `detection` (`None`
     /// leaves the window `Unknown`).
     async fn start_with(
@@ -2759,9 +2945,21 @@ impl Turns {
         delivery: yagura_daemon::profile_delivery::ProfileDelivery,
         detection: Option<&str>,
     ) -> Self {
+        Self::start_in(profile, delivery, detection, "").await
+    }
+
+    async fn start_in(
+        profile: &'static str,
+        delivery: yagura_daemon::profile_delivery::ProfileDelivery,
+        detection: Option<&str>,
+        layer: &str,
+    ) -> Self {
         let instance = unique_instance();
         let profiles_dir = unique_temp_dir("interrupt-turn-profiles");
         std::fs::create_dir_all(&profiles_dir).expect("create the profiles directory");
+        if !layer.is_empty() {
+            write_profile(&profiles_dir, profile, layer);
+        }
         let detection_dir = unique_temp_dir("interrupt-turns");
         let mut config = detection_config(&detection_dir, approver_base_config());
         config.profiles_dir = Some(profiles_dir);
@@ -3007,7 +3205,8 @@ async fn a_window_no_main_hook_reached_is_marked_unconfirmed_and_a_turn_started_
 /// In an open turn, every stop event of the main session and of its subagents is
 /// stopped, however often the AI asks, until a main stop answer whose answer ends the turn
 /// (Grok Build's `PostToolUse`); the answer leaves the inbox alone. A subagent after it is
-/// not stopped, and an interrupt then finds no open turn.
+/// not stopped, and an interrupt then finds no open turn. A stop event whose profile also
+/// has it hand a block is stopped all the same, and what waits stays in the inbox.
 #[tokio::test]
 async fn an_open_turn_is_stopped_at_every_stop_event_until_a_stop_answer_that_ends_it() {
     let turns = Turns::start("grok-build").await;
@@ -3074,6 +3273,33 @@ async fn an_open_turn_is_stopped_at_every_stop_event_until_a_stop_answer_that_en
         String::from_utf8_lossy(&taken.stdout).contains("PARCEL-KEPT-BY-STOP"),
         "the parcel the stop answer left is the next door's; {}",
         describe(&taken)
+    );
+
+    // A stop event that also hands a block is answered with the stop in its place.
+    let blocking = Turns::start_layered(
+        "grok-build",
+        "[hook_events]\nPreToolUse = { status = \"running\", deliver = \"block\" }\n",
+    )
+    .await;
+    blocking
+        .hook_unstopped("UserPromptSubmit", "{}", "a turn's start is never stopped")
+        .await;
+    blocking
+        .interrupt_answers("stop_requested", "a main hook started the turn")
+        .await;
+    blocking.deposit("PARCEL-KEPT-BY-BLOCKING-STOP");
+    blocking
+        .hook_stopped(
+            "PreToolUse",
+            "{}",
+            StopForm::Continue,
+            "the main PreToolUse of the marked turn, which would hand a block otherwise",
+        )
+        .await;
+    assert_eq!(
+        blocking.entry().inbox().pending_count(),
+        1,
+        "a stop answer in place of a block reads nothing from the inbox"
     );
 }
 

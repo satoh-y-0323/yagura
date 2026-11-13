@@ -1216,54 +1216,49 @@ fn registered_hook_timeouts(id: &str) -> Vec<(String, Option<u64>)> {
     out
 }
 
-/// What the daemon answers a door's read of `--hook <profile> <event>` with, as its wire
-/// form: the values of the hook's input it asks for are all reported absent.
-async fn hook_door_answer(
-    h: &common::Harness,
-    window_id: &str,
-    profile: &str,
-    event: &str,
-) -> serde_json::Value {
-    use yagura_protocol::{ClientMessage, DaemonMessage};
-    let read = |input: Option<Vec<serde_json::Value>>| -> ClientMessage {
-        let mut door = serde_json::json!({ "kind": "hook", "profile": profile, "name": event });
-        if let Some(input) = input {
-            door["input"] = serde_json::Value::Array(input);
-        }
-        let wire = serde_json::json!({
-            "type": "door_read",
-            "window_id": window_id,
-            "token": common::VALID_TOKEN,
-            "door": door,
-        });
-        serde_json::from_value(wire.clone())
-            .unwrap_or_else(|err| panic!("the wire must know a door's read {wire}: {err}"))
-    };
-    let mut client = h.connect().await;
-    let mut answer = common::call_door(&mut client, &read(None)).await;
-    if let DaemonMessage::HookInputWanted { pointers } = &answer {
-        let input = vec![serde_json::json!("absent"); pointers.len()];
-        answer = common::call_door(&mut client, &read(Some(input))).await;
-    }
-    serde_json::to_value(&answer).expect("a daemon message serializes")
-}
-
-/// The time the daemon names to a `--hook` door is the one the profile's registration
-/// gives the CLI for that hook, so the two come from one value. A registration that names
-/// no time (Codex's `-c` handlers) leaves the CLI's own, which the daemon names too.
+/// The time the daemon names to a `--hook` door of a window opened from a profile is the
+/// one the profile's registration gives the CLI for that hook, so the two come from one
+/// value. A registration that names no time (Codex's `-c` handlers) leaves the CLI's own,
+/// which the daemon names too. Each window runs a quiet stand-in for its CLI, laid over the
+/// shipped profile; a profile that declares its CLI's process image declares the stand-in's,
+/// whose own reads are the window's.
 #[tokio::test]
 async fn the_daemon_names_each_hook_door_the_time_its_registration_gives_the_cli() {
-    let dir = common::unique_temp_dir("bundled-hook-deadline");
-    let mut config = common::detection_config(&dir, common::approver_base_config());
-    config.bundled_profiles = true;
-    let h = common::Harness::start("bundled-hook-deadline", config).await;
-    let mut client = h.connect().await;
-    let window_id = h.open_idle_window(&mut client).await;
+    use crate::hook_events_door::{LineageCli, LineageImage, door_answer, open_from_profile};
+    const DECLARES_ITS_IMAGE: &str = "antigravity-cli";
+    let instance = crate::hook_events_door::unique_instance();
+    let profiles_dir = common::unique_temp_dir("bundled-hook-deadline");
+    std::fs::create_dir_all(&profiles_dir).expect("create the profiles directory");
+    let config = yagura_daemon::DaemonConfig {
+        profiles_dir: Some(profiles_dir.clone()),
+        bundled_profiles: true,
+        ..common::approver_base_config()
+    };
+    let h = common::Harness::start_on_instance(&instance, config).await;
+    let image = LineageImage::install("bundled-hook-deadline");
+    let mut stand_in: Option<LineageCli> = None;
     for id in ["antigravity-cli", "grok-build", "muse-code", "codex-cli"] {
+        if id == DECLARES_ITS_IMAGE {
+            stand_in = Some(image.write_layer(&profiles_dir, id, &instance));
+        } else {
+            common::write_profile(
+                &profiles_dir,
+                id,
+                &format!(
+                    "[command]\ndefault = ['{}']\n",
+                    common::echo_child_path().display()
+                ),
+            );
+        }
+        let window_id = open_from_profile(&h, id).await;
         let hooks = registered_hook_timeouts(id);
         assert!(!hooks.is_empty(), "{id} registers --hook doors");
         for (event, registered) in hooks {
-            let answer = hook_door_answer(&h, &window_id, id, &event).await;
+            let door = serde_json::json!({ "kind": "hook", "profile": id, "name": event });
+            let answer = match stand_in.as_mut().filter(|_| id == DECLARES_ITS_IMAGE) {
+                Some(cli) => cli.read(&h.endpoint, door).await,
+                None => door_answer(&h.endpoint, &window_id, common::VALID_TOKEN, door).await,
+            };
             assert_eq!(
                 answer["type"], "delivery",
                 "{id}/{event}: the read is answered with a delivery: {answer}"
@@ -1281,6 +1276,9 @@ async fn the_daemon_names_each_hook_door_the_time_its_registration_gives_the_cli
                 ),
             }
         }
+    }
+    if let Some(mut cli) = stand_in {
+        cli.exit().await;
     }
 }
 

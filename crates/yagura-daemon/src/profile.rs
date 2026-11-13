@@ -634,6 +634,9 @@ pub struct ProfileLaunch {
     /// overlay that keeps its credentials from its CLI's tools. `None` when
     /// the profile declares none.
     pub launch_overlay: Option<LaunchOverlaySpec>,
+    /// The profile's `[hook_timeout]` table: the times its CLI gives the
+    /// window's hooks, which the window keeps from its open on.
+    pub hook_timeouts: HookTimeouts,
     /// The profile's `[delivery]` table, as declared. What it contributes to a
     /// spawn argv (a launch prompt) is rendered by
     /// [`crate::profile_delivery::launch_prompt_injection`] and never enters
@@ -1481,10 +1484,17 @@ pub fn parse_profile(id: &str, source: &str) -> Result<Profile, ProfileParseErro
 /// `{hook_timeout.events.<event>}`), so a CLI is never given a time the door
 /// does not know. A CLI whose registration names none keeps its own default,
 /// which the table then records with the source of the value.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+///
+/// A window keeps the table its profile declared when it opened
+/// ([`crate::window_table::WindowFacts`]), spelled as the TOML table is and
+/// read back by [`HookTimeouts::kept`].
+#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize)]
 pub struct HookTimeouts {
+    #[serde(skip_serializing_if = "Option::is_none")]
     default: Option<u64>,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     doors: BTreeMap<String, u64>,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     events: BTreeMap<String, u64>,
 }
 
@@ -1499,6 +1509,15 @@ const TIMEOUT_PLACEHOLDER: &str = "{hook_timeout";
 const HOOK_TIMEOUT_RULE: HookEventsError = HookEventsError::Invalid("hook_timeout");
 
 impl HookTimeouts {
+    /// A table a window kept, read back under the rule a profile's
+    /// `[hook_timeout]` is read by. Any process of the user can write where it
+    /// is kept, so a table that breaks the rule is `None`: no time is known.
+    #[must_use]
+    pub fn kept(kept: serde_json::Value) -> Option<Self> {
+        let table = toml::Value::try_from(kept).ok()?;
+        parse_hook_timeouts(Some(table)).ok()
+    }
+
     /// The time the CLI gives the hook `door` reads for: the one named for the
     /// door's kind or event, else the table's `default`. `None` when the table
     /// gives none.
@@ -3300,6 +3319,7 @@ pub fn resolve_launch(
             .map(|image| image.for_os(config.host_os).to_vec())
             .unwrap_or_default(),
         launch_overlay: profile.launch_overlay,
+        hook_timeouts: profile.hook_timeouts,
         delivery: profile.delivery,
         limits,
     })

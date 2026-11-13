@@ -3946,10 +3946,51 @@ fn write_overlay_profile(sandbox: &Sandbox, id: &str, shipped: &str, guest: bool
     );
 }
 
+/// The time the daemon names a context read in the name of `window_id` with [`TOKEN`].
+async fn context_time(sandbox: &Sandbox, window_id: &str) -> Option<serde_json::Value> {
+    let answer = crate::hook_events_door::door_answer(
+        sandbox.endpoint(),
+        window_id,
+        TOKEN,
+        serde_json::json!({ "kind": "context" }),
+    )
+    .await;
+    assert_eq!(
+        answer["type"],
+        "delivery",
+        "{window_id}: the context read is answered: {answer}; daemon log:\n{}",
+        sandbox.daemon_log()
+    );
+    answer.get("hook_timeout_sec").cloned()
+}
+
+/// Rewrites the profile `id` of the sandbox so its `[hook_timeout]` gives every door 7
+/// seconds more; returns the time it gave a context door before.
+fn lengthen_hook_timeouts(sandbox: &Sandbox, id: &str) -> u64 {
+    let path = sandbox.profiles_dir.join(format!("{id}.toml"));
+    let source = std::fs::read_to_string(&path).unwrap();
+    let before = yagura_daemon::profile::parse_profile(id, &source)
+        .unwrap_or_else(|err| panic!("{id} parses: {err}"))
+        .hook_timeouts
+        .for_door(&yagura_protocol::Door::Context)
+        .unwrap_or_else(|| panic!("{id} gives a context door a time"));
+    let mut document: toml::Table = source.parse().unwrap();
+    let mut table = toml::Table::new();
+    table.insert(
+        "default".into(),
+        toml::Value::Integer(i64::try_from(before + 7).unwrap()),
+    );
+    document.insert("hook_timeout".into(), toml::Value::Table(table));
+    std::fs::write(&path, toml::to_string(&document).unwrap()).unwrap();
+    before
+}
+
 /// A window taken back by the next daemon keeps whether its overlay was made, with its row
 /// or from its holder's launch record when the row is gone: one run directly made it at its
 /// open and is spoken for. One whose CLI runs in another environment and whose daemon ended
-/// before anything asked for its overlay never made it, and is still refused.
+/// before anything asked for its overlay never made it, and is still refused. The time its
+/// doors are named is the one its CLI was given at its open, kept the same two ways, though
+/// its profile was rewritten after.
 #[tokio::test]
 async fn a_taken_back_window_keeps_whether_its_overlay_was_made() {
     const DIRECT: &str = "overlay-kept-direct";
@@ -3981,17 +4022,28 @@ async fn a_taken_back_window_keeps_whether_its_overlay_was_made() {
                 .unwrap();
         }
     }
+    let opened = [DIRECT, DIRECT_ROWLESS].map(|id| lengthen_hook_timeouts(&sandbox, id));
 
     let mut next = start_with_token(&sandbox).await;
     for window_id in &ids {
         listed(&mut next, &sandbox, window_id).await;
     }
-    for (window_id, profile) in [(&ids[0], DIRECT), (&ids[1], DIRECT_ROWLESS)] {
+    for ((window_id, profile), opened) in [(&ids[0], DIRECT), (&ids[1], DIRECT_ROWLESS)]
+        .into_iter()
+        .zip(opened)
+    {
         let answer = spoken_for(&sandbox, window_id, profile).await;
         assert!(
             matches!(answer, DaemonMessage::Identified { .. }),
             "{profile}: a window run directly made its overlay at its open, got {answer:?}; \
              daemon log:\n{}",
+            sandbox.daemon_log()
+        );
+        assert_eq!(
+            context_time(&sandbox, window_id).await,
+            Some(serde_json::json!(opened)),
+            "{profile}: a window taken back is named the time its CLI was given at its open, \
+             not its rewritten profile's; daemon log:\n{}",
             sandbox.daemon_log()
         );
     }
@@ -4008,7 +4060,8 @@ async fn a_taken_back_window_keeps_whether_its_overlay_was_made() {
 
 /// A window whose row was written before whether its overlay was made was kept is refused
 /// when the profile its row names declares an overlay, and spoken for as before when it
-/// declares none.
+/// declares none. Such a row keeps no time its CLI was given either, so the window's doors
+/// are named none.
 #[tokio::test]
 async fn a_window_whose_row_predates_the_overlay_fact_is_refused_when_its_profile_declares_one() {
     const DECLARED: &str = "overlay-old-declared";
@@ -4017,7 +4070,7 @@ async fn a_window_whose_row_predates_the_overlay_fact_is_refused_when_its_profil
     write_overlay_profile(&sandbox, DECLARED, "grok-build", false);
     let cli = crate::credentials_launch::quiet_cli(&sandbox.tree.make_dir("logs-plain"));
     let cli: Vec<&str> = cli.iter().map(String::as_str).collect();
-    sandbox.write_probe_profile(PLAIN, &cli, "");
+    sandbox.write_probe_profile(PLAIN, &cli, "\n[hook_timeout]\ndefault = 9\n");
 
     let mut first = start_with_token(&sandbox).await;
     let declared = first.open_profile_window(&sandbox, DECLARED).await;
@@ -4033,6 +4086,13 @@ async fn a_window_whose_row_predates_the_overlay_fact_is_refused_when_its_profil
     assert!(
         matches!(answer, DaemonMessage::Identified { .. }),
         "control: an older row whose profile declares no overlay is spoken for, got {answer:?}"
+    );
+    assert_eq!(
+        context_time(&sandbox, &plain).await,
+        None,
+        "a row older than the time its CLI was given keeps none, so its doors are named none \
+         whatever its profile gives now; daemon log:\n{}",
+        sandbox.daemon_log()
     );
     let answer = spoken_for(&sandbox, &declared, DECLARED).await;
     assert!(

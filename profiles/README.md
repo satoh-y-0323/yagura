@@ -1783,6 +1783,13 @@ give fails the profile. A string that is exactly one placeholder becomes the
 number itself, so a JSON entry's `timeout` stays a number. A CLI that is given
 no time keeps its own default, which the table may record for the door.
 
+A window keeps the table as it was when the window opened, since its CLI was
+given those times when it started: editing or removing the table later changes
+what the next window is told, not an open one, and a window the daemon takes
+back after a restart keeps its own. A door the table gives no time -- no key
+for it and no `default`, or a window opened from no profile -- is not measured:
+it prints what it was handed.
+
 ## Interrupt
 
 A profile's optional `[interrupt]` table says how the user and an AI

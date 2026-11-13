@@ -413,6 +413,68 @@ async fn a_windows_row_comes_before_its_child_follows_its_values_and_goes_with_i
     }
     wait_for_rows_of(&db, &[&beta_id], "after the first window closed").await;
 
+    // A shutdown waits for a window still opening, which it then ends with its
+    // row, and refuses an open asked for once it began.
+    let paused = FaultPoints::arm(FaultPoint::WindowRegistrationPaused);
+    let stopping = Harness::start(
+        "window-table-row-stopping",
+        DaemonConfig {
+            faults: paused.clone(),
+            ..DaemonConfig::default()
+        },
+    )
+    .await;
+    let stopping_db = root.join("stopping.db");
+    store::wire_into(&stopping.registry, Some(stopping_db.clone()));
+    let registry = stopping.registry.clone();
+    let opening =
+        tokio::spawn(async move { registry.open(request(echo_command(), "wt-opening")).await });
+    tokio::time::timeout(HANG_GUARD, paused.reached())
+        .await
+        .expect("the open must come to its registration");
+    let mut shutdown = std::pin::pin!(stopping.registry.terminate_all());
+    let first_poll =
+        std::future::poll_fn(|cx| std::task::Poll::Ready(shutdown.as_mut().poll(cx))).await;
+    let waited_for_the_opening = first_poll.is_pending();
+    let registry = stopping.registry.clone();
+    let later =
+        tokio::spawn(async move { registry.open(request(echo_command(), "wt-later")).await });
+    paused.release();
+    if first_poll.is_pending() {
+        tokio::time::timeout(HANG_GUARD, shutdown)
+            .await
+            .expect("the shutdown must end once the opening window goes on");
+    }
+    let later = tokio::time::timeout(HANG_GUARD, later)
+        .await
+        .expect("the later open must be answered")
+        .expect("the later open's task");
+    let later_seen = match &later {
+        Ok(opened) => format!("opened {}", opened.window_id),
+        Err(err) => format!("{err:?}"),
+    };
+    let opening = tokio::time::timeout(HANG_GUARD, opening)
+        .await
+        .expect("the paused open must be answered")
+        .expect("the paused open's task");
+    let opening_seen = opening.as_ref().map(|opened| opened.window_id.clone());
+    let row_left = row_of(&state_rows(&stopping_db), "wt-opening");
+    stopping.registry.terminate_all().await;
+    assert!(
+        waited_for_the_opening,
+        "a shutdown must not end while a window is still opening"
+    );
+    assert!(
+        later_seen.starts_with("ShuttingDown"),
+        "an open asked for once the shutdown began must be refused as shutting down, got \
+         {later_seen}"
+    );
+    assert!(
+        row_left.is_none(),
+        "the window that was opening when the shutdown began must be ended with its row by \
+         the time the shutdown ends (its open answered {opening_seen:?}): {row_left:?}"
+    );
+
     unwritable.registry.terminate_all().await;
     holderless.terminate_all().await;
     h.registry.terminate_all().await;

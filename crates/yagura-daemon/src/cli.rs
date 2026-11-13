@@ -23,8 +23,8 @@ use std::time::Duration;
 use thiserror::Error;
 use yagura_os::{InstanceIdError, InstanceNamespace};
 use yagura_protocol::{
-    CREDENTIALS_FLAG, DOOR_ANSWER_TIMEOUT, GUEST_ROOT_FLAG, GUEST_STEP_FLAG, GuestArgsError,
-    GuestLineage, WindowStatus, guest_lineage_arg, is_valid_source,
+    CREDENTIALS_FLAG, GUEST_ROOT_FLAG, GUEST_STEP_FLAG, GuestArgsError, GuestLineage, WindowStatus,
+    guest_lineage_arg, is_valid_source,
 };
 
 use crate::detector::definition::is_valid_detection_name;
@@ -205,13 +205,10 @@ pub const HOOK_STDIN_DRAIN_GRACE: Duration = Duration::from_secs(2);
 /// What a door keeps out of the time its CLI gives the hook for printing,
 /// saying so, and ending. A door with less than this left prints nothing.
 ///
-/// Measured with Claude Code (Windows), Copilot and Muse (WSL): a hook given 3
-/// seconds had its output taken when it printed 2.8 seconds after it started
-/// and exited 0, and not when it printed at 3.6 seconds, so the CLI's cut-off
-/// lies above the 0.2 seconds those runs kept. A door adds its own start-up
-/// before it takes the time and the notice and exit after the print, so it
-/// keeps more than twice that, and still leaves a hook given one second (the
-/// least a profile gives) half a second.
+/// A CLI cuts a hook off at its time, and a door adds its own start-up before
+/// it takes the time and the notice and exit after the print, so it keeps more
+/// than a CLI was measured to need, and still leaves a hook given one second
+/// (the least a profile gives) half a second.
 pub const HOOK_DOOR_MARGIN: Duration = Duration::from_millis(500);
 
 /// How long a door answered with a delivery waits for the rest of its stdin,
@@ -219,26 +216,25 @@ pub const HOOK_DOOR_MARGIN: Duration = Duration::from_millis(500);
 /// into its [`HOOK_DOOR_MARGIN`], and never past [`HOOK_STDIN_DRAIN_GRACE`].
 #[must_use]
 pub fn door_drain_wait(hook_timeout_sec: Option<u64>, elapsed: Duration) -> Duration {
-    door_time_left(hook_timeout_sec, elapsed)
-        .saturating_sub(HOOK_DOOR_MARGIN)
-        .min(HOOK_STDIN_DRAIN_GRACE)
+    door_time_left(hook_timeout_sec, elapsed).map_or(HOOK_STDIN_DRAIN_GRACE, |left| {
+        left.saturating_sub(HOOK_DOOR_MARGIN)
+            .min(HOOK_STDIN_DRAIN_GRACE)
+    })
 }
 
 /// Whether a door answered with a delivery prints it, `elapsed` after it
 /// started, when the daemon names `hook_timeout_sec`: only with at least
-/// [`HOOK_DOOR_MARGIN`] left of the time its CLI gives the hook.
+/// [`HOOK_DOOR_MARGIN`] left of the time its CLI gives the hook, and always
+/// when the daemon names no time.
 #[must_use]
 pub fn door_prints(hook_timeout_sec: Option<u64>, elapsed: Duration) -> bool {
-    door_time_left(hook_timeout_sec, elapsed) >= HOOK_DOOR_MARGIN
+    door_time_left(hook_timeout_sec, elapsed).is_none_or(|left| left >= HOOK_DOOR_MARGIN)
 }
 
 /// What is left, `elapsed` after a door started, of the time its CLI gives the
-/// hook. A daemon that names no time is taken to give the hook the time a
-/// door had before revision 34.
-fn door_time_left(hook_timeout_sec: Option<u64>, elapsed: Duration) -> Duration {
-    hook_timeout_sec
-        .map_or(DOOR_ANSWER_TIMEOUT, Duration::from_secs)
-        .saturating_sub(elapsed)
+/// hook; `None` when the daemon names no time, which the door does not measure.
+fn door_time_left(hook_timeout_sec: Option<u64>, elapsed: Duration) -> Option<Duration> {
+    hook_timeout_sec.map(|seconds| Duration::from_secs(seconds).saturating_sub(elapsed))
 }
 
 /// The hook-door flag naming the registration a hook file was written for.

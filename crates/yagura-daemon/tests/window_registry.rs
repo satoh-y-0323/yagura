@@ -633,7 +633,7 @@ async fn registry_living_window_limit_rejects_open_until_a_window_exits() {
         "open beyond the living limit must return ResourceExhausted, got {err:?}"
     );
 
-    registry.terminate_all().await;
+    entry1.session().terminate();
     wait_for_exited(&entry1).await;
 
     let id2 = registry
@@ -660,7 +660,7 @@ async fn registry_total_entry_count_evicts_oldest_unattached_exited_window() {
         .expect("first open")
         .window_id;
     let entry1 = registry.get(&id1).expect("get id1");
-    registry.terminate_all().await;
+    entry1.session().terminate();
     wait_for_exited(&entry1).await;
 
     let id2 = registry
@@ -669,7 +669,7 @@ async fn registry_total_entry_count_evicts_oldest_unattached_exited_window() {
         .expect("second open after id1 exited (living limit freed)")
         .window_id;
     let entry2 = registry.get(&id2).expect("get id2");
-    registry.terminate_all().await;
+    entry2.session().terminate();
     wait_for_exited(&entry2).await;
 
     // Total entries now 2 (== max_windows * 2); a third open must evict the
@@ -715,7 +715,7 @@ async fn registry_total_entry_count_rejects_open_when_all_exited_entries_are_att
         .expect("first open")
         .window_id;
     let entry1 = registry.get(&id1).expect("get id1");
-    registry.terminate_all().await;
+    entry1.session().terminate();
     wait_for_exited(&entry1).await;
     let (_gen1, _kick1) = entry1.register_attach().await;
 
@@ -725,7 +725,7 @@ async fn registry_total_entry_count_rejects_open_when_all_exited_entries_are_att
         .expect("second open after id1 exited (living limit freed)")
         .window_id;
     let entry2 = registry.get(&id2).expect("get id2");
-    registry.terminate_all().await;
+    entry2.session().terminate();
     wait_for_exited(&entry2).await;
     let (_gen2, _kick2) = entry2.register_attach().await;
 
@@ -753,7 +753,7 @@ async fn registry_evicts_an_exited_window_once_its_attach_holder_let_go() {
         .expect("first open")
         .window_id;
     let entry1 = registry.get(&id1).expect("get id1");
-    registry.terminate_all().await;
+    entry1.session().terminate();
     wait_for_exited(&entry1).await;
     let (gen1, _kick1) = entry1.register_attach().await;
     entry1.clear_attach_if(gen1).await;
@@ -764,7 +764,7 @@ async fn registry_evicts_an_exited_window_once_its_attach_holder_let_go() {
         .expect("second open after id1 exited (living limit freed)")
         .window_id;
     let entry2 = registry.get(&id2).expect("get id2");
-    registry.terminate_all().await;
+    entry2.session().terminate();
     wait_for_exited(&entry2).await;
     // Still held, so id1 is the only eviction candidate.
     let (_gen2, _kick2) = entry2.register_attach().await;
@@ -847,7 +847,7 @@ async fn registry_total_entry_count_evicts_exactly_one_candidate_across_two_conc
             .expect("setup open")
             .window_id;
         let entry = registry.get(&id).expect("get setup window");
-        registry.terminate_all().await;
+        entry.session().terminate();
         wait_for_exited(&entry).await;
         evictable_ids.push(id);
     }
