@@ -10,6 +10,7 @@
 
 use crate::common;
 
+use std::path::Path;
 use std::time::Duration;
 
 use tracing_test::traced_test;
@@ -18,11 +19,16 @@ use yagura_daemon::inbox::{DeliverySpec, DoorOutputs, OutputForm, Parcel};
 use yagura_daemon::profile::parse_profile;
 use yagura_daemon::profile_delivery::ProfileDelivery;
 use yagura_daemon::store;
+use yagura_daemon::wake_file::WAKE_FILE_NAME;
 use yagura_daemon::window::WindowProvenance;
 use yagura_daemon::{DaemonConfig, OpenWindowRequest};
 use yagura_protocol::{ClientMessage, DaemonMessage, DeliveryStream, WindowStatus};
 use yagura_test_support::ipc::Connection;
 
+use crate::hooks_injection::{credentials_folder_of, until_gone};
+use crate::send_message_lifecycle::{
+    open_wake_window, outcome_of, register_wait, send_queued, state_of, wake_file_of, withdraw,
+};
 use common::{
     CONTROL_DETECTION_NAME, Harness, READY_MARKER, VALID_TOKEN, approver_base_config, call_door,
     detection_config, echo_child_path, expect_delivery, expect_error, query_status,
@@ -1355,4 +1361,244 @@ async fn a_parcel_that_could_not_be_written_never_shows_and_holds_nothing_back()
     let got = take(&h, &id).await;
     assert!(got.contains("PARCEL-LATER"), "{got:?}");
     assert!(!got.contains("PARCEL-DOOMED"), "{got:?}");
+}
+
+// --- asking a CLI with no wait to wait again --------------------------------------
+
+/// The definition the wake cases run under: `CTRL-READY` reads as idle, a `REACT` line as
+/// running and a `GONE` line as unknown, so a test changes the window's status without any
+/// door. Five bottom lines: blank lines push an older mark out of reach.
+const WAKE_ASK_DETECTION: &str = "wake-ask";
+
+/// Writes [`WAKE_ASK_DETECTION`] beside the control definition and lets a send through.
+fn wake_ask_config(config: &mut DaemonConfig) {
+    let dir = config
+        .detection_dir
+        .clone()
+        .expect("the wake cases read definitions from a directory");
+    std::fs::write(
+        dir.join(format!("{WAKE_ASK_DETECTION}.toml")),
+        yagura_test_support::detection::idle_definition_toml(
+            WAKE_ASK_DETECTION,
+            "bottom_line_count = 5\n",
+            "\n[[rules]]\nstatus = \"running\"\npattern = 'REACT'\npriority = 20\nregion = \"bottom\"\n\
+             \n[[rules]]\nstatus = \"unknown\"\npattern = 'GONE'\npriority = 30\nregion = \"bottom\"\n",
+        ),
+    )
+    .expect("write the wake definition");
+    config.approval_policy = Some(common::policy(&["send_message"]));
+}
+
+/// What the wake file at `path` holds; `None` while there is none.
+fn wake_text(path: &Path) -> Option<Vec<u8>> {
+    std::fs::read(path).ok()
+}
+
+/// Waits until the wake file at `path` holds something other than `before` (`None`: until
+/// there is one), and returns what it held then. The deadline only detects a hang.
+pub(crate) async fn until_rewritten(path: &Path, before: Option<&[u8]>) -> Vec<u8> {
+    let deadline = tokio::time::Instant::now() + yagura_test_support::HANG_GUARD;
+    loop {
+        let now = wake_text(path);
+        if now.as_deref() != before
+            && let Some(now) = now
+        {
+            return now;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "{} was not written again; it holds {:?}",
+            path.display(),
+            now.map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+/// [`until_rewritten`], then what the file holds once every write the daemon started has
+/// ended: the next comparison never sees a write half done.
+async fn asked_again(path: &Path, before: Option<&[u8]>) -> Vec<u8> {
+    until_rewritten(path, before).await;
+    common::let_every_clock_bound_run_out().await;
+    let now = wake_text(path).expect("a wake file once written stays");
+    assert_ne!(Some(now.as_slice()), before, "{}", path.display());
+    now
+}
+
+/// Asserts the wake file at `path` still holds `held` once everything the daemon had to do
+/// is done.
+async fn asked_nothing_more(path: &Path, held: Option<&[u8]>, why: &str) {
+    common::let_every_clock_bound_run_out().await;
+    assert_eq!(wake_text(path).as_deref(), held, "{why}");
+}
+
+/// A `wake = "wait"` window whose CLI has no wait registered is asked to wait again: the
+/// daemon writes the wake file its open named (and did not make) once a parcel can be
+/// pushed. It asks once and waits for the CLI's answer: a parcel arriving meanwhile asks
+/// nothing more, and nothing is asked while a wait is registered. A door that registers no
+/// wait, a wait registered, and the window's status changing each answer the ask, after
+/// which a parcel that can be pushed asks again, as one arriving after a wait ended
+/// unanswered does. Each ask leaves the file holding something else.
+#[tokio::test]
+async fn a_wait_window_with_no_wait_is_asked_once_until_its_cli_answers() {
+    let (h, mut client) = start("inbox-wake-ask", wake_ask_config).await;
+    let root = unique_temp_dir("inbox-wake-ask-creds");
+    let id = open_wake_window(&h, &root, "asked", WAKE_ASK_DETECTION, true).await;
+    let wake = wake_file_of(&root, &id);
+    h.write_input(&id, READY_MARKER).await;
+    wait_until_status(&mut client, &id, WindowStatus::Idle).await;
+    assert_eq!(wake_text(&wake), None, "the open makes no wake file");
+
+    let one = send_queued(&mut client, &id, "ASK-ONE").await;
+    let first = asked_again(&wake, None).await;
+    let two = send_queued(&mut client, &id, "ASK-TWO").await;
+    asked_nothing_more(
+        &wake,
+        Some(&first),
+        "a parcel arriving while the ask stands asks nothing more",
+    )
+    .await;
+
+    assert!(held(
+        call_door(&mut client, &report(&id, VALID_TOKEN, "s-1")).await
+    ));
+    let second = asked_again(&wake, Some(&first)).await;
+
+    for sent in [one, two] {
+        assert_eq!(
+            outcome_of(&withdraw(&mut client, &sent).await).as_deref(),
+            Some("withdrawn")
+        );
+    }
+    let mut waiter = register_wait(&h, &id).await;
+    common::send(
+        &mut client,
+        &ClientMessage::SendText {
+            window_id: id.clone(),
+            text: "ASK-THREE".to_string(),
+        },
+    )
+    .await;
+    let (output, _, _) = expect_delivery(common::read_response(&mut waiter).await);
+    assert!(output.contains("ASK-THREE"), "{output:?}");
+    common::send(&mut waiter, &printed()).await;
+    let answer = common::read_response(&mut client).await;
+    assert_eq!(
+        state_of(&answer).as_deref(),
+        Some("delivered"),
+        "{answer:?}"
+    );
+    asked_nothing_more(
+        &wake,
+        Some(&second),
+        "a parcel handed to the registered wait asks nothing",
+    )
+    .await;
+    send_queued(&mut client, &id, "ASK-FOUR").await;
+    let third = asked_again(&wake, Some(&second)).await;
+
+    assert!(take(&h, &id).await.contains("ASK-FOUR"));
+    drop(register_wait(&h, &id).await);
+    until("the wait that ended unanswered to be dropped", || {
+        !has_waiter(&h, &id)
+    })
+    .await;
+    send_queued(&mut client, &id, "ASK-FIVE").await;
+    let fourth = asked_again(&wake, Some(&third)).await;
+
+    h.write_input(&id, b"REACT\r").await;
+    wait_until_status(&mut client, &id, WindowStatus::Running).await;
+    until_rewritten(&wake, Some(&fourth)).await;
+}
+
+/// Nothing is asked of a window whose CLI has a wait registered once it can be pushed to,
+/// of one that cannot be pushed to (`Unknown`, `Exited`) though the ask was answered and a
+/// parcel waits, or of one with no wake file: what waits there waits for the CLI's next
+/// event.
+#[tokio::test]
+async fn a_window_that_cannot_be_pushed_to_or_has_no_wake_file_is_never_asked() {
+    let (h, mut client) = start("inbox-wake-never", wake_ask_config).await;
+    let root = unique_temp_dir("inbox-wake-never-creds");
+    let id = open_wake_window(&h, &root, "never", WAKE_ASK_DETECTION, true).await;
+    let wake = wake_file_of(&root, &id);
+    h.write_input(&id, READY_MARKER).await;
+    wait_until_status(&mut client, &id, WindowStatus::Idle).await;
+
+    let mut waiter = register_wait(&h, &id).await;
+    common::send(
+        &mut client,
+        &ClientMessage::SendText {
+            window_id: id.clone(),
+            text: "HANDED-TO-THE-WAIT".to_string(),
+        },
+    )
+    .await;
+    let (output, _, _) = expect_delivery(common::read_response(&mut waiter).await);
+    assert!(output.contains("HANDED-TO-THE-WAIT"), "{output:?}");
+    common::send(&mut waiter, &printed()).await;
+    let answer = common::read_response(&mut client).await;
+    assert_eq!(
+        state_of(&answer).as_deref(),
+        Some("delivered"),
+        "{answer:?}"
+    );
+    asked_nothing_more(
+        &wake,
+        None,
+        "a parcel handed to the registered wait asks nothing",
+    )
+    .await;
+
+    send_queued(&mut client, &id, "LEFT-WAITING").await;
+    let first = asked_again(&wake, None).await;
+    h.write_input(&id, b"GONE\r").await;
+    wait_until_status(&mut client, &id, WindowStatus::Unknown).await;
+    asked_nothing_more(
+        &wake,
+        Some(&first),
+        "the status change answered the ask, but nothing is asked of an Unknown window",
+    )
+    .await;
+
+    let mut waiter = register_wait(&h, &id).await;
+    h.write_input(&id, b"\r\n\r\n\r\n\r\n\r\n").await;
+    h.write_input(&id, READY_MARKER).await;
+    let (output, _, _) = expect_delivery(common::read_response(&mut waiter).await);
+    assert!(output.contains("LEFT-WAITING"), "{output:?}");
+    common::send(&mut waiter, &printed()).await;
+    until("the printed parcel to leave", || pending(&h, &id) == 0).await;
+    asked_nothing_more(
+        &wake,
+        Some(&first),
+        "a wait was registered when the window could be pushed to again",
+    )
+    .await;
+
+    send_queued(&mut client, &id, "LEFT-AT-THE-END").await;
+    let folder = credentials_folder_of(&root, &id).expect("a launch window has its folder");
+    asked_again(&wake, Some(&first)).await;
+    h.registry
+        .get(&id)
+        .expect("window exists")
+        .session()
+        .terminate();
+    wait_until_status(&mut client, &id, WindowStatus::Exited).await;
+    until_gone(&folder).await;
+    common::let_every_clock_bound_run_out().await;
+    assert!(
+        !folder.exists(),
+        "nothing is asked of an exited window, which would make its folder again"
+    );
+
+    let unasked = open_wake_window(&h, &root, "unasked", WAKE_ASK_DETECTION, false).await;
+    let unasked_folder =
+        credentials_folder_of(&root, &unasked).expect("a launch window has its folder");
+    h.write_input(&unasked, READY_MARKER).await;
+    wait_until_status(&mut client, &unasked, WindowStatus::Idle).await;
+    send_queued(&mut client, &unasked, "NEVER-UNASKED").await;
+    common::let_every_clock_bound_run_out().await;
+    assert!(
+        !unasked_folder.join(WAKE_FILE_NAME).exists(),
+        "a window with no wake file is never asked"
+    );
 }

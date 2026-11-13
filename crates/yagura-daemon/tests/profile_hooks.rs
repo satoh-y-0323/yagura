@@ -196,9 +196,11 @@ fn commands_by_event(document: &str) -> BTreeMap<String, Vec<String>> {
         .collect()
 }
 
-/// The hooks the shipped profiles inject: the status reports, and the three doors a window's
+/// The hooks the shipped profiles inject: the status reports, the three doors a window's
 /// CLI reads its inbox through (start-up context, the start of a turn, and a wait that the
-/// daemon answers when something arrives for a waiting CLI).
+/// daemon answers when something arrives for a waiting CLI), the wait its wake file starts
+/// again, and the answers that hand the CLI the wake file to watch without asking the
+/// daemon (at start-up, and again whenever the CLI changes directory).
 fn expected_commands(program: &str, credentials: &str) -> BTreeMap<String, Vec<String>> {
     let report = |status: &str| {
         hook_command(
@@ -208,13 +210,20 @@ fn expected_commands(program: &str, credentials: &str) -> BTreeMap<String, Vec<S
         )
     };
     let door = |name: &str| hook_command(program, credentials, &format!("--deliver-{name}"));
+    let answer =
+        |event: &str| hook_command(program, credentials, &format!("--print-answer {event}"));
     let mut expected: BTreeMap<String, Vec<String>> = [
         ("PreToolUse", vec![report("running")]),
         ("PostToolUse", vec![report("running")]),
         ("PermissionRequest", vec![report("waiting_approval")]),
         ("StopFailure", vec![report("waiting_input")]),
         ("UserPromptSubmit", vec![report("running"), door("take")]),
-        ("SessionStart", vec![door("context"), door("wait")]),
+        (
+            "SessionStart",
+            vec![door("context"), door("wait"), answer("SessionStart")],
+        ),
+        ("CwdChanged", vec![answer("CwdChanged")]),
+        ("FileChanged", vec![door("wait")]),
         ("Stop", vec![report("waiting_input"), door("wait")]),
     ]
     .into_iter()
@@ -292,22 +301,24 @@ fn shipped_documents() -> [(&'static str, &'static str, String); 2] {
 /// The profile's wake timeout, as the hook that waits must carry it.
 const WAKE_TIMEOUT_SECS: u64 = 86_400;
 
+/// The file the daemon writes to ask a window's CLI to wait again: the group that starts the
+/// wait on its change matches it alone.
+const WAKE_FILE_MATCHER: &str = "yagura_wake";
+
 #[test]
 fn the_hook_that_waits_for_the_daemon_is_asynchronous_and_outlives_a_long_idle() {
     for (id, program, document) in shipped_documents() {
         let wait = hook_command(program, CREDENTIALS_FILE, "--deliver-wait");
         let by_event = hooks_by_event(&document);
-        for event in ["SessionStart", "Stop"] {
-            let waits: Vec<_> = by_event[event]
+        for event in ["SessionStart", "Stop", "FileChanged"] {
+            let hooks = by_event
+                .get(event)
+                .unwrap_or_else(|| panic!("{id}: {event} ships no hook: {by_event:?}"));
+            let waits: Vec<_> = hooks
                 .iter()
                 .filter(|hook| hook["command"] == wait.as_str())
                 .collect();
-            assert_eq!(
-                waits.len(),
-                1,
-                "{id}: {event} carries one wait: {:?}",
-                by_event[event]
-            );
+            assert_eq!(waits.len(), 1, "{id}: {event} carries one wait: {hooks:?}");
             let hook = waits[0];
             assert_eq!(
                 hook["asyncRewake"],
@@ -320,6 +331,24 @@ fn the_hook_that_waits_for_the_daemon_is_asynchronous_and_outlives_a_long_idle()
                 "{id}: {event}: the hook outlives the default timeout: {hook}"
             );
         }
+        let settings: serde_json::Value =
+            serde_json::from_str(&document).expect("the hooks settings must be valid JSON");
+        let matchers: Vec<&serde_json::Value> = settings["hooks"]["FileChanged"]
+            .as_array()
+            .unwrap_or_else(|| panic!("{id}: FileChanged maps to an array of groups"))
+            .iter()
+            .filter(|group| {
+                group["hooks"]
+                    .as_array()
+                    .is_some_and(|hooks| hooks.iter().any(|hook| hook["command"] == wait.as_str()))
+            })
+            .map(|group| &group["matcher"])
+            .collect();
+        assert_eq!(
+            matchers,
+            [&serde_json::Value::String(WAKE_FILE_MATCHER.to_string())],
+            "{id}: the wait a changed file starts is started by the wake file alone"
+        );
     }
 }
 

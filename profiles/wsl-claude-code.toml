@@ -46,12 +46,20 @@ args = ["--mcp-config", '{"mcpServers":{"{server}":{"command":"${YAGURA_MCP_BRID
 
 # Each hook event reports the turn's start, a permission prompt, or its end to
 # the daemon, each door handed the credentials file (verified with Claude Code
-# 2.1.285).
+# 2.1.285). The wake file is asked for as in claude-code.toml.
 # The JSON is inline so the launch hands the WSL CLI no path to convert, and
 # the Windows executable is called by name because a Linux shell does not
 # resolve the bare name.
 [hooks]
-args = ["--settings", '''{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"yagura-daemon.exe --credentials '{credentials_file}' --deliver-context"},{"type":"command","command":"yagura-daemon.exe --credentials '{credentials_file}' --deliver-wait","asyncRewake":true,"timeout":{hook_timeout.doors.wait}}]}],"UserPromptSubmit":[{"hooks":[{"type":"command","command":"yagura-daemon.exe --credentials '{credentials_file}' --emit-status running --source claude-code --skip-if /agent_id"},{"type":"command","command":"yagura-daemon.exe --credentials '{credentials_file}' --deliver-take"}]}],"PreToolUse":[{"hooks":[{"type":"command","command":"yagura-daemon.exe --credentials '{credentials_file}' --emit-status running --source claude-code --skip-if /agent_id"}]}],"PostToolUse":[{"hooks":[{"type":"command","command":"yagura-daemon.exe --credentials '{credentials_file}' --emit-status running --source claude-code --skip-if /agent_id"}]}],"PermissionRequest":[{"hooks":[{"type":"command","command":"yagura-daemon.exe --credentials '{credentials_file}' --emit-status waiting_approval --source claude-code --skip-if /agent_id"}]}],"Stop":[{"hooks":[{"type":"command","command":"yagura-daemon.exe --credentials '{credentials_file}' --emit-status waiting_input --source claude-code --skip-if /agent_id"},{"type":"command","command":"yagura-daemon.exe --credentials '{credentials_file}' --deliver-wait","asyncRewake":true,"timeout":{hook_timeout.doors.wait}}]}],"StopFailure":[{"hooks":[{"type":"command","command":"yagura-daemon.exe --credentials '{credentials_file}' --emit-status waiting_input --source claude-code --skip-if /agent_id"}]}]}}''']
+args = ["--settings", '''{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"yagura-daemon.exe --credentials '{credentials_file}' --deliver-context"},{"type":"command","command":"yagura-daemon.exe --credentials '{credentials_file}' --deliver-wait","asyncRewake":true,"timeout":{hook_timeout.doors.wait}},{"type":"command","command":"yagura-daemon.exe --credentials '{credentials_file}' --print-answer SessionStart"}]}],"UserPromptSubmit":[{"hooks":[{"type":"command","command":"yagura-daemon.exe --credentials '{credentials_file}' --emit-status running --source claude-code --skip-if /agent_id"},{"type":"command","command":"yagura-daemon.exe --credentials '{credentials_file}' --deliver-take"}]}],"PreToolUse":[{"hooks":[{"type":"command","command":"yagura-daemon.exe --credentials '{credentials_file}' --emit-status running --source claude-code --skip-if /agent_id"}]}],"PostToolUse":[{"hooks":[{"type":"command","command":"yagura-daemon.exe --credentials '{credentials_file}' --emit-status running --source claude-code --skip-if /agent_id"}]}],"PermissionRequest":[{"hooks":[{"type":"command","command":"yagura-daemon.exe --credentials '{credentials_file}' --emit-status waiting_approval --source claude-code --skip-if /agent_id"}]}],"Stop":[{"hooks":[{"type":"command","command":"yagura-daemon.exe --credentials '{credentials_file}' --emit-status waiting_input --source claude-code --skip-if /agent_id"},{"type":"command","command":"yagura-daemon.exe --credentials '{credentials_file}' --deliver-wait","asyncRewake":true,"timeout":{hook_timeout.doors.wait}}]}],"CwdChanged":[{"hooks":[{"type":"command","command":"yagura-daemon.exe --credentials '{credentials_file}' --print-answer CwdChanged"}]}],"FileChanged":[{"matcher":"yagura_wake","hooks":[{"type":"command","command":"yagura-daemon.exe --credentials '{credentials_file}' --deliver-wait","asyncRewake":true,"timeout":{hook_timeout.doors.wait}}]}],"StopFailure":[{"hooks":[{"type":"command","command":"yagura-daemon.exe --credentials '{credentials_file}' --emit-status waiting_input --source claude-code --skip-if /agent_id"}]}]}}''']
+
+# What the window's open leaves beside its credentials file for the
+# `--print-answer` hooks, which print it without asking the daemon: the wake
+# file the CLI watches, handed over at start-up and again on each change of
+# directory, so the list holds even while no daemon runs.
+[hooks.answers]
+SessionStart = '{"hookSpecificOutput":{"hookEventName":"SessionStart","watchPaths":{wake_paths}}}'
+CwdChanged = '{"hookSpecificOutput":{"hookEventName":"CwdChanged","watchPaths":{wake_paths}}}'
 
 # The seconds Claude Code gives a hook command that registers a `timeout`: the
 # wait (`asyncRewake`) takes it in `[hooks]` through
@@ -79,6 +87,9 @@ convert = ["wsl", "-e", "wslpath", "-u", "{path}"]
 # the script -- never spliced into the script string itself.
 read = ["wsl", "-e", "sh", "-c", 'f="$HOME/$1"; [ -e "$f" ] || exit 3; exec cat -- "$f"', "sh", "{file}"]
 absent_exit = 3
+# The guest's state folder, as the guest names it and as `wslpath -w` reaches
+# it from Windows: the window's wake file goes under it.
+state_base = ["wsl", "-e", "sh", "-c", 'b="${XDG_STATE_HOME:-$HOME/.local/state}"; printf "%s\n" "$b"; wslpath -w "$b"']
 
 # The registration commands below run the same way any other window from
 # this profile does: through the launch argv above, so they reach the same

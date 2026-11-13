@@ -400,6 +400,9 @@ pub struct WaitingFacts {
     pub status: WindowStatus,
     /// Whether the CLI has a wait registered now.
     pub has_waiter: bool,
+    /// Whether the daemon asks a CLI with no wait registered to register one
+    /// again: the window's open named a wake file.
+    pub asks_again: bool,
     /// Whether the CLI has reported a session the wake command can name.
     pub session_known: bool,
     /// Whether a door is carrying the envelope and has not said it printed it.
@@ -423,6 +426,7 @@ pub struct WaitingFacts {
 ///     wake: WaitingWake::Wait,
 ///     status: WindowStatus::Running,
 ///     has_waiter: false,
+///     asks_again: false,
 ///     session_known: true,
 ///     carried: false,
 ///     saved: false,
@@ -443,6 +447,10 @@ pub fn waiting_note(facts: WaitingFacts) -> Option<String> {
     } else {
         match facts.wake {
             WaitingWake::Wait if facts.has_waiter => return None,
+            WaitingWake::Wait if facts.asks_again => {
+                "No wait of the window's CLI was registered, so the daemon asked the CLI to \
+                 register one again; it is handed over once the CLI does, or at its next turn."
+            }
             WaitingWake::Wait => {
                 "No wait of the window's CLI is registered right now; it arrives at the CLI's \
                  next turn."

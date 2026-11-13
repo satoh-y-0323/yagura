@@ -4067,6 +4067,7 @@ impl IpcServer {
             peer,
             guest: None,
             refused: LineageAnswer::Error,
+            registers_wait: false,
         };
         let Some(entry) = self
             .authenticate_window(outbound, door, token, window_id)
@@ -4124,6 +4125,12 @@ impl IpcServer {
     ///
     /// The one place a door is admitted, last: only a request whose
     /// credentials hold is judged ([`IpcServer::admit`]).
+    ///
+    /// A door admitted is the window's CLI answering an ask to wait again
+    /// ([`crate::inbox::Inbox::ask_due`]), so an ask that stood is taken back
+    /// and the window's agent looks again; a door that registers a wait takes
+    /// it back as it registers, after this. A window never asked is not
+    /// woken: its agent would race the door for what waits.
     async fn authenticate_window(
         &self,
         outbound: &Outbound,
@@ -4136,12 +4143,18 @@ impl IpcServer {
             peer,
             guest,
             refused,
+            registers_wait,
         } = door;
         let window = self
             .verify_credentials(outbound, name, token, window_id)
             .await?;
         match self.admit(window, peer, guest).await {
-            Ok(entry) => Some(entry),
+            Ok(entry) => {
+                if !registers_wait && entry.inbox().clear_ask() {
+                    entry.wake_notice_agent();
+                }
+                Some(entry)
+            }
             Err(denied) => {
                 outbound.reply(&match refused {
                     LineageAnswer::Silence => crate::inbox::silence(),
@@ -4921,6 +4934,8 @@ pub(super) struct HookDoor<'a> {
     pub(super) guest: Option<&'a GuestLineage>,
     /// How a request its window's lineage refuses is answered.
     pub(super) refused: LineageAnswer,
+    /// Whether the door registers a wait once admitted.
+    pub(super) registers_wait: bool,
 }
 
 impl<'a> HookDoor<'a> {
@@ -4931,12 +4946,21 @@ impl<'a> HookDoor<'a> {
             peer,
             guest: None,
             refused: LineageAnswer::Silence,
+            registers_wait: false,
         }
     }
 
     /// The door with what its request collected of its lineage in a WSL guest.
     pub(super) fn with_guest(self, guest: Option<&'a GuestLineage>) -> Self {
         Self { guest, ..self }
+    }
+
+    /// The door, which registers a wait once admitted when `registers_wait`.
+    pub(super) fn registering_wait(self, registers_wait: bool) -> Self {
+        Self {
+            registers_wait,
+            ..self
+        }
     }
 }
 
@@ -5489,6 +5513,7 @@ pub(crate) fn waiting_note_for(entry: &WindowEntry, carried: bool, saved: bool) 
         wake,
         status: entry.current_status(),
         has_waiter: entry.inbox().has_waiter(),
+        asks_again: entry.wake_record().is_some(),
         session_known: entry.session_id().is_some(),
         carried,
         saved,

@@ -4339,3 +4339,141 @@ async fn a_window_whose_row_predates_the_wake_record_holds_no_wake_slot() {
         sandbox.daemon_log()
     );
 }
+
+// --- a taken-back window whose CLI has no wait is asked to wait again --------------------
+
+/// Writes the profile `id`: a `launch` window whose CLI keeps it open on this host, with a
+/// `{wake_paths}` answer, and whose `[delivery]` wakes its CLI by answering the wait the CLI
+/// registers, on stderr with exit code 2.
+fn write_wait_wake_profile(sandbox: &Sandbox, id: &str) {
+    use crate::hooks_injection::{WAKE_ANSWER, wake_profile};
+    let cli = crate::credentials_launch::quiet_cli(&sandbox.tree.make_dir(&format!("logs-{id}")));
+    let source = wake_profile(id, &cli, &[("SessionStart", WAKE_ANSWER)], None);
+    common::write_profile(
+        &sandbox.profiles_dir,
+        id,
+        &format!(
+            "{source}\n[delivery]\nwake = \"wait\"\nwake_stream = \"stderr\"\nwake_exit = 2\n"
+        ),
+    );
+}
+
+/// Reports that the CLI of `window_id` waits for input, as its hooks do, and waits until the
+/// window can be pushed to (its status is neither `Unknown` nor `Exited`).
+async fn until_pushable(daemon: &mut RunningDaemon, sandbox: &Sandbox, window_id: &str) {
+    let status = WindowStatus::WaitingInput;
+    send(
+        &mut daemon.client,
+        &ClientMessage::StatusEvent {
+            source: "cli".to_owned(),
+            status,
+            window_id: Some(window_id.to_owned()),
+            token: TOKEN.to_owned(),
+        },
+    )
+    .await;
+    send(&mut daemon.client, &ClientMessage::Ping).await;
+    match read_response(&mut daemon.client).await {
+        DaemonMessage::Pong => {}
+        other => panic!("the status report must be taken, got {other:?}"),
+    }
+    let deadline = tokio::time::Instant::now() + HANG_GUARD;
+    while matches!(
+        listed(daemon, sandbox, window_id).await.status,
+        WindowStatus::Unknown | WindowStatus::Exited
+    ) {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "{window_id} could never be pushed to; daemon log:\n{}",
+            sandbox.daemon_log()
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+/// Sends `text` to `window_id`, which must leave it waiting.
+async fn send_waiting(daemon: &mut RunningDaemon, window_id: &str, text: &str) {
+    send(
+        &mut daemon.client,
+        &ClientMessage::SendText {
+            window_id: window_id.to_owned(),
+            text: text.to_owned(),
+        },
+    )
+    .await;
+    let answer = read_response(&mut daemon.client).await;
+    assert_eq!(
+        crate::send_message_lifecycle::state_of(&answer).as_deref(),
+        Some("queued"),
+        "{text} must be left waiting: {answer:?}"
+    );
+}
+
+/// A `wake = "wait"` window taken back by the next daemon is asked to wait again once it can
+/// be pushed to and its CLI has no wait registered: the next daemon writes the wake file
+/// the window's open named (so it holds something other than what the first daemon's ask
+/// left), and the wait its CLI registers on that change is handed the parcel the store kept
+/// from before the first daemon ended and the one sent after, in the profile's stream and
+/// exit code.
+#[tokio::test]
+async fn a_taken_back_wait_window_with_no_wait_is_asked_again_and_its_next_wait_takes_every_parcel()
+{
+    const WAKE: &str = "wake-ask";
+    let sandbox = Sandbox::new("recover-wake-ask");
+    write_wait_wake_profile(&sandbox, WAKE);
+    let playbook = sandbox
+        .tree
+        .make_dir("wake-ask-playbook")
+        .join("playbook.toml");
+    std::fs::write(
+        &playbook,
+        "[approval]\nauto_approve = [\"open_window\", \"close_window\", \"send_message\"]\n",
+    )
+    .unwrap();
+    let env = [
+        ("YAGURA_STATUS_TOKEN_OVERRIDE", TOKEN),
+        ("YAGURA_PLAYBOOK", utf8(&playbook)),
+    ];
+
+    let mut first = sandbox.start_from(&env).await;
+    let window_id = first.open_profile_window(&sandbox, WAKE).await;
+    let paths = sandbox_wake_paths(&sandbox, &window_id)
+        .unwrap_or_else(|| panic!("the open of {window_id} names no wake file"));
+    let wake = PathBuf::from(&paths[0]);
+    until_pushable(&mut first, &sandbox, &window_id).await;
+    send_waiting(&mut first, &window_id, "SENT-BEFORE-RESTART").await;
+    crate::inbox::until_rewritten(&wake, None).await;
+    until_rows_settled(&sandbox, &[&window_id]).await;
+    first.kill_keeping_windows();
+    let before = std::fs::read(&wake).expect("the first daemon's ask stays");
+    // A message's envelope goes with its daemon; a parcel the store keeps stays.
+    seed_parcel(&sandbox, &window_id, "KEPT-BEFORE-RESTART");
+
+    let mut next = sandbox.start_from(&env).await;
+    listed(&mut next, &sandbox, &window_id).await;
+    until_pushable(&mut next, &sandbox, &window_id).await;
+    crate::inbox::until_rewritten(&wake, Some(&before)).await;
+    send_waiting(&mut next, &window_id, "AFTER-RESTART").await;
+
+    let mut door = connect(&sandbox).await;
+    send(
+        &mut door,
+        &ClientMessage::DoorRead {
+            window_id: window_id.clone(),
+            token: TOKEN.to_owned(),
+            door: yagura_protocol::Door::Wait,
+            guest: None,
+        },
+    )
+    .await;
+    let (output, stream, code) = common::expect_delivery(read_response(&mut door).await);
+    for text in ["KEPT-BEFORE-RESTART", "AFTER-RESTART"] {
+        assert!(
+            output.contains(text),
+            "the wait is handed {text}: {output:?}"
+        );
+    }
+    assert_eq!(stream, yagura_protocol::DeliveryStream::Stderr);
+    assert_eq!(code, 2);
+    send(&mut door, &ClientMessage::DeliverPrinted).await;
+}

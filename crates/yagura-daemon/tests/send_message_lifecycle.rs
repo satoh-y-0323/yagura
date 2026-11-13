@@ -11,7 +11,8 @@
 
 use crate::common;
 
-use std::path::Path;
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -77,6 +78,73 @@ pub(crate) async fn open_wait_window(
     h.write_input(&window_id, READY_MARKER).await;
     wait_until_status(client, &window_id, WindowStatus::Idle).await;
     window_id
+}
+
+/// An `echo_child` window under `detection` whose profile wakes its CLI by answering the
+/// wait the CLI registers, opened as a `launch` window whose hooks are injected, with its
+/// credentials folder `root/creds/<name>`. With `wake` its `[hooks]` answer names
+/// `{wake_paths}`, so its open gives it a wake file; without, its one answer names nothing.
+/// Left `Unknown`: the caller drives it on.
+pub(crate) async fn open_wake_window(
+    h: &Harness,
+    root: &Path,
+    name: &str,
+    detection: &str,
+    wake: bool,
+) -> String {
+    use crate::hooks_injection::{PLAIN_ANSWER, WAKE_ANSWER};
+    let (event, answer) = if wake {
+        ("SessionStart", WAKE_ANSWER)
+    } else {
+        ("Plain", PLAIN_ANSWER)
+    };
+    let texts: BTreeMap<String, String> = [(event.to_string(), answer.to_string())]
+        .into_iter()
+        .collect();
+    h.registry
+        .open_with_extra_env(
+            yagura_daemon::OpenWindowRequest {
+                command: yagura_test_support::process::echo_child_command(),
+                cwd: None,
+                name: None,
+                vendor: None,
+                detection: Some(detection.to_string()),
+                on_name_taken: Default::default(),
+            },
+            Vec::new(),
+            vec![yagura_daemon::window::CliInjection {
+                kind: yagura_daemon::window::InjectionKind::Hooks,
+                args: vec!["--hooks".to_string(), "injected".to_string()],
+                config_file: None,
+                config_dir: None,
+            }],
+            yagura_daemon::window::WindowProvenance {
+                delivery: Some(yagura_daemon::profile_delivery::ProfileDelivery {
+                    wake: yagura_daemon::profile_delivery::WakeMode::Wait,
+                    ..common::wake_none_delivery()
+                }),
+                hooks: yagura_daemon::window::HooksRoute::Injection,
+                credentials: yagura_daemon::profile::CredentialsMode::Launch,
+                credentials_dir: Some(root.join("creds").join(name)),
+                hook_answers: yagura_daemon::wake_file::HookAnswers {
+                    texts,
+                    wake: wake.then_some(yagura_daemon::wake_file::WakePlace::Folder),
+                },
+                ..yagura_daemon::window::WindowProvenance::default()
+            },
+        )
+        .await
+        .expect("registry.open_with_extra_env should spawn the child")
+        .window_id
+}
+
+/// The wake file the open of `window_id` (a window of [`open_wake_window`] under `root`)
+/// handed its CLI to watch.
+pub(crate) fn wake_file_of(root: &Path, window_id: &str) -> PathBuf {
+    let paths = crate::hooks_injection::wake_paths_of(root, window_id)
+        .unwrap_or_else(|| panic!("the open of {window_id} names no wake file"));
+    assert_eq!(paths.len(), 1, "one wake file: {paths:?}");
+    PathBuf::from(&paths[0])
 }
 
 /// Sends a door's read of `door` for `window_id` on `conn`.
@@ -368,49 +436,83 @@ async fn send_message_puts_its_envelope_in_the_inbox_and_writes_nothing_to_the_w
             .unwrap_or(0),
         0
     );
+
+    // With no wait registered, a window with a wake file is asked to wait again, which its
+    // note says; one without says what the note above says.
+    let root = unique_temp_dir("send-message-inbox-wake");
+    for (name, wake) in [("asked", true), ("unasked", false)] {
+        let wake_window =
+            open_wake_window(&h, &root, name, LEADING_KEYS_DETECTION_NAME, wake).await;
+        h.write_input(&wake_window, READY_MARKER).await;
+        wait_until_status(&mut client, &wake_window, WindowStatus::Idle).await;
+        let answer = send_text(&mut client, &wake_window, "WAKE-NOTE-7K").await;
+        assert_eq!(state_of(&answer).as_deref(), Some("queued"), "{answer:?}");
+        let wake_note = note_of(&answer)
+            .unwrap_or_else(|| panic!("{name}: a waiting envelope's answer has a note"));
+        assert!(!wake_note.is_empty(), "{name}");
+        if wake {
+            assert_ne!(
+                wake_note, note,
+                "a window with a wake file is asked to wait again, so its note says that"
+            );
+        } else {
+            assert_eq!(
+                wake_note, note,
+                "a window without a wake file waits for its CLI's next turn, as one with no hooks does"
+            );
+        }
+    }
 }
 
 /// A CLI that left a wait registered is handed the envelope at once; the answer
-/// waits for the door to say it printed it and then needs no note.
+/// waits for the door to say it printed it and then needs no note, also in a window
+/// with a wake file.
 #[tokio::test]
 async fn send_message_to_a_window_whose_cli_waits_is_delivered_once_the_door_printed_it() {
     let dir = unique_temp_dir("send-message-waited");
     let h = Harness::start("send-message-waited", sending_config(&dir)).await;
     let mut client = h.connect().await;
-    let window_id = open_wait_window(&h, &mut client, CONTROL_DETECTION_NAME).await;
-    let writes_before = entry(&h, &window_id).write_seq();
-    let mut door = register_wait(&h, &window_id).await;
+    let plain = open_wait_window(&h, &mut client, CONTROL_DETECTION_NAME).await;
+    let root = unique_temp_dir("send-message-waited-wake");
+    let with_wake_file = open_wake_window(&h, &root, "waited", CONTROL_DETECTION_NAME, true).await;
+    h.write_input(&with_wake_file, READY_MARKER).await;
+    wait_until_status(&mut client, &with_wake_file, WindowStatus::Idle).await;
 
-    send(
-        &mut client,
-        &ClientMessage::SendText {
-            window_id: window_id.clone(),
-            text: "WAITED-BODY-3R".to_string(),
-        },
-    )
-    .await;
-    let output = match first_of(&mut door, &mut client).await {
-        First::Door(delivery) => expect_delivery(delivery).0,
-        First::Requester(answer) => {
-            panic!("the answer must wait for the door the envelope was handed to: {answer:?}")
-        }
-    };
-    assert!(output.contains("WAITED-BODY-3R"), "{output:?}");
-    send(&mut door, &ClientMessage::DeliverPrinted).await;
+    for window_id in [plain, with_wake_file] {
+        let writes_before = entry(&h, &window_id).write_seq();
+        let mut door = register_wait(&h, &window_id).await;
 
-    let answer = read_response(&mut client).await;
-    assert_eq!(
-        state_of(&answer).as_deref(),
-        Some("delivered"),
-        "{answer:?}"
-    );
-    assert_eq!(
-        note_of(&answer),
-        None,
-        "a wait was registered, so there is nothing to say about when it arrives"
-    );
-    assert!(output.contains(&id_of(&answer)), "{output:?}");
-    assert_eq!(entry(&h, &window_id).write_seq(), writes_before);
+        send(
+            &mut client,
+            &ClientMessage::SendText {
+                window_id: window_id.clone(),
+                text: "WAITED-BODY-3R".to_string(),
+            },
+        )
+        .await;
+        let output = match first_of(&mut door, &mut client).await {
+            First::Door(delivery) => expect_delivery(delivery).0,
+            First::Requester(answer) => {
+                panic!("the answer must wait for the door the envelope was handed to: {answer:?}")
+            }
+        };
+        assert!(output.contains("WAITED-BODY-3R"), "{output:?}");
+        send(&mut door, &ClientMessage::DeliverPrinted).await;
+
+        let answer = read_response(&mut client).await;
+        assert_eq!(
+            state_of(&answer).as_deref(),
+            Some("delivered"),
+            "{answer:?}"
+        );
+        assert_eq!(
+            note_of(&answer),
+            None,
+            "a wait was registered, so there is nothing to say about when it arrives"
+        );
+        assert!(output.contains(&id_of(&answer)), "{output:?}");
+        assert_eq!(entry(&h, &window_id).write_seq(), writes_before);
+    }
 }
 
 // =====================================================================

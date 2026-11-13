@@ -16,6 +16,7 @@
 use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
@@ -325,6 +326,70 @@ impl WakeHold {
         let previous = std::mem::replace(&mut *lock_recover(&self.0), HoldState::Released);
         drop(previous);
     }
+}
+
+/// The most wake files the daemon writes at once. A write is one small file,
+/// though one in a WSL guest may wait on the guest's file server.
+pub(crate) const WAKE_WRITES_MAX_CONCURRENT: usize = 4;
+
+/// Writes wake files: each write leaves the file holding text it never held
+/// before, also across daemon restarts, since a CLI's watcher may not see a
+/// write of the same text as a change.
+pub(crate) struct WakeWriter {
+    permits: Arc<Semaphore>,
+    /// Names this daemon's run in every text it writes.
+    run: String,
+    written: AtomicU64,
+}
+
+impl WakeWriter {
+    pub(crate) fn new() -> Self {
+        let since_epoch = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |since| since.as_nanos());
+        Self {
+            permits: Arc::new(Semaphore::new(WAKE_WRITES_MAX_CONCURRENT)),
+            run: format!("{}-{since_epoch}", crate::handoff::new_envelope_id()),
+            written: AtomicU64::new(0),
+        }
+    }
+
+    /// Writes the wake file `record` names, making its folder first, off the
+    /// runtime's threads.
+    ///
+    /// # Errors
+    ///
+    /// The file is a link, or making its folder or writing it fails.
+    pub(crate) async fn write(&self, record: &WakeRecord) -> std::io::Result<()> {
+        let permit = Arc::clone(&self.permits)
+            .acquire_owned()
+            .await
+            .map_err(std::io::Error::other)?;
+        let text = format!(
+            "{}-{}\n",
+            self.run,
+            self.written.fetch_add(1, Ordering::Relaxed)
+        );
+        let path = PathBuf::from(&record.write);
+        tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            write_wake_file(&path, &text)
+        })
+        .await
+        .map_err(std::io::Error::other)?
+    }
+}
+
+/// Blocking: writes `text` over the wake file at `path`, making its folder
+/// first. A link is never written through: the file is the daemon's own.
+fn write_wake_file(path: &Path, text: &str) -> std::io::Result<()> {
+    if let Some(folder) = path.parent() {
+        std::fs::create_dir_all(folder)?;
+    }
+    if std::fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_symlink()) {
+        return Err(std::io::Error::other("the wake file is a link"));
+    }
+    std::fs::write(path, text)
 }
 
 /// How a window's open reads a guest's state base: the profile's

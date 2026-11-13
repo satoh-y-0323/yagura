@@ -1045,7 +1045,7 @@ const HOOK_REGISTRATION_TEXT_SHA256: &[(&str, &str)] = &[
     ),
     (
         "claude-code",
-        "3eade0ff85b1ce356b9f0da18fe38e9df4a69544ed096509cd207a8e9ee4e567",
+        "48910c227e355a392e368d1d099e9370998f58b2ecf5305177d83a8c5296d2ef",
     ),
     (
         "codex-cli",
@@ -1065,7 +1065,7 @@ const HOOK_REGISTRATION_TEXT_SHA256: &[(&str, &str)] = &[
     ),
     (
         "wsl-claude-code",
-        "b74899b4c3d29bd80100d362f3c70a55643df6c45d83d6b806ee74e90d9ae12c",
+        "4310ef4041bdc08779c94070edd5c1f90612426e61a6d21966f1eef0a11c20f5",
     ),
     (
         "wsl-codex-cli",

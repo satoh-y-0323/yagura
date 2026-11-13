@@ -6,7 +6,10 @@
 //! of a CLI:
 //!
 //! - `wait`: answers the wait the CLI left registered, whenever the window can
-//!   be pushed to again.
+//!   be pushed to again. With none registered, a window whose open named a
+//!   wake file has its CLI asked to register one again: the daemon writes the
+//!   file once, and asks again only after the CLI answered (a door of the
+//!   window arrived, a wait registered) or the window's status changed.
 //! - `command`: runs the profile's own program with the wake arguments, once
 //!   the CLI has reported its session. A failed run puts the parcels back and
 //!   is not repeated until something changes.
@@ -29,6 +32,7 @@ use crate::inbox::{Deposited, Parcel, ParcelEnd, Place, PushEnd, fill_wake_argum
 use crate::profile_delivery::WakeMode;
 use crate::pty;
 use crate::waiter::StatusAt;
+use crate::wake_file::WakeWriter;
 use crate::window::{WindowEntry, WindowLiveness, WindowRegistry};
 
 use super::report::ReportInboxes;
@@ -47,6 +51,7 @@ pub(super) struct NoticeAgents {
     registry: Arc<WindowRegistry>,
     reports: Arc<ReportInboxes>,
     config: DaemonConfig,
+    wake_writer: WakeWriter,
 }
 
 impl NoticeAgents {
@@ -60,6 +65,7 @@ impl NoticeAgents {
             registry: Arc::clone(registry),
             reports,
             config: registry.config().clone(),
+            wake_writer: WakeWriter::new(),
         });
         let launcher_agents = Arc::downgrade(&agents);
         registry.set_notice_launcher(Box::new(move |entry: &Arc<WindowEntry>| {
@@ -189,14 +195,25 @@ async fn run_agent(agents: Arc<NoticeAgents>, entry: Arc<WindowEntry>) {
     let mut status = entry.watch_status();
     // A failed wake command is not run again until something changes.
     let mut command_failed = false;
+    let mut woke_by_status = false;
+    // A wake file that could not be written is warned of once per window.
+    let mut ask_failed_before = false;
     while matches!(
         agents.registry.liveness(&window_id),
         WindowLiveness::Alive(_)
     ) {
+        // A status change answers an ask, also one made while the agent was
+        // busy, which `idle` never sees.
+        if std::mem::take(&mut woke_by_status) | status.has_changed().unwrap_or(false) {
+            let _ = entry.inbox().clear_ask();
+        }
         status.borrow_and_update();
         let wake = entry.delivery().map(|delivery| delivery.wake.clone());
         match wake {
-            Some(WakeMode::Wait) => entry.inbox().wake_waiter(),
+            Some(WakeMode::Wait) => {
+                entry.inbox().wake_waiter();
+                ask_to_wait(&agents, &entry, &mut ask_failed_before).await;
+            }
             Some(WakeMode::Command(args)) => {
                 if !command_failed
                     && pushable(&entry)
@@ -212,12 +229,38 @@ async fn run_agent(agents: Arc<NoticeAgents>, entry: Arc<WindowEntry>) {
             // report inbox is discarded once it ends.
             Some(WakeMode::None) | None => {}
         }
-        if !idle(&entry, &mut status).await {
-            break;
+        match idle(&entry, &mut status).await {
+            Woke::Ended => break,
+            Woke::Status => woke_by_status = true,
+            Woke::Notice => {}
         }
         command_failed = false;
     }
     finish(&agents, &entry);
+}
+
+/// Asks the CLI of `entry`, a window whose CLI waits for the daemon, to
+/// register a wait again by writing the wake file its open named, when a
+/// parcel can be pushed and no wait is registered
+/// ([`crate::inbox::Inbox::ask_due`]). The ask stands until the CLI answers
+/// it; one that could not be written is taken back.
+async fn ask_to_wait(agents: &NoticeAgents, entry: &WindowEntry, failed_before: &mut bool) {
+    let Some(record) = entry.wake_record() else {
+        return;
+    };
+    if !entry.inbox().ask_due() {
+        return;
+    }
+    if let Err(err) = agents.wake_writer.write(record).await {
+        let _ = entry.inbox().clear_ask();
+        if !std::mem::replace(failed_before, true) {
+            tracing::warn!(
+                window_id = entry.window_id(),
+                error = %err,
+                "could not write the window's wake file; what waits arrives at the CLI's next turn"
+            );
+        }
+    }
 }
 
 /// Whether the daemon may push to `entry` now.
@@ -228,13 +271,21 @@ fn pushable(entry: &WindowEntry) -> bool {
     )
 }
 
-/// Waits for something that may give the agent work: a status change, or a
-/// wake (a new parcel, a session reported). `false` once the window's status
-/// stream is gone.
-async fn idle(entry: &WindowEntry, status: &mut watch::Receiver<StatusAt>) -> bool {
+/// What woke an idle agent.
+enum Woke {
+    /// The window's status changed.
+    Status,
+    /// A wake: a new parcel, a session reported, a door arrived.
+    Notice,
+    /// The window's status stream is gone.
+    Ended,
+}
+
+/// Waits for something that may give the agent work.
+async fn idle(entry: &WindowEntry, status: &mut watch::Receiver<StatusAt>) -> Woke {
     tokio::select! {
-        changed = status.changed() => changed.is_ok(),
-        () = entry.notice_woken() => true,
+        changed = status.changed() => if changed.is_ok() { Woke::Status } else { Woke::Ended },
+        () = entry.notice_woken() => Woke::Notice,
     }
 }
 

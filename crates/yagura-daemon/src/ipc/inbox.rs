@@ -214,7 +214,9 @@ impl IpcServer {
         let Some(entry) = self
             .authenticate_window(
                 outbound,
-                super::HookDoor::new("door_read", state.peer_process_id).with_guest(guest),
+                super::HookDoor::new("door_read", state.peer_process_id)
+                    .with_guest(guest)
+                    .registering_wait(matches!(door, Door::Wait)),
                 token,
                 Some(window_id),
             )

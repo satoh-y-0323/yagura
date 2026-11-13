@@ -885,6 +885,9 @@ struct State {
     /// window lives: a withdrawal tells one handed over from one never sent.
     /// One withdrawn, and every one of a sender that ended, is dropped.
     sent: HashMap<String, Sender>,
+    /// The CLI was asked to register a wait again and has not answered yet:
+    /// kept under the lock the wait is, so an ask is decided against it.
+    asked: bool,
 }
 
 impl State {
@@ -1836,6 +1839,8 @@ impl Inbox {
         if state.closed.is_some() {
             return Wait::Answered(Box::new(DoorRead::silent()));
         }
+        // A wait is the answer to an ask.
+        state.asked = false;
         if let Some(replaced) = state.waiter.take() {
             // The replaced wait may have ended already; then nobody reads this.
             let _ = replaced.answer.send(DoorRead::silent());
@@ -1861,6 +1866,33 @@ impl Inbox {
             },
             answer,
         }
+    }
+
+    /// Whether the window's CLI is to be asked to register a wait again now,
+    /// and marks it asked when it is: a parcel shows that can be pushed, no
+    /// wait is registered, and no ask stands unanswered. Decided under the
+    /// lock a wait registers under, so a wait that registers meanwhile is
+    /// seen.
+    #[must_use]
+    pub fn ask_due(&self) -> bool {
+        let mut state = self.shared.lock();
+        if state.asked
+            || state.waiter.is_some()
+            || state.closed.is_some()
+            || state.shown() == 0
+            || !self.shared.pushable()
+        {
+            return false;
+        }
+        state.asked = true;
+        true
+    }
+
+    /// Takes back the ask that stands: the CLI answered it (a door arrived,
+    /// or the window's status changed), or it could not be made. Returns
+    /// whether one stood.
+    pub fn clear_ask(&self) -> bool {
+        std::mem::take(&mut self.shared.lock().asked)
     }
 
     /// Answers the registered wait with what is waiting, when the window can

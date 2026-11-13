@@ -1268,6 +1268,13 @@ impl WindowEntry {
         !self.lineage_noted.swap(true, Ordering::SeqCst)
     }
 
+    /// Where the daemon writes to ask the window's CLI to wait again, as the
+    /// window's open decided it; `None` for a window that cannot be asked.
+    #[must_use]
+    pub fn wake_record(&self) -> Option<&crate::wake_file::WakeRecord> {
+        self.provenance.facts.wake.as_ref()
+    }
+
     /// The program a wake by command runs, when the profile declares one.
     #[must_use]
     pub fn wake_command(&self) -> Option<&WakeCommand> {
