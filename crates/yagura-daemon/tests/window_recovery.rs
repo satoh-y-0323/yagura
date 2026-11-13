@@ -3893,6 +3893,39 @@ async fn a_taken_back_guest_window_is_judged_by_the_chain_its_hook_collects() {
 
 // --- whether a window's overlay was made is a fact of the window -------------------------
 
+/// The argv the window's own CLI logged under `logs`. The bridge scan before a window
+/// opens runs the same `[command]` (`mcp list`) into the same log, so its line is skipped.
+async fn window_cli_args_logged_in(logs: &std::path::Path) -> Vec<String> {
+    let deadline = tokio::time::Instant::now() + yagura_test_support::HANG_GUARD;
+    loop {
+        let events = std::fs::read_to_string(logs.join("events.jsonl")).unwrap_or_default();
+        let started = events
+            .lines()
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .filter(|line| line["event"] == "argv")
+            .map(|line| {
+                line["args"]
+                    .as_array()
+                    .map(|args| {
+                        args.iter()
+                            .filter_map(|arg| arg.as_str().map(str::to_string))
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default()
+            })
+            .find(|args| !(args.iter().any(|a| a == "mcp") && args.iter().any(|a| a == "list")));
+        if let Some(started) = started {
+            return started;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "hang guard: the window's CLI never logged its argv under {}",
+            logs.display()
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+}
+
 /// Whether a claim of `window_id` of `profile` with [`TOKEN`] is answered as its window's.
 async fn spoken_for(sandbox: &Sandbox, window_id: &str, profile: &str) -> DaemonMessage {
     let (mut answers, _) =
@@ -4138,7 +4171,7 @@ async fn a_guest_window_makes_its_overlay_through_its_door_as_a_direct_one_would
 
     let guest = first.open_profile_window(&sandbox, GUEST).await;
     // The CLI logs its argv once the statement has started it, after the door answered.
-    let started = common::launch_args_logged_in(&logs).await;
+    let started = window_cli_args_logged_in(&logs).await;
     assert!(
         !started.iter().any(|arg| arg.contains("yagura-daemon")),
         "the door's path is not handed on to the CLI: {started:?}"
