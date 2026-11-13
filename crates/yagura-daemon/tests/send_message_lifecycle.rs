@@ -19,7 +19,7 @@ use serde_json::Value;
 
 use common::{
     CONTROL_DETECTION_NAME, Harness, LEADING_KEYS_DETECTION_NAME, READY_MARKER, VALID_TOKEN,
-    approver_base_config, detection_config, expect_delivery, policy, read_response, send,
+    approver_base_config, detection_config, expect_delivery, identify, policy, read_response, send,
     unique_temp_dir, wait_until_status, write_leading_keys_definition,
 };
 use yagura_daemon::DaemonConfig;
@@ -169,7 +169,11 @@ pub(crate) async fn first_of(door: &mut Connection, requester: &mut Connection) 
     }
 }
 
-async fn send_text(client: &mut Connection, window_id: &str, text: &str) -> DaemonMessage {
+pub(crate) async fn send_text(
+    client: &mut Connection,
+    window_id: &str,
+    text: &str,
+) -> DaemonMessage {
     send(
         client,
         &ClientMessage::SendText {
@@ -179,6 +183,115 @@ async fn send_text(client: &mut Connection, window_id: &str, text: &str) -> Daem
     )
     .await;
     read_response(client).await
+}
+
+/// Asks, on `client`, to withdraw the envelope named `id`; returns the answer.
+pub(crate) async fn withdraw(client: &mut Connection, id: &str) -> DaemonMessage {
+    send(
+        client,
+        &ClientMessage::WithdrawMessage { id: id.to_string() },
+    )
+    .await;
+    read_response(client).await
+}
+
+/// What a withdrawal's answer says: the refusal's code for an error, the answer's
+/// `outcome` otherwise (`None` when it carries none).
+pub(crate) fn outcome_of(answer: &DaemonMessage) -> Option<String> {
+    if let DaemonMessage::Error { code, .. } = answer {
+        return Some(code.clone());
+    }
+    answer_json(answer)["outcome"].as_str().map(str::to_string)
+}
+
+/// How many envelopes `list_windows` says wait in `window_id`'s inbox.
+pub(crate) async fn listed_queued_count(client: &mut Connection, window_id: &str) -> Option<u64> {
+    send(client, &ClientMessage::ListWindows).await;
+    match read_response(client).await {
+        DaemonMessage::WindowList { windows } => {
+            let info = windows
+                .iter()
+                .find(|info| info.window_id == window_id)
+                .unwrap_or_else(|| panic!("{window_id} must be listed: {windows:?}"));
+            serde_json::to_value(info).expect("a window info always encodes")["queued_count"]
+                .as_u64()
+        }
+        other => panic!("expected window_list, got {other:?}"),
+    }
+}
+
+/// What `get_window_status` of `window_id` shows the caller on `client` of the
+/// envelopes waiting there: their count, and the ids it may see, sorted (none when
+/// the answer names none).
+pub(crate) async fn queue_seen_by(
+    client: &mut Connection,
+    window_id: &str,
+) -> (Option<u64>, Vec<String>) {
+    send(
+        client,
+        &ClientMessage::GetWindowStatus {
+            window_id: window_id.to_string(),
+        },
+    )
+    .await;
+    let answer = read_response(client).await;
+    assert!(
+        matches!(answer, DaemonMessage::WindowStatus { .. }),
+        "expected window_status, got {answer:?}"
+    );
+    let json = answer_json(&answer);
+    let mut ids: Vec<String> = match &json["queued_ids"] {
+        Value::Null => Vec::new(),
+        Value::Array(ids) => ids
+            .iter()
+            .map(|id| {
+                id.as_str()
+                    .unwrap_or_else(|| panic!("an id is a string: {json}"))
+                    .to_string()
+            })
+            .collect(),
+        other => panic!("queued_ids must be an array of ids, got {other}"),
+    };
+    ids.sort();
+    (json["queued_count"].as_u64(), ids)
+}
+
+/// A window of its own (its status stays `Unknown`) and a connection identified as
+/// it, which sends as that window.
+pub(crate) async fn window_sender(h: &Harness) -> (String, Connection) {
+    let window_id = h.open_unknown_window().await;
+    let mut client = h.connect().await;
+    identify(&mut client, &window_id).await;
+    (window_id, client)
+}
+
+/// Closes `window_id` from a connection identified as that window, which needs no
+/// approval.
+pub(crate) async fn close_own_window(client: &mut Connection, window_id: &str) {
+    send(
+        client,
+        &ClientMessage::CloseWindow {
+            window_id: window_id.to_string(),
+            force: Some(true),
+        },
+    )
+    .await;
+    match read_response(client).await {
+        DaemonMessage::WindowClosed { window_id: closed } => assert_eq!(closed, window_id),
+        other => panic!("expected window_closed, got {other:?}"),
+    }
+}
+
+/// Sends `text` to `window_id` on `client` and returns the id of the envelope, which
+/// must be left waiting.
+pub(crate) async fn send_queued(client: &mut Connection, window_id: &str, text: &str) -> String {
+    let answer = send_text(client, window_id, text).await;
+    assert_eq!(
+        state_of(&answer).as_deref(),
+        Some("queued"),
+        "{text} must be left waiting: {answer:?}"
+    );
+    id_of(&answer)
 }
 
 // =====================================================================
@@ -217,6 +330,16 @@ async fn send_message_puts_its_envelope_in_the_inbox_and_writes_nothing_to_the_w
         writes_before,
         "send_message must write nothing to the window's PTY"
     );
+    assert_eq!(
+        listed_queued_count(&mut client, &window_id).await,
+        Some(2),
+        "list_windows says how many envelopes wait in the window"
+    );
+    assert_eq!(
+        queue_seen_by(&mut client, &window_id).await,
+        (Some(2), Vec::new()),
+        "a caller that is no window is shown how many wait, and no id"
+    );
 
     let taken = take_and_print(&h, &window_id).await;
     for needle in [
@@ -233,6 +356,17 @@ async fn send_message_puts_its_envelope_in_the_inbox_and_writes_nothing_to_the_w
     }
     assert_eq!(entry(&h, &window_id).inbox().pending_count(), 0);
     assert_eq!(entry(&h, &window_id).write_seq(), writes_before);
+    assert_eq!(
+        outcome_of(&withdraw(&mut client, &first_id).await).as_deref(),
+        Some("already_delivered"),
+        "an envelope a door printed is no longer the sender's to withdraw"
+    );
+    assert_eq!(
+        listed_queued_count(&mut client, &window_id)
+            .await
+            .unwrap_or(0),
+        0
+    );
 }
 
 /// A CLI that left a wait registered is handed the envelope at once; the answer
@@ -305,4 +439,179 @@ async fn send_message_to_a_window_without_doors_is_undelivered_no_delivery_and_w
     );
     assert_eq!(entry(&h, &window_id).inbox().pending_count(), 0);
     assert_eq!(entry(&h, &window_id).write_seq(), writes_before);
+}
+
+// =====================================================================
+// withdraw_message: a sender takes back what still waits
+// =====================================================================
+
+/// Only the caller that sent an envelope takes it back: another caller that is no
+/// window, and a window, leave it waiting. No playbook approves `withdraw_message`
+/// and no approver is there, so its answer also shows it asks no approval.
+#[tokio::test]
+async fn withdraw_message_takes_a_waiting_envelope_out_for_its_sender_alone_and_asks_no_approval() {
+    let dir = unique_temp_dir("withdraw-sender");
+    let h = Harness::start("withdraw-sender", sending_config(&dir)).await;
+    let mut sender = h.connect().await;
+    let window_id = open_wait_window(&h, &mut sender, CONTROL_DETECTION_NAME).await;
+    let mut other = h.connect().await;
+    let (_, mut window) = window_sender(&h).await;
+
+    let id = send_queued(&mut sender, &window_id, "WITHDRAW-ME-6Q").await;
+    for (who, client) in [("another caller", &mut other), ("a window", &mut window)] {
+        let answer = withdraw(client, &id).await;
+        assert_ne!(
+            outcome_of(&answer).as_deref(),
+            Some("withdrawn"),
+            "{who} did not send it: {answer:?}"
+        );
+        assert_eq!(entry(&h, &window_id).inbox().pending_count(), 1, "{who}");
+    }
+
+    let answer = withdraw(&mut sender, &id).await;
+    assert_eq!(
+        outcome_of(&answer).as_deref(),
+        Some("withdrawn"),
+        "{answer:?}"
+    );
+    assert_eq!(entry(&h, &window_id).inbox().pending_count(), 0);
+    assert_eq!(
+        listed_queued_count(&mut sender, &window_id)
+            .await
+            .unwrap_or(0),
+        0
+    );
+    assert_eq!(
+        outcome_of(&withdraw(&mut sender, "an-id-never-handed-out").await).as_deref(),
+        Some("not_found")
+    );
+}
+
+/// A window caller is shown the ids of what it left waiting there and no other's,
+/// and withdraws only those; a caller that is no window is shown the count alone.
+#[tokio::test]
+async fn a_window_sees_and_withdraws_only_what_it_sent_and_a_caller_that_is_no_window_sees_the_count()
+ {
+    let dir = unique_temp_dir("withdraw-windows");
+    let h = Harness::start("withdraw-windows", sending_config(&dir)).await;
+    let mut external = h.connect().await;
+    let window_id = open_wait_window(&h, &mut external, CONTROL_DETECTION_NAME).await;
+    let (_, mut a) = window_sender(&h).await;
+    let (_, mut b) = window_sender(&h).await;
+
+    let a_id = send_queued(&mut a, &window_id, "FROM-A-2K").await;
+    let b_id = send_queued(&mut b, &window_id, "FROM-B-2K").await;
+    let external_id = send_queued(&mut external, &window_id, "FROM-EXTERNAL-2K").await;
+
+    assert_eq!(
+        queue_seen_by(&mut a, &window_id).await.1,
+        vec![a_id.clone()]
+    );
+    assert_eq!(
+        queue_seen_by(&mut b, &window_id).await.1,
+        vec![b_id.clone()]
+    );
+    assert_eq!(
+        queue_seen_by(&mut external, &window_id).await,
+        (Some(3), Vec::new())
+    );
+
+    for (who, client, id) in [
+        ("window B", &mut b, &a_id),
+        ("window A", &mut a, &external_id),
+    ] {
+        let answer = withdraw(client, id).await;
+        assert_ne!(
+            outcome_of(&answer).as_deref(),
+            Some("withdrawn"),
+            "{who} did not send {id}: {answer:?}"
+        );
+    }
+    assert_eq!(entry(&h, &window_id).inbox().pending_count(), 3);
+
+    assert_eq!(
+        outcome_of(&withdraw(&mut a, &a_id).await).as_deref(),
+        Some("withdrawn")
+    );
+    assert_eq!(
+        queue_seen_by(&mut a, &window_id).await.1,
+        Vec::<String>::new()
+    );
+    assert_eq!(queue_seen_by(&mut b, &window_id).await.1, vec![b_id]);
+    assert_eq!(
+        listed_queued_count(&mut external, &window_id).await,
+        Some(2)
+    );
+    let left = take_and_print(&h, &window_id).await;
+    assert!(
+        !left.contains("FROM-A-2K") && left.contains("FROM-B-2K") && left.contains(&external_id),
+        "{left:?}"
+    );
+}
+
+#[tokio::test]
+async fn withdrawing_an_envelope_whose_window_has_ended_is_not_found() {
+    let dir = unique_temp_dir("withdraw-ended");
+    let h = Harness::start("withdraw-ended", sending_config(&dir)).await;
+    let mut sender = h.connect().await;
+    let window_id = open_wait_window(&h, &mut sender, CONTROL_DETECTION_NAME).await;
+    let id = send_queued(&mut sender, &window_id, "ENDS-WITH-ITS-WINDOW").await;
+
+    let mut own = h.connect().await;
+    identify(&mut own, &window_id).await;
+    close_own_window(&mut own, &window_id).await;
+    until("the window's end to empty its inbox", || {
+        entry(&h, &window_id).inbox().pending_count() == 0
+    })
+    .await;
+
+    assert_eq!(
+        outcome_of(&withdraw(&mut sender, &id).await).as_deref(),
+        Some("not_found")
+    );
+}
+
+/// A window that ends takes with it what it left waiting in every window's inbox, and
+/// nothing another sender left there. One a door carries is not withdrawn: the door
+/// ends without printing it, and it waits again.
+#[tokio::test]
+async fn a_senders_end_withdraws_what_it_left_waiting_everywhere_but_not_what_a_door_carries() {
+    let dir = unique_temp_dir("withdraw-sender-end");
+    let h = Harness::start("withdraw-sender-end", sending_config(&dir)).await;
+    let mut external = h.connect().await;
+    let first = open_wait_window(&h, &mut external, CONTROL_DETECTION_NAME).await;
+    let second = open_wait_window(&h, &mut external, CONTROL_DETECTION_NAME).await;
+    let (sender_id, mut sender) = window_sender(&h).await;
+
+    send_queued(&mut sender, &first, "SENDER-TO-FIRST").await;
+    send_queued(&mut external, &first, "EXTERNAL-TO-FIRST").await;
+    send_queued(&mut sender, &second, "SENDER-CARRIED").await;
+    let mut door = h.connect().await;
+    send_door_read(&mut door, &second, Door::Take).await;
+    let (carried, _, _) = expect_delivery(read_response(&mut door).await);
+    assert!(carried.contains("SENDER-CARRIED"), "{carried:?}");
+    send_queued(&mut sender, &second, "SENDER-WAITING").await;
+
+    close_own_window(&mut sender, &sender_id).await;
+    until("the sender's waiting envelopes to be withdrawn", || {
+        entry(&h, &first).inbox().pending_count() == 1
+            && entry(&h, &second).inbox().pending_count() == 0
+    })
+    .await;
+
+    drop(door);
+    until("the carried envelope to wait again", || {
+        entry(&h, &second).inbox().pending_count() == 1
+    })
+    .await;
+    let again = take_and_print(&h, &second).await;
+    assert!(
+        again.contains("SENDER-CARRIED") && !again.contains("SENDER-WAITING"),
+        "{again:?}"
+    );
+    let left = take_and_print(&h, &first).await;
+    assert!(
+        left.contains("EXTERNAL-TO-FIRST") && !left.contains("SENDER-TO-FIRST"),
+        "{left:?}"
+    );
 }

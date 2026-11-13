@@ -42,6 +42,7 @@ fn window(window_id: &str, status_reports_missing: Option<bool>) -> WindowInfo {
         status_rev: Some(1),
         mcp_connected: Some(true),
         status_reports_missing,
+        queued_count: None,
     }
 }
 

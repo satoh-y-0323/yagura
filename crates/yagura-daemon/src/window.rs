@@ -22,7 +22,7 @@ use yagura_os::program;
 use yagura_protocol::{
     DefaultPalettes, DetectedStatus, INSTANCE_ENV, MCP_BRIDGE_ENV, OnNameTaken, Palette, RoomRef,
     STATUS_TOKEN_ENV, UnknownReason, WINDOW_ID_ENV, WINDOW_NAME_MAX_BYTES, WindowInfo,
-    WindowNameError, WindowStatus, validate_window_name, validate_window_vendor,
+    WindowNameError, WindowStatus, WithdrawOutcome, validate_window_name, validate_window_vendor,
 };
 
 use crate::config::DaemonConfig;
@@ -30,7 +30,7 @@ use crate::detector::definition::{Definition, DefinitionError, is_valid_detectio
 use crate::detector::engine::{ConfirmedStatus, DetectionEngine, DetectorHandle, InputEcho};
 use crate::detector::layers::{DefinitionSource, DetectionLayers, LayerError, ResolvedDefinition};
 use crate::holder_host::HolderHost;
-use crate::inbox::{Inbox, is_session_id};
+use crate::inbox::{Inbox, Sender, is_session_id};
 use crate::parcel_store::{InboxKeeper, KeptParcel, MarkKeeper, ParcelStore};
 use crate::profile::CredentialsMode;
 use crate::profile_delivery::ProfileDelivery;
@@ -850,6 +850,9 @@ pub struct WindowEntry {
     /// Raised when this window's display name or exit changes who takes part
     /// in a chat room.
     participation: Arc<ParticipationSignal>,
+    /// The registry's windows, whose inboxes this window's end withdraws what
+    /// it sent from. Weak, so an entry never keeps the registry's list alive.
+    peers: Weak<Mutex<Vec<Arc<WindowEntry>>>>,
     /// The window's row in the window table, removed before the window's
     /// holder is told to end ([`WindowEntry::remove_row_then`]).
     row: WindowRow,
@@ -983,7 +986,23 @@ impl WindowEntry {
     /// down. A window whose child merely exited on its own is never marked
     /// this way and stays a restore candidate.
     pub(crate) fn mark_closed(&self) {
-        self.closed.store(true, Ordering::SeqCst);
+        if !self.closed.swap(true, Ordering::SeqCst) {
+            self.withdraw_what_it_sent();
+        }
+    }
+
+    /// Withdraws the envelopes this window sent that still wait in any
+    /// window's inbox, once it ended (closed, or its exit published): nobody
+    /// is left to answer them. Ones a door carries are left to it.
+    fn withdraw_what_it_sent(&self) {
+        let Some(peers) = self.peers.upgrade() else {
+            return;
+        };
+        // Copied out first, so no inbox's lock is taken under the list's.
+        let peers: Vec<Arc<WindowEntry>> = lock_recover(&peers).clone();
+        for peer in peers {
+            peer.inbox.withdraw_sent_by(&self.window_id);
+        }
     }
 
     /// Writes `data` to this window's PTY, telling the detector what kind of
@@ -1307,6 +1326,7 @@ impl WindowEntry {
         );
         if published == Publication::BecameExited {
             self.participation.raise();
+            self.withdraw_what_it_sent();
         }
         Ok(ExitConfirmed { _private: () })
     }
@@ -1389,6 +1409,7 @@ impl WindowEntry {
             status_rev: Some(at.generation),
             mcp_connected: Some(self.mcp_connected()),
             status_reports_missing: Some(self.report_gap()),
+            queued_count: Some(u64::try_from(self.inbox.pending_count()).unwrap_or(u64::MAX)),
         }
     }
 
@@ -1527,7 +1548,7 @@ pub enum WindowLiveness {
 /// looking up and tearing down windows.
 pub struct WindowRegistry {
     config: DaemonConfig,
-    entries: Mutex<Vec<Arc<WindowEntry>>>,
+    entries: Arc<Mutex<Vec<Arc<WindowEntry>>>>,
     /// Serializes the whole of [`WindowRegistry::open`] (limit check ->
     /// spawn -> insert) against concurrent opens, so the dual resource
     /// limits are enforced atomically rather than raced past.
@@ -1614,7 +1635,7 @@ impl WindowRegistry {
 
         Self {
             config,
-            entries: Mutex::new(Vec::new()),
+            entries: Arc::new(Mutex::new(Vec::new())),
             open_lock: AsyncMutex::new(()),
             holder_host,
             window_table: Mutex::new(None),
@@ -2462,6 +2483,7 @@ impl WindowRegistry {
             .map(|store| InboxKeeper::new(store, &window_id));
         let inbox = Inbox::kept(
             self.config().inbox_capacity,
+            self.config().max_queued_per_sender,
             delivery_spec,
             // The registry does not know whether the room introduces this
             // window, so the limit counts the configured intro.
@@ -2497,6 +2519,7 @@ impl WindowRegistry {
             provenance,
             mcp_connections: Arc::new(AtomicUsize::new(0)),
             participation: Arc::clone(&self.participation),
+            peers: Arc::downgrade(&self.entries),
             row,
             #[cfg(feature = "fault-injection")]
             faults: self.config().faults.clone(),
@@ -2632,6 +2655,19 @@ impl WindowRegistry {
             return WindowLiveness::Dead;
         }
         WindowLiveness::Alive(entry)
+    }
+
+    /// Withdraws the envelope `id` for `asker` from whichever live window's
+    /// inbox took it in ([`Inbox::withdraw_sent`]). An envelope whose window
+    /// ended, or that `asker` did not send, is not found.
+    pub fn withdraw_sent(&self, id: &str, asker: &Sender) -> WithdrawOutcome {
+        let entries: Vec<Arc<WindowEntry>> = lock_recover(&self.entries).clone();
+        entries
+            .iter()
+            .filter(|entry| matches!(self.liveness(&entry.window_id), WindowLiveness::Alive(_)))
+            .map(|entry| entry.inbox.withdraw_sent(id, asker))
+            .find(|outcome| *outcome != WithdrawOutcome::NotFound)
+            .unwrap_or(WithdrawOutcome::NotFound)
     }
 
     /// Installs the window table every window opened from now on writes its

@@ -240,6 +240,7 @@ fn daemon_message_kind(msg: &DaemonMessage) -> String {
         DaemonMessage::WindowList { .. } => "WindowList".to_string(),
         DaemonMessage::WindowStatus { .. } => "WindowStatus".to_string(),
         DaemonMessage::TextSent { .. } => "TextSent".to_string(),
+        DaemonMessage::MessageWithdrawn { .. } => "MessageWithdrawn".to_string(),
         DaemonMessage::WindowInterrupted { .. } => "WindowInterrupted".to_string(),
         DaemonMessage::WindowClosed { .. } => "WindowClosed".to_string(),
         DaemonMessage::WaitResult { .. } => "WaitResult".to_string(),

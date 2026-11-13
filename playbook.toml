@@ -37,6 +37,14 @@ require_approval = true
 #                                     # key. 60 is also the daemon's own
 #                                     # built-in default, so leaving this
 #                                     # commented out has the same effect.
+# max_queued_per_sender = 8          # Envelopes (send_message, send_handoff)
+#                                     # one sender may leave waiting in one
+#                                     # window at once. Each window that sends
+#                                     # counts on its own; every caller that
+#                                     # is no window shares one count. Must be
+#                                     # within 1 and the inbox's capacity (64)
+#                                     # -- a value outside is warned about
+#                                     # and the default 8 is used.
 
 # [chat]
 # Optional overrides for the chat rooms; every field defaults to a

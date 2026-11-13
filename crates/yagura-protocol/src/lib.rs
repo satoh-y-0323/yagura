@@ -217,6 +217,12 @@
 //! before sending `door_read` or `deliver_printed`.
 //! The same revision drops `send_keys` and its answer `keys_sent`: the daemon
 //! no longer writes into a window's input on an agent's behalf.
+//! It also adds `withdraw_message` ([`ClientMessage::WithdrawMessage`], answered
+//! with [`DaemonMessage::MessageWithdrawn`]), which takes back an envelope still
+//! waiting, and reports what waits in a window's inbox: `queued_count` in
+//! [`WindowInfo`] and `window_status`, and `queued_ids` in `window_status`. A
+//! caller establishes [`WITHDRAW_MESSAGE_MIN_REVISION`] before sending
+//! `withdraw_message`.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -406,6 +412,11 @@ pub const DELIVER_DONE_MIN_REVISION: u32 = 33;
 /// An older daemon refuses them by name and takes nothing, so a door that gets
 /// that refusal prints nothing and ends with success.
 pub const DOOR_READ_MIN_REVISION: u32 = 34;
+
+/// The first wire revision that understands [`ClientMessage::WithdrawMessage`].
+///
+/// An older daemon refuses it by name, so nothing is withdrawn.
+pub const WITHDRAW_MESSAGE_MIN_REVISION: u32 = 34;
 
 /// How long a hook door waits for one answer of the daemon, and the time it
 /// takes its hook to be given when the daemon names none for it.
@@ -1816,6 +1827,11 @@ pub struct WindowInfo {
     /// read as "reports arriving". Omitted from the wire when `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status_reports_missing: Option<bool>,
+    /// How many parcels wait in the window's inbox to be read: the ones a
+    /// door or a push carries are not counted. `None` when the daemon does
+    /// not report this fact. Omitted from the wire when `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queued_count: Option<u64>,
 }
 
 /// One restore candidate: a window from the previous boot's configuration,
@@ -2207,6 +2223,22 @@ pub enum WithdrawReason {
     /// A reason this build does not know.
     #[serde(other)]
     Unknown,
+}
+
+/// What became of an envelope a sender asked to withdraw
+/// ([`ClientMessage::WithdrawMessage`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WithdrawOutcome {
+    /// It was waiting and is out of the inbox: it never reaches the CLI.
+    Withdrawn,
+    /// A door carries it, or the CLI was handed it already. One a door
+    /// carries waits again if the door ends without printing it.
+    AlreadyDelivered,
+    /// The caller sent no envelope of that id that its window still holds:
+    /// the id is not the caller's, it was withdrawn, or its window ended or
+    /// the daemon restarted.
+    NotFound,
 }
 
 /// What became of an envelope a sender put in a window's inbox
@@ -2692,6 +2724,15 @@ pub enum ClientMessage {
         /// The text to put in the window's inbox as a `[yagura message]`
         /// envelope; it is never typed into the window's input.
         text: String,
+    },
+    /// Takes back an envelope the caller sent with `send_text` or
+    /// `send_handoff`, while it still waits in its window's inbox. Only its
+    /// sender may: the window that sent it, or, for a caller that is no
+    /// window, the connection that was answered with its id. Answered with
+    /// [`DaemonMessage::MessageWithdrawn`].
+    WithdrawMessage {
+        /// The envelope's id, as the send's answer named it.
+        id: String,
     },
     /// Request to interrupt the child process (write the configured interrupt
     /// byte sequence to the PTY).
@@ -3460,6 +3501,7 @@ pub fn required_protocol_revision(msg: &ClientMessage) -> u32 {
         ClientMessage::SetDefaultPalettes(_) => DEFAULT_PALETTES_MIN_REVISION,
         ClientMessage::RunHook { .. } => HOOK_EVENTS_MIN_REVISION,
         ClientMessage::DoorRead { .. } | ClientMessage::DeliverPrinted => DOOR_READ_MIN_REVISION,
+        ClientMessage::WithdrawMessage { .. } => WITHDRAW_MESSAGE_MIN_REVISION,
         _ => PROTOCOL_REVISION_BASELINE,
     }
 }
@@ -3585,6 +3627,17 @@ pub enum DaemonMessage {
         /// Omitted from the wire when `None`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         mcp_connected: Option<bool>,
+        /// How many envelopes and other parcels wait in the window's inbox
+        /// to be read; see [`WindowInfo::queued_count`]. Omitted from the
+        /// wire when `None`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        queued_count: Option<u64>,
+        /// The ids of the envelopes the caller's own window sent that wait in
+        /// this window's inbox. Shown to a caller identified as a window
+        /// only; `None` for every other caller, which is shown the count
+        /// alone. Omitted from the wire when `None`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        queued_ids: Option<Vec<String>>,
     },
     /// Response to [`ClientMessage::SendText`]: what became of the envelope
     /// the text was put in. Nothing is written to the window's PTY: the
@@ -3601,6 +3654,14 @@ pub enum DaemonMessage {
         /// `None`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         note: Option<String>,
+    },
+    /// Response to [`ClientMessage::WithdrawMessage`]: what became of the
+    /// envelope.
+    MessageWithdrawn {
+        /// The envelope's id, as the request named it.
+        id: String,
+        /// What became of the envelope.
+        outcome: WithdrawOutcome,
     },
     /// Response to [`ClientMessage::InterruptWindow`]: the interrupt byte
     /// sequence was written to the target window's PTY.
@@ -5114,6 +5175,7 @@ const CLIENT_MESSAGE_TYPES: &[&str] = &[
     "list_windows",
     "get_window_status",
     "send_text",
+    "withdraw_message",
     "interrupt_window",
     "close_window",
     "wait_for_status",
@@ -5191,6 +5253,7 @@ const DAEMON_MESSAGE_TYPES: &[&str] = &[
     "window_list",
     "window_status",
     "text_sent",
+    "message_withdrawn",
     "window_interrupted",
     "window_closed",
     "wait_result",

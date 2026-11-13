@@ -282,6 +282,13 @@ pub struct DaemonConfig {
     /// [`DEFAULT_INBOX_CAPACITY`].
     pub inbox_capacity: usize,
 
+    /// How many envelopes one sender may leave in one window's inbox at once:
+    /// each window that sends counts on its own, and every caller that is no
+    /// window shares one count. One past it is refused `resource_exhausted`.
+    /// Defaults to [`DEFAULT_MAX_QUEUED_PER_SENDER`]; a playbook overrides it
+    /// with `[limits] max_queued_per_sender`.
+    pub max_queued_per_sender: usize,
+
     /// Detection definition names excluded from chat participation.
     /// Defaults to `["generic-shell"]`.
     pub chat_exclude_detections: Vec<String>,
@@ -494,6 +501,9 @@ const DEFAULT_CHAT_INTRO: &str = "A chat room for this workspace is available. U
 /// Default value of [`DaemonConfig::inbox_capacity`].
 pub const DEFAULT_INBOX_CAPACITY: usize = 64;
 
+/// Default value of [`DaemonConfig::max_queued_per_sender`].
+pub const DEFAULT_MAX_QUEUED_PER_SENDER: usize = 8;
+
 /// Default value of [`DaemonConfig::model_choices_max_concurrent`].
 const DEFAULT_MODEL_CHOICES_MAX_CONCURRENT: usize = 2;
 
@@ -666,6 +676,7 @@ impl Default for DaemonConfig {
             chat_intro: DEFAULT_CHAT_INTRO.to_string(),
             delivery: DeliverySpec::default(),
             inbox_capacity: DEFAULT_INBOX_CAPACITY,
+            max_queued_per_sender: DEFAULT_MAX_QUEUED_PER_SENDER,
             chat_exclude_detections: vec![DEFAULT_DETECTION_NAME.to_string()],
             mcp_bridge: None,
             mcp_config_dir: None,

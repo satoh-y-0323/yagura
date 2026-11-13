@@ -63,7 +63,7 @@ use crate::handoff::{
     compose_message_envelope, compose_task_notice,
 };
 use crate::health;
-use crate::inbox::{Parcel, ParcelEnd};
+use crate::inbox::{Parcel, ParcelEnd, Sender};
 use crate::input_encode::{self, ClientWrite, PointerOutcome, ViewPage, WheelOutcome};
 use crate::live_policy::{self, PolicyCell};
 use crate::palette_store::{self, PaletteStore};
@@ -328,14 +328,16 @@ enum StreamSend {
 /// What a request queued for approval runs once it is approved, carrying the
 /// arguments its handler already validated.
 enum PendingAction {
-    SendText(String),
+    /// A message envelope and who sends it.
+    SendText(String, Sender),
     Interrupt,
     Close(bool),
-    /// A handoff envelope, plus the requesting window's id for the audit
-    /// line (the envelope's own bytes are never logged) and the budget slot
-    /// of this handoff, given back when the action is dropped.
+    /// A handoff envelope and who sends it, plus the requesting window's id
+    /// for the audit line (the envelope's own bytes are never logged) and the
+    /// budget slot of this handoff, given back when the action is dropped.
     SendHandoff {
         text: String,
+        sender: Sender,
         requester: Option<String>,
         slot: Option<HandoffSlot>,
     },
@@ -345,7 +347,7 @@ impl PendingAction {
     /// The gated tool this action performs.
     fn tool(&self) -> DestructiveTool {
         match self {
-            Self::SendText(_) => DestructiveTool::SendMessage,
+            Self::SendText(..) => DestructiveTool::SendMessage,
             Self::Interrupt => DestructiveTool::InterruptWindow,
             Self::Close(_) => DestructiveTool::CloseWindow,
             Self::SendHandoff { .. } => DestructiveTool::SendHandoff,
@@ -554,6 +556,9 @@ struct DeliveryJob {
     registry: Arc<WindowRegistry>,
     entry: Arc<WindowEntry>,
     envelope: String,
+    /// Who sends the envelope: what it counts against, and who may withdraw
+    /// it.
+    sender: Sender,
     requester: Option<String>,
     slot: Option<HandoffSlot>,
     /// Raised when the requester left: its connection closed, or its CLI
@@ -666,6 +671,16 @@ impl Drop for CounterGuard {
     fn drop(&mut self) {
         self.counter.fetch_sub(1, Ordering::AcqRel);
     }
+}
+
+/// The refusal for an envelope past what one sender may leave in a window's
+/// inbox ([`DaemonConfig::max_queued_per_sender`]).
+fn sender_bound_msg() -> DaemonMessage {
+    error_msg(
+        "resource_exhausted",
+        "the window's inbox already holds as many of this sender's envelopes as one sender may \
+         leave there; withdraw one with withdraw_message, or wait until one is handed over",
+    )
 }
 
 /// The refusal for an envelope the window's inbox has no room for.
@@ -1574,11 +1589,22 @@ impl IpcServer {
                 FrameOutcome::Continue
             }
             Ok(ClientMessage::GetWindowStatus { window_id }) => {
-                self.handle_get_window_status(outbound, &window_id).await;
+                self.handle_get_window_status(outbound, state, &window_id)
+                    .await;
                 FrameOutcome::Continue
             }
             Ok(ClientMessage::SendText { window_id, text }) => {
                 self.handle_send_text(outbound, state, &window_id, &text);
+                FrameOutcome::Continue
+            }
+            Ok(ClientMessage::WithdrawMessage { id }) => {
+                // Not gated: it only takes out what the caller itself put in,
+                // and writes nothing to any window.
+                let asker = sender_of(&self.registry, state);
+                outbound.reply(&DaemonMessage::MessageWithdrawn {
+                    outcome: self.registry.withdraw_sent(&id, &asker),
+                    id,
+                });
                 FrameOutcome::Continue
             }
             Ok(ClientMessage::InterruptWindow { window_id }) => {
@@ -3184,7 +3210,16 @@ impl IpcServer {
     /// status change); `last_output_summary` is `None` exactly when the
     /// window's screen shows no text. Everything here is what the daemon
     /// holds itself, so a holder that does not answer never holds it up.
-    async fn handle_get_window_status(&self, outbound: &Outbound, window_id: &str) {
+    ///
+    /// What waits in the window's inbox is told as a count to every caller;
+    /// a caller identified as a window is also shown the ids of the
+    /// envelopes it sent that wait there, and no other's.
+    async fn handle_get_window_status(
+        &self,
+        outbound: &Outbound,
+        state: &ConnectionState,
+        window_id: &str,
+    ) {
         let Some(entry) = self.registry.get(window_id) else {
             outbound.reply(&window_not_found_msg());
             return;
@@ -3210,6 +3245,11 @@ impl IpcServer {
             unknown_reason: snapshot.status.unknown_reason(),
             detection_warning: entry.detection_warning().map(str::to_string),
             mcp_connected: Some(entry.mcp_connected()),
+            queued_count: Some(u64::try_from(entry.inbox().pending_count()).unwrap_or(u64::MAX)),
+            queued_ids: match sender_of(&self.registry, state) {
+                sender @ Sender::Window(_) => Some(entry.inbox().waiting_sent_by(&sender)),
+                Sender::External(_) => None,
+            },
         });
     }
 
@@ -3270,6 +3310,7 @@ impl IpcServer {
             return;
         }
         let requester = requester_window(&self.registry, &state.origin);
+        let sender = sender_from(requester.as_ref(), state);
         let envelope = compose_message_envelope(&envelope_from(requester.as_ref()), &id, text);
         if !entry.inbox().fits(&envelope) {
             outbound.reply(&error_msg(
@@ -3291,7 +3332,7 @@ impl IpcServer {
                     Arc::clone(&self.registry),
                     self.config.clone(),
                     entry,
-                    PendingAction::SendText(envelope),
+                    PendingAction::SendText(envelope, sender),
                     ticket,
                 );
                 return;
@@ -3302,7 +3343,7 @@ impl IpcServer {
         let RequestWatch { outbound, .. } = RequestWatch::quiet(&self.registry, outbound, state);
         let registry = Arc::clone(&self.registry);
         tokio::spawn(async move {
-            execute_send_text(&outbound, &registry, &entry, envelope, permit).await;
+            execute_send_text(&outbound, &registry, &entry, envelope, sender, permit).await;
         });
     }
 
@@ -3456,6 +3497,7 @@ impl IpcServer {
             return;
         }
         let requester_id = requester.as_ref().map(|info| info.window_id.clone());
+        let sender = sender_from(requester.as_ref(), state);
 
         match (window_id, profile) {
             (Some(window_id), None) => {
@@ -3512,6 +3554,7 @@ impl IpcServer {
                             entry,
                             PendingAction::SendHandoff {
                                 text: envelope.text,
+                                sender,
                                 requester: requester_id,
                                 slot: Some(slot),
                             },
@@ -3534,6 +3577,7 @@ impl IpcServer {
                     registry: Arc::clone(&self.registry),
                     entry,
                     envelope: envelope.text,
+                    sender,
                     requester: requester_id,
                     slot: Some(slot),
                     closed: left,
@@ -4526,6 +4570,7 @@ async fn execute_send_text(
     registry: &WindowRegistry,
     entry: &Arc<WindowEntry>,
     envelope: String,
+    sender: Sender,
     _permit: Permit<permit::SendMessage>,
 ) {
     // Audit trail: the window and the envelope size only. The text itself is
@@ -4546,8 +4591,10 @@ async fn execute_send_text(
     );
     // Unsaved, as a handoff is: a next daemon never hands out an envelope
     // whose sender it cannot answer.
-    let parcel = Parcel::new(key, envelope).unsaved();
-    let answered = match deposit_envelope(registry, entry, parcel) {
+    let parcel = Parcel::new(key, envelope)
+        .unsaved()
+        .sent_by(id.clone(), sender.clone());
+    let answered = match deposit_envelope(registry, entry, parcel, &sender) {
         Ok(tracked) => answer_deposit(entry, tracked, false).await,
         Err(refused) => Err(refused),
     };
@@ -4657,6 +4704,7 @@ async fn deliver_handoff(job: DeliveryJob) {
         registry,
         entry,
         envelope,
+        sender,
         requester,
         slot,
         closed,
@@ -4692,8 +4740,10 @@ async fn deliver_handoff(job: DeliveryJob) {
     );
     // A next daemon never hands out an envelope whose sender it cannot
     // answer: the daemon's end withdraws it.
-    let parcel = Parcel::new(key.clone(), envelope).unsaved();
-    let answered = match deposit_envelope(&registry, &entry, parcel) {
+    let parcel = Parcel::new(key.clone(), envelope)
+        .unsaved()
+        .sent_by(id.clone(), sender.clone());
+    let answered = match deposit_envelope(&registry, &entry, parcel, &sender) {
         Ok(tracked) => {
             #[cfg(feature = "fault-injection")]
             if entry.inbox().holds(&key) {
@@ -4732,22 +4782,53 @@ struct Sent {
     note: Option<String>,
 }
 
-/// Puts `parcel` in `entry`'s inbox for [`answer_deposit`].
+/// Puts `parcel`, an envelope `sender` sent, in `entry`'s inbox for
+/// [`answer_deposit`].
+///
+/// A sending window's end withdraws what it left waiting, so one that ended
+/// before the envelope went in has it withdrawn here: checked after the
+/// deposit, one end or the other always sees the envelope.
 ///
 /// # Errors
 ///
-/// The refusal to answer when the inbox would not take it.
+/// The refusal to answer when the inbox would not take it, or when its
+/// sending window ended.
 // The error is the wire reply itself, as in `IpcServer::plan_from_profile`.
 #[allow(clippy::result_large_err)]
 fn deposit_envelope(
     registry: &WindowRegistry,
     entry: &Arc<WindowEntry>,
     parcel: Parcel,
+    sender: &Sender,
 ) -> Result<notice_queue::Tracked, DaemonMessage> {
-    notice_queue::deposit(registry, entry, parcel).map_err(|refused| match refused {
-        notice_queue::Refused::Full => inbox_full_msg(),
-        notice_queue::Refused::Ended => child_exited_msg(),
-    })
+    let mut deposited = entry.inbox().deposit_tracked(parcel);
+    if let Sender::Window(window_id) = sender
+        && deposited.end.is_some()
+        && !deposited.handed_to_wait
+        && !matches!(registry.liveness(window_id), WindowLiveness::Alive(_))
+    {
+        entry.inbox().withdraw_sent_by(window_id);
+        return Err(error_msg(
+            "invalid_state",
+            "the sending window has ended, so its envelope was withdrawn",
+        ));
+    }
+    let sender_at_bound = deposited.sender_at_bound;
+    let handed_to_wait = deposited.handed_to_wait;
+    let place = deposited.place.take();
+    match notice_queue::after_deposit(registry, entry, deposited) {
+        // A parcel taken in always comes with its place.
+        Ok(end) => place
+            .map(|place| notice_queue::Tracked {
+                end,
+                handed_to_wait,
+                place,
+            })
+            .ok_or_else(child_exited_msg),
+        Err(notice_queue::Refused::Full) if sender_at_bound => Err(sender_bound_msg()),
+        Err(notice_queue::Refused::Full) => Err(inbox_full_msg()),
+        Err(notice_queue::Refused::Ended) => Err(child_exited_msg()),
+    }
 }
 
 /// How an attempt the deposit started to hand its parcel over came out.
@@ -5519,7 +5600,7 @@ fn spawn_pending(
             ApprovalEnd::RequesterGone => {
                 // A send's watch answers nothing itself; one whose requester
                 // only ended its turn still has a connection to answer on.
-                if let PendingAction::SendHandoff { .. } | PendingAction::SendText(_) = action {
+                if let PendingAction::SendHandoff { .. } | PendingAction::SendText(..) = action {
                     drop(action);
                     outbound.reply(&send_withdrawn_msg());
                 }
@@ -5540,8 +5621,8 @@ fn spawn_pending(
         };
 
         match permitted {
-            PermittedAction::SendText(envelope, permit) => {
-                execute_send_text(&outbound, &registry, &entry, envelope, permit).await;
+            PermittedAction::SendText(envelope, sender, permit) => {
+                execute_send_text(&outbound, &registry, &entry, envelope, sender, permit).await;
             }
             PermittedAction::Interrupt(permit) => {
                 execute_interrupt(&outbound, &entry, &config, permit).await;
@@ -5551,6 +5632,7 @@ fn spawn_pending(
             }
             PermittedAction::SendHandoff {
                 text,
+                sender,
                 requester,
                 slot,
                 permit,
@@ -5560,6 +5642,7 @@ fn spawn_pending(
                     registry,
                     entry,
                     envelope: text,
+                    sender,
                     requester,
                     slot,
                     closed,
@@ -5837,6 +5920,22 @@ fn open_withdrawn_msg() -> DaemonMessage {
         "approval_timeout",
         "the requester ended its turn before an approver decided, so no window was opened",
     )
+}
+
+/// Who a request on this connection sends as: the window it identified as,
+/// when the registry still holds it, or else a caller that is no window, on
+/// this connection. Read from the same record as [`envelope_from`], so an
+/// envelope's sender and its `from` never disagree.
+fn sender_from(requester: Option<&WindowInfo>, state: &ConnectionState) -> Sender {
+    match requester {
+        Some(window) => Sender::Window(window.window_id.clone()),
+        None => Sender::External(state.conn_id),
+    }
+}
+
+/// [`sender_from`] for a request that composes no envelope.
+fn sender_of(registry: &WindowRegistry, state: &ConnectionState) -> Sender {
+    sender_from(requester_window(registry, &state.origin).as_ref(), state)
 }
 
 /// Turns the requester's registry record into the envelope's `from` value.

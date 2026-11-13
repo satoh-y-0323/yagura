@@ -39,6 +39,7 @@ fn sample_window_info(status_rev: Option<u64>) -> WindowInfo {
         status_rev,
         mcp_connected: None,
         status_reports_missing: None,
+        queued_count: None,
     }
 }
 
@@ -125,6 +126,8 @@ fn window_status_response_has_no_status_rev_field() {
         unknown_reason: None,
         detection_warning: None,
         mcp_connected: None,
+        queued_count: None,
+        queued_ids: None,
     };
     let body = encode_daemon_message(&msg);
     let value: serde_json::Value = serde_json::from_slice(&body).expect("valid json");

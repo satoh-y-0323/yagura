@@ -30,6 +30,7 @@ fn sample_window_info(room: Option<RoomRef>) -> WindowInfo {
         status_rev: None,
         mcp_connected: None,
         status_reports_missing: None,
+        queued_count: None,
     }
 }
 

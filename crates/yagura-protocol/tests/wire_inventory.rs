@@ -92,7 +92,7 @@ use yagura_protocol::{
     RoomRef, TaskAssignment, TaskReport, TerminalSize, TicketConfigInfo, TicketFieldInfo,
     TicketInfo, TicketResultInfo, TicketStateInfo, TicketSummary, TicketWorkspaceInfo,
     ToolAutoApprove, UnknownReason, ViewState, WheelInput, WindowInfo,
-    WindowStatus as WireWindowStatus, WithdrawReason,
+    WindowStatus as WireWindowStatus, WithdrawOutcome, WithdrawReason,
 };
 
 // ---------------------------------------------------------------------
@@ -236,6 +236,7 @@ wire_sample!(enum WireWindowStatus => Running);
 wire_sample!(enum UnknownReason => NoDefinition);
 wire_sample!(enum ApprovalRequesterKind => External);
 wire_sample!(enum WithdrawReason => Resolved);
+wire_sample!(enum WithdrawOutcome => Withdrawn);
 wire_sample!(enum DeliveryState => Delivered);
 wire_sample!(enum AssignmentSource => User);
 wire_sample!(enum ReportOutcome => Succeeded);
@@ -315,6 +316,7 @@ wire_sample!(struct WindowInfo {
     status_rev,
     mcp_connected,
     status_reports_missing,
+    queued_count,
 });
 wire_sample!(struct RestoreCandidate {
     position,
@@ -654,6 +656,7 @@ fn client_message_corpus() -> Vec<ClientMessage> {
         wire_sample!(ClientMessage::ListWindows),
         wire_sample!(ClientMessage::GetWindowStatus { window_id }),
         wire_sample!(ClientMessage::SendText { window_id, text }),
+        wire_sample!(ClientMessage::WithdrawMessage { id }),
         wire_sample!(ClientMessage::InterruptWindow { window_id }),
         wire_sample!(ClientMessage::CloseWindow { window_id, force }),
         wire_sample!(ClientMessage::WaitForStatus {
@@ -886,6 +889,8 @@ fn daemon_message_corpus() -> Vec<DaemonMessage> {
             unknown_reason,
             detection_warning,
             mcp_connected,
+            queued_count,
+            queued_ids,
         }),
         wire_sample!(DaemonMessage::TextSent {
             window_id,
@@ -893,6 +898,7 @@ fn daemon_message_corpus() -> Vec<DaemonMessage> {
             state,
             note
         }),
+        wire_sample!(DaemonMessage::MessageWithdrawn { id, outcome }),
         wire_sample!(DaemonMessage::WindowInterrupted { window_id }),
         wire_sample!(DaemonMessage::WindowClosed { window_id }),
         wire_sample!(DaemonMessage::WaitResult {
@@ -1169,6 +1175,24 @@ fn withdraw_reason_wire_variants() -> BTreeSet<String> {
             WithdrawReason::Unknown => "unknown",
         };
         serde_spelling(&reason, hand)
+    })
+    .collect()
+}
+
+fn withdraw_outcome_wire_variants() -> BTreeSet<String> {
+    [
+        WithdrawOutcome::Withdrawn,
+        WithdrawOutcome::AlreadyDelivered,
+        WithdrawOutcome::NotFound,
+    ]
+    .into_iter()
+    .map(|outcome| {
+        let hand = match &outcome {
+            WithdrawOutcome::Withdrawn => "withdrawn",
+            WithdrawOutcome::AlreadyDelivered => "already_delivered",
+            WithdrawOutcome::NotFound => "not_found",
+        };
+        serde_spelling(&outcome, hand)
     })
     .collect()
 }
@@ -1670,6 +1694,10 @@ fn current_enum_wire_variants() -> BTreeMap<String, BTreeSet<String>> {
         (
             "DeliveryState".to_string(),
             handoff_delivery_wire_variants(),
+        ),
+        (
+            "WithdrawOutcome".to_string(),
+            withdraw_outcome_wire_variants(),
         ),
         (
             "AssignmentSource".to_string(),

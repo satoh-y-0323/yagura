@@ -21,6 +21,7 @@ const KNOWN_TOOL_NAMES: &[&str] = &[
     "list_windows",
     "get_window_status",
     "send_message",
+    "withdraw_message",
     "open_window",
     "interrupt_window",
     "close_window",
@@ -1181,6 +1182,11 @@ fn router_cases() -> Vec<(&'static str, Value, &'static str)> {
             "send_message",
             json!({ "window_id": "w-1", "text": "hello" }),
             "send_text",
+        ),
+        (
+            "withdraw_message",
+            json!({ "id": "envelope-1" }),
+            "withdraw_message",
         ),
         (
             "open_window",

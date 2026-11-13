@@ -206,6 +206,11 @@ pub struct PolicyLimits {
     /// instead of silently taking effect.
     #[serde(default, deserialize_with = "deserialize_approval_timeout_secs")]
     pub approval_timeout_secs: Option<u64>,
+    /// How many envelopes one sender may leave in one window's inbox at once
+    /// ([`DaemonConfig::max_queued_per_sender`]). A value outside 1 to the
+    /// inbox's capacity is warned about by [`apply_limits`], which keeps the
+    /// default.
+    pub max_queued_per_sender: Option<u64>,
     /// Deprecated: bounded how long a delivery typed into a window waited for
     /// it to start up. Nothing is typed into a window any more, so any value
     /// is read, warned about and never used.
@@ -655,6 +660,24 @@ pub fn apply_limits(config: &mut DaemonConfig, limits: Option<&PolicyLimits>) {
     }
     if let Some(seconds) = limits.approval_timeout_secs {
         config.approval_timeout_secs = seconds;
+    }
+    if let Some(bound) = limits.max_queued_per_sender {
+        // A bound of 0 refuses every envelope, and one past the inbox's
+        // capacity bounds nothing the capacity does not: neither is what the
+        // key is for, and neither should stop the rest of the playbook.
+        match usize::try_from(bound) {
+            Ok(bound) if (1..=config.inbox_capacity).contains(&bound) => {
+                config.max_queued_per_sender = bound;
+            }
+            _ => tracing::warn!(
+                key = "max_queued_per_sender",
+                value = bound,
+                default = config.max_queued_per_sender,
+                "playbook [limits] max_queued_per_sender must be between 1 and {}; the \
+                 default is used",
+                config.inbox_capacity
+            ),
+        }
     }
 }
 

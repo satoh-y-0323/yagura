@@ -162,6 +162,13 @@ pub struct SendMessageArgs {
     pub text: Option<String>,
 }
 
+/// Arguments for the `withdraw_message` tool.
+#[derive(Debug, Clone, Deserialize)]
+pub struct WithdrawMessageArgs {
+    /// The id the send's answer named the envelope with.
+    pub id: Option<String>,
+}
+
 /// Arguments for the `open_window` tool.
 #[derive(Debug, Clone, Deserialize)]
 pub struct OpenWindowArgs {
@@ -300,6 +307,7 @@ pub(crate) fn message_kind(message: &DaemonMessage) -> &'static str {
         DaemonMessage::WindowList { .. } => "WindowList",
         DaemonMessage::WindowStatus { .. } => "WindowStatus",
         DaemonMessage::TextSent { .. } => "TextSent",
+        DaemonMessage::MessageWithdrawn { .. } => "MessageWithdrawn",
         DaemonMessage::WindowInterrupted { .. } => "WindowInterrupted",
         DaemonMessage::WindowClosed { .. } => "WindowClosed",
         DaemonMessage::WaitResult { .. } => "WaitResult",
@@ -542,6 +550,8 @@ pub async fn get_window_status<T: DaemonTransport>(
             unknown_reason,
             detection_warning,
             mcp_connected,
+            queued_count,
+            queued_ids,
         } => {
             // Built key by key rather than with `json!` so that an absent
             // reason or warning leaves out the key entirely instead of
@@ -563,6 +573,12 @@ pub async fn get_window_status<T: DaemonTransport>(
             }
             if let Some(connected) = mcp_connected {
                 result.insert("mcp_connected".to_string(), Value::Bool(connected));
+            }
+            if let Some(count) = queued_count {
+                result.insert("queued_count".to_string(), json!(count));
+            }
+            if let Some(ids) = queued_ids {
+                result.insert("queued_ids".to_string(), json!(ids));
             }
             Ok(Value::Object(result))
         }
@@ -601,6 +617,27 @@ pub async fn send_message<T: DaemonTransport>(
             json!({ "window_id": window_id, "id": id, "state": state, "note": note }),
             transport.requester_identity(),
         )),
+        DaemonMessage::Error { code, message, .. } => Err(map_daemon_error(&code, message)),
+        other => Err(unexpected_response(&other)),
+    }
+}
+
+/// `withdraw_message`: `id` is required and non-empty, checked before any
+/// daemon round trip. The reply carries the id and what became of the
+/// envelope, as the daemon answered.
+pub async fn withdraw_message<T: DaemonTransport>(
+    transport: &T,
+    args: WithdrawMessageArgs,
+) -> Result<Value, ToolError> {
+    let id = require_non_empty(args.id, "id")?;
+    let response = transport
+        .round_trip(ClientMessage::WithdrawMessage { id })
+        .await
+        .map_err(map_transport_error)?;
+    match response {
+        DaemonMessage::MessageWithdrawn { id, outcome } => {
+            Ok(json!({ "id": id, "outcome": outcome }))
+        }
         DaemonMessage::Error { code, message, .. } => Err(map_daemon_error(&code, message)),
         other => Err(unexpected_response(&other)),
     }

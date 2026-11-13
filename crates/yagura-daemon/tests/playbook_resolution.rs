@@ -14,7 +14,9 @@ use crate::common;
 use common::store_fixtures::capture_warn_events;
 use yagura_daemon::DaemonConfig;
 use yagura_daemon::cli::resolve_playbook;
-use yagura_daemon::config::APPROVAL_TIMEOUT_DEFAULT_SECS;
+use yagura_daemon::config::{
+    APPROVAL_TIMEOUT_DEFAULT_SECS, DEFAULT_INBOX_CAPACITY, DEFAULT_MAX_QUEUED_PER_SENDER,
+};
 use yagura_daemon::control::{ApprovalPolicy, DestructiveTool, apply_limits, parse_policy};
 
 #[test]
@@ -216,6 +218,39 @@ fn a_deprecated_limits_key_is_warned_about_and_changes_no_setting_whatever_its_v
                 "{key} = {seconds} must change no setting of the daemon"
             );
         }
+    }
+}
+
+/// `[limits] max_queued_per_sender` sets how many envelopes one sender may leave in one
+/// window. A value outside 1 to the inbox's capacity does not fail the load: merging it
+/// warns naming the key and leaves the default.
+#[test]
+fn max_queued_per_sender_sets_the_bound_and_one_out_of_range_is_warned_about_and_keeps_the_default()
+{
+    for (value, expected, warns) in [
+        (3, 3, false),
+        (DEFAULT_INBOX_CAPACITY as u64, DEFAULT_INBOX_CAPACITY, false),
+        (0, DEFAULT_MAX_QUEUED_PER_SENDER, true),
+        (
+            DEFAULT_INBOX_CAPACITY as u64 + 1,
+            DEFAULT_MAX_QUEUED_PER_SENDER,
+            true,
+        ),
+    ] {
+        let policy = parse_policy(&format!("[limits]\nmax_queued_per_sender = {value}\n"))
+            .unwrap_or_else(|err| panic!("max_queued_per_sender = {value} must load, got: {err}"));
+        let mut config = DaemonConfig::default();
+        let (events, ()) = capture_warn_events(|| apply_limits(&mut config, policy.limits()));
+        assert_eq!(config.max_queued_per_sender, expected, "{value}");
+        assert_eq!(
+            warned_about(&events, "max_queued_per_sender"),
+            warns,
+            "{value}: warned: {:?}",
+            events
+                .iter()
+                .map(|event| &event.message)
+                .collect::<Vec<_>>()
+        );
     }
 }
 

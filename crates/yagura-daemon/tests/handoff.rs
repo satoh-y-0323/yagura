@@ -19,8 +19,9 @@ use crate::common;
 use serde_json::Value;
 
 use crate::send_message_lifecycle::{
-    First, entry, first_of, id_of, note_of, open_wait_window, register_wait, sending_config,
-    state_of, take_and_print, until,
+    First, entry, first_of, id_of, note_of, open_wait_window, outcome_of, register_wait,
+    send_queued, send_text, sending_config, state_of, take_and_print, until, window_sender,
+    withdraw,
 };
 use common::{
     CONTROL_DETECTION_NAME, Harness, expect_delivery, read_response, send, unique_temp_dir,
@@ -470,10 +471,132 @@ async fn a_handoff_whose_door_holds_it_past_the_door_bound_is_answered_queued_an
         0,
         "the envelope is still the door's: it is not put back"
     );
+    assert_eq!(
+        outcome_of(&withdraw(&mut client, &id_of(&answer)).await).as_deref(),
+        Some("already_delivered"),
+        "an envelope a door carries is no longer the sender's to withdraw"
+    );
     send(&mut door, &ClientMessage::DeliverPrinted).await;
     send(&mut client, &ClientMessage::Ping).await;
     assert!(
         matches!(read_response(&mut client).await, DaemonMessage::Pong),
         "the handoff is answered once"
+    );
+}
+
+// =====================================================================
+// How many envelopes one sender may leave waiting in one window
+// =====================================================================
+
+/// The daemon's default bound on what one sender leaves waiting in one window.
+const SENDER_BOUND: usize = 8;
+
+/// Asks a handoff of `note` to `window_id` on `client` and returns the answer.
+async fn handoff_answer(client: &mut Connection, window_id: &str, note: &str) -> DaemonMessage {
+    ask_handoff(client, window_id, note).await;
+    read_response(client).await
+}
+
+/// One sender leaves at most eight envelopes, handoffs and messages alike, waiting in one
+/// window; the one past that is refused and nothing of it is put in. The bound is per
+/// window: the same sender still reaches another window. Parcels the daemon puts in on
+/// its own (as chat and report notices are) are no sender's and take no sender's room.
+#[tokio::test]
+async fn one_sender_leaves_at_most_eight_envelopes_waiting_in_a_window_and_the_next_is_resource_exhausted()
+ {
+    let dir = unique_temp_dir("sender-bound");
+    let h = Harness::start("sender-bound", sending_config(&dir)).await;
+    let mut external = h.connect().await;
+    let window_id = open_wait_window(&h, &mut external, CONTROL_DETECTION_NAME).await;
+    let other_window = open_wait_window(&h, &mut external, CONTROL_DETECTION_NAME).await;
+    for n in 0..SENDER_BOUND {
+        let refused = entry(&h, &window_id)
+            .inbox()
+            .deposit(yagura_daemon::inbox::Parcel::new(
+                format!("daemon-own-{n}"),
+                format!("DAEMON-OWN-{n}"),
+            ));
+        assert!(
+            refused.is_empty(),
+            "the inbox takes the daemon's own parcel {n}"
+        );
+    }
+
+    for n in 0..SENDER_BOUND / 2 {
+        let answer = handoff_answer(&mut external, &window_id, &format!("BOUND-HANDOFF-{n}")).await;
+        assert_eq!(state_of(&answer).as_deref(), Some("queued"), "{answer:?}");
+        send_queued(&mut external, &window_id, &format!("BOUND-MESSAGE-{n}")).await;
+    }
+    assert_eq!(
+        entry(&h, &window_id).inbox().pending_count(),
+        2 * SENDER_BOUND
+    );
+
+    let message = send_text(&mut external, &window_id, "ONE-MESSAGE-TOO-MANY").await;
+    assert_eq!(
+        state_of(&message).as_deref(),
+        Some("resource_exhausted"),
+        "{message:?}"
+    );
+    let handoff = handoff_answer(&mut external, &window_id, "ONE-HANDOFF-TOO-MANY").await;
+    assert_eq!(
+        state_of(&handoff).as_deref(),
+        Some("resource_exhausted"),
+        "{handoff:?}"
+    );
+    assert_eq!(
+        entry(&h, &window_id).inbox().pending_count(),
+        2 * SENDER_BOUND
+    );
+
+    send_queued(&mut external, &other_window, "SAME-SENDER-OTHER-WINDOW").await;
+    let taken = take_and_print(&h, &window_id).await;
+    assert!(
+        !taken.contains("TOO-MANY"),
+        "a refused envelope is never put in: {taken:?}"
+    );
+}
+
+/// The bound counts each window that sends on its own, while every caller that is no
+/// window shares one: a second such connection finds the room the first one filled.
+/// An envelope withdrawn gives its room back.
+#[tokio::test]
+async fn each_window_has_its_own_room_and_callers_that_are_no_window_share_one() {
+    let dir = unique_temp_dir("sender-bound-who");
+    let h = Harness::start("sender-bound-who", sending_config(&dir)).await;
+    let mut external = h.connect().await;
+    let window_id = open_wait_window(&h, &mut external, CONTROL_DETECTION_NAME).await;
+    let (_, mut a) = window_sender(&h).await;
+    let (_, mut b) = window_sender(&h).await;
+
+    let mut external_ids = Vec::new();
+    for n in 0..SENDER_BOUND {
+        send_queued(&mut a, &window_id, &format!("FROM-A-{n}")).await;
+        external_ids.push(send_queued(&mut external, &window_id, &format!("FROM-EXT-{n}")).await);
+    }
+    let past = send_text(&mut a, &window_id, "A-PAST-ITS-ROOM").await;
+    assert_eq!(
+        state_of(&past).as_deref(),
+        Some("resource_exhausted"),
+        "{past:?}"
+    );
+    send_queued(&mut b, &window_id, "B-HAS-ITS-OWN-ROOM").await;
+
+    let mut second_external = h.connect().await;
+    let shared = send_text(&mut second_external, &window_id, "EXT-SHARES-THE-ROOM").await;
+    assert_eq!(
+        state_of(&shared).as_deref(),
+        Some("resource_exhausted"),
+        "{shared:?}"
+    );
+
+    assert_eq!(
+        outcome_of(&withdraw(&mut external, &external_ids[0]).await).as_deref(),
+        Some("withdrawn")
+    );
+    send_queued(&mut external, &window_id, "EXT-AFTER-A-WITHDRAWAL").await;
+    assert_eq!(
+        entry(&h, &window_id).inbox().pending_count(),
+        2 * SENDER_BOUND + 1
     );
 }

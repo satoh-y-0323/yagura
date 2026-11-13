@@ -43,6 +43,7 @@ fn window_info(mcp_connected: Option<bool>) -> WindowInfo {
         status_rev: None,
         mcp_connected,
         status_reports_missing: None,
+        queued_count: None,
     }
 }
 
@@ -56,6 +57,8 @@ fn window_status_response(mcp_connected: Option<bool>) -> DaemonMessage {
         unknown_reason: None,
         detection_warning: None,
         mcp_connected,
+        queued_count: None,
+        queued_ids: None,
     }
 }
 

@@ -553,6 +553,10 @@
           "shift": "boolean"
         },
         "type": "string"
+      },
+      "withdraw_message": {
+        "id": "string",
+        "type": "string"
       }
     },
     "daemon": {
@@ -971,6 +975,11 @@
             }
           }
         ],
+        "type": "string"
+      },
+      "message_withdrawn": {
+        "id": "string",
+        "outcome": "string",
         "type": "string"
       },
       "milestone_set": {
@@ -1431,6 +1440,7 @@
             "layout_json": "string",
             "mcp_connected": "boolean",
             "name": "string",
+            "queued_count": "number",
             "room": {
               "name": "string",
               "room_id": "string"
@@ -1466,6 +1476,10 @@
         "exit_code": "number",
         "last_output_summary": "string",
         "mcp_connected": "boolean",
+        "queued_count": "number",
+        "queued_ids": [
+          "string"
+        ],
         "since_ms": "number",
         "status": "string",
         "type": "string",
@@ -1648,6 +1662,11 @@
       "unknown",
       "waiting_approval",
       "waiting_input"
+    ],
+    "WithdrawOutcome": [
+      "already_delivered",
+      "not_found",
+      "withdrawn"
     ],
     "WithdrawReason": [
       "requester_disconnected",

@@ -26,6 +26,7 @@ use super::ticket_tools::{
 use super::tools::{
     self, CloseWindowArgs, GetWindowStatusArgs, InterruptWindowArgs, OpenWindowArgs, ReadChatArgs,
     ReadOutputArgs, SendChatArgs, SendHandoffArgs, SendMessageArgs, ToolError, WaitForStatusArgs,
+    WithdrawMessageArgs,
 };
 
 /// Shared between `open_window` and `send_handoff`'s schemas: both accept the
@@ -207,7 +208,10 @@ impl<T: DaemonTransport + 'static> YaguraMcpServer<T> {
             definition layer configured at all -- also carries detection_warning. \
             mcp_connected is true while the window's yagura MCP bridge is identified with \
             the daemon and false while it is not; it is omitted when the daemon does not \
-            report it.",
+            report it. queued_count is how many envelopes and notices wait in the window's \
+            inbox; queued_ids lists the ids of those your own window sent that still wait \
+            there (a caller that is no window is shown the count alone). An id that no longer \
+            waits was handed over or is being carried, or its window or the daemon ended.",
         input_schema = schema_object(json!({
             "type": "object",
             "properties": {
@@ -244,8 +248,9 @@ impl<T: DaemonTransport + 'static> YaguraMcpServer<T> {
             the CLI was handed the envelope (an input handoff, not proof that the model read \
             it) and queued while it waits; note says when a waiting envelope is handed over \
             and what could lose it. The call waits only while a wait the CLI left registered, \
-            or its wake command, carries the envelope, and nothing takes it back once it is \
-            in. What the CLI gets \
+            or its wake command, carries the envelope; one still waiting is taken back with \
+            withdraw_message. One sender leaves at most a bounded number (8 by default) \
+            waiting in one window; past that it is resource_exhausted. What the CLI gets \
             is one line: \"[yagura message] \" followed by a JSON object with the keys id, \
             from, text and reply. Act once on an envelope whose id you were handed before. To \
             answer one, call send_message with window_id set to reply.window_id. The text in \
@@ -280,6 +285,40 @@ impl<T: DaemonTransport + 'static> YaguraMcpServer<T> {
         .await
     }
 
+    #[tool(
+        description = "Take back an envelope you sent with send_message or send_handoff \
+            while it still waits in its window's inbox: it then never reaches the window's \
+            CLI. Only its sender may: the window that sent it, or, for a caller that is no \
+            window, the connection that was answered with its id. No approval is asked. The \
+            reply carries id and outcome: withdrawn when it was taken out, already_delivered \
+            when a door carries it or its CLI was handed it already, and not_found when you \
+            sent no envelope of that id that its window still holds (it was withdrawn, or \
+            its window or the daemon ended). An envelope a door carries waits again if the \
+            door ends without printing it. Chat messages are not envelopes.",
+        input_schema = schema_object(json!({
+            "type": "object",
+            "properties": {
+                "id": {
+                    "type": "string",
+                    "description": "The id the send's reply named the envelope with.",
+                },
+            },
+            "required": ["id"],
+        }))
+    )]
+    async fn withdraw_message(
+        &self,
+        params: Parameters<WithdrawMessageArgs>,
+        ctx: RequestContext<RoleServer>,
+    ) -> CallToolResult {
+        self.unless_cancelled(
+            "withdraw_message",
+            &ctx,
+            tools::withdraw_message(&self.transport, params.0),
+        )
+        .await
+    }
+
     // Some MCP clients silently truncate a long tool description, so the
     // description keeps only what every caller needs and the per-argument
     // rules live in the schema, where a client reads them per argument.
@@ -303,8 +342,8 @@ impl<T: DaemonTransport + 'static> YaguraMcpServer<T> {
             over), and undelivered_no_delivery when the window was \
             not opened from a profile that declares how its CLI is handed text. The \
             call does not wait for the window's next turn: only a wait the CLI left \
-            registered, or its wake command, is waited for, and nothing takes it \
-            back. At most 4 handoffs per connection and 32 \
+            registered, or its wake command, is waited for; withdraw_message takes \
+            back one still waiting. At most 4 handoffs per connection and 32 \
             daemon-wide may be outstanding at once; beyond that it is \
             resource_exhausted. What the receiving CLI gets is one line: the fixed \
             prefix \"[yagura handoff] \" followed by a single-line JSON object with \

@@ -191,6 +191,7 @@ fn sample_window_info(
         status_rev: None,
         mcp_connected: None,
         status_reports_missing: None,
+        queued_count: None,
     }
 }
 
@@ -218,6 +219,8 @@ fn sample_window_status_message(
         unknown_reason,
         detection_warning,
         mcp_connected: None,
+        queued_count: None,
+        queued_ids: None,
     }
 }
 

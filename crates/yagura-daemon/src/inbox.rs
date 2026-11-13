@@ -20,11 +20,11 @@
 //! written, and the parcels show in the order they were deposited: one whose
 //! row could not be written never shows, and holds nothing back.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 
 use tokio::sync::{oneshot, watch};
-use yagura_protocol::{DaemonMessage, DeliveryStream, WindowStatus};
+use yagura_protocol::{DaemonMessage, DeliveryStream, WindowStatus, WithdrawOutcome};
 
 use crate::parcel_store::{ChatDelivery, InboxKeeper, KeptParcel, RowEnd, Written};
 use crate::waiter::StatusAt;
@@ -297,6 +297,36 @@ pub struct Parcel {
     pub text: String,
     notice: bool,
     saved: bool,
+    sent: Option<Sent>,
+}
+
+/// Who sent an envelope: what the bound on the envelopes one sender leaves in
+/// a window counts by, and who alone may withdraw it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Sender {
+    /// The window of this id.
+    Window(String),
+    /// A caller that is no window, on the daemon connection of this number.
+    External(u64),
+}
+
+impl Sender {
+    /// Whether `self` and `other` count against the same bound: one window's
+    /// own, or the one every caller that is no window shares.
+    fn shares_bound_with(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Window(one), Self::Window(other)) => one == other,
+            (Self::External(_), Self::External(_)) => true,
+            (Self::Window(_), Self::External(_)) | (Self::External(_), Self::Window(_)) => false,
+        }
+    }
+}
+
+/// An envelope's id and its sender.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Sent {
+    id: String,
+    sender: Sender,
 }
 
 impl Parcel {
@@ -309,7 +339,28 @@ impl Parcel {
             text: text.into(),
             notice: false,
             saved: true,
+            sent: None,
         }
+    }
+
+    /// This parcel as the envelope `id` that `sender` sent: it counts against
+    /// `sender`'s bound in the window ([`Inbox::deposit`]), and only `sender`
+    /// withdraws it by `id` ([`Inbox::withdraw_sent`]).
+    #[must_use]
+    pub fn sent_by(self, id: impl Into<String>, sender: Sender) -> Self {
+        Self {
+            sent: Some(Sent {
+                id: id.into(),
+                sender,
+            }),
+            ..self
+        }
+    }
+
+    fn sent_by_sender(&self, sender: &Sender) -> bool {
+        self.sent
+            .as_ref()
+            .is_some_and(|sent| sent.sender == *sender)
     }
 
     /// This parcel held in memory alone: it ends with the daemon, and no
@@ -758,6 +809,10 @@ struct State {
     /// The place the next parcel deposited takes.
     next_seq: i64,
     next_id: u64,
+    /// The sender of each envelope taken in, by its id, for as long as the
+    /// window lives: a withdrawal tells one handed over from one never sent.
+    /// One withdrawn, and every one of a sender that ended, is dropped.
+    sent: HashMap<String, Sender>,
 }
 
 impl State {
@@ -779,7 +834,27 @@ impl State {
             .parcels
             .iter()
             .position(|held| held.parcel.key == key)?;
-        self.parcels.remove(position)
+        let removed = self.parcels.remove(position)?;
+        if let Some(sent) = &removed.parcel.sent {
+            self.sent.remove(&sent.id);
+        }
+        Some(removed)
+    }
+
+    /// How many parcels the inbox holds, waiting or carried, that count
+    /// against the same bound as `sender`.
+    fn held_against(&self, sender: &Sender) -> usize {
+        self.parcels
+            .iter()
+            .chain(self.carrying.iter().flat_map(|carried| carried.held.iter()))
+            .chain(self.doors.iter().flat_map(|door| door.held.iter()))
+            .filter(|held| {
+                held.parcel
+                    .sent
+                    .as_ref()
+                    .is_some_and(|sent| sent.sender.shares_bound_with(sender))
+            })
+            .count()
     }
 
     /// How many waiting parcels are not notices: the ones the capacity bounds.
@@ -796,6 +871,8 @@ struct Shared {
     me: Weak<Shared>,
     state: Mutex<State>,
     capacity: usize,
+    /// The most parcels one sender's envelopes take in the inbox at once.
+    sender_bound: usize,
     spec: DeliverySpec,
     /// The most the window's context prints ahead of the parcels.
     intro: String,
@@ -1257,6 +1334,9 @@ pub struct Deposited {
     /// Where the new parcel is until it ends (the sender closes then);
     /// `None` when it was turned away at once.
     pub place: Option<watch::Receiver<Place>>,
+    /// Whether it was turned away because its sender's envelopes already
+    /// take as many places in the inbox as one sender may.
+    pub sender_at_bound: bool,
 }
 
 /// A push under way: what it carries.
@@ -1312,20 +1392,31 @@ impl std::fmt::Debug for Inbox {
 
 impl Inbox {
     /// An empty inbox holding at most `capacity` parcels besides notices,
-    /// answering by `spec`
+    /// and at most [`crate::config::DEFAULT_MAX_QUEUED_PER_SENDER`] of one
+    /// sender's envelopes, answering by `spec`
     /// and pushing only while `status` allows it.
     #[must_use]
     pub fn new(capacity: usize, spec: DeliverySpec, status: watch::Receiver<StatusAt>) -> Self {
-        Self::kept(capacity, spec, "", status, None, Vec::new())
+        Self::kept(
+            capacity,
+            crate::config::DEFAULT_MAX_QUEUED_PER_SENDER,
+            spec,
+            "",
+            status,
+            None,
+            Vec::new(),
+        )
     }
 
-    /// [`Self::new`] for a window whose context prints at most `intro` ahead
+    /// [`Self::new`] holding at most `sender_bound` of one sender's envelopes,
+    /// for a window whose context prints at most `intro` ahead
     /// of the parcels, keeping every change through `keeper` and holding
     /// `kept` first: the parcels the store kept for the window, oldest first,
     /// whose depositors are gone. A kept parcel no answer carries whole is
     /// dropped, as a deposit of it would have been turned away.
     pub(crate) fn kept(
         capacity: usize,
+        sender_bound: usize,
         spec: DeliverySpec,
         intro: &str,
         status: watch::Receiver<StatusAt>,
@@ -1347,6 +1438,7 @@ impl Inbox {
                     text: parcel.text,
                     notice: parcel.notice,
                     saved: true,
+                    sent: None,
                 },
                 seq: parcel.seq,
                 id,
@@ -1371,6 +1463,7 @@ impl Inbox {
                 me: me.clone(),
                 state: Mutex::new(state),
                 capacity,
+                sender_bound,
                 spec,
                 intro: intro.to_string(),
                 status,
@@ -1382,7 +1475,9 @@ impl Inbox {
     }
 
     /// Adds `parcel` and returns the parcels the inbox turned away: `parcel`
-    /// itself when the inbox is full of other parcels, has ended, or `parcel`
+    /// itself when the inbox is full of other parcels, has ended, its
+    /// sender's envelopes already take as many places as one sender may
+    /// (waiting or carried; see [`Parcel::sent_by`]), or `parcel`
     /// alone is not carried whole by some output the window prints it in
     /// (each door's, and the wake command's). Nothing already inside is
     /// pushed out, except that a notice replaces the notice waiting under its
@@ -1437,27 +1532,38 @@ impl Inbox {
         wakes: bool,
         keeping: Keeping,
     ) -> (Deposited, Saving, Option<(KeptParcel, Unwritten)>) {
-        let refused = |parcel| {
+        let refused = |parcel, sender_at_bound| {
             (
                 Deposited {
                     turned_away: vec![parcel],
                     end: None,
                     handed_to_wait: false,
                     place: None,
+                    sender_at_bound,
                 },
                 Saving::ready(),
                 None,
             )
         };
         if !self.shared.fits(&parcel.text) {
-            return refused(parcel);
+            return refused(parcel, false);
         }
         let mut state = self.shared.lock();
         // A notice is one per key, so it bounds itself; it is never turned
         // away, and never counted, for the room other parcels take.
         let full = !parcel.notice && state.waiting_others() >= self.shared.capacity;
         if state.closed.is_some() || full {
-            return refused(parcel);
+            return refused(parcel, false);
+        }
+        // Checked under the lock the parcel goes in under, so two deposits of
+        // one sender never both take its last place.
+        if let Some(sent) = &parcel.sent
+            && state.held_against(&sent.sender) >= self.shared.sender_bound
+        {
+            return refused(parcel, true);
+        }
+        if let Some(sent) = &parcel.sent {
+            state.sent.insert(sent.id.clone(), sent.sender.clone());
         }
         let (tx, rx) = oneshot::channel();
         let id = state.take_id();
@@ -1509,6 +1615,7 @@ impl Inbox {
                 end: Some(rx),
                 handed_to_wait,
                 place: Some(place),
+                sender_at_bound: false,
             },
             saving,
             row,
@@ -1777,6 +1884,64 @@ impl Inbox {
         }
     }
 
+    /// Withdraws the envelope `id` for `asker`, if it still waits: answered
+    /// [`WithdrawOutcome::Withdrawn`] once it is out, under the same lock the
+    /// doors take it under, so nothing hands it to the CLI after that.
+    /// [`WithdrawOutcome::AlreadyDelivered`] when a door or a push carries it
+    /// or it was handed over; [`WithdrawOutcome::NotFound`] when `asker` sent
+    /// no envelope of that id that the inbox still knows, or the inbox ended.
+    pub fn withdraw_sent(&self, id: &str, asker: &Sender) -> WithdrawOutcome {
+        let mut state = self.shared.lock();
+        if state.closed.is_some() || state.sent.get(id) != Some(asker) {
+            return WithdrawOutcome::NotFound;
+        }
+        let waiting = state
+            .parcels
+            .iter()
+            .position(|held| held.parcel.sent.as_ref().is_some_and(|sent| sent.id == id));
+        match waiting.and_then(|position| state.parcels.remove(position)) {
+            Some(removed) => {
+                self.shared.forget([&removed]);
+                state.sent.remove(id);
+                WithdrawOutcome::Withdrawn
+            }
+            None => WithdrawOutcome::AlreadyDelivered,
+        }
+    }
+
+    /// Withdraws every envelope the window `window_id` sent that still waits,
+    /// once that window ended: nobody is left to answer them. One a door or a
+    /// push carries is left to it, and waits again if they fail.
+    pub fn withdraw_sent_by(&self, window_id: &str) {
+        let sender = Sender::Window(window_id.to_string());
+        let mut state = self.shared.lock();
+        let (gone, staying): (VecDeque<Held>, VecDeque<Held>) = std::mem::take(&mut state.parcels)
+            .into_iter()
+            .partition(|held| held.parcel.sent_by_sender(&sender));
+        state.parcels = staying;
+        self.shared.forget(&gone);
+        state.sent.retain(|_, sent| *sent != sender);
+    }
+
+    /// The ids of the envelopes `sender` sent that wait to be read, oldest
+    /// first.
+    #[must_use]
+    pub fn waiting_sent_by(&self, sender: &Sender) -> Vec<String> {
+        let state = self.shared.lock();
+        state
+            .parcels
+            .iter()
+            .take(state.shown())
+            .filter_map(|held| {
+                held.parcel
+                    .sent
+                    .as_ref()
+                    .filter(|sent| sent.sender == *sender)
+                    .map(|sent| sent.id.clone())
+            })
+            .collect()
+    }
+
     /// Replaces the text of the waiting parcel named `key`. `false` when no
     /// such parcel waits, or the new text would be turned away by
     /// [`Self::deposit`].
@@ -1810,6 +1975,7 @@ impl Inbox {
             return;
         }
         state.closed = Some(end);
+        state.sent.clear();
         for held in std::mem::take(&mut state.parcels) {
             held.settle(end);
         }

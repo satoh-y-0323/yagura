@@ -17,6 +17,7 @@ use yagura_protocol::{APPROVAL_TEXT_MAX_BYTES, ApprovalTarget, DaemonMessage, De
 use crate::approval::{ApprovalDraft, SubmitError, Ticket};
 use crate::config::DaemonConfig;
 use crate::control::{self, DenyReason, DestructiveTool, GateVerdict};
+use crate::inbox::Sender;
 use crate::live_policy;
 use crate::window::WindowEntry;
 
@@ -431,11 +432,12 @@ pub(super) async fn await_verdict<T: GatedTool>(
 /// arguments its handler already validated, plus the licence the recheck
 /// issued.
 pub(super) enum PermittedAction {
-    SendText(String, Permit<SendMessage>),
+    SendText(String, Sender, Permit<SendMessage>),
     Interrupt(Permit<InterruptWindow>),
     Close(bool, Permit<CloseWindow>),
     SendHandoff {
         text: String,
+        sender: Sender,
         requester: Option<String>,
         slot: Option<HandoffSlot>,
         permit: Permit<SendHandoff>,
@@ -462,15 +464,19 @@ pub(super) fn gate_approved(action: PendingAction, detected: DetectedStatus) -> 
         return ApprovedOutcome::Denied(action, reason);
     }
     ApprovedOutcome::Permitted(match action {
-        PendingAction::SendText(text) => PermittedAction::SendText(text, Permit::issue()),
+        PendingAction::SendText(text, sender) => {
+            PermittedAction::SendText(text, sender, Permit::issue())
+        }
         PendingAction::Interrupt => PermittedAction::Interrupt(Permit::issue()),
         PendingAction::Close(force) => PermittedAction::Close(force, Permit::issue()),
         PendingAction::SendHandoff {
             text,
+            sender,
             requester,
             slot,
         } => PermittedAction::SendHandoff {
             text,
+            sender,
             requester,
             slot,
             permit: Permit::issue(),

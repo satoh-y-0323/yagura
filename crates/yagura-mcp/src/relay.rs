@@ -74,8 +74,8 @@ const RESTARTED_TEXT: &str = "the connection to the yagura daemon was lost after
     read read_chat with after_seq; for plans and a task window's report read list_plans, then \
     get_plan; for tickets read list_tickets and get_ticket. A call that only \
     waited (wait_for_status, wait_for_report) or was waiting for approval did nothing, so call \
-    it again. A send_message or send_handoff may already have reached its receiver, and nothing \
-    takes it back: if you send it again, it may arrive twice, under a new id, so say in it that \
+    it again. A send_message or send_handoff may already have reached its receiver, and \
+    withdraw_message cannot take it back past the restart: if you send it again, it may arrive twice, under a new id, so say in it that \
     it is a resend. The same holds for a report sent to your opener.";
 
 const BACK_TEXT: &str = "the yagura daemon could not be reached when this call was made, so the \

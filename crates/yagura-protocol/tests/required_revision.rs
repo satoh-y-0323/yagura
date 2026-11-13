@@ -137,6 +137,9 @@ fn one_message_per_variant_without_launch_option() -> Vec<ClientMessage> {
             window_id: "w1".to_string(),
             text: "hi".to_string(),
         },
+        ClientMessage::WithdrawMessage {
+            id: "e1".to_string(),
+        },
         ClientMessage::InterruptWindow {
             window_id: "w1".to_string(),
         },
@@ -549,6 +552,7 @@ fn every_other_variant_requires_no_more_than_baseline() {
                         | ClientMessage::AddTicketResult { .. }
                         | ClientMessage::SetMilestone { .. }
                         | ClientMessage::RunHook { .. }
+                        | ClientMessage::WithdrawMessage { .. }
                 )
         })
     {
@@ -982,6 +986,18 @@ fn a_doors_read_and_its_printed_notice_require_revision_thirty_four() {
         required_protocol_revision(&client_from_wire(
             serde_json::json!({ "type": "deliver_printed" })
         )),
+        34
+    );
+}
+
+/// A daemon before revision 34 refuses `withdraw_message` by name, so it is sent only to a
+/// peer that speaks revision 34.
+#[test]
+fn withdraw_message_requires_revision_thirty_four() {
+    assert_eq!(
+        required_protocol_revision(&ClientMessage::WithdrawMessage {
+            id: "e1".to_string(),
+        }),
         34
     );
 }

@@ -3963,3 +3963,47 @@ async fn send_handoff_between_two_windows_approved_by_a_registered_approver_queu
     assert_eq!(json["reference"], "src/foo.rs");
     assert_eq!(json["note"], "please look at the error handling");
 }
+
+/// The child of [`a_window_that_ends_on_its_own_takes_what_it_left_waiting_with_it`]:
+/// it ends by itself at its first input.
+const ENDS_AT_INPUT_CHILD: &str = "a_child_that_ends_at_its_first_input";
+
+#[test]
+#[ignore = "the child of the test below, started by common::own_test_child_command"]
+fn a_child_that_ends_at_its_first_input() {
+    if !common::running_as_own_test(module_path!(), ENDS_AT_INPUT_CHILD) {
+        return;
+    }
+    let mut byte = [0u8; 1];
+    let _ = std::io::Read::read(&mut std::io::stdin().lock(), &mut byte);
+    std::process::exit(0);
+}
+
+/// A sending window whose child exits by itself, with no close asked of it, withdraws
+/// what it left waiting in another window's inbox, as a closed one does.
+#[tokio::test]
+async fn a_window_that_ends_on_its_own_takes_what_it_left_waiting_with_it() {
+    use crate::send_message_lifecycle::{entry, open_wait_window, send_queued, sending_config};
+
+    let dir = unique_temp_dir("sender-ends-on-its-own");
+    let h = Harness::start("sender-ends-on-its-own", sending_config(&dir)).await;
+    let mut external = h.connect().await;
+    let target = open_wait_window(&h, &mut external, CONTROL_DETECTION_NAME).await;
+    let sender_id = h
+        .open(
+            common::own_test_child_command(module_path!(), ENDS_AT_INPUT_CHILD),
+            None,
+        )
+        .await;
+    let mut sender = h.connect().await;
+    identify(&mut sender, &sender_id).await;
+    send_queued(&mut sender, &target, "LEFT-BY-A-WINDOW-THAT-ENDS").await;
+    assert_eq!(entry(&h, &target).inbox().pending_count(), 1);
+
+    h.write_input(&sender_id, b"q\r").await;
+    h.wait_until_child_exited(&sender_id).await;
+    crate::send_message_lifecycle::until("the ended sender's envelope to be withdrawn", || {
+        entry(&h, &target).inbox().pending_count() == 0
+    })
+    .await;
+}

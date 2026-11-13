@@ -2413,6 +2413,7 @@ mod tests {
             status_rev: None,
             mcp_connected: None,
             status_reports_missing: None,
+            queued_count: None,
         }
     }
 

@@ -130,6 +130,7 @@ fn sample_window_info(window_id: &str) -> WindowInfo {
         status_rev: None,
         mcp_connected: None,
         status_reports_missing: None,
+        queued_count: None,
     }
 }
 
@@ -155,6 +156,7 @@ async fn list_windows_maps_window_list_response_to_a_windows_array() {
             status_rev: None,
             mcp_connected: None,
             status_reports_missing: None,
+            queued_count: Some(3),
         },
     ];
     let transport = MockTransport::with_response(Ok(DaemonMessage::WindowList {
@@ -276,6 +278,8 @@ async fn list_windows_unexpected_daemon_message_error_names_the_variant_without_
         unknown_reason: None,
         detection_warning: None,
         mcp_connected: None,
+        queued_count: None,
+        queued_ids: None,
     }));
 
     let err = list_windows(&transport).await.expect_err("must fail");
@@ -413,6 +417,8 @@ async fn get_window_status_maps_a_successful_response_transparently() {
         unknown_reason: None,
         detection_warning: None,
         mcp_connected: None,
+        queued_count: Some(2),
+        queued_ids: Some(vec!["envelope-1".to_string(), "envelope-2".to_string()]),
     }));
     let args = GetWindowStatusArgs {
         window_id: Some("w1".to_string()),
@@ -434,6 +440,14 @@ async fn get_window_status_maps_a_successful_response_transparently() {
     assert_eq!(result["since_ms"].as_u64(), Some(4200));
     assert_eq!(result["last_output_summary"], "$ ");
     assert!(result["exit_code"].is_null());
+    assert_eq!(
+        (&result["queued_count"], &result["queued_ids"]),
+        (
+            &serde_json::json!(2),
+            &serde_json::json!(["envelope-1", "envelope-2"])
+        ),
+        "what waits in the window is passed through as the daemon showed it, got {result}"
+    );
 }
 
 #[tokio::test]
@@ -447,6 +461,8 @@ async fn get_window_status_passes_through_null_optional_fields() {
         unknown_reason: None,
         detection_warning: None,
         mcp_connected: None,
+        queued_count: None,
+        queued_ids: None,
     }));
     let args = GetWindowStatusArgs {
         window_id: Some("w1".to_string()),
@@ -536,6 +552,8 @@ async fn get_window_status_includes_the_unknown_reason_key_when_the_daemon_repor
         unknown_reason: Some(UnknownReason::ScreenLost),
         detection_warning: None,
         mcp_connected: None,
+        queued_count: None,
+        queued_ids: None,
     }));
     let args = GetWindowStatusArgs {
         window_id: Some("w1".to_string()),
@@ -559,6 +577,8 @@ async fn get_window_status_omits_the_unknown_reason_key_when_the_daemon_reports_
         unknown_reason: None,
         detection_warning: None,
         mcp_connected: None,
+        queued_count: None,
+        queued_ids: None,
     }));
     let args = GetWindowStatusArgs {
         window_id: Some("w1".to_string()),
@@ -586,6 +606,8 @@ async fn get_window_status_includes_the_detection_warning_key_when_the_daemon_re
         unknown_reason: Some(UnknownReason::NoDefinition),
         detection_warning: Some("failed to load the detection definition (os error)".to_string()),
         mcp_connected: None,
+        queued_count: None,
+        queued_ids: None,
     }));
     let args = GetWindowStatusArgs {
         window_id: Some("w1".to_string()),
@@ -612,6 +634,8 @@ async fn get_window_status_omits_the_detection_warning_key_when_the_daemon_repor
         unknown_reason: None,
         detection_warning: None,
         mcp_connected: None,
+        queued_count: None,
+        queued_ids: None,
     }));
     let args = GetWindowStatusArgs {
         window_id: Some("w1".to_string()),
@@ -643,6 +667,8 @@ async fn get_window_status_includes_mcp_connected_true_when_the_daemon_reports_i
         unknown_reason: None,
         detection_warning: None,
         mcp_connected: Some(true),
+        queued_count: None,
+        queued_ids: None,
     }));
     let args = GetWindowStatusArgs {
         window_id: Some("w1".to_string()),
@@ -670,6 +696,8 @@ async fn get_window_status_includes_mcp_connected_false_when_the_daemon_reports_
         unknown_reason: None,
         detection_warning: None,
         mcp_connected: Some(false),
+        queued_count: None,
+        queued_ids: None,
     }));
     let args = GetWindowStatusArgs {
         window_id: Some("w1".to_string()),
@@ -697,6 +725,8 @@ async fn get_window_status_omits_mcp_connected_when_the_daemon_reports_none() {
         unknown_reason: None,
         detection_warning: None,
         mcp_connected: None,
+        queued_count: None,
+        queued_ids: None,
     }));
     let args = GetWindowStatusArgs {
         window_id: Some("w1".to_string()),
@@ -735,6 +765,57 @@ async fn list_windows_passes_a_true_mcp_connected_through() {
         "list_windows must surface the daemon's mcp_connected fact, got: {}",
         windows[0]
     );
+}
+
+// ---------------------------------------------------------------------
+// withdraw_message
+// ---------------------------------------------------------------------
+
+#[tokio::test]
+async fn withdraw_message_rejects_a_missing_or_empty_id_without_calling_the_transport() {
+    use yagura_daemon::mcp::tools::{WithdrawMessageArgs, withdraw_message};
+
+    for id in [None, Some(String::new())] {
+        let transport = MockTransport::never_called();
+        let err = withdraw_message(&transport, WithdrawMessageArgs { id: id.clone() })
+            .await
+            .expect_err("must fail");
+        assert_eq!(err.code(), "invalid_argument", "{id:?}");
+        assert_eq!(transport.call_count(), 0, "{id:?}");
+    }
+}
+
+#[tokio::test]
+async fn withdraw_message_sends_the_id_and_relays_what_became_of_the_envelope() {
+    use yagura_daemon::mcp::tools::{WithdrawMessageArgs, withdraw_message};
+
+    for outcome in ["withdrawn", "already_delivered", "not_found"] {
+        let transport = MockTransport::with_response(Ok(wire(serde_json::json!({
+            "type": "message_withdrawn",
+            "id": MESSAGE_ID,
+            "outcome": outcome,
+        }))));
+        let result = withdraw_message(
+            &transport,
+            WithdrawMessageArgs {
+                id: Some(MESSAGE_ID.to_string()),
+            },
+        )
+        .await
+        .expect("must succeed");
+
+        assert_eq!(
+            transport.last_sent(),
+            ClientMessage::WithdrawMessage {
+                id: MESSAGE_ID.to_string(),
+            }
+        );
+        assert_eq!(
+            (&result["id"], &result["outcome"]),
+            (&serde_json::json!(MESSAGE_ID), &serde_json::json!(outcome)),
+            "the reply must carry what the daemon answered, got {result}"
+        );
+    }
 }
 
 // ---------------------------------------------------------------------
@@ -3262,6 +3343,8 @@ async fn the_read_only_tools_report_no_requester_at_all() {
             unknown_reason: None,
             detection_warning: None,
             mcp_connected: None,
+            queued_count: None,
+            queued_ids: None,
         }),
         identity.clone(),
     );

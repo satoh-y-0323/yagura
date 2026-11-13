@@ -375,8 +375,9 @@ fn reply_for(message: DaemonMessage) -> Option<(PendingKind, Reply)> {
         DaemonMessage::TicketDetail { ticket } => {
             Some((PendingKind::TicketDetail, Reply::TicketDetail(ticket)))
         }
-        // Identified and HandoffSent are never received: this client sends
-        // neither `identify` nor `send_handoff`.
+        // Identified, HandoffSent and MessageWithdrawn are never received:
+        // this client sends none of `identify`, `send_handoff` and
+        // `withdraw_message`.
         // ApprovalRequested / ApprovalWithdrawn are unsolicited event-class
         // messages `dispatch` handles directly rather than as a reply. The
         // rest stream to the WebView as events elsewhere, or answer nothing.
@@ -393,6 +394,7 @@ fn reply_for(message: DaemonMessage) -> Option<(PendingKind, Reply)> {
         | DaemonMessage::ApprovalRequested { .. }
         | DaemonMessage::ApprovalWithdrawn { .. }
         | DaemonMessage::HandoffSent { .. }
+        | DaemonMessage::MessageWithdrawn { .. }
         // ChatChanged, PlanChanged, TicketChanged, ModelChoices and the two
         // MCP registration pushes are turned into events by `dispatch`; the
         // ones answering a request follow its acknowledgement rather than
