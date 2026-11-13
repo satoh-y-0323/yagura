@@ -156,7 +156,7 @@ async fn attach(daemon: &mut RunningDaemon, window_id: &str) {
 }
 
 /// Sends a status event and then a ping: the refusal answered before the pong, if any.
-async fn status_event_refusal(
+pub(crate) async fn status_event_refusal(
     daemon: &mut RunningDaemon,
     window_id: &str,
     token: &str,
@@ -3722,6 +3722,24 @@ async fn a_taken_back_window_keeps_whether_its_cli_runs_in_another_environment()
 /// migrates rows written before the fact was kept.
 fn store_before_the_guest_fact(sandbox: &Sandbox) {
     const FIRST: &str = "022_window_guest.sql";
+    let first = migrations_from(22);
+    assert_eq!(
+        first
+            .first()
+            .and_then(|path| path.file_name())
+            .and_then(OsStr::to_str),
+        Some(FIRST),
+        "the migration that keeps a window's guest fact is {FIRST}"
+    );
+    store_before_migration(sandbox, 22);
+}
+
+/// The migration that keeps whether a window's overlay was made, and every later one, are
+/// numbered from here.
+const OVERLAY_FACT_MIGRATION: u32 = 23;
+
+/// The migrations numbered `number` or later, in order.
+fn migrations_from(number: u32) -> Vec<PathBuf> {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations");
     let mut later: Vec<PathBuf> = std::fs::read_dir(&dir)
         .unwrap()
@@ -3730,21 +3748,20 @@ fn store_before_the_guest_fact(sandbox: &Sandbox) {
             path.file_name()
                 .and_then(OsStr::to_str)
                 .and_then(|name| name.get(..3))
-                .and_then(|number| number.parse::<u32>().ok())
-                .is_some_and(|number| number >= 22)
+                .and_then(|n| n.parse::<u32>().ok())
+                .is_some_and(|n| n >= number)
         })
         .collect();
     later.sort();
-    assert_eq!(
-        later
-            .first()
-            .and_then(|path| path.file_name())
-            .and_then(OsStr::to_str),
-        Some(FIRST),
-        "the migration that keeps a window's guest fact is {FIRST}"
-    );
+    later
+}
+
+/// Puts the sandbox's store back as it was before the migration numbered `number`: every
+/// column it and the later ones add is dropped, and the schema version set back, so the
+/// next daemon migrates rows written before.
+fn store_before_migration(sandbox: &Sandbox, number: u32) {
     let db = rusqlite::Connection::open(store_db(sandbox)).unwrap();
-    for path in later.iter().rev() {
+    for path in migrations_from(number).iter().rev() {
         let text = std::fs::read_to_string(path).unwrap();
         let code: String = text
             .lines()
@@ -3765,7 +3782,7 @@ fn store_before_the_guest_fact(sandbox: &Sandbox) {
             }
         }
     }
-    db.pragma_update(None, "user_version", 21).unwrap();
+    db.pragma_update(None, "user_version", number - 1).unwrap();
 }
 
 /// A window whose row was written before the guest fact was kept is taken as one whose
@@ -3872,4 +3889,275 @@ async fn a_taken_back_guest_window_is_judged_by_the_chain_its_hook_collects() {
         );
         cli.exit().await;
     }
+}
+
+// --- whether a window's overlay was made is a fact of the window -------------------------
+
+/// Whether a claim of `window_id` of `profile` with [`TOKEN`] is answered as its window's.
+async fn spoken_for(sandbox: &Sandbox, window_id: &str, profile: &str) -> DaemonMessage {
+    let (mut answers, _) =
+        crate::credentials_launch::claims(sandbox, window_id, profile, TOKEN, 1).await;
+    answers.remove(0)
+}
+
+/// Writes the profile `id`: the shipped profile `shipped` whose CLI keeps its window open,
+/// run in another environment with `guest`.
+fn write_overlay_profile(sandbox: &Sandbox, id: &str, shipped: &str, guest: bool) {
+    use crate::credentials_launch::{quiet_cli, shipped_with_command, unchanged_convert};
+    let convert = unchanged_convert();
+    let cli = quiet_cli(&sandbox.tree.make_dir(&format!("logs-{id}")));
+    common::write_profile(
+        &sandbox.profiles_dir,
+        id,
+        &shipped_with_command(id, shipped, &cli, guest.then_some(convert.as_slice()), &[]),
+    );
+}
+
+/// A window taken back by the next daemon keeps whether its overlay was made, with its row
+/// or from its holder's launch record when the row is gone: one run directly made it at its
+/// open and is spoken for. One whose CLI runs in another environment and whose daemon ended
+/// before anything asked for its overlay never made it, and is still refused.
+#[tokio::test]
+async fn a_taken_back_window_keeps_whether_its_overlay_was_made() {
+    const DIRECT: &str = "overlay-kept-direct";
+    const DIRECT_ROWLESS: &str = "overlay-kept-direct-rowless";
+    const GUEST: &str = "overlay-kept-guest";
+    const GUEST_ROWLESS: &str = "overlay-kept-guest-rowless";
+    let sandbox = Sandbox::new("recover-overlay");
+    for (id, shipped, guest) in [
+        (DIRECT, "grok-build", false),
+        (DIRECT_ROWLESS, "grok-build", false),
+        (GUEST, "wsl-grok-build", true),
+        (GUEST_ROWLESS, "wsl-grok-build", true),
+    ] {
+        write_overlay_profile(&sandbox, id, shipped, guest);
+    }
+
+    let mut first = start_with_token(&sandbox).await;
+    let mut ids = Vec::new();
+    for profile in [DIRECT, DIRECT_ROWLESS, GUEST, GUEST_ROWLESS] {
+        ids.push(first.open_profile_window(&sandbox, profile).await);
+    }
+    let settled: Vec<&str> = ids.iter().map(String::as_str).collect();
+    until_rows_settled(&sandbox, &settled).await;
+    first.kill_keeping_windows();
+    {
+        let db = rusqlite::Connection::open(store_db(&sandbox)).unwrap();
+        for window_id in [&ids[1], &ids[3]] {
+            db.execute("DELETE FROM windows WHERE window_id = ?1", [window_id])
+                .unwrap();
+        }
+    }
+
+    let mut next = start_with_token(&sandbox).await;
+    for window_id in &ids {
+        listed(&mut next, &sandbox, window_id).await;
+    }
+    for (window_id, profile) in [(&ids[0], DIRECT), (&ids[1], DIRECT_ROWLESS)] {
+        let answer = spoken_for(&sandbox, window_id, profile).await;
+        assert!(
+            matches!(answer, DaemonMessage::Identified { .. }),
+            "{profile}: a window run directly made its overlay at its open, got {answer:?}; \
+             daemon log:\n{}",
+            sandbox.daemon_log()
+        );
+    }
+    for (window_id, profile) in [(&ids[2], GUEST), (&ids[3], GUEST_ROWLESS)] {
+        let answer = spoken_for(&sandbox, window_id, profile).await;
+        assert!(
+            crate::credentials_launch::refused_as_pending(&answer),
+            "{profile}: a guest window whose overlay was never made is still refused after \
+             the take-back, got {answer:?}; daemon log:\n{}",
+            sandbox.daemon_log()
+        );
+    }
+}
+
+/// A window whose row was written before whether its overlay was made was kept is refused
+/// when the profile its row names declares an overlay, and spoken for as before when it
+/// declares none.
+#[tokio::test]
+async fn a_window_whose_row_predates_the_overlay_fact_is_refused_when_its_profile_declares_one() {
+    const DECLARED: &str = "overlay-old-declared";
+    const PLAIN: &str = "overlay-old-plain";
+    let sandbox = Sandbox::new("recover-overlay-old");
+    write_overlay_profile(&sandbox, DECLARED, "grok-build", false);
+    let cli = crate::credentials_launch::quiet_cli(&sandbox.tree.make_dir("logs-plain"));
+    let cli: Vec<&str> = cli.iter().map(String::as_str).collect();
+    sandbox.write_probe_profile(PLAIN, &cli, "");
+
+    let mut first = start_with_token(&sandbox).await;
+    let declared = first.open_profile_window(&sandbox, DECLARED).await;
+    let plain = first.open_profile_window(&sandbox, PLAIN).await;
+    until_rows_settled(&sandbox, &[&declared, &plain]).await;
+    first.kill_keeping_windows();
+    store_before_migration(&sandbox, OVERLAY_FACT_MIGRATION);
+
+    let mut next = start_with_token(&sandbox).await;
+    listed(&mut next, &sandbox, &declared).await;
+    listed(&mut next, &sandbox, &plain).await;
+    let answer = spoken_for(&sandbox, &plain, PLAIN).await;
+    assert!(
+        matches!(answer, DaemonMessage::Identified { .. }),
+        "control: an older row whose profile declares no overlay is spoken for, got {answer:?}"
+    );
+    let answer = spoken_for(&sandbox, &declared, DECLARED).await;
+    assert!(
+        crate::credentials_launch::refused_as_pending(&answer),
+        "an older row whose profile declares an overlay is refused, got {answer:?}; daemon \
+         log:\n{}",
+        sandbox.daemon_log()
+    );
+}
+
+/// A WSL grok window makes its overlay in its guest through the shipped launch statement:
+/// the statement runs the daemon named by the whole `{daemon}` element as a door, which
+/// hands it the overlay the daemon makes from the guest's facts with the same rule as for a
+/// window run directly, and the CLI starts with it. The window is then spoken for, and still
+/// is once the next daemon has taken it back. The guest is this machine when it runs Linux;
+/// elsewhere there is no bash to run the statement with, and the case returns without a run.
+#[tokio::test]
+async fn a_guest_window_makes_its_overlay_through_its_door_as_a_direct_one_would_and_keeps_it() {
+    use crate::credentials_launch::{
+        OVERLAY_VAR, drops_with, overlay_drops, quiet_cli, reported_overlay, shipped_with_command,
+        unchanged_convert,
+    };
+    if !cfg!(target_os = "linux") {
+        return;
+    }
+    const DIRECT: &str = "overlay-door-direct";
+    const GUEST_PROBE: &str = "overlay-door-probe";
+    const GUEST: &str = "overlay-door-guest";
+    const INLINE: &str = r#"{"models":{"default_reasoning_effort":"high"},"shell_environment_policy":{"exclude":["BETA_*"]}}"#;
+    let shipped: toml::Table =
+        common::docs::read_doc_verbatim("../../profiles/wsl-grok-build.toml")
+            .parse()
+            .expect("the shipped WSL grok profile is TOML");
+    let argv: Vec<String> = shipped["command"]["windows"]
+        .as_array()
+        .expect("the shipped WSL grok profile has a Windows argv")
+        .iter()
+        .map(|arg| arg.as_str().expect("an argument").to_string())
+        .collect();
+    let at = argv
+        .iter()
+        .position(|arg| arg == "-lic")
+        .expect("the shipped profile starts grok through `bash -lic <statement>`");
+    assert_eq!(
+        argv[at + 2..],
+        ["grok", "{daemon}"],
+        "the shipped statement takes the program, then the door it runs as a whole \
+         `{{daemon}}` element: {argv:?}"
+    );
+    let statement = argv[at + 1].clone();
+    let guest_argv = |program: Vec<String>| -> Vec<String> {
+        let mut argv = vec![
+            crate::hook_events_door::bash_path(),
+            "-c".to_string(),
+            statement.clone(),
+            program[0].clone(),
+            "{daemon}".to_string(),
+        ];
+        argv.extend(program[1..].iter().cloned());
+        argv
+    };
+
+    let sandbox = Sandbox::new("recover-overlay-door");
+    let grok = sandbox.tree.make_dir("home").join(".grok");
+    std::fs::create_dir_all(&grok).unwrap();
+    std::fs::write(
+        grok.join("config.toml"),
+        "[shell_environment_policy]\nexclude = [\"ACME_*\"]\n",
+    )
+    .unwrap();
+    let probe = vec![
+        yagura_test_support::process::env_probe_path()
+            .display()
+            .to_string(),
+        OVERLAY_VAR.to_string(),
+    ];
+    let convert = unchanged_convert();
+    let guest_env = [("GROK_CONFIG", INLINE)];
+    common::write_profile(
+        &sandbox.profiles_dir,
+        DIRECT,
+        &shipped_with_command(DIRECT, "grok-build", &probe, None, &[]),
+    );
+    common::write_profile(
+        &sandbox.profiles_dir,
+        GUEST_PROBE,
+        &shipped_with_command(
+            GUEST_PROBE,
+            "wsl-grok-build",
+            &guest_argv(probe.clone()),
+            Some(&convert),
+            &guest_env,
+        ),
+    );
+    let logs = sandbox.tree.make_dir("logs-guest");
+    common::write_profile(
+        &sandbox.profiles_dir,
+        GUEST,
+        &shipped_with_command(
+            GUEST,
+            "wsl-grok-build",
+            &guest_argv(quiet_cli(&logs)),
+            Some(&convert),
+            &guest_env,
+        ),
+    );
+    // The statement runs what a guest's shell finds on its own `PATH`.
+    let path = std::env::join_paths(
+        common::real_daemon::daemon_base_dirs()
+            .into_iter()
+            .chain([PathBuf::from("/usr/bin"), PathBuf::from("/bin")]),
+    )
+    .unwrap();
+    let path = path.to_str().unwrap().to_string();
+    let mut first = sandbox
+        .start_from(&[
+            ("YAGURA_STATUS_TOKEN_OVERRIDE", TOKEN),
+            ("GROK_CONFIG", INLINE),
+            ("PATH", &path),
+        ])
+        .await;
+
+    let direct = first.open_profile_window(&sandbox, DIRECT).await;
+    let direct_overlay = reported_overlay(&mut first, &sandbox, &direct).await;
+    let probe_window = first.open_profile_window(&sandbox, GUEST_PROBE).await;
+    let guest_overlay = reported_overlay(&mut first, &sandbox, &probe_window).await;
+    assert_eq!(
+        guest_overlay, direct_overlay,
+        "the door hands the overlay a window run directly gets for the same facts"
+    );
+    assert_eq!(
+        overlay_drops(&guest_overlay),
+        drops_with(&["ACME_*", "BETA_*"]),
+        "{guest_overlay}"
+    );
+
+    let guest = first.open_profile_window(&sandbox, GUEST).await;
+    // The CLI logs its argv once the statement has started it, after the door answered.
+    let started = common::launch_args_logged_in(&logs).await;
+    assert!(
+        !started.iter().any(|arg| arg.contains("yagura-daemon")),
+        "the door's path is not handed on to the CLI: {started:?}"
+    );
+    let answer = spoken_for(&sandbox, &guest, GUEST).await;
+    assert!(
+        matches!(answer, DaemonMessage::Identified { .. }),
+        "a guest window whose overlay was made is spoken for, got {answer:?}; daemon log:\n{}",
+        sandbox.daemon_log()
+    );
+    until_rows_settled(&sandbox, &[&guest]).await;
+    first.kill_keeping_windows();
+
+    let mut next = start_with_token(&sandbox).await;
+    listed(&mut next, &sandbox, &guest).await;
+    let answer = spoken_for(&sandbox, &guest, GUEST).await;
+    assert!(
+        matches!(answer, DaemonMessage::Identified { .. }),
+        "the guest window is still spoken for once taken back, got {answer:?}; daemon log:\n{}",
+        sandbox.daemon_log()
+    );
 }

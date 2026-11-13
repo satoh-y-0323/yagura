@@ -223,6 +223,11 @@
 //! [`WindowInfo`] and `window_status`, and `queued_ids` in `window_status`. A
 //! caller establishes [`WITHDRAW_MESSAGE_MIN_REVISION`] before sending
 //! `withdraw_message`.
+//! It also adds `build_launch_overlay` ([`ClientMessage::BuildLaunchOverlay`],
+//! answered with [`DaemonMessage::LaunchOverlay`]): the overlay door of a
+//! window whose CLI runs in another environment asks for the window's launch
+//! overlay. A caller establishes [`LAUNCH_OVERLAY_MIN_REVISION`] before sending
+//! it.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -417,6 +422,12 @@ pub const DOOR_READ_MIN_REVISION: u32 = 34;
 ///
 /// An older daemon refuses it by name, so nothing is withdrawn.
 pub const WITHDRAW_MESSAGE_MIN_REVISION: u32 = 34;
+
+/// The first wire revision that understands [`ClientMessage::BuildLaunchOverlay`].
+///
+/// An older daemon refuses it by name, so the overlay door fails and the
+/// launch does not start the CLI.
+pub const LAUNCH_OVERLAY_MIN_REVISION: u32 = 34;
 
 /// How long a hook door waits for one answer of the daemon, and the time it
 /// takes its hook to be given when the daemon names none for it.
@@ -3483,6 +3494,24 @@ pub enum ClientMessage {
     /// Never answered: the door ends without waiting. Only the connection that
     /// was answered can say it.
     DeliverPrinted,
+    /// The launch overlay of a window whose CLI runs in another environment,
+    /// made from what that environment holds: the window's launch runs its
+    /// overlay door before the CLI starts. Answered with
+    /// [`DaemonMessage::LaunchOverlay`], after which the window's credentials
+    /// speak for it; refused with an error, after which they still do not.
+    /// Authenticated like a status event.
+    BuildLaunchOverlay {
+        /// The window being launched.
+        window_id: String,
+        /// That window's own token.
+        token: String,
+        /// The values of the variables the window's profile names for its
+        /// overlay, as the other environment holds them.
+        env: BTreeMap<String, String>,
+        /// The text of each file the window's profile names for its overlay
+        /// that the other environment holds, by the name the profile gives it.
+        files: BTreeMap<String, String>,
+    },
 }
 
 /// The door a [`ClientMessage::DoorRead`] reads for.
@@ -3660,6 +3689,7 @@ pub fn required_protocol_revision(msg: &ClientMessage) -> u32 {
         ClientMessage::RunHook { .. } => HOOK_EVENTS_MIN_REVISION,
         ClientMessage::DoorRead { .. } | ClientMessage::DeliverPrinted => DOOR_READ_MIN_REVISION,
         ClientMessage::WithdrawMessage { .. } => WITHDRAW_MESSAGE_MIN_REVISION,
+        ClientMessage::BuildLaunchOverlay { .. } => LAUNCH_OVERLAY_MIN_REVISION,
         _ => PROTOCOL_REVISION_BASELINE,
     }
 }
@@ -4081,6 +4111,13 @@ pub enum DaemonMessage {
     DeliverConfirmed {
         /// Whether the held read was withdrawn instead of settled.
         withdrawn: bool,
+    },
+    /// Response to [`ClientMessage::BuildLaunchOverlay`]: the window's
+    /// launch overlay, for the launch to hand its CLI. Sent once the window
+    /// keeps that its overlay was made.
+    LaunchOverlay {
+        /// The overlay, as the text the CLI reads it from.
+        overlay: String,
     },
     /// Response to [`ClientMessage::ReportSession`].
     SessionRecorded {
@@ -5396,6 +5433,7 @@ const CLIENT_MESSAGE_TYPES: &[&str] = &[
     "run_hook",
     "door_read",
     "deliver_printed",
+    "build_launch_overlay",
 ];
 
 /// The `type` values recognized by [`DaemonMessage`].
@@ -5460,6 +5498,7 @@ const DAEMON_MESSAGE_TYPES: &[&str] = &[
     "mcp_registration_result",
     "delivery",
     "deliver_confirmed",
+    "launch_overlay",
     "session_recorded",
     "ticket_workspace_list",
     "ticket_list",

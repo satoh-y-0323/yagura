@@ -443,6 +443,8 @@ struct PlannedOpen {
     wake_command: Option<WakeCommand>,
     /// The images of the CLI's process the profile declares for this host.
     process_image: Vec<yagura_os::ancestry::ImagePattern>,
+    /// The profile's `[launch_overlay]` table.
+    launch_overlay: Option<crate::launch_overlay::LaunchOverlaySpec>,
     /// How the launch turns the other instances' bridge registrations off,
     /// read right before spawn; `None` when the profile cannot say.
     bridge_scan: Option<mcp_registration::BridgeScan>,
@@ -1877,6 +1879,20 @@ impl IpcServer {
                 inbox::handle_printed(&state.held_read).await;
                 FrameOutcome::Continue
             }
+            Ok(ClientMessage::BuildLaunchOverlay {
+                window_id,
+                token,
+                env,
+                files,
+            }) => {
+                self.handle_build_launch_overlay(
+                    outbound,
+                    (&window_id, &token),
+                    crate::launch_overlay::OverlayFacts { env, files },
+                )
+                .await;
+                FrameOutcome::Continue
+            }
             // The reads of a door before revision 34 take nothing: it prints
             // after it took, so what it took would be lost.
             Ok(
@@ -2866,7 +2882,7 @@ impl IpcServer {
             _ => None,
         };
         let base_argv = if wakes_by_command || scanning.is_some() {
-            Some(
+            Some(crate::profile::without_door(
                 crate::profile::resolve_launch(
                     &self.config,
                     profile,
@@ -2876,7 +2892,7 @@ impl IpcServer {
                 )
                 .map_err(|err| profile_launch_error_msg(&err))?
                 .argv,
-            )
+            ))
         } else {
             None
         };
@@ -2905,7 +2921,7 @@ impl IpcServer {
             );
         let hooks_gate = launch
             .hooks_registration
-            .filter(crate::mcp_registration::McpRegistrationSpec::owns_entries)
+            .filter(|registration| registration.owns_entries(self.config.host_os))
             .map(|registration| HooksGate {
                 profile: profile.to_string(),
                 registration,
@@ -2944,6 +2960,7 @@ impl IpcServer {
             delivery: launch.delivery,
             wake_command,
             process_image: launch.process_image,
+            launch_overlay: launch.launch_overlay,
             bridge_scan,
             limits: launch.limits,
             chat: Arc::clone(&self.chat),
@@ -3805,13 +3822,16 @@ impl IpcServer {
             return FrameOutcome::Continue;
         }
         let guest = declaration.and_then(|declared| declared.guest.as_ref());
-        if let Err(refused) = self
-            .trace_lineage(&entry, state.peer_process_id, guest)
+        let entry = match self
+            .admit(Credentialed::verified(entry), state.peer_process_id, guest)
             .await
         {
-            outbound.reply(&refused.message());
-            return FrameOutcome::Continue;
-        }
+            Ok(entry) => entry,
+            Err(refused) => {
+                outbound.reply(&refused.message());
+                return FrameOutcome::Continue;
+            }
+        };
 
         match &state.origin {
             // Re-claiming the same window is the same statement twice, not a
@@ -4102,8 +4122,8 @@ impl IpcServer {
     /// waits for the take-back to end. Nothing is answered when the peer
     /// leaves first.
     ///
-    /// The one place a door's lineage is judged, last: only a request whose
-    /// credentials hold is traced ([`IpcServer::trace_lineage`]).
+    /// The one place a door is admitted, last: only a request whose
+    /// credentials hold is judged ([`IpcServer::admit`]).
     async fn authenticate_window(
         &self,
         outbound: &Outbound,
@@ -4112,11 +4132,38 @@ impl IpcServer {
         window_id: Option<&str>,
     ) -> Option<Arc<WindowEntry>> {
         let HookDoor {
-            name: door,
+            name,
             peer,
             guest,
             refused,
         } = door;
+        let window = self
+            .verify_credentials(outbound, name, token, window_id)
+            .await?;
+        match self.admit(window, peer, guest).await {
+            Ok(entry) => Some(entry),
+            Err(denied) => {
+                outbound.reply(&match refused {
+                    LineageAnswer::Silence => crate::inbox::silence(),
+                    LineageAnswer::Error => denied.message(),
+                });
+                None
+            }
+        }
+    }
+
+    /// Resolves the window a request (`door` names it) presents the
+    /// credentials of, answering the refusal itself when they do not hold:
+    /// the token's shape first, then the window, then that window's own
+    /// token. See [`IpcServer::authenticate_window`] for when the window is
+    /// resolved.
+    async fn verify_credentials(
+        &self,
+        outbound: &Outbound,
+        door: &'static str,
+        token: &str,
+        window_id: Option<&str>,
+    ) -> Option<Credentialed> {
         let auth_failed = || {
             error_msg(
                 "auth_failed",
@@ -4154,14 +4201,74 @@ impl IpcServer {
             outbound.reply(&window_not_found_msg());
             return None;
         };
-        if let Err(lineage) = self.trace_lineage(&current, peer, guest).await {
-            outbound.reply(&match refused {
-                LineageAnswer::Silence => crate::inbox::silence(),
-                LineageAnswer::Error => lineage.message(),
-            });
-            return None;
+        Some(Credentialed::verified(current))
+    }
+
+    /// The window `window`'s credentials speak for, once they do: its launch
+    /// overlay, when its profile declares one, was made, and the request
+    /// traces back to its CLI ([`IpcServer::trace_lineage`]).
+    async fn admit(
+        &self,
+        window: Credentialed,
+        peer: Option<u32>,
+        guest: Option<&GuestLineage>,
+    ) -> Result<Arc<WindowEntry>, Refused> {
+        let entry = window.past_overlay()?;
+        self.trace_lineage(&entry, peer, guest)
+            .await
+            .map_err(Refused::Lineage)?;
+        Ok(entry)
+    }
+
+    /// Answers `build_launch_overlay`: builds the launch overlay of the window
+    /// whose credentials the overlay door presents from what its environment
+    /// holds, by the window's own profile and the rule a window run directly
+    /// is built by, and hands it back once the window keeps that it was made.
+    /// The one request a window's credentials serve before that.
+    async fn handle_build_launch_overlay(
+        &self,
+        outbound: &Outbound,
+        (window_id, token): (&str, &str),
+        facts: crate::launch_overlay::OverlayFacts,
+    ) {
+        let Some(window) = self
+            .verify_credentials(outbound, "build_launch_overlay", token, Some(window_id))
+            .await
+        else {
+            return;
+        };
+        let door = window.for_overlay_door();
+        let Some(spec) = door.spec() else {
+            outbound.reply(&error_msg(
+                "invalid_state",
+                "the window's profile declares no launch overlay",
+            ));
+            return;
+        };
+        let built = crate::launch_overlay::build_overlay(spec, &facts);
+        for left_out in &built.left_out {
+            tracing::warn!(
+                window_id = door.window_id(),
+                reason = left_out,
+                "part of the user's settings is left out of the window's launch overlay; the \
+                 window's credentials are kept from its tools all the same"
+            );
         }
-        Some(current)
+        if door.keep_made().await.is_err() {
+            tracing::warn!(
+                window_id = door.window_id(),
+                "the window could not keep that its launch overlay was made; its launch does not \
+                 start the CLI"
+            );
+            outbound.reply(&error_msg(
+                "internal",
+                "the window could not keep that its launch overlay was made",
+            ));
+            return;
+        }
+        outbound.reply(&DaemonMessage::LaunchOverlay {
+            overlay: built.text,
+        });
     }
 
     /// Traces a request in `entry`'s name from the process `peer` back to the
@@ -4840,6 +4947,104 @@ pub(super) enum LineageAnswer {
     Silence,
     /// With [`LineageRefused::message`].
     Error,
+}
+
+/// A window whose credentials a request presented and the daemon verified.
+/// What they serve is decided here alone: a request reaches the window only
+/// once they speak for it ([`Credentialed::past_overlay`]), except the
+/// overlay door's, the one request that makes them do so
+/// ([`Credentialed::for_overlay_door`]).
+mod credentialed {
+    use std::sync::Arc;
+
+    use super::Refused;
+    use crate::launch_overlay::LaunchOverlaySpec;
+    use crate::window::WindowEntry;
+    use crate::window_table::RowUnwritten;
+
+    pub(super) struct Credentialed(Arc<WindowEntry>);
+
+    impl Credentialed {
+        /// `entry`, whose own token the request presented.
+        pub(super) fn verified(entry: Arc<WindowEntry>) -> Self {
+            Self(entry)
+        }
+
+        /// The window, unless its profile declares a launch overlay that was
+        /// not made: until it is, its CLI may hand the credentials to its
+        /// tools, which must not speak for the window.
+        pub(super) fn past_overlay(self) -> Result<Arc<WindowEntry>, Refused> {
+            let entry = self.0;
+            if !entry.overlay_pending() {
+                return Ok(entry);
+            }
+            if entry.first_overlay_note() {
+                tracing::warn!(
+                    window_id = entry.window_id(),
+                    "refusing a request in the name of a window whose launch overlay has not \
+                     been made; its launch statement runs the overlay door before the CLI \
+                     starts and hands the CLI the overlay"
+                );
+            } else {
+                tracing::debug!(
+                    window_id = entry.window_id(),
+                    "refusing a request in the name of a window whose launch overlay has not \
+                     been made"
+                );
+            }
+            Err(Refused::OverlayPending)
+        }
+
+        /// The window, for its overlay door's request.
+        pub(super) fn for_overlay_door(self) -> OverlayDoor {
+            OverlayDoor(self.0)
+        }
+    }
+
+    /// A window as its overlay door's request reaches it: what its overlay is
+    /// built by, and keeping that it was made.
+    pub(super) struct OverlayDoor(Arc<WindowEntry>);
+
+    impl OverlayDoor {
+        pub(super) fn window_id(&self) -> &str {
+            self.0.window_id()
+        }
+
+        pub(super) fn spec(&self) -> Option<&LaunchOverlaySpec> {
+            self.0.launch_overlay()
+        }
+
+        pub(super) async fn keep_made(&self) -> Result<(), RowUnwritten> {
+            self.0.keep_overlay_made().await
+        }
+    }
+}
+
+use credentialed::Credentialed;
+
+/// Why a request presenting a window's credentials was refused although
+/// they hold.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Refused {
+    /// By the window's lineage.
+    Lineage(LineageRefused),
+    /// The window's launch overlay has not been made.
+    OverlayPending,
+}
+
+impl Refused {
+    /// The error a refused request is answered with. Not a credential
+    /// failure: the requester holds the window's credentials.
+    fn message(self) -> DaemonMessage {
+        match self {
+            Self::Lineage(lineage) => lineage.message(),
+            Self::OverlayPending => error_msg(
+                "launch_overlay_pending",
+                "the window's launch overlay has not been made, so its credentials do not speak \
+                 for it",
+            ),
+        }
+    }
 }
 
 /// Why a request in a window's name was refused by the window's lineage.
@@ -5641,9 +5846,17 @@ async fn open_planned(
     let mut injections = mcp_registration::render_profile_injections(
         config,
         std::mem::take(&mut planned.profile_injections),
+        &mut planned.request.command,
         planned.host_paths.take(),
     )
-    .await;
+    .await
+    .map_err(|reason| {
+        WindowOpenError::SpawnFailed(format!(
+            "the daemon's path could not be drawn for the command ({reason}); the window is not \
+             opened"
+        ))
+    })?;
+    let overlay = overlay_at_open(config, &mut planned, runs_in_guest);
     // Whether or not the injections above survived.
     if !planned.launch_args.is_empty() {
         injections.push(CliInjection {
@@ -5689,8 +5902,10 @@ async fn open_planned(
         credentials_dir,
         facts: WindowFacts {
             runs_in_guest: Some(runs_in_guest),
+            overlay,
         },
         lineage: LineageRule::for_window(planned.process_image, runs_in_guest),
+        launch_overlay: planned.launch_overlay,
         ..provenance
     };
     let opened = registry
@@ -5717,6 +5932,52 @@ async fn open_planned(
         None => {}
     }
     Ok(opened)
+}
+
+/// Whether the launch overlay of the window `planned` opens is made, `None`
+/// when its profile declares none. A CLI the daemon runs directly sees the
+/// daemon's own environment, so its overlay is made here from it and handed
+/// to the CLI in the profile's variable, before the window's row and record
+/// are written. One in another environment is handed its overlay by its
+/// launch statement through the overlay door, so it is not made yet.
+fn overlay_at_open(
+    config: &DaemonConfig,
+    planned: &mut PlannedOpen,
+    runs_in_guest: bool,
+) -> Option<crate::window::OverlayFact> {
+    use crate::window::OverlayFact;
+    let spec = planned.launch_overlay.as_ref()?;
+    if runs_in_guest {
+        return Some(OverlayFact::Pending);
+    }
+    let env = |name: &str| {
+        config
+            .child_base_env
+            .get(std::ffi::OsStr::new(name))
+            .map(std::ffi::OsStr::to_os_string)
+            .or_else(|| std::env::var_os(name))
+            .and_then(|value| value.into_string().ok())
+    };
+    let facts = crate::launch_overlay::host_facts(
+        spec,
+        config.home_dir.as_deref(),
+        config.host_os.platform() != yagura_os::program::Platform::Windows,
+        &env,
+    );
+    let built = crate::launch_overlay::build_overlay(spec, &facts);
+    for left_out in &built.left_out {
+        tracing::warn!(
+            profile = %planned.launch.profile,
+            reason = left_out,
+            "part of the user's settings is left out of the window's launch overlay; the \
+             window's credentials are kept from its tools all the same"
+        );
+    }
+    planned
+        .extra_env
+        .retain(|(name, _)| !name.eq_ignore_ascii_case(&spec.env));
+    planned.extra_env.push((spec.env.clone(), built.text));
+    Some(OverlayFact::Made)
 }
 
 /// For a `launch` window: plans its credentials folder and points its

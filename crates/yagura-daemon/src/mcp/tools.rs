@@ -336,6 +336,7 @@ pub(crate) fn message_kind(message: &DaemonMessage) -> &'static str {
         DaemonMessage::Delivery { .. } => "Delivery",
         DaemonMessage::SessionRecorded { .. } => "SessionRecorded",
         DaemonMessage::DeliverConfirmed { .. } => "DeliverConfirmed",
+        DaemonMessage::LaunchOverlay { .. } => "LaunchOverlay",
         DaemonMessage::PlanDetail { .. } => "PlanDetail",
         DaemonMessage::PlanList { .. } => "PlanList",
         DaemonMessage::PlanDeleted { .. } => "PlanDeleted",

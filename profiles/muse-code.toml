@@ -1,8 +1,11 @@
 # Launches Muse Code directly. Requires `muse` to be resolvable on the
 # daemon's PATH (or its extra bin directories on Windows).
-# Checked with Muse Code 1.4.12. Muse has no registration command, so on
-# every OS the bridge and the hooks are written to its settings files (see
-# [mcp_registration]) and nothing is injected at launch.
+# Checked with Muse Code 1.4.12. Muse has no registration command. On
+# Windows the bridge and the hooks are written to its settings files (see
+# [mcp_registration]) and nothing is injected at launch: `muse.cmd` cannot pass
+# them. On Linux and macOS every launch passes them with -c, as wsl-muse-code
+# does, and nothing is registered: a server of the same name in the user's
+# settings would make Muse refuse that launch.
 schema = 1
 display_name = "Muse Code"
 detection = "muse-code"
@@ -35,6 +38,43 @@ values = ["muse-spark-1.3", "muse-wonder-1.0", "muse-spark-1.2"]
 text = "On Windows, Muse Code's launcher cannot pass a start-up request; use the WSL: Muse Code profile (wsl-muse-code) for task windows and for a handoff that opens a new window."
 url = "https://github.com/satoh-y-0323/yagura/blob/main/docs/mcp-setup.md#configuring-muse-code-cli"
 
+# Linux and macOS: the window's identity reaches the hooks and the MCP bridge
+# as the credentials file's path in their arguments, not through the
+# environment, so the CLIs the window's tools start do not inherit it. Muse
+# hands its MCP server only the variables named in `env` and refuses the
+# whole launch over a `${VAR}` that is unset, so `{env_refs}` names only what
+# the window really has. A server of the same name in the user's settings
+# also makes Muse refuse the launch, so `absent` drops this injection in that
+# case. The hooks file is read only through this launch's -c, so its commands
+# need no check for being inside a window.
+[credentials.linux]
+mode = "launch"
+
+[credentials.macos]
+mode = "launch"
+
+[mcp.linux]
+args = ["-c", "mcpServers.{server}={\"transport\":\"stdio\",\"command\":{bridge_json},\"args\":[\"--profile\",\"muse-code\",\"--credentials\",\"{credentials_file}\"],\"env\":{env_refs},\"mode\":\"optional\"}"]
+absent = { file = ".config/muse/settings.json", pointer = "/mcpServers/{server}" }
+
+[mcp.macos]
+args = ["-c", "mcpServers.{server}={\"transport\":\"stdio\",\"command\":{bridge_json},\"args\":[\"--profile\",\"muse-code\",\"--credentials\",\"{credentials_file}\"],\"env\":{env_refs},\"mode\":\"optional\"}"]
+absent = { file = ".config/muse/settings.json", pointer = "/mcpServers/{server}" }
+
+[hooks.linux]
+config_file = '''{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"yagura-daemon --credentials '{credentials_file}' --hook muse-code SessionStart","timeout":{hook_timeout}}]}],"UserPromptSubmit":[{"hooks":[{"type":"command","command":"yagura-daemon --credentials '{credentials_file}' --hook muse-code UserPromptSubmit","timeout":{hook_timeout}}]}],"PermissionRequest":[{"matcher":"*","hooks":[{"type":"command","command":"yagura-daemon --credentials '{credentials_file}' --hook muse-code PermissionRequest","timeout":{hook_timeout}}]}],"Stop":[{"hooks":[{"type":"command","command":"yagura-daemon --credentials '{credentials_file}' --hook muse-code Stop","timeout":{hook_timeout}}]}],"StopFailure":[{"hooks":[{"type":"command","command":"yagura-daemon --credentials '{credentials_file}' --hook muse-code StopFailure","timeout":{hook_timeout}}]}],"Interrupt":[{"hooks":[{"type":"command","command":"yagura-daemon --credentials '{credentials_file}' --hook muse-code Interrupt","timeout":{hook_timeout},"async":true}]}]}}'''
+args = [
+  "-c", "managed_hooks_path=\"{hooks_config_file}\"",
+  "-c", "managed_hooks_env_vars=[\"YAGURA_INSTANCE\"]",
+]
+
+[hooks.macos]
+config_file = '''{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"yagura-daemon --credentials '{credentials_file}' --hook muse-code SessionStart","timeout":{hook_timeout}}]}],"UserPromptSubmit":[{"hooks":[{"type":"command","command":"yagura-daemon --credentials '{credentials_file}' --hook muse-code UserPromptSubmit","timeout":{hook_timeout}}]}],"PermissionRequest":[{"matcher":"*","hooks":[{"type":"command","command":"yagura-daemon --credentials '{credentials_file}' --hook muse-code PermissionRequest","timeout":{hook_timeout}}]}],"Stop":[{"hooks":[{"type":"command","command":"yagura-daemon --credentials '{credentials_file}' --hook muse-code Stop","timeout":{hook_timeout}}]}],"StopFailure":[{"hooks":[{"type":"command","command":"yagura-daemon --credentials '{credentials_file}' --hook muse-code StopFailure","timeout":{hook_timeout}}]}],"Interrupt":[{"hooks":[{"type":"command","command":"yagura-daemon --credentials '{credentials_file}' --hook muse-code Interrupt","timeout":{hook_timeout},"async":true}]}]}}'''
+args = [
+  "-c", "managed_hooks_path=\"{hooks_config_file}\"",
+  "-c", "managed_hooks_env_vars=[\"YAGURA_INSTANCE\"]",
+]
+
 # SessionStart runs on the first prompt, not at start-up. Muse takes plain
 # text from a hook too; the JSON form names the event the text arrives for.
 [delivery]
@@ -61,7 +101,7 @@ args_pointer = "/mcpServers/{server}/args"
 file = ".config/muse/settings.json"
 claim = "/managed_hooks_path"
 
-[mcp_registration.json_entry.entries]
+[mcp_registration.json_entry.by_os.windows]
 "/mcpServers/{server}" = { transport = "stdio", command = "{bridge}", args = ["--profile", "muse-code"], env = "{env_refs}", mode = "optional", tool_timeout_sec = 86400 }
 "/managed_hooks_path" = "yagura-managed-hooks.json"
 "/managed_hooks_env_vars" = ["YAGURA_WINDOW_ID", "YAGURA_STATUS_TOKEN", "YAGURA_INSTANCE"]
@@ -69,16 +109,13 @@ claim = "/managed_hooks_path"
 # Managed hooks run in every Muse session of the user, ours or not. Outside a
 # window `yagura-daemon` is not on PATH and each turn would show `Hook
 # failed`, so the shell checks for the window first and does nothing
-# otherwise. On Windows the same check also stops the working directory from
-# being searched for a `yagura-daemon.bat`.
+# otherwise. The same check also stops the working directory from being
+# searched for a `yagura-daemon.bat`.
 [[mcp_registration.json_entry]]
 file = ".config/muse/yagura-managed-hooks.json"
 
 [mcp_registration.json_entry.by_os.windows]
 "/hooks" = { SessionStart = [{ hooks = [{ type = "command", command = "if defined YAGURA_WINDOW_ID (set NoDefaultCurrentDirectoryInExePath=1& yagura-daemon --hook muse-code SessionStart)", timeout = "{hook_timeout}" }] }], UserPromptSubmit = [{ hooks = [{ type = "command", command = "if defined YAGURA_WINDOW_ID (set NoDefaultCurrentDirectoryInExePath=1& yagura-daemon --hook muse-code UserPromptSubmit)", timeout = "{hook_timeout}" }] }], PermissionRequest = [{ matcher = "*", hooks = [{ type = "command", command = "if defined YAGURA_WINDOW_ID (set NoDefaultCurrentDirectoryInExePath=1& yagura-daemon --hook muse-code PermissionRequest)", timeout = "{hook_timeout}" }] }], Stop = [{ hooks = [{ type = "command", command = "if defined YAGURA_WINDOW_ID (set NoDefaultCurrentDirectoryInExePath=1& yagura-daemon --hook muse-code Stop)", timeout = "{hook_timeout}" }] }], StopFailure = [{ hooks = [{ type = "command", command = "if defined YAGURA_WINDOW_ID (set NoDefaultCurrentDirectoryInExePath=1& yagura-daemon --hook muse-code StopFailure)", timeout = "{hook_timeout}" }] }], Interrupt = [{ hooks = [{ type = "command", command = "if defined YAGURA_WINDOW_ID (set NoDefaultCurrentDirectoryInExePath=1& yagura-daemon --hook muse-code Interrupt)", timeout = "{hook_timeout}", async = true }] }] }
-
-[mcp_registration.json_entry.by_os.default]
-"/hooks" = { SessionStart = [{ hooks = [{ type = "command", command = '[ -z "$YAGURA_WINDOW_ID" ] || exec yagura-daemon --hook muse-code SessionStart', timeout = "{hook_timeout}" }] }], UserPromptSubmit = [{ hooks = [{ type = "command", command = '[ -z "$YAGURA_WINDOW_ID" ] || exec yagura-daemon --hook muse-code UserPromptSubmit', timeout = "{hook_timeout}" }] }], PermissionRequest = [{ matcher = "*", hooks = [{ type = "command", command = '[ -z "$YAGURA_WINDOW_ID" ] || exec yagura-daemon --hook muse-code PermissionRequest', timeout = "{hook_timeout}" }] }], Stop = [{ hooks = [{ type = "command", command = '[ -z "$YAGURA_WINDOW_ID" ] || exec yagura-daemon --hook muse-code Stop', timeout = "{hook_timeout}" }] }], StopFailure = [{ hooks = [{ type = "command", command = '[ -z "$YAGURA_WINDOW_ID" ] || exec yagura-daemon --hook muse-code StopFailure', timeout = "{hook_timeout}" }] }], Interrupt = [{ hooks = [{ type = "command", command = '[ -z "$YAGURA_WINDOW_ID" ] || exec yagura-daemon --hook muse-code Interrupt', timeout = "{hook_timeout}", async = true }] }] }
 
 # The seconds this CLI gives a hook command. The registered entries name it
 # through `{hook_timeout}`, and the daemon names it to a door that asks, so

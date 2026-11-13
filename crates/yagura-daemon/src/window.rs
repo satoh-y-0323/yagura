@@ -41,10 +41,10 @@ use crate::pty::{
 use crate::room::{mention_key, reserved_mention};
 use crate::token::StatusToken;
 use crate::waiter::StatusAt;
-pub use crate::window_table::{HooksRoute, WindowFacts};
+pub use crate::window_table::{HooksRoute, OverlayFact, WindowFacts};
 use crate::window_table::{
-    OpeningRow, OpeningWrite, PendingWrite, Reservation, RowScopes, WindowRow, WindowTable,
-    WindowValues, credentials_kind, credentials_mode, launch_record, recorded_launch,
+    OpeningRow, OpeningWrite, PendingWrite, Reservation, RowScopes, RowUnwritten, WindowRow,
+    WindowTable, WindowValues, credentials_kind, credentials_mode, launch_record, recorded_launch,
     route_taken_back,
 };
 use crate::workspace::{self, WorkspaceKey, resolve_key_blocking};
@@ -387,6 +387,10 @@ pub struct WindowProvenance {
     pub facts: WindowFacts,
     /// How a request in the window's name is traced back to its CLI.
     pub lineage: LineageRule,
+    /// The `[launch_overlay]` table of the profile the window was launched
+    /// from, which its overlay door's request is built by; `None` when the
+    /// profile declares none.
+    pub launch_overlay: Option<crate::launch_overlay::LaunchOverlaySpec>,
 }
 
 /// How a request in a window's name is traced back to the window's CLI,
@@ -901,6 +905,13 @@ pub struct WindowEntry {
     /// Whether this window's first request refused, or let through
     /// unjudged, by its lineage was logged as a warning.
     lineage_noted: AtomicBool,
+    /// Whether the window's launch overlay was made, which its credentials
+    /// speak for it only after; `None` when its profile declares none. Starts
+    /// as [`WindowFacts::overlay`] and is written with the window's values.
+    overlay: Mutex<Option<OverlayFact>>,
+    /// Whether a request refused for an overlay not made was logged as a
+    /// warning for this window.
+    overlay_noted: AtomicBool,
     /// The window's row in the window table, removed before the window's
     /// holder is told to end ([`WindowEntry::remove_row_then`]).
     row: WindowRow,
@@ -936,7 +947,13 @@ impl WindowEntry {
     }
 
     fn values_now(&self) -> WindowValues {
-        WindowValues {
+        self.values_with_overlay(*lock_recover(&self.overlay))
+    }
+
+    /// The window's values as they are now, holding `overlay` as whether its
+    /// launch overlay was made.
+    fn values_with_overlay(&self, overlay: Option<OverlayFact>) -> WindowValues {
+        let mut values = WindowValues {
             layout_json: self.layout_json(),
             session_id: self.session_id(),
             ..window_values(
@@ -947,7 +964,45 @@ impl WindowEntry {
                 &self.command,
                 self.detection.as_ref(),
             )
+        };
+        values.facts.overlay = overlay;
+        values
+    }
+
+    /// Whether the window's credentials wait for its launch overlay: its
+    /// profile declares one and it was not made.
+    pub(crate) fn overlay_pending(&self) -> bool {
+        *lock_recover(&self.overlay) == Some(OverlayFact::Pending)
+    }
+
+    /// `true` the first time it is asked: whether a note about this window's
+    /// overlay not made is the first, and so a warning.
+    pub(crate) fn first_overlay_note(&self) -> bool {
+        !self.overlay_noted.swap(true, Ordering::SeqCst)
+    }
+
+    /// The `[launch_overlay]` table the window's overlay is built by, when
+    /// its profile declares one.
+    pub(crate) fn launch_overlay(&self) -> Option<&crate::launch_overlay::LaunchOverlaySpec> {
+        self.provenance.launch_overlay.as_ref()
+    }
+
+    /// Keeps that the window's launch overlay was made, and returns once its
+    /// row holds it: only then may the overlay be handed to the launch, so a
+    /// window is never left whose CLI has the overlay but whose next daemon
+    /// would refuse it. A row that cannot take it leaves the overlay not
+    /// made.
+    pub(crate) async fn keep_overlay_made(&self) -> Result<(), RowUnwritten> {
+        let before = lock_recover(&self.overlay).replace(OverlayFact::Made);
+        let written = self
+            .row
+            .update_waited(|| self.values_with_overlay(Some(OverlayFact::Made)))
+            .written()
+            .await;
+        if written.is_err() {
+            *lock_recover(&self.overlay) = before;
         }
+        written
     }
 
     /// The PTY session backing this window (input / resize / screen /
@@ -2595,6 +2650,7 @@ impl WindowRegistry {
             kept,
         );
         let detector_weak = Arc::downgrade(&detector_handle);
+        let provenance_overlay = provenance.facts.overlay;
 
         Arc::new(WindowEntry {
             window_id,
@@ -2624,6 +2680,8 @@ impl WindowRegistry {
             participation: Arc::clone(&self.participation),
             peers: Arc::downgrade(&self.entries),
             lineage_noted: AtomicBool::new(false),
+            overlay: Mutex::new(provenance_overlay),
+            overlay_noted: AtomicBool::new(false),
             row,
             #[cfg(feature = "fault-injection")]
             faults: self.config().faults.clone(),
@@ -3102,8 +3160,20 @@ impl WindowRegistry {
                 profile.process_image,
                 values.facts.runs_in_guest.unwrap_or(profile.host_paths),
             ),
-            facts: values.facts.clone(),
+            // A row or record older than the fact, of a window whose profile
+            // now declares an overlay: its CLI may hold the credentials in its
+            // tools, so they do not speak for it.
+            facts: WindowFacts {
+                overlay: values.facts.overlay.or(profile
+                    .launch_overlay
+                    .as_ref()
+                    .map(|_| OverlayFact::Pending)),
+                ..values.facts.clone()
+            },
+            launch_overlay: profile.launch_overlay,
         };
+        let overlay_before_fact =
+            values.facts.overlay.is_none() && provenance.facts.overlay.is_some();
         if provenance.hooks.reaches() {
             detector_handle.expect_status_reports(true);
         }
@@ -3137,6 +3207,13 @@ impl WindowRegistry {
             row,
             kept,
         );
+        if overlay_before_fact && entry.first_overlay_note() {
+            tracing::warn!(
+                window_id,
+                "the window was opened by a version that did not make its launch overlay, so its \
+                 credentials do not speak for it; open the window again"
+            );
+        }
         if let Some(layout_json) = values.layout_json {
             entry.set_layout(layout_json);
         }
@@ -3306,6 +3383,8 @@ struct ProfileDetermined {
     process_image: Vec<ImagePattern>,
     /// Whether the profile converts paths for a CLI in another environment.
     host_paths: bool,
+    /// The profile's `[launch_overlay]` table.
+    launch_overlay: Option<crate::launch_overlay::LaunchOverlaySpec>,
 }
 
 /// What the profile `profile` determines for a window taken back, resolved
@@ -3338,7 +3417,7 @@ fn profile_determined(config: &DaemonConfig, window_id: &str, profile: &str) -> 
         .as_ref()
         .filter(|delivery| matches!(delivery.wake, crate::profile_delivery::WakeMode::Command(_)))
         .map(|_| WakeCommand {
-            argv: launch.argv.clone(),
+            argv: crate::profile::without_door(launch.argv.clone()),
             env: launch.env.clone().into_iter().collect(),
         });
     ProfileDetermined {
@@ -3346,6 +3425,7 @@ fn profile_determined(config: &DaemonConfig, window_id: &str, profile: &str) -> 
         wake_command,
         process_image: launch.process_image,
         host_paths: launch.host_paths.is_some(),
+        launch_overlay: launch.launch_overlay,
     }
 }
 

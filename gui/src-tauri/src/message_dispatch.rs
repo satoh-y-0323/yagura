@@ -420,7 +420,9 @@ fn reply_for(message: DaemonMessage) -> Option<(PendingKind, Reply)> {
         // MilestoneSet is never received: the GUI only reads tickets.
         | DaemonMessage::MilestoneSet { .. }
         // HookInputWanted answers a hook's request, which the GUI never sends.
-        | DaemonMessage::HookInputWanted { .. } => None,
+        | DaemonMessage::HookInputWanted { .. }
+        // LaunchOverlay answers a window's overlay door, which the GUI is not.
+        | DaemonMessage::LaunchOverlay { .. } => None,
     }
 }
 

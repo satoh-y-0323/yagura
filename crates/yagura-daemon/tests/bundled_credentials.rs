@@ -10,8 +10,9 @@
 
 use std::path::Path;
 
+use yagura_daemon::mcp_registration::RegistrationTarget;
 use yagura_daemon::profile::{
-    CredentialsMode, InjectedPaths, InjectionSpec, Profile, ProfileCredentials, parse_profile,
+    CredentialsMode, InjectedPaths, InjectionSpec, Profile, ProfileOs, parse_profile,
     render_mcp_args,
 };
 use yagura_protocol::{INSTANCE_ENV, STATUS_TOKEN_ENV, WINDOW_ID_ENV};
@@ -195,18 +196,49 @@ fn the_env_profiles_keep_their_credentials_and_codex_blanks_them_for_its_tools()
             );
         }
     }
+    // Muse Code's form depends on the OS its window runs on, which its windows measure
+    // (`credentials_launch_injection.rs`).
     for id in [
-        "muse-code",
         "grok-build",
         "wsl-grok-build",
         "antigravity-cli",
         "wsl-antigravity-cli",
         "shell",
     ] {
+        let credentials = shipped(id).credentials;
         assert_eq!(
-            shipped(id).credentials,
-            ProfileCredentials::default(),
+            credentials.mode,
+            CredentialsMode::Env,
             "{id} keeps the credentials in the environment"
+        );
+        assert!(credentials.launch_args.is_empty(), "{id}");
+    }
+}
+
+/// Muse Code's registration writes the bridge and claims the managed hooks only on
+/// Windows: on Linux and macOS a window starts Muse with both at launch, and a bridge of
+/// the same name in the user's settings would make Muse refuse that launch.
+#[test]
+fn muse_codes_registration_writes_the_bridge_and_claims_the_managed_hooks_only_on_windows() {
+    let profile = shipped("muse-code");
+    let json = profile
+        .mcp_registration
+        .as_ref()
+        .and_then(|registration| registration.json_entry())
+        .expect("muse-code registers through its settings files");
+    let target = RegistrationTarget::for_instance(None);
+    for os in [ProfileOs::Windows, ProfileOs::Linux, ProfileOs::MacOs] {
+        let windows = os == ProfileOs::Windows;
+        let bridge = json.files().iter().any(|file| file.names_bridge(os));
+        assert_eq!(bridge, windows, "{os:?}: whether the bridge is written");
+        let claimed = json.files().iter().any(|file| {
+            file.removal_keys(&target, os, true)
+                .iter()
+                .any(|key| key == "/managed_hooks_path")
+        });
+        assert_eq!(
+            claimed, windows,
+            "{os:?}: whether the managed hooks are claimed"
         );
     }
 }

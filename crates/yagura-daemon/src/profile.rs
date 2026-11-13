@@ -43,6 +43,7 @@ use crate::config::DaemonConfig;
 use crate::detector::definition::is_valid_detection_name;
 use crate::detector::layers::{DetectionLayers, LayerError};
 use crate::host_paths::{HostPaths, HostPathsError, RawHostPaths, parse_host_paths};
+use crate::launch_overlay::{LaunchOverlayError, LaunchOverlaySpec};
 use crate::profile_delivery::{
     DeliveryError, ProfileDelivery, WakeMode, parse_delivery, parse_guidance,
 };
@@ -84,6 +85,21 @@ const HOOKS_CONFIG_DIR_PLACEHOLDER: &str = "{hooks_config_dir}";
 /// `[hooks]` (args, `config_file` and `config_dir` content) only by a profile
 /// whose `[credentials]` mode is `launch`.
 const CREDENTIALS_FILE_PLACEHOLDER: &str = "{credentials_file}";
+
+/// A `[command]` element that is exactly this stands for the window's overlay
+/// door: the daemon's own path, converted for the CLI as a registration's
+/// `{daemon}` is. Handed on as an argument of its own, never inside a shell's
+/// statement.
+pub const DAEMON_PLACEHOLDER: &str = "{daemon}";
+
+/// What a whole `{daemon}` element becomes in a run that opens no window (a
+/// registration, a listing, a wake): there is no window, so no door, and a
+/// launch statement starts its CLI without one.
+pub const NO_DOOR_ARG: &str = "-";
+
+/// The operating-system keys a `[credentials]`, `[mcp]` or `[hooks]` table
+/// may be written under, as `[command]` is.
+const OS_KEYS: [&str; 4] = ["default", "windows", "macos", "linux"];
 
 /// Reason text for [`ProfileUnavailableKind::NotFound`]: the selected argv's
 /// executable could not be found by the injected resolution environment.
@@ -398,6 +414,15 @@ pub struct Profile {
     /// The `[credentials]` table, already validated; the default when the
     /// document has none.
     pub credentials: ProfileCredentials,
+    /// The `[credentials]`, `[mcp]` and `[hooks]` tables a launch on each
+    /// operating system uses. A table written once serves every operating
+    /// system (and is `credentials`, `mcp` and `hooks` above); one written
+    /// under `[command]`'s keys is chosen the way an argv is.
+    pub launch_tables: LaunchTablesByOs,
+    /// The `[launch_overlay]` table, already validated: how a window of this
+    /// profile is handed the overlay that keeps its credentials from its
+    /// CLI's tools. `None` means the document has none.
+    pub launch_overlay: Option<LaunchOverlaySpec>,
     /// The top-level `[mcp_registration]` table, already validated. `None`
     /// means the document has no such table. This never affects opening a
     /// window from this profile: it only describes how the daemon can
@@ -452,6 +477,38 @@ pub struct ProfileCredentials {
     /// Argv elements added to the spawn only. They never enter
     /// [`ProfileLaunch::argv`], which a restored window replays.
     pub launch_args: Vec<String>,
+}
+
+/// The `[credentials]`, `[mcp]` and `[hooks]` tables a launch on one
+/// operating system uses.
+#[derive(Debug, Clone, Default)]
+pub struct LaunchTables {
+    /// The `[credentials]` table; the default when there is none.
+    pub credentials: ProfileCredentials,
+    /// The `[mcp]` table; `None` when there is none.
+    pub mcp: Option<InjectionSpec>,
+    /// The `[hooks]` table; `None` when there is none.
+    pub hooks: Option<InjectionSpec>,
+}
+
+/// [`LaunchTables`] for each operating system.
+#[derive(Debug, Clone, Default)]
+pub struct LaunchTablesByOs {
+    windows: LaunchTables,
+    macos: LaunchTables,
+    linux: LaunchTables,
+}
+
+impl LaunchTablesByOs {
+    /// The tables a launch on `os` uses.
+    #[must_use]
+    pub fn for_os(&self, os: ProfileOs) -> &LaunchTables {
+        match os {
+            ProfileOs::Windows => &self.windows,
+            ProfileOs::MacOs => &self.macos,
+            ProfileOs::Linux => &self.linux,
+        }
+    }
 }
 
 /// One profile as [`list_profiles`] reports it.
@@ -569,6 +626,10 @@ pub struct ProfileLaunch {
     /// The images of the profile's CLI process it declares for this host
     /// ([`ProcessImage::for_os`]); empty when it declares none.
     pub process_image: Vec<ImagePattern>,
+    /// The profile's `[launch_overlay]` table: how the window is handed the
+    /// overlay that keeps its credentials from its CLI's tools. `None` when
+    /// the profile declares none.
+    pub launch_overlay: Option<LaunchOverlaySpec>,
     /// The profile's `[delivery]` table, as declared. What it contributes to a
     /// spawn argv (a launch prompt) is rendered by
     /// [`crate::profile_delivery::launch_prompt_injection`] and never enters
@@ -733,6 +794,13 @@ pub enum ProfileParseError {
     /// spelt by a profile that is not in `launch` mode ([`CredentialsError`]).
     #[error("invalid credentials table")]
     InvalidCredentials(#[source] CredentialsError),
+    /// A `[launch_overlay]` table breaks its rule ([`LaunchOverlayError`]).
+    #[error("invalid launch overlay table")]
+    InvalidLaunchOverlay(#[source] LaunchOverlayError),
+    /// `{daemon}` is spelt in a `[command]` element it is not the whole of,
+    /// or in `launch_only`.
+    #[error("{{daemon}} is not a whole command element")]
+    DaemonInCommand,
 }
 
 /// Why a `[credentials]` table, or a `{credentials_file}` placeholder, was
@@ -947,10 +1015,13 @@ struct RawProfile {
     model: Option<RawModelOption>,
     #[serde(default)]
     effort: Option<RawLaunchOption>,
+    /// Untyped so a table written per operating system is told apart from
+    /// one written once ([`RawByOs`]); each is decoded as a [`RawInjection`].
     #[serde(default)]
-    mcp: Option<RawInjection>,
+    mcp: Option<toml::Value>,
+    /// Untyped for the same reason as `mcp`.
     #[serde(default)]
-    hooks: Option<RawInjection>,
+    hooks: Option<toml::Value>,
     /// Kept untyped here so a broken table is classified as
     /// [`ProfileParseError::InvalidMcpRegistration`] -- with its own
     /// document-independent `Display` -- rather than
@@ -990,6 +1061,54 @@ struct RawProfile {
     /// [`ProfileParseError::InvalidCredentials`].
     #[serde(default)]
     credentials: Option<toml::Value>,
+    /// Untyped so every rule it breaks is
+    /// [`ProfileParseError::InvalidLaunchOverlay`].
+    #[serde(default)]
+    launch_overlay: Option<toml::Value>,
+}
+
+/// A `[credentials]`, `[mcp]` or `[hooks]` table, written once (`default`) or
+/// per operating system under `[command]`'s keys: a table whose every key is
+/// one of them and holds a table.
+struct RawByOs {
+    default: Option<toml::Value>,
+    windows: Option<toml::Value>,
+    macos: Option<toml::Value>,
+    linux: Option<toml::Value>,
+}
+
+impl RawByOs {
+    fn split(raw: Option<toml::Value>) -> Self {
+        let per_os = matches!(&raw, Some(toml::Value::Table(table))
+            if !table.is_empty()
+                && table
+                    .iter()
+                    .all(|(key, value)| OS_KEYS.contains(&key.as_str()) && value.is_table()));
+        let Some(toml::Value::Table(mut table)) = raw.clone().filter(|_| per_os) else {
+            return Self {
+                default: raw,
+                windows: None,
+                macos: None,
+                linux: None,
+            };
+        };
+        Self {
+            default: table.remove("default"),
+            windows: table.remove("windows"),
+            macos: table.remove("macos"),
+            linux: table.remove("linux"),
+        }
+    }
+
+    fn for_os(&self, os: ProfileOs) -> Option<&toml::Value> {
+        program::select_for_os(
+            os,
+            self.windows.as_ref(),
+            self.macos.as_ref(),
+            self.linux.as_ref(),
+            self.default.as_ref(),
+        )
+    }
 }
 
 /// A `[mcp]` or `[hooks]` table before validation. `args` is `Option` for the
@@ -1181,8 +1300,21 @@ pub fn parse_profile(id: &str, source: &str) -> Result<Profile, ProfileParseErro
         .flatten()
         {
             yagura_protocol::validate_argv_elements(argv)?;
+            if argv
+                .iter()
+                .any(|arg| arg != DAEMON_PLACEHOLDER && arg.contains(DAEMON_PLACEHOLDER))
+            {
+                return Err(ProfileParseError::DaemonInCommand);
+            }
         }
         yagura_protocol::validate_argv_elements(&command.launch_only)?;
+        if command
+            .launch_only
+            .iter()
+            .any(|arg| arg.contains(DAEMON_PLACEHOLDER))
+        {
+            return Err(ProfileParseError::DaemonInCommand);
+        }
     }
     let (model, model_choices) = match raw.model {
         Some(RawModelOption {
@@ -1208,27 +1340,36 @@ pub fn parse_profile(id: &str, source: &str) -> Result<Profile, ProfileParseErro
     }
     let hook_timeouts = parse_hook_timeouts(raw.hook_timeout.take())
         .map_err(ProfileParseError::InvalidHookEvents)?;
-    fill_hook_timeouts(
-        raw.hooks.as_mut(),
-        raw.mcp_registration.as_mut(),
-        &hook_timeouts,
-    )
-    .map_err(ProfileParseError::InvalidHookEvents)?;
-    let credentials =
-        parse_credentials(raw.credentials).map_err(ProfileParseError::InvalidCredentials)?;
-    let launch = credentials.mode == CredentialsMode::Launch;
-    if !launch
-        && [&raw.mcp, &raw.hooks]
-            .into_iter()
-            .flatten()
-            .any(spells_credentials_file)
-    {
-        return Err(ProfileParseError::InvalidCredentials(
-            CredentialsError::FileNeedsLaunch,
-        ));
-    }
-    let mcp = parse_injection_spec(raw.mcp, TableKind::Mcp, launch)?;
-    let hooks = parse_injection_spec(raw.hooks, TableKind::Hooks, launch)?;
+    fill_hook_timeouts(None, raw.mcp_registration.as_mut(), &hook_timeouts)
+        .map_err(ProfileParseError::InvalidHookEvents)?;
+    let written = [
+        RawByOs::split(raw.credentials.take()),
+        RawByOs::split(raw.mcp.take()),
+        RawByOs::split(raw.hooks.take()),
+    ];
+    let tables = |os: Option<ProfileOs>| {
+        let [credentials, mcp, hooks] = written.each_ref().map(|table| match os {
+            Some(os) => table.for_os(os),
+            None => table.default.as_ref(),
+        });
+        parse_launch_tables(credentials, mcp, hooks, &hook_timeouts)
+    };
+    let LaunchTables {
+        credentials,
+        mcp,
+        hooks,
+    } = tables(None)?;
+    let launch_tables = LaunchTablesByOs {
+        windows: tables(Some(ProfileOs::Windows))?,
+        macos: tables(Some(ProfileOs::MacOs))?,
+        linux: tables(Some(ProfileOs::Linux))?,
+    };
+    let launch_overlay = raw
+        .launch_overlay
+        .take()
+        .map(crate::launch_overlay::parse_spec)
+        .transpose()
+        .map_err(ProfileParseError::InvalidLaunchOverlay)?;
     let host_paths =
         parse_host_paths(raw.host_paths).map_err(ProfileParseError::InvalidHostPaths)?;
     let mcp_registration =
@@ -1286,6 +1427,8 @@ pub fn parse_profile(id: &str, source: &str) -> Result<Profile, ProfileParseErro
         mcp,
         hooks,
         credentials,
+        launch_tables,
+        launch_overlay,
         mcp_registration,
         delivery,
         hook_events,
@@ -1491,6 +1634,43 @@ fn fill_hook_timeouts(
         timeouts.fill_value(registration)?;
     }
     Ok(())
+}
+
+/// Validates the `[credentials]`, `[mcp]` and `[hooks]` tables one launch
+/// uses, with the times of `[hook_timeout]` put into the `[hooks]` texts.
+fn parse_launch_tables(
+    credentials: Option<&toml::Value>,
+    mcp: Option<&toml::Value>,
+    hooks: Option<&toml::Value>,
+    timeouts: &HookTimeouts,
+) -> Result<LaunchTables, ProfileParseError> {
+    let decode = |raw: Option<&toml::Value>| {
+        raw.cloned()
+            .map(toml::Value::try_into::<RawInjection>)
+            .transpose()
+    };
+    let mcp = decode(mcp)?;
+    let mut hooks = decode(hooks)?;
+    fill_hook_timeouts(hooks.as_mut(), None, timeouts)
+        .map_err(ProfileParseError::InvalidHookEvents)?;
+    let credentials =
+        parse_credentials(credentials.cloned()).map_err(ProfileParseError::InvalidCredentials)?;
+    let launch = credentials.mode == CredentialsMode::Launch;
+    if !launch
+        && [&mcp, &hooks]
+            .into_iter()
+            .flatten()
+            .any(spells_credentials_file)
+    {
+        return Err(ProfileParseError::InvalidCredentials(
+            CredentialsError::FileNeedsLaunch,
+        ));
+    }
+    Ok(LaunchTables {
+        credentials,
+        mcp: parse_injection_spec(mcp, TableKind::Mcp, launch)?,
+        hooks: parse_injection_spec(hooks, TableKind::Hooks, launch)?,
+    })
 }
 
 /// Validates the `[credentials]` table (`None` in, the default out).
@@ -3016,10 +3196,14 @@ pub fn resolve_launch(
         .as_ref()
         .map(|command| command.launch_only.clone())
         .unwrap_or_default();
-    let hooks_registration = profile
-        .mcp_registration
-        .clone()
-        .filter(|registration| profile.hooks.is_some() || registration.json_entry().is_some());
+    let LaunchTables {
+        credentials,
+        mcp,
+        hooks,
+    } = profile.launch_tables.for_os(config.host_os).clone();
+    let hooks_registration = profile.mcp_registration.clone().filter(|registration| {
+        hooks.is_some() || registration.owns_json_entries_on(config.host_os)
+    });
     let bridge_listing = profile
         .mcp_registration
         .as_ref()
@@ -3044,9 +3228,9 @@ pub fn resolve_launch(
         vendor: profile.id,
         detection: profile.detection,
         env,
-        mcp: profile.mcp,
-        hooks: profile.hooks,
-        credentials: profile.credentials,
+        mcp,
+        hooks,
+        credentials,
         launch_only,
         hooks_registration,
         bridge_listing,
@@ -3056,6 +3240,7 @@ pub fn resolve_launch(
             .as_ref()
             .map(|image| image.for_os(config.host_os).to_vec())
             .unwrap_or_default(),
+        launch_overlay: profile.launch_overlay,
         delivery: profile.delivery,
         limits,
     })
@@ -3078,11 +3263,28 @@ pub(crate) fn resolve_spawn_argv(
     config: &DaemonConfig,
     argv: &[String],
 ) -> Result<Vec<String>, &'static str> {
+    let argv = without_door(argv.to_vec());
     let platform = config.host_os.platform();
     let predicate = is_executable_predicate(config);
-    let resolution = program::resolve_program(argv, platform, &config.program_lookup, &predicate)
+    let resolution = program::resolve_program(&argv, platform, &config.program_lookup, &predicate)
         .map_err(|_rejected| REASON_METACHARACTER)?;
-    Ok(program::into_spawn_argv(&resolution, argv, platform))
+    Ok(program::into_spawn_argv(&resolution, &argv, platform))
+}
+
+/// `argv` for a run that opens no window: every whole `{daemon}` element
+/// becomes [`NO_DOOR_ARG`]. A window's launch draws it as its overlay door
+/// instead; nothing else of the daemon runs a profile's argv as a window.
+#[must_use]
+pub fn without_door(argv: Vec<String>) -> Vec<String> {
+    argv.into_iter()
+        .map(|arg| {
+            if arg == DAEMON_PLACEHOLDER {
+                NO_DOOR_ARG.to_string()
+            } else {
+                arg
+            }
+        })
+        .collect()
 }
 
 /// Resolves where `profile_id`'s model choices come from, reading the profile

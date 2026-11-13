@@ -571,3 +571,183 @@ fn launch_only_elements_are_refused_by_the_same_rule_as_launch_args() {
         );
     }
 }
+
+// =============================================================================
+// (f) Muse Code's form follows the OS its window runs on
+// =============================================================================
+
+/// The value of the `-c <key>=<value>` launch argument whose key starts with `key`.
+fn launch_setting(args: &[String], key: &str) -> Option<String> {
+    args.windows(2)
+        .find(|pair| pair[0] == "-c" && pair[1].starts_with(key))
+        .map(|pair| pair[1].split_once('=').expect("key=value").1.to_string())
+}
+
+/// A Muse Code window on Linux and macOS starts Muse with the bridge and the hooks at
+/// launch (`-c mcpServers.<server>=` and `-c managed_hooks_path=`), each naming the
+/// window's own credentials file, as `wsl-muse-code` does. On Windows it keeps the form
+/// whose hooks and bridge are registered in the user's settings, and nothing is added at
+/// launch.
+#[tokio::test]
+async fn muse_code_starts_with_its_bridge_and_hooks_at_launch_only_on_linux_and_macos() {
+    use crate::credentials_launch::shipped_with_command;
+    for (os, at_launch) in [
+        (ProfileOs::Linux, true),
+        (ProfileOs::MacOs, true),
+        (ProfileOs::Windows, false),
+    ] {
+        let tree = TempDir::new("yagura-cli-test", "cred-inject-muse");
+        let profiles_dir = tree.make_dir("profiles");
+        let mcp_dir = tree.make_dir("mcp");
+        let logs = tree.make_dir("logs");
+        let cli = vec![
+            env!("CARGO_BIN_EXE_hook_child").to_string(),
+            COMPOSER_MARKER.to_string(),
+            COMPOSER_SEPARATOR.to_string(),
+            COMPOSER_CONTINUATION_PREFIX.to_string(),
+            "0".to_string(),
+            "-".to_string(),
+            "--log".to_string(),
+            logs.display().to_string(),
+        ];
+        write_profile(
+            &profiles_dir,
+            "muse",
+            &shipped_with_command("muse", "muse-code", &cli, None, &[]),
+        );
+        let bridge = tree.make_dir("bridge").join("yagura-mcp.exe");
+        let h = Harness::start(
+            "cred-inject-muse",
+            DaemonConfig {
+                host_os: os,
+                ..config(profiles_dir, &mcp_dir, Some(bridge))
+            },
+        )
+        .await;
+        let mut client = h.connect().await;
+
+        open(&mut client, "muse").await;
+        let args = launch_args_logged_in(&logs).await;
+        let hooks = launch_setting(&args, "managed_hooks_path=");
+        let server = launch_setting(&args, "mcpServers.");
+        assert_eq!(
+            (hooks.is_some(), server.is_some()),
+            (at_launch, at_launch),
+            "{os:?}: whether the hooks and the bridge are handed at launch; argv: {args:?}"
+        );
+        if let (Some(hooks), Some(server)) = (hooks, server) {
+            let server: serde_json::Value = serde_json::from_str(&server)
+                .unwrap_or_else(|err| panic!("{os:?}: the bridge entry is JSON: {err}"));
+            let server_args: Vec<&str> = server["args"]
+                .as_array()
+                .expect("the bridge's args")
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .collect();
+            let at = server_args
+                .iter()
+                .position(|arg| *arg == "--credentials")
+                .unwrap_or_else(|| panic!("{os:?}: the bridge is handed the credentials file"));
+            let credentials = server_args[at + 1];
+            assert!(
+                Path::new(credentials).is_file(),
+                "{os:?}: the bridge's credentials file is the window's: {credentials}"
+            );
+            let hooks = read(hooks.trim_matches('"'));
+            assert!(
+                hooks.contains(credentials),
+                "{os:?}: the hooks name the window's credentials file {credentials}: {hooks}"
+            );
+        }
+        h.registry.terminate_all().await;
+    }
+}
+
+// =============================================================================
+// (g) `{daemon}` in `[command]`
+// =============================================================================
+
+/// What a hook-child window opened from a profile whose argv ends in
+/// `--seen-daemon {daemon}`, with `tables`, is told the daemon is; `Err` with the open's
+/// answer when it does not open.
+async fn daemon_named_to_window(tables: &str) -> Result<(String, String), Box<DaemonMessage>> {
+    let tree = TempDir::new("yagura-cli-test", "cred-inject-daemon");
+    let profiles_dir = tree.make_dir("profiles");
+    let mcp_dir = tree.make_dir("mcp");
+    let logs = tree.make_dir("logs");
+    let report_dir = tree.make_dir("report");
+    let copy = report_dir.join(yagura_daemon::config::REPORT_EXE_NAME);
+    std::fs::write(&copy, b"").unwrap();
+    let expected = yagura_os::spaceless_path(&copy).expect("a name without spaces");
+    write_hook_child_profile(
+        &profiles_dir,
+        "door",
+        &logs,
+        &["--seen-daemon", "{daemon}"],
+        tables,
+    );
+    let h = Harness::start(
+        "cred-inject-daemon",
+        DaemonConfig {
+            report_dir: Some(report_dir),
+            ..config(profiles_dir, &mcp_dir, None)
+        },
+    )
+    .await;
+    let mut client = h.connect().await;
+    send(
+        &mut client,
+        &ClientMessage::OpenWindowFromProfile {
+            profile: "door".to_string(),
+            cwd: None,
+            name: None,
+            model: None,
+            effort: None,
+            on_name_taken: Default::default(),
+        },
+    )
+    .await;
+    let seen = match read_response(&mut client).await {
+        DaemonMessage::WindowOpened { .. } => {
+            let args = launch_args_logged_in(&logs).await;
+            Ok((value_after(&args, "--seen-daemon"), expected))
+        }
+        other => Err(Box::new(other)),
+    };
+    h.registry.terminate_all().await;
+    seen
+}
+
+/// A `[command]` element that is `{daemon}` as a whole reaches the window's CLI as the
+/// daemon's path, the one a registration names, converted the way the profile's
+/// `[host_paths]` converts a path; a conversion that fails opens no window.
+#[tokio::test]
+async fn a_whole_daemon_element_reaches_the_cli_as_the_daemons_path_converted_for_it() {
+    const CONVERTED: &str = "/converted/yagura-daemon";
+    let convert = |exit_code: u8| {
+        format!(
+            "\n[host_paths]\nconvert = ['{}', \"probe\", \"{{path}}\"]\n\n\
+             [env]\nMCP_CLI_STUB_PROBE_OUTPUT = \"{CONVERTED}\"\n\
+             MCP_CLI_STUB_PROBE_EXIT_CODE = \"{exit_code}\"\n",
+            mcp_cli_stub_path().display()
+        )
+    };
+
+    let (seen, expected) = daemon_named_to_window("")
+        .await
+        .unwrap_or_else(|answer| panic!("the window opens, got {answer:?}"));
+    assert_eq!(seen, expected, "the CLI is handed the daemon's path");
+
+    let (seen, _) = daemon_named_to_window(&convert(0))
+        .await
+        .unwrap_or_else(|answer| panic!("the window opens, got {answer:?}"));
+    assert_eq!(seen, CONVERTED, "the CLI is handed the converted path");
+
+    let answer = daemon_named_to_window(&convert(1)).await;
+    assert!(
+        answer
+            .as_ref()
+            .is_err_and(|answer| matches!(**answer, DaemonMessage::Error { .. })),
+        "a path that cannot be converted opens no window, got {answer:?}"
+    );
+}

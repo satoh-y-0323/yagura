@@ -922,6 +922,8 @@ fn expected_wording(err: &ProfileParseError) -> &'static str {
         ProfileParseError::InvalidMcpRegistration(_) => "invalid mcp registration table",
         ProfileParseError::InvalidHostPaths(_) => "invalid host paths table",
         ProfileParseError::InvalidCredentials(_) => "invalid credentials table",
+        ProfileParseError::InvalidLaunchOverlay(_) => "invalid launch overlay table",
+        ProfileParseError::DaemonInCommand => "{daemon} is not a whole command element",
     }
 }
 
@@ -2692,6 +2694,28 @@ fn a_declared_process_image_with_more_than_one_star_is_refused() {
         assert!(
             parse_profile("image-two", &source).is_err(),
             "{image}: a pattern with more than one * must be refused"
+        );
+    }
+}
+
+/// `{daemon}` in `[command]` stands for the daemon's path only as a whole element, handed
+/// on as an argument of its own: spliced into an element, which may be a shell's
+/// statement, the profile is not read, whichever OS key holds it.
+#[test]
+fn daemon_in_a_command_is_read_only_as_a_whole_element() {
+    for (command, readable) in [
+        (r#"default = ["prog", "{daemon}"]"#, true),
+        (r#"default = ["prog", "--door={daemon}"]"#, false),
+        (
+            r#"windows = ["wsl", "-e", "bash", "-c", "exec {daemon} x", "grok"]"#,
+            false,
+        ),
+    ] {
+        let source = format!("schema = 1\ndisplay_name = \"Door\"\n\n[command]\n{command}\n");
+        assert_eq!(
+            parse_profile("door", &source).is_ok(),
+            readable,
+            "whether the profile is read: {command}"
         );
     }
 }

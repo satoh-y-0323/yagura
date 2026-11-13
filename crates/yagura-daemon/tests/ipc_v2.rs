@@ -269,6 +269,7 @@ fn daemon_message_kind(msg: &DaemonMessage) -> String {
         DaemonMessage::Delivery { .. } => "Delivery".to_string(),
         DaemonMessage::SessionRecorded { .. } => "SessionRecorded".to_string(),
         DaemonMessage::DeliverConfirmed { .. } => "DeliverConfirmed".to_string(),
+        DaemonMessage::LaunchOverlay { .. } => "LaunchOverlay".to_string(),
         DaemonMessage::PlanDetail { .. } => "PlanDetail".to_string(),
         DaemonMessage::PlanList { .. } => "PlanList".to_string(),
         DaemonMessage::PlanDeleted { .. } => "PlanDeleted".to_string(),

@@ -122,6 +122,10 @@ pub enum CliCommand {
         /// (`--guest-root`, `--guest-step`); `None` when it handed over none.
         guest: Option<GuestLineage>,
     },
+    /// Print the launch overlay of the window being launched, made by the
+    /// daemon from what the stdin holds (`--launch-overlay`). Not a hook
+    /// door: every failure ends it non-zero.
+    LaunchOverlay,
 }
 
 impl CliCommand {
@@ -138,7 +142,7 @@ impl CliCommand {
             | Self::DeliverWait { skip_if }
             | Self::ReportSession { skip_if, .. } => skip_if.as_deref(),
             // The pointer of a `--hook` door is profile data, never an argument.
-            Self::Run { .. } | Self::Shutdown | Self::Hook { .. } => None,
+            Self::Run { .. } | Self::Shutdown | Self::Hook { .. } | Self::LaunchOverlay => None,
         }
     }
 
@@ -152,7 +156,7 @@ impl CliCommand {
                 Some(HookEffect::Deliver)
             }
             Self::ReportSession { .. } => Some(HookEffect::Session),
-            Self::Run { .. } | Self::Shutdown | Self::Hook { .. } => None,
+            Self::Run { .. } | Self::Shutdown | Self::Hook { .. } | Self::LaunchOverlay => None,
         }
     }
 }
@@ -179,6 +183,17 @@ pub fn names_hook_door(args: &[String]) -> bool {
 
 /// The hook-door flag naming the registration a hook file was written for.
 const FOR_INSTANCE_FLAG: &str = "--for-instance";
+
+/// The flag of the overlay door ([`CliCommand::LaunchOverlay`]).
+pub const LAUNCH_OVERLAY_FLAG: &str = "--launch-overlay";
+
+/// Whether `args` name the overlay door. Decided on the raw arguments, before
+/// [`parse_args`], so that its every failure, an unreadable argument too, is
+/// one a launch statement can tell from an overlay.
+#[must_use]
+pub fn names_overlay_door(args: &[String]) -> bool {
+    args.iter().any(|arg| arg == LAUNCH_OVERLAY_FLAG)
+}
 
 /// Whether a hook door's single `--for-instance` names a registration other
 /// than the one `instance_id` (the window's `YAGURA_INSTANCE`) registers under,
@@ -271,9 +286,18 @@ impl CliError {
 /// # Errors
 ///
 /// Returns [`CliError`] for an unknown argument, a flag missing its value, a
-/// value that fails validation, a repeated `--for-instance` or `--credentials`, or two of the
-/// client-side commands combined.
+/// value that fails validation, a repeated `--for-instance` or `--credentials`, two of the
+/// client-side commands combined, or anything beside `--launch-overlay`.
 pub fn parse_args(args: &[String]) -> Result<CliCommand, CliError> {
+    // The overlay door reads everything it needs from the window's
+    // environment and its stdin.
+    if names_overlay_door(args) {
+        return match args.iter().find(|arg| *arg != LAUNCH_OVERLAY_FLAG) {
+            None if args.len() == 1 => Ok(CliCommand::LaunchOverlay),
+            None => Err(CliError::RepeatedArgument(LAUNCH_OVERLAY_FLAG.to_string())),
+            Some(other) => Err(CliError::UnknownArgument(other.clone())),
+        };
+    }
     let mut shutdown = false;
     let mut emit_status: Option<WindowStatus> = None;
     let mut source: Option<String> = None;

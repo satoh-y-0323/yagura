@@ -30,6 +30,17 @@
         "room_id": "string",
         "type": "string"
       },
+      "build_launch_overlay": {
+        "env": {
+          "sample": "string"
+        },
+        "files": {
+          "sample": "string"
+        },
+        "token": "string",
+        "type": "string",
+        "window_id": "string"
+      },
       "clear_chat_room": {
         "room_id": "string",
         "type": "string"
@@ -891,6 +902,10 @@
       "identified": {
         "type": "string",
         "window_id": "string"
+      },
+      "launch_overlay": {
+        "overlay": "string",
+        "type": "string"
       },
       "mcp_registration_requested": {
         "action": "string",

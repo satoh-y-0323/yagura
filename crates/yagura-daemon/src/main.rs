@@ -74,6 +74,11 @@ const HOOK_DOOR_MARGIN: Duration = Duration::from_millis(500);
 
 fn main() -> Result<ExitCode> {
     let args = yagura_protocol::process_args();
+    // The overlay door is no hook door: none of its failures may look like the
+    // silent success a hook outside a window has, so it is decided first.
+    if cli::names_overlay_door(&args) {
+        return Ok(launch_overlay_door(&args));
+    }
     // A hook also runs outside any window (a CLI started by hand) and may carry
     // arguments only a newer copy knows, so it is decided on the raw arguments,
     // before they are parsed and before logging is set up: such a hook stays
@@ -202,6 +207,10 @@ async fn async_main(
             guest,
         } => {
             return run_hook_event(&ipc, &endpoint, (&profile, &event), guest, credentials).await;
+        }
+        // Run by `main` before anything else.
+        CliCommand::LaunchOverlay => {
+            anyhow::bail!("--launch-overlay is not run as one of the daemon's commands")
         }
         // `--detection` / `--detection-dir` / `--playbook` /
         // `--profiles-dir` / `--approver-exe` / `--roles` / `--tickets`
@@ -1065,6 +1074,91 @@ async fn finish_door(
         }
         _ => anyhow::bail!("the daemon sent no usable answer"),
     }
+}
+
+/// Runs the overlay door (`--launch-overlay`): prints the launch overlay the
+/// daemon makes for the window being launched from what the stdin holds, and
+/// ends with success; anything else ends non-zero with one line on stderr
+/// that holds no value, and nothing on stdout. A launch statement starts its
+/// CLI only with an overlay it was printed.
+fn launch_overlay_door(args: &[String]) -> ExitCode {
+    match launch_overlay(args) {
+        Ok(overlay) => {
+            let mut stdout = std::io::stdout().lock();
+            if stdout
+                .write_all(overlay.as_bytes())
+                .and_then(|()| stdout.flush())
+                .is_ok()
+            {
+                return ExitCode::SUCCESS;
+            }
+            eprintln!("yagura-daemon --launch-overlay: the overlay could not be printed");
+        }
+        Err(reason) => eprintln!("yagura-daemon --launch-overlay: {reason}"),
+    }
+    ExitCode::FAILURE
+}
+
+/// The overlay [`launch_overlay_door`] prints, or why there is none.
+fn launch_overlay(args: &[String]) -> std::result::Result<String, String> {
+    use std::io::Read as _;
+    use yagura_daemon::launch_overlay::{DoorInputError, MAX_DOOR_INPUT_BYTES, read_door_input};
+
+    cli::parse_args(args).map_err(|error| error.without_values())?;
+    let WindowCredentials { window_id, token } = process_window_credentials(args)
+        .ok_or_else(|| "the window's credentials are not in its environment".to_string())?;
+    let namespace = cli::resolve_instance_id(std::env::var_os("YAGURA_INSTANCE"))
+        .map_err(|_| "YAGURA_INSTANCE names no instance".to_string())?;
+    let mut input = Vec::new();
+    std::io::stdin()
+        .lock()
+        .take(
+            u64::try_from(MAX_DOOR_INPUT_BYTES)
+                .unwrap_or(u64::MAX)
+                .saturating_add(1),
+        )
+        .read_to_end(&mut input)
+        .map_err(|_| "the input could not be read".to_string())?;
+    if input.len() > MAX_DOOR_INPUT_BYTES {
+        return Err(DoorInputError::TooLarge.to_string());
+    }
+    let facts = read_door_input(&input).map_err(|error| error.to_string())?;
+    let request = ClientMessage::BuildLaunchOverlay {
+        window_id,
+        token,
+        env: facts.env,
+        files: facts.files,
+    };
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|_| "the door could not start".to_string())?;
+    runtime.block_on(async {
+        let ipc = PlatformIpc::default();
+        let user = ipc
+            .current_user_id()
+            .map_err(|_| "the current user could not be resolved".to_string())?;
+        let endpoint = yagura_os::default_endpoint(&user, &namespace);
+        let mut client = ipc
+            .connect(&endpoint)
+            .await
+            .map_err(|_| "no daemon could be reached".to_string())?;
+        send_hook_request(&mut client, &request)
+            .await
+            .map_err(|_| "the request could not be sent".to_string())?;
+        let answer =
+            tokio::time::timeout(DOOR_ANSWER_TIMEOUT, read_one_daemon_message(&mut client))
+                .await
+                .map_err(|_| "the daemon did not answer in time".to_string())?;
+        match answer {
+            Some(DaemonMessage::LaunchOverlay { overlay }) => Ok(overlay),
+            Some(DaemonMessage::Error { code, .. }) => {
+                Err(format!("the daemon made no overlay ({code})"))
+            }
+            Some(_) => Err("the daemon answered with no overlay".to_string()),
+            None => Err("the daemon's answer could not be read".to_string()),
+        }
+    })
 }
 
 /// Sends one request of a hook door on `client`.

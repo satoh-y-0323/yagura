@@ -472,6 +472,11 @@ impl JsonFileSpec {
         self.entries.iter().chain(self.by_os.selected(os))
     }
 
+    /// Every entry written on some operating system.
+    fn written(&self) -> impl Iterator<Item = &(String, JsonValue)> {
+        self.entries.iter().chain(self.by_os.all())
+    }
+
     /// Whether the file has entries to write on `os`.
     #[must_use]
     pub fn owns_entries_on(&self, os: HostOs) -> bool {
@@ -586,8 +591,7 @@ impl JsonEntrySpec {
         self.files
             .iter()
             .find(|file| {
-                file.entries
-                    .iter()
+                file.written()
                     .any(|(key, value)| is_bridge_entry(key, value))
             })
             .map(|file| file.file(target))
@@ -950,12 +954,30 @@ impl McpRegistrationSpec {
         self.list.as_ref()
     }
 
-    /// Whether this row owns settings-file entries of its own (a `toml_set`
-    /// with `entries`, or a `json_entry`): what a launch of the profile
-    /// depends on for its CLI to run yagura's hooks.
+    /// Whether this row owns settings-file entries of its own on `os` (a
+    /// `toml_set` with `entries`, or a `json_entry` with entries written
+    /// there): what a launch of the profile depends on for its CLI to run
+    /// yagura's hooks.
     #[must_use]
-    pub fn owns_entries(&self) -> bool {
-        self.toml_set.as_ref().is_some_and(TomlSetSpec::has_entries) || self.json_entry.is_some()
+    pub fn owns_entries(&self, os: HostOs) -> bool {
+        self.toml_set.as_ref().is_some_and(TomlSetSpec::has_entries)
+            || self.owns_json_entries_on(os)
+    }
+
+    /// Whether the `json_entry` writes an entry on `os`.
+    #[must_use]
+    pub fn owns_json_entries_on(&self, os: HostOs) -> bool {
+        self.json_entry
+            .as_ref()
+            .is_some_and(|entry| entry.files.iter().any(|file| file.owns_entries_on(os)))
+    }
+
+    /// Whether registering on `os` does anything: the CLI has commands for
+    /// it, or the row writes settings-file entries there. A row that does
+    /// nothing on `os` is no row there.
+    #[must_use]
+    pub fn registers_on(&self, os: HostOs) -> bool {
+        self.commands.is_some() || self.owns_entries(os)
     }
 
     /// Whether this row's profile converts daemon-side paths through its
@@ -2063,7 +2085,7 @@ fn build_json_entry(raw: RawJsonEntries) -> Result<JsonEntrySpec, McpRegistratio
     }
     let bridge_entry = files
         .iter()
-        .flat_map(|file| &file.entries)
+        .flat_map(JsonFileSpec::written)
         .find(|(key, value)| is_bridge_entry(key, value))
         .and_then(|(key, value)| {
             let command = bridge_pointer(value)?;
@@ -2128,11 +2150,14 @@ fn build_json_file(raw: RawJsonEntry) -> Result<JsonFileSpec, McpRegistrationErr
     if overlaps {
         return Err(invalid());
     }
+    // A claim written only on some operating systems claims only there: a
+    // registration elsewhere writes nothing of this file's shared entries.
     let claim = raw
         .claim
         .map(|pointer| {
             let (key, value) = entries
                 .iter()
+                .chain(by_os.all())
                 .find(|(key, _)| *key == pointer)
                 .ok_or_else(invalid)?;
             // A shared entry holding a plain value: both sides must be able

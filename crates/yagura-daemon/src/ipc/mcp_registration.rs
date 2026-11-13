@@ -240,7 +240,11 @@ fn row_essentials(
     Vec<(OsString, OsString)>,
 )> {
     let listed = profile::read_listed_profile(config, profile_id)?;
-    let spec = listed.profile.mcp_registration.clone()?;
+    let spec = listed
+        .profile
+        .mcp_registration
+        .clone()
+        .filter(|spec| spec.registers_on(config.host_os))?;
     let env = listed
         .profile
         .env
@@ -317,9 +321,10 @@ fn row_commands(
     Some((add, remove))
 }
 
-/// `launch_argv` followed by `rendered`.
+/// `launch_argv` followed by `rendered`, as a run that opens no window runs
+/// it ([`profile::without_door`]).
 fn full_argv(launch_argv: &[String], rendered: Vec<String>) -> Vec<String> {
-    let mut argv = launch_argv.to_vec();
+    let mut argv = profile::without_door(launch_argv.to_vec());
     argv.extend(rendered);
     argv
 }
@@ -328,7 +333,13 @@ fn full_argv(launch_argv: &[String], rendered: Vec<String>) -> Vec<String> {
 /// `launch_argv` (the profile's launch command) precedes a rendered `add` /
 /// `remove` argv (the same convention `full_argv` follows).
 fn program_at_for(launch_argv: &[String]) -> u32 {
-    u32::try_from(launch_argv.len().saturating_sub(1)).unwrap_or(u32::MAX)
+    // A whole `{daemon}` after the CLI is its launch statement's argument.
+    let doors = launch_argv
+        .iter()
+        .rev()
+        .take_while(|arg| *arg == profile::DAEMON_PLACEHOLDER)
+        .count();
+    u32::try_from(launch_argv.len().saturating_sub(doors + 1)).unwrap_or(u32::MAX)
 }
 
 /// `spec`'s settings-file edit, for display: the values in TOML notation, in
@@ -484,7 +495,7 @@ async fn with_entries_status(
     bridge: &str,
     writes: Option<&Semaphore>,
 ) -> mcp_registration::DerivedStatus {
-    if !source.spec.owns_entries() {
+    if !source.spec.owns_entries(config.host_os) {
         return derived;
     }
     if !matches!(
@@ -1453,29 +1464,66 @@ pub(super) struct PathConversion {
 }
 
 /// Renders a launch's `[mcp]` and `[hooks]` injections, in order, with every
-/// daemon-side path they name converted through `conversion` first. Without
-/// a conversion, or when no injection names a path, nothing is run.
+/// daemon-side path they name converted through `conversion` first, and
+/// draws each whole `{daemon}` element of the window's `command` as the path
+/// its overlay door runs the daemon by: the one a registration's `{daemon}`
+/// names, converted the same way. Without a conversion, or when nothing names
+/// a path, nothing is run.
 ///
 /// The wait for a slot and the conversions together stay within
 /// `config.mcp_listing_timeout`. A table whose path cannot be converted is
 /// left out of the launch with a warning; the window still opens.
+///
+/// # Errors
+///
+/// The fixed reason the daemon's path could not be drawn for the command:
+/// the command cannot be left out as a table can, so the window does not
+/// open.
 pub(super) async fn render_profile_injections(
     config: &DaemonConfig,
     injections: Vec<profile::UnrenderedInjection>,
+    command: &mut [String],
     conversion: Option<PathConversion>,
-) -> Vec<CliInjection> {
-    let wanted: BTreeSet<PathBuf> = injections
+) -> Result<Vec<CliInjection>, &'static str> {
+    let door = if command.iter().any(|arg| arg == profile::DAEMON_PLACEHOLDER) {
+        match hook_daemon_path(config) {
+            Ok(Some(path)) => Some(PathBuf::from(path)),
+            Ok(None) => return Err("the daemon has no copy for a window to run"),
+            Err(_) => return Err(HOOK_DAEMON_NEEDS_QUOTING),
+        }
+    } else {
+        None
+    };
+    let mut wanted: BTreeSet<PathBuf> = injections
         .iter()
         .flat_map(profile::UnrenderedInjection::host_paths)
         .collect();
-    let Some(conversion) = conversion.filter(|_| !wanted.is_empty()) else {
-        return injections
+    wanted.extend(door.clone());
+    let converted = match conversion.filter(|_| !wanted.is_empty()) {
+        Some(conversion) => Some(convert_paths(config, &conversion, wanted).await),
+        None => None,
+    };
+    if let Some(door) = door {
+        let drawn = match converted.as_ref().map(|converted| converted.get(&door)) {
+            Some(Some(Ok(seen))) => seen.clone(),
+            Some(Some(Err(reason))) => return Err(reason),
+            Some(None) => return Err("the conversion could not be run, or failed"),
+            None => door.to_string_lossy().into_owned(),
+        };
+        for arg in command
+            .iter_mut()
+            .filter(|arg| *arg == profile::DAEMON_PLACEHOLDER)
+        {
+            arg.clone_from(&drawn);
+        }
+    }
+    let Some(converted) = converted else {
+        return Ok(injections
             .into_iter()
             .filter_map(|injection| injection.render(Path::to_path_buf))
-            .collect();
+            .collect());
     };
-    let converted = convert_paths(config, &conversion, wanted).await;
-    injections
+    Ok(injections
         .into_iter()
         .filter_map(|injection| {
             let failure = injection
@@ -1497,7 +1545,7 @@ pub(super) async fn render_profile_injections(
                 _ => path.to_path_buf(),
             })
         })
-        .collect()
+        .collect())
 }
 
 /// Converts each of `paths` through `conversion`, one child at a time under

@@ -850,6 +850,14 @@ fn client_message_corpus() -> Vec<ClientMessage> {
             "guest": { "root": "sample", "steps": [{ "stat": "sample" }] },
         })),
         message_from_wire::<ClientMessage>(serde_json::json!({ "type": "deliver_printed" })),
+        // Revision 34's request for a window's launch overlay, from a guest's facts.
+        message_from_wire::<ClientMessage>(serde_json::json!({
+            "type": "build_launch_overlay",
+            "window_id": "sample",
+            "token": "sample",
+            "env": { "sample": "sample" },
+            "files": { "sample": "sample" },
+        })),
     ]
 }
 
@@ -982,6 +990,11 @@ fn daemon_message_corpus() -> Vec<DaemonMessage> {
             "stream": "stdout",
             "exit_code": 1,
             "hook_timeout_sec": 1,
+        })),
+        // Revision 34's answer with a window's launch overlay.
+        message_from_wire::<DaemonMessage>(serde_json::json!({
+            "type": "launch_overlay",
+            "overlay": "sample",
         })),
         wire_sample!(DaemonMessage::SessionRecorded { held }),
         wire_sample!(DaemonMessage::DeliverConfirmed { withdrawn }),

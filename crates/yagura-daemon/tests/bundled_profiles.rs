@@ -561,6 +561,22 @@ fn shipped_hook_commands(profile: &Profile) -> Vec<Vec<HookLine>> {
                     }
                 }
             }
+            // The hooks a launch on `os` hands its CLI in a file, when the profile
+            // chooses them per operating system.
+            if profile.hooks.is_none()
+                && let Some(file) = profile
+                    .launch_tables
+                    .for_os(os)
+                    .hooks
+                    .as_ref()
+                    .and_then(|spec| spec.config_file.as_deref())
+            {
+                let document: serde_json::Value =
+                    serde_json::from_str(file).expect("a hooks file is JSON");
+                for (event, groups) in document["hooks"].as_object().into_iter().flatten() {
+                    collect_command_lines(event, groups, &mut lines);
+                }
+            }
             renderings.push(lines);
         }
     }
@@ -966,6 +982,26 @@ fn hook_registration_text(profile: &Profile) -> String {
         }
     }
     if let Some(spec) = &profile.hooks {
+        text.push_str(&hooks_injection_text(spec));
+    }
+    // The hooks a profile chooses per operating system, each with its own.
+    if profile.hooks.is_none() {
+        for os in [HostOs::Windows, HostOs::MacOs, HostOs::Linux] {
+            if let Some(spec) = &profile.launch_tables.for_os(os).hooks {
+                for line in hooks_injection_text(spec).lines() {
+                    text.push_str(&format!("{os:?} {line}\n"));
+                }
+            }
+        }
+    }
+    text
+}
+
+/// The text of a `[hooks]` injection: its arguments, with the paths a launch picks put
+/// back as placeholders, and the content of its settings file and directory.
+fn hooks_injection_text(spec: &yagura_daemon::profile::InjectionSpec) -> String {
+    let mut text = String::new();
+    {
         let injection = prepare_hooks_injection(spec, Some(std::path::Path::new("cfg")))
             .expect("a shipped [hooks] table renders");
         let file_path = injection
@@ -1025,7 +1061,7 @@ const HOOK_REGISTRATION_TEXT_SHA256: &[(&str, &str)] = &[
     ),
     (
         "muse-code",
-        "1ee610f53e526888b150516e98a0c98897523d37edce399602a84f52fb87112c",
+        "e436d3f9a47d79c7790cce38a69221ab9b630958a31c925d0ee1d8f8adf0da63",
     ),
     (
         "wsl-claude-code",
@@ -1518,4 +1554,108 @@ fn an_older_registration_of_each_bundled_profile_reads_as_differing() {
         checked.len() > 1,
         "the bundled profiles with a registration were checked: {checked:?}"
     );
+}
+
+#[cfg(unix)]
+fn make_executable(path: &std::path::Path) {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+#[cfg(not(unix))]
+fn make_executable(_: &std::path::Path) {}
+
+/// The shipped `wsl-grok-build` statement starts grok only with the overlay its door
+/// printed: a door that ends non-zero, or ends zero having printed nothing, ends the
+/// statement with 1 and one line on stderr that holds nothing the door printed, and grok
+/// does not start. A door that printed an overlay hands it to grok in `GROK_CONFIG`, and
+/// grok gets the arguments after the door's path. The guest is this machine when it runs
+/// Linux; elsewhere the case returns without a run.
+#[test]
+// The shipped statement is run under bash as a guest runs it.
+#[allow(clippy::disallowed_methods)]
+fn wsl_grok_builds_statement_starts_grok_only_with_the_overlay_a_door_that_succeeded_printed() {
+    if !cfg!(target_os = "linux") {
+        return;
+    }
+    let document: toml::Table = read_doc_verbatim("../../profiles/wsl-grok-build.toml")
+        .parse()
+        .expect("the shipped WSL grok profile is TOML");
+    let argv: Vec<String> = document["command"]["windows"]
+        .as_array()
+        .expect("the shipped WSL grok profile has a Windows argv")
+        .iter()
+        .map(|arg| arg.as_str().expect("an argument").to_string())
+        .collect();
+    let at = argv
+        .iter()
+        .position(|arg| arg == "-lic")
+        .expect("the shipped profile starts grok through `bash -lic <statement>`");
+    let statement = &argv[at + 1];
+
+    let tree = yagura_test_support::paths::TempDir::new("yagura-grok-statement", "run");
+    let home = tree.make_dir("home");
+    let bin = tree.make_dir("bin");
+    let record = tree.path().join("grok.log");
+    let grok = bin.join("grok");
+    std::fs::write(
+        &grok,
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' \"GROK_CONFIG=$GROK_CONFIG\" \"$@\" > '{}'\n",
+            record.display()
+        ),
+    )
+    .unwrap();
+    make_executable(&grok);
+    const OVERLAY: &str = r#"{"a":1}"#;
+    for (what, door_body, started) in [
+        (
+            "a door that ends non-zero",
+            "cat > /dev/null; printf 'SECRET-OUT'; exit 3",
+            false,
+        ),
+        (
+            "a door that prints nothing",
+            "cat > /dev/null; exit 0",
+            false,
+        ),
+        (
+            "a door that prints an overlay",
+            "cat > /dev/null; printf '%s' '{\"a\":1}'",
+            true,
+        ),
+    ] {
+        let door = bin.join("door");
+        std::fs::write(&door, format!("#!/bin/sh\n{door_body}\n")).unwrap();
+        make_executable(&door);
+        let _ = std::fs::remove_file(&record);
+        let output = std::process::Command::new(crate::hook_events_door::bash_path())
+            .args(["-c", statement])
+            .arg(&grok)
+            .arg(&door)
+            .args(["--model", "m"])
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("HOME", &home)
+            .stdin(std::process::Stdio::null())
+            .output()
+            .expect("run the statement");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if started {
+            assert_eq!(
+                std::fs::read_to_string(&record).ok().as_deref(),
+                Some(format!("GROK_CONFIG={OVERLAY}\n--model\nm\n").as_str()),
+                "{what}: grok starts with the overlay and its own arguments; stderr: {stderr}"
+            );
+        } else {
+            assert_eq!(
+                output.status.code(),
+                Some(1),
+                "{what}: the statement ends with 1; stderr: {stderr}"
+            );
+            assert_eq!(stderr.lines().count(), 1, "{what}: one line: {stderr:?}");
+            assert!(!stderr.contains("SECRET-OUT"), "{what}: {stderr:?}");
+            assert!(!record.exists(), "{what}: grok must not start");
+        }
+    }
 }

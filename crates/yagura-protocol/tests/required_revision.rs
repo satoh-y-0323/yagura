@@ -374,12 +374,24 @@ fn one_message_per_variant_without_launch_option() -> Vec<ClientMessage> {
         },
         door_read("take"),
         client_from_wire(serde_json::json!({ "type": "deliver_printed" })),
+        build_launch_overlay(),
     ]
 }
 
 /// The wire tags of revision 34's door requests, which this file builds from their wire
 /// form.
-const DOOR_TAGS: [&str; 2] = ["door_read", "deliver_printed"];
+const DOOR_TAGS: [&str; 3] = ["door_read", "deliver_printed", "build_launch_overlay"];
+
+/// A request for a window's launch overlay, from a guest's facts.
+fn build_launch_overlay() -> ClientMessage {
+    client_from_wire(serde_json::json!({
+        "type": "build_launch_overlay",
+        "window_id": "w1",
+        "token": "t",
+        "env": { "GROK_CONFIG": "{}" },
+        "files": {},
+    }))
+}
 
 /// A message decoded from its wire form.
 fn client_from_wire(wire: Value) -> ClientMessage {
@@ -1003,4 +1015,11 @@ fn withdraw_message_requires_revision_thirty_four() {
         }),
         34
     );
+}
+
+/// A daemon before revision 34 does not know the request for a window's launch overlay,
+/// so it is sent only to a peer that speaks revision 34.
+#[test]
+fn a_request_for_a_launch_overlay_requires_revision_thirty_four() {
+    assert_eq!(required_protocol_revision(&build_launch_overlay()), 34);
 }

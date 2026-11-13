@@ -130,3 +130,79 @@ fn emit_status_inside_a_window_fails_when_the_daemon_is_unreachable() {
          (a CLI reads 2 as \"block the action\"); got {code:?}"
     );
 }
+
+/// Runs `--launch-overlay` with `extra` after it and exactly the given window variables,
+/// against an instance no daemon serves.
+fn launch_overlay(extra: &[&str], window_id: Option<&str>, token: Option<&str>) -> Output {
+    static COUNTER: AtomicU32 = AtomicU32::new(0);
+    let instance = format!(
+        "ovl{:x}{}",
+        std::process::id(),
+        COUNTER.fetch_add(1, Ordering::Relaxed)
+    );
+    let _endpoint = InstanceEndpoint::new(&instance);
+    let bases = TempDir::new("yagura-emit", "overlay-bases");
+    let mut command = Command::new(daemon_bin());
+    command
+        .arg("--launch-overlay")
+        .args(extra)
+        .env("YAGURA_INSTANCE", &instance)
+        .env_remove("YAGURA_STORE_DB")
+        .env_remove(WINDOW_ID_VAR)
+        .env_remove(STATUS_TOKEN_VAR)
+        .stdin(Stdio::null());
+    if cfg!(windows) {
+        command
+            .env("LOCALAPPDATA", bases.make_dir("local"))
+            .env("APPDATA", bases.make_dir("roaming"));
+    } else {
+        command
+            .env("XDG_DATA_HOME", bases.make_dir("data"))
+            .env("XDG_STATE_HOME", bases.make_dir("state"))
+            .env("XDG_CONFIG_HOME", bases.make_dir("config"))
+            .env("HOME", bases.make_dir("home"));
+    }
+    if let Some(window_id) = window_id {
+        command.env(WINDOW_ID_VAR, window_id);
+    }
+    if let Some(token) = token {
+        command.env(STATUS_TOKEN_VAR, token);
+    }
+    command
+        .output()
+        .expect("failed to spawn the yagura-daemon binary for --launch-overlay")
+}
+
+/// The overlay door is no hook door: where a hook door outside a window succeeds without a
+/// word, the overlay door ends non-zero with one line on stderr that holds no credential,
+/// and prints nothing on stdout, whether it has no credentials, cannot read its arguments,
+/// or reaches no daemon. A launch statement then knows it has no overlay.
+#[test]
+fn the_overlay_door_fails_loudly_where_a_hook_door_stays_silent() {
+    const TOKEN: &str = "0123456789abcdef0123456789abcdef";
+    assert_silent_success(
+        &emit_status(None, None),
+        "control: a hook door outside a window",
+    );
+    for (what, output) in [
+        ("without credentials", launch_overlay(&[], None, None)),
+        (
+            "with an argument it cannot read",
+            launch_overlay(&["--unknown-flag"], Some("w1"), Some(TOKEN)),
+        ),
+        (
+            "with no daemon to reach",
+            launch_overlay(&[], Some("w1"), Some(TOKEN)),
+        ),
+    ] {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            !output.status.success(),
+            "{what}: the door ends non-zero; stderr: {stderr:?}"
+        );
+        assert!(stdout.is_empty(), "{what}: nothing on stdout: {stdout:?}");
+        assert_eq!(stderr.lines().count(), 1, "{what}: one line: {stderr:?}");
+        assert!(!stderr.contains(TOKEN), "{what}: no credential: {stderr:?}");
+    }
+}

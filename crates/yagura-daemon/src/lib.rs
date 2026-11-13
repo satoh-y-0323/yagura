@@ -17,6 +17,7 @@ pub mod inbox;
 pub mod input_encode;
 pub mod ipc;
 pub mod json_entry;
+pub mod launch_overlay;
 pub mod live_policy;
 pub mod mcp;
 pub mod mcp_registration;

@@ -992,9 +992,10 @@ async fn a_placed_profile_without_the_table_is_listed_with_the_shipped_table_and
 }
 
 // =============================================================================
-// Muse Code: no registration command; registering writes the bridge and the
-// hooks into a test home's settings files, the hooks acting only inside a
-// window.
+// Muse Code: no registration command; on Windows registering writes the
+// bridge and the hooks into a test home's settings files, the hooks acting only
+// inside a window. On Linux and macOS a launch passes both, so nothing is
+// registered.
 // =============================================================================
 
 const MUSE_SETTINGS_FILE: &str = ".config/muse/settings.json";
@@ -1046,7 +1047,8 @@ fn muse_code_reads_its_status_from_its_settings_file_directly() {
 }
 
 #[tokio::test]
-async fn registering_muse_code_writes_the_bridge_and_window_only_hooks_into_the_home() {
+async fn registering_muse_code_writes_the_bridge_and_window_only_hooks_into_the_home_on_windows_alone()
+ {
     for (os, tag, prefix, suffix) in [
         (
             yagura_daemon::profile::ProfileOs::Windows,
@@ -1057,7 +1059,7 @@ async fn registering_muse_code_writes_the_bridge_and_window_only_hooks_into_the_
         (
             yagura_daemon::profile::ProfileOs::Linux,
             "bundled-mcpreg-muse-linux",
-            "[ -z \"$YAGURA_WINDOW_ID\" ] || exec ",
+            "",
             "",
         ),
     ] {
@@ -1099,6 +1101,14 @@ async fn registering_muse_code_writes_the_bridge_and_window_only_hooks_into_the_
                 DaemonMessage::McpRegistrationStatus { request_id: 1, .. } => {}
                 other => panic!("expected mcp_registration_status, got {other:?}"),
             }
+        }
+        if os != yagura_daemon::profile::ProfileOs::Windows {
+            assert!(
+                rows.iter().all(|row| row.profile != "muse-code"),
+                "{os:?}: a launch passes muse-code's bridge and hooks, so it has nothing to                  register: {rows:?}"
+            );
+            h.registry.terminate_all().await;
+            continue;
         }
         let row = row_of(&rows, "muse-code");
         assert_eq!(row.group, None, "{os:?}: muse-code runs on the host");

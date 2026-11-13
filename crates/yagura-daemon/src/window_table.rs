@@ -64,6 +64,9 @@ pub struct WindowFacts {
     /// Whether the window's CLI runs in another environment (a WSL guest):
     /// its open converts the daemon's paths for it (`[host_paths]`).
     pub runs_in_guest: Option<bool>,
+    /// Whether the launch overlay of a window whose profile declares one was
+    /// made; `None` for a window whose profile declared none when it opened.
+    pub overlay: Option<OverlayFact>,
 }
 
 impl WindowFacts {
@@ -72,7 +75,41 @@ impl WindowFacts {
     pub(crate) fn or(self, other: Self) -> Self {
         Self {
             runs_in_guest: self.runs_in_guest.or(other.runs_in_guest),
+            overlay: self.overlay.or(other.overlay),
         }
+    }
+}
+
+/// Whether a window's launch overlay was made: until it is, the window's
+/// credentials do not speak for it.
+///
+/// Its spelling in the table and the launch record is its serde name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OverlayFact {
+    /// Not yet: the window's CLI runs in another environment, whose overlay
+    /// door has not asked for it.
+    Pending,
+    /// The daemon made it for the window's launch.
+    Made,
+}
+
+impl OverlayFact {
+    /// The fact `kind` spells; `None` for a spelling that is no fact's, which
+    /// its reader takes as not kept.
+    fn named(kind: &str) -> Option<Self> {
+        let kind: serde::de::value::StrDeserializer<'_, serde::de::value::Error> =
+            kind.into_deserializer();
+        Self::deserialize(kind).ok()
+    }
+}
+
+impl ToSql for OverlayFact {
+    fn to_sql(&self) -> rusqlite::Result<ToSqlOutput<'_>> {
+        Ok(ToSqlOutput::from(match self {
+            Self::Pending => "pending",
+            Self::Made => "made",
+        }))
     }
 }
 
@@ -437,7 +474,7 @@ fn read_rows(conn: &Connection) -> rusqlite::Result<Vec<StoredWindow>> {
     let mut statement = conn.prepare_fixed(
         "SELECT window_id, state, name, cwd, vendor, command_json, detection, profile, model, \
          effort, layout_json, session_id, opener, task_plan_id, task_id, credentials, \
-         child_scope, hooks, guest FROM windows ORDER BY opened_seq",
+         child_scope, hooks, guest, overlay FROM windows ORDER BY opened_seq",
     )?;
     let rows = statement.query_map([], |row| {
         let Some(window_id) = text_of(row.get_ref(0)?) else {
@@ -506,6 +543,9 @@ fn row_values(row: &rusqlite::Row<'_>) -> rusqlite::Result<WindowValues> {
             // Any process of the user can write the file: a cell that is not
             // a flag reads as not kept.
             runs_in_guest: row.get::<_, Option<bool>>(18).ok().flatten(),
+            overlay: text_of(row.get_ref(19)?)
+                .as_deref()
+                .and_then(OverlayFact::named),
         },
     })
 }
@@ -635,9 +675,9 @@ fn insert_opening(
         "INSERT INTO windows \
          (window_id, name, cwd, vendor, command_json, detection, profile, model, effort, \
          layout_json, session_id, opener, task_plan_id, task_id, credentials, child_scope, \
-         hooks, guest, state) \
+         hooks, guest, overlay, state) \
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, \
-         ?18, 'opening') \
+         ?18, ?19, 'opening') \
          ON CONFLICT(window_id) DO NOTHING",
         params![
             window_id,
@@ -658,6 +698,7 @@ fn insert_opening(
             child_scope,
             values.hooks,
             values.facts.runs_in_guest,
+            values.facts.overlay,
         ],
     )
 }
@@ -673,7 +714,7 @@ fn update_values(
         "UPDATE windows SET name = ?2, cwd = ?3, vendor = ?4, command_json = ?5, \
          detection = ?6, profile = ?7, model = ?8, effort = ?9, layout_json = ?10, \
          session_id = ?11, opener = ?12, task_plan_id = ?13, task_id = ?14, credentials = ?15, \
-         hooks = ?16, guest = ?17 \
+         hooks = ?16, guest = ?17, overlay = ?18 \
          WHERE window_id = ?1",
         params![
             window_id,
@@ -693,6 +734,7 @@ fn update_values(
             values.credentials,
             values.hooks,
             values.facts.runs_in_guest,
+            values.facts.overlay,
         ],
     )
 }

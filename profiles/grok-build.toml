@@ -43,6 +43,23 @@ values = ["grok-4.7", "grok-4.7-build-fast", "grok-4.6", "grok-4.5"]
 [effort]
 args = ["--reasoning-effort", "{value}"]
 
+# The window's credentials are in its environment, which Grok Build hands its
+# tools' shells. The overlay a window is handed in GROK_CONFIG keeps them (and
+# the overlay's own variables) from those shells: it is the user's own overlay
+# with `shell_environment_policy.exclude` made the union of every exclude the
+# layers below it hold and those names, since the overlay replaces their lists.
+# The layers are `config.toml` and the managed settings in GROK_HOME (or
+# ~/.grok) and /etc/grok. An empty or malformed GROK_CONFIG falls through to
+# GROK_CONFIG_PATH, read as JSON when it ends in .json and as TOML otherwise
+# (05-configuration.md and 10-hooks.md, 1.0.70).
+[launch_overlay]
+env = "GROK_CONFIG"
+file_env = "GROK_CONFIG_PATH"
+dir_env = "GROK_HOME"
+dir = ".grok"
+layers = ["config.toml", "managed_config.toml", "/etc/grok/managed_config.toml"]
+list = "/shell_environment_policy/exclude"
+
 # Hook output reaches the model only from the tool-call hooks, not at session
 # start or prompt submit (1.0.70), so the start-up context goes in as `--rules`
 # and other text waits for the next call. Grok has no way to wake an idle

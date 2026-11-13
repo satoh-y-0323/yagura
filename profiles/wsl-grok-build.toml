@@ -2,7 +2,15 @@
 # wsl-claude-code.toml for why this profile carries no other operating
 # system's argv). The shell is both a login and an interactive shell so
 # `~/.bashrc` runs too, which is where a tool such as nvm adds its own
-# install to `PATH`.
+# install to `PATH`. After the rc files and before grok starts, the
+# statement runs the window's overlay door (the whole `{daemon}` element,
+# converted like a registration's `{daemon}`) with what the guest holds for
+# the overlay ([launch_overlay]), and starts grok only with the overlay the
+# door printed, in GROK_CONFIG; a door that fails or prints nothing ends the
+# window. A run that opens no window (a registration) is handed `-` there and
+# starts grok as it is. A statement that does not hand grok the overlay
+# leaves the window's credentials in its tools' shells, and the daemon does
+# not take them for the window.
 # The launch options below follow `grok --help` (1.0.70). Model names change
 # over time -- edit the aliases to match what your own account can run.
 # No approval-skip, `--trust` or `--no-auto-update` flag: each would change a
@@ -15,7 +23,7 @@ detection = "grok-build"
 subagent_pointer = "/subagentType"
 
 [command]
-windows = ["wsl", "-e", "bash", "-lic", "exec \"$0\" \"$@\"", "grok"]
+windows = ["wsl", "-e", "bash", "-lic", "d=$1; shift; if [ \"$d\" = - ]; then exec \"$0\" \"$@\"; fi; c=${GROK_HOME:-$HOME/.grok}; o=$({ if [ -n \"${GROK_CONFIG+x}\" ]; then printf 'env\\0GROK_CONFIG\\0%s\\0' \"$GROK_CONFIG\"; fi; if [ -n \"${GROK_CONFIG_PATH+x}\" ]; then printf 'env\\0GROK_CONFIG_PATH\\0%s\\0' \"$GROK_CONFIG_PATH\"; fi; for f in config.toml managed_config.toml /etc/grok/managed_config.toml; do case $f in (/*) p=$f;; (*) p=$c/$f;; esac; if [ -f \"$p\" ]; then printf 'file\\0%s\\0' \"$f\"; cat -- \"$p\"; printf '\\0'; fi; done; p=${GROK_CONFIG_PATH:-}; if [ -n \"$p\" ] && [ -f \"$p\" ]; then printf 'file\\0GROK_CONFIG_PATH\\0'; cat -- \"$p\"; printf '\\0'; fi; } | \"$d\" --launch-overlay) || { echo 'yagura: the launch overlay could not be made, so grok is not started' >&2; exit 1; }; [ -n \"$o\" ] || { echo 'yagura: the launch overlay is empty, so grok is not started' >&2; exit 1; }; GROK_CONFIG=$o; export GROK_CONFIG; exec \"$0\" \"$@\"", "grok", "{daemon}"]
 
 # Grok Build also runs Claude Code's and Cursor's hooks and MCP servers.
 # Switched off for the window so it runs only the ones registered for Grok
@@ -48,6 +56,23 @@ values = ["grok-4.7", "grok-4.7-build-fast", "grok-4.6", "grok-4.5"]
 # the launch (1.0.70).
 [effort]
 args = ["--reasoning-effort", "{value}"]
+
+# The window's credentials are in its environment, which Grok Build hands its
+# tools' shells. The overlay a window is handed in GROK_CONFIG keeps them (and
+# the overlay's own variables) from those shells: it is the user's own overlay
+# with `shell_environment_policy.exclude` made the union of every exclude the
+# layers below it hold and those names, since the overlay replaces their lists.
+# The layers are `config.toml` and the managed settings in GROK_HOME (or
+# ~/.grok) and /etc/grok. An empty or malformed GROK_CONFIG falls through to
+# GROK_CONFIG_PATH, read as JSON when it ends in .json and as TOML otherwise
+# (05-configuration.md and 10-hooks.md, 1.0.70).
+[launch_overlay]
+env = "GROK_CONFIG"
+file_env = "GROK_CONFIG_PATH"
+dir_env = "GROK_HOME"
+dir = ".grok"
+layers = ["config.toml", "managed_config.toml", "/etc/grok/managed_config.toml"]
+list = "/shell_environment_policy/exclude"
 
 # Hook output reaches the model only from the tool-call hooks, not at session
 # start or prompt submit (1.0.70), so the start-up context goes in as `--rules`

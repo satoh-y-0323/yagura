@@ -1287,3 +1287,23 @@ fn the_door_arguments_the_shipped_guest_hook_command_runs_with_are_read_as_a_hoo
         other => panic!("the door arguments {argv:?} must read as a hook door, got {other:?}"),
     }
 }
+
+/// `--launch-overlay` is the overlay door: it reads alone, takes no argument, and is no
+/// hook door, so it never falls into the silent success a hook door outside a window has.
+/// The command is named through its debug form so that this file builds before it exists.
+#[test]
+fn launch_overlay_reads_as_the_overlay_door_and_is_no_hook_door() {
+    assert_eq!(
+        format!("{:?}", parse_args(&args(&["--launch-overlay"]))),
+        "Ok(LaunchOverlay)",
+        "--launch-overlay reads as the overlay door"
+    );
+    assert!(
+        parse_args(&args(&["--launch-overlay", "extra"])).is_err(),
+        "the overlay door takes no argument"
+    );
+    assert!(
+        !yagura_daemon::cli::names_hook_door(&args(&["--launch-overlay"])),
+        "the overlay door is no hook door"
+    );
+}
