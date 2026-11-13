@@ -26,7 +26,7 @@ use yagura_os::{IpcTransport, OsError, PeerAuth, PlatformIpc};
 use yagura_daemon::child_env::{
     ChildBaseEnvInputs, LOGIN_ENV_MAX_OUTPUT_BYTES, resolve_child_base_env,
 };
-use yagura_daemon::cli::{self, CliCommand};
+use yagura_daemon::cli::{self, CliCommand, HOOK_STDIN_DRAIN_GRACE};
 use yagura_daemon::config::{
     StartupParts, log_dir, prepare_report_dir, registration_cwd, report_dir,
     resolve_default_window_cwd, resolve_input_echo_window_ms, resolve_max_windows,
@@ -55,23 +55,6 @@ type ClientConnection = <PlatformIpc as IpcTransport>::ClientConnection;
 
 /// Stands in for a startup-log field the OS would not tell us.
 const UNKNOWN_LOG_FIELD: &str = "unknown";
-
-/// The most a hook waits for the rest of its stdin to be read, before it prints
-/// inside a window and in place of an answer outside one. Bounds a CLI that
-/// leaves stdin open.
-const HOOK_STDIN_DRAIN_GRACE: Duration = Duration::from_secs(2);
-
-/// What a door keeps out of the time its CLI gives the hook for printing,
-/// saying so, and ending. A door with less than this left prints nothing.
-///
-/// Measured with Claude Code (Windows), Copilot and Muse (WSL): a hook given 3
-/// seconds had its output taken when it printed 2.8 seconds after it started
-/// and exited 0, and not when it printed at 3.6 seconds, so the CLI's cut-off
-/// lies above the 0.2 seconds those runs kept. A door adds its own start-up
-/// before it takes the time and the notice and exit after the print, so it
-/// keeps more than twice that, and still leaves a hook given one second (the
-/// least a profile gives) half a second.
-const HOOK_DOOR_MARGIN: Duration = Duration::from_millis(500);
 
 fn main() -> Result<ExitCode> {
     let args = yagura_protocol::process_args();
@@ -1059,7 +1042,7 @@ async fn run_hook_door(
 /// A delivery is printed, then the daemon is told it was, and the door ends
 /// without waiting for a reply: a daemon that ends in between leaves its
 /// parcels for the next one, which hands them out again, and none is lost. A
-/// door with less than [`HOOK_DOOR_MARGIN`] left of the time its CLI gives the
+/// door with less than [`cli::HOOK_DOOR_MARGIN`] left of the time its CLI gives the
 /// hook prints nothing and does not say it did, so the daemon takes the
 /// parcels back. A daemon that names no time is taken to give the hook the
 /// time a door had before revision 34.
@@ -1076,14 +1059,8 @@ async fn finish_door(
             exit_code,
             hook_timeout_sec,
         }) => {
-            let time = hook_timeout_sec.map_or(DOOR_ANSWER_TIMEOUT, Duration::from_secs);
-            let left = || (started + time).saturating_duration_since(Instant::now());
-            drained.wait(
-                left()
-                    .saturating_sub(HOOK_DOOR_MARGIN)
-                    .min(HOOK_STDIN_DRAIN_GRACE),
-            );
-            if left() < HOOK_DOOR_MARGIN {
+            drained.wait(cli::door_drain_wait(hook_timeout_sec, started.elapsed()));
+            if !cli::door_prints(hook_timeout_sec, started.elapsed()) {
                 return Ok(ExitCode::SUCCESS);
             }
             write_hook_output(stream, &output)?;

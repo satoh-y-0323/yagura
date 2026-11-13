@@ -1,6 +1,7 @@
 //! The points a test of the daemon arms to stand the daemon at one moment of
 //! its work: the daemon ends itself there, or its parcel writer, its window
-//! table's writer, or a relay session's take of reports, fails or stops there
+//! table's writer, a relay session's take of reports, or a window's open,
+//! fails or stops there
 //! until the test releases it. Each point is named by the
 //! property it stands for, not by the code it sits in, so a change that moves
 //! the property moves the point with it.
@@ -61,11 +62,15 @@ pub enum FaultPoint {
     /// Every write of a window's values to its row fails until the fault is
     /// released; the rows themselves are still reserved, marked and removed.
     WindowRowUpdateFails,
+    /// A window's holder has started its child and let the daemon in, and the
+    /// window is not registered yet. Every such open stops there until the
+    /// fault is released. Released only in-process.
+    WindowRegistrationPaused,
 }
 
 impl FaultPoint {
     /// Every point, in the order of [`FaultPoint::name`]'s table.
-    pub const ALL: [Self; 11] = [
+    pub const ALL: [Self; 12] = [
         Self::HandoffDeposited,
         Self::WriteFails,
         Self::ParcelEndHalfSettled,
@@ -77,6 +82,7 @@ impl FaultPoint {
         Self::WindowHolderStarted,
         Self::WindowRowUpdatePaused,
         Self::WindowRowUpdateFails,
+        Self::WindowRegistrationPaused,
     ];
 
     /// The point's name, as [`POINT_ENV`] carries it.
@@ -94,6 +100,7 @@ impl FaultPoint {
             Self::WindowHolderStarted => "window_holder_started",
             Self::WindowRowUpdatePaused => "window_row_update_paused",
             Self::WindowRowUpdateFails => "window_row_update_fails",
+            Self::WindowRegistrationPaused => "window_registration_paused",
         }
     }
 
@@ -114,6 +121,7 @@ impl FaultPoint {
                 | Self::ReportTakenUnanswered
                 | Self::WindowRowUpdatePaused
                 | Self::WindowRowUpdateFails
+                | Self::WindowRegistrationPaused
         )
     }
 
@@ -121,7 +129,10 @@ impl FaultPoint {
     const fn in_process_only(self) -> bool {
         matches!(
             self,
-            Self::WriterPaused | Self::ReportTakenUnanswered | Self::WindowRowUpdatePaused
+            Self::WriterPaused
+                | Self::ReportTakenUnanswered
+                | Self::WindowRowUpdatePaused
+                | Self::WindowRegistrationPaused
         )
     }
 }
@@ -188,8 +199,9 @@ impl FaultPoints {
     ///
     /// [`FaultArmError::Unknown`] when [`POINT_ENV`] names no point, and
     /// [`FaultArmError::InProcessOnly`] for [`FaultPoint::WriterPaused`],
-    /// [`FaultPoint::ReportTakenUnanswered`] and
-    /// [`FaultPoint::WindowRowUpdatePaused`], which nothing outside the
+    /// [`FaultPoint::ReportTakenUnanswered`],
+    /// [`FaultPoint::WindowRowUpdatePaused`] and
+    /// [`FaultPoint::WindowRegistrationPaused`], which nothing outside the
     /// process can release.
     pub fn from_env() -> Result<Self, FaultArmError> {
         let Some(name) = std::env::var_os(POINT_ENV) else {
@@ -341,11 +353,17 @@ impl FaultPoints {
     /// Stops a relay session's `wait_for_report` between taking its reports
     /// and handing its answer to the session, until the fault is released.
     pub(crate) async fn hold_report_taken(&self) {
-        let Some(armed) = self
-            .armed
-            .as_ref()
-            .filter(|armed| armed.point == FaultPoint::ReportTakenUnanswered)
-        else {
+        self.hold_at(FaultPoint::ReportTakenUnanswered).await;
+    }
+
+    /// Stops a window's open between its holder letting the daemon in and the
+    /// window's registration, until the fault is released.
+    pub(crate) async fn hold_registration(&self) {
+        self.hold_at(FaultPoint::WindowRegistrationPaused).await;
+    }
+
+    async fn hold_at(&self, point: FaultPoint) {
+        let Some(armed) = self.armed.as_ref().filter(|armed| armed.point == point) else {
             return;
         };
         let mut released = armed.released_watch.subscribe();

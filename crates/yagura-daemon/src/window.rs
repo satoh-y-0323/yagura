@@ -2065,6 +2065,8 @@ impl WindowRegistry {
         self.config
             .faults
             .reach(crate::fault_point::FaultPoint::WindowHolderStarted);
+        #[cfg(feature = "fault-injection")]
+        self.config.faults.hold_registration().await;
         let session = Arc::new(session);
         if let Some(folder) = credentials_folder {
             remove_credentials_when_exited(&session, folder);
