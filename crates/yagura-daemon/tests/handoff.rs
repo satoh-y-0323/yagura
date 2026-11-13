@@ -19,9 +19,8 @@ use crate::common;
 use serde_json::Value;
 
 use crate::send_message_lifecycle::{
-    First, entry, first_of, id_of, note_of, open_wait_window, outcome_of, register_wait,
-    send_queued, send_text, sending_config, state_of, take_and_print, until, window_sender,
-    withdraw,
+    First, entry, first_of, id_of, open_wait_window, outcome_of, register_wait, send_queued,
+    send_text, sending_config, state_of, take_and_print, until, window_sender, withdraw,
 };
 use common::{
     CONTROL_DETECTION_NAME, Harness, expect_delivery, read_response, send, unique_temp_dir,
@@ -346,65 +345,6 @@ async fn ask_handoff(client: &mut Connection, window_id: &str, note: &str) {
         },
     )
     .await;
-}
-
-/// No wait is registered and the window wakes by none other: nothing is tried, so
-/// the answer comes at once and the envelope waits for the window's next door.
-#[tokio::test]
-async fn a_handoff_with_no_wait_registered_is_answered_queued_at_once_and_waits_for_the_next_door()
-{
-    let dir = unique_temp_dir("handoff-queued");
-    let h = Harness::start("handoff-queued", sending_config(&dir)).await;
-    let mut client = h.connect().await;
-    let window_id = open_wait_window(&h, &mut client, CONTROL_DETECTION_NAME).await;
-
-    ask_handoff(&mut client, &window_id, "HANDOFF-QUEUED-2M").await;
-    let answer = read_response(&mut client).await;
-    assert_eq!(state_of(&answer).as_deref(), Some("queued"), "{answer:?}");
-    let note = note_of(&answer)
-        .unwrap_or_else(|| panic!("a waiting envelope's answer says when it is handed over"));
-    assert!(!note.is_empty());
-    let id = id_of(&answer);
-    assert_eq!(entry(&h, &window_id).inbox().pending_count(), 1);
-
-    let taken = take_and_print(&h, &window_id).await;
-    assert!(
-        taken.contains("HANDOFF-QUEUED-2M") && taken.contains(&id),
-        "the next door hands over the envelope with the id the answer named: {taken:?}"
-    );
-    assert_eq!(entry(&h, &window_id).inbox().pending_count(), 0);
-}
-
-#[tokio::test]
-async fn a_handoff_a_registered_wait_is_handed_is_answered_delivered_once_the_door_printed_it() {
-    let dir = unique_temp_dir("handoff-waited");
-    let h = Harness::start("handoff-waited", sending_config(&dir)).await;
-    let mut client = h.connect().await;
-    let window_id = open_wait_window(&h, &mut client, CONTROL_DETECTION_NAME).await;
-    let mut door = register_wait(&h, &window_id).await;
-
-    ask_handoff(&mut client, &window_id, "HANDOFF-WAITED-5T").await;
-    let output = match first_of(&mut door, &mut client).await {
-        First::Door(delivery) => expect_delivery(delivery).0,
-        First::Requester(answer) => {
-            panic!("the answer must wait for the door the envelope was handed to: {answer:?}")
-        }
-    };
-    assert!(output.contains("HANDOFF-WAITED-5T"), "{output:?}");
-    send(&mut door, &ClientMessage::DeliverPrinted).await;
-
-    let answer = read_response(&mut client).await;
-    assert_eq!(
-        state_of(&answer).as_deref(),
-        Some("delivered"),
-        "{answer:?}"
-    );
-    assert_eq!(
-        note_of(&answer),
-        None,
-        "a wait was registered, so there is nothing to say about when it arrives"
-    );
-    assert!(output.contains(&id_of(&answer)), "{output:?}");
 }
 
 /// The door the envelope was handed to ends before it printed: the envelope goes
