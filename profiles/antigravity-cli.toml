@@ -81,10 +81,13 @@ SessionStart = { deliver = "context" }
 PostToolUse = { status = "running" }
 Stop = { status = "waiting_input", deliver = "block", when = { "/terminationReason" = "NO_TOOL_CALL", "/executionNum" = 0 } }
 
-# The file name of the CLI's own process, which a hook or bridge speaking for
-# one of its windows is traced up to: only one such process may stand between
-# it and the window's child. Measured with agy 1.5.6 (Windows: agy.exe, the
-# window's child itself; Linux: ~/.local/bin/agy). macOS is not measured yet.
+# The name the operating system keeps of the CLI's own process from its start
+# (Windows: the image file name; Linux: the command name, at most 15 bytes),
+# which an update of the CLI's own file does not change. A hook or bridge
+# speaking for one of its windows is traced up to it: only one such process
+# may stand between it and the window's child. Measured with agy 1.5.6
+# (Windows: agy.exe, the window's child itself; Linux: started as
+# ~/.local/bin/agy). macOS is not measured yet.
 [process_image]
 windows = "agy.exe"
 linux = "agy"

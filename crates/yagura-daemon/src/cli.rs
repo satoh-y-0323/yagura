@@ -400,7 +400,6 @@ pub fn parse_args(args: &[String]) -> Result<CliCommand, CliError> {
             }
             GUEST_STEP_FLAG => {
                 next_value(&mut remaining, GUEST_STEP_FLAG)?;
-                next_value(&mut remaining, GUEST_STEP_FLAG)?;
                 guest_given = true;
             }
             "--roles" => roles_arg = Some(next_path(&mut remaining, "--roles")?),

@@ -488,6 +488,10 @@ async fn a_shipped_profile_s_subagent_hooks_report_only_running_or_waiting_for_a
         ("codex-cli", CODEX_SUB, codex, codex_main),
         ("wsl-codex-cli", CODEX_SUB, codex, codex_main),
     ];
+    // A `wsl-*` profile has a Windows argv only, so no other host lists it.
+    let cases = cases
+        .into_iter()
+        .filter(|(profile, ..)| cfg!(windows) || !profile.starts_with("wsl-"));
     let entry = setup.entry();
     for (profile, subagent, events, (take, main)) in cases {
         for &(name, reports) in events {
@@ -2118,6 +2122,17 @@ impl LineageImage {
             .unwrap_or_else(|| self.tree.make_dir(&format!("{id}-bases")))
     }
 
+    /// Renames the copy aside while its windows' CLIs run, and puts a new copy under its
+    /// name, as a CLI updating itself does.
+    pub(crate) fn rename_aside_and_replace(&self) {
+        let aside = self.exe.with_file_name(format!("{}.old", self.image()));
+        std::fs::rename(&self.exe, aside).expect("rename the copy aside");
+        yagura_test_support::process::install_exe(
+            &std::env::current_exe().expect("current_exe"),
+            &self.exe,
+        );
+    }
+
     /// The copy's file name: the process image its windows' CLIs run under.
     pub(crate) fn image(&self) -> String {
         self.exe
@@ -2680,6 +2695,7 @@ impl LineageImage {
 /// waits and reports the status. Run by a CLI of the same image that CLI started, it prints
 /// nothing, exits 0, takes nothing and reports nothing. A request that carries no root (a
 /// window opened before the launch statement exported one) is only matched, whoever runs it.
+/// Once the CLI has renamed its file aside to update itself, its hook is still taken.
 #[tokio::test]
 async fn a_guest_windows_hook_is_judged_by_what_the_shipped_command_collects_under_dash() {
     let Some(shell) = guest_shell() else {
@@ -2727,6 +2743,17 @@ async fn a_guest_windows_hook_is_judged_by_what_the_shipped_command_collects_und
         "a request that carries no root is only matched: {rootless:?}"
     );
     assert_eq!(entry.status_event_count(), reported + 2);
+
+    image.rename_aside_and_replace();
+    entry
+        .inbox()
+        .deposit(Parcel::new("a", "PARCEL-AFTER-UPDATE"));
+    let updated = cli.run_command(By::Cli, &hook, "{}", &[]).await;
+    assert!(
+        updated.stdout.contains("PARCEL-AFTER-UPDATE"),
+        "the window's own CLI takes the parcel after renaming its file aside: {updated:?}"
+    );
+    assert_eq!(entry.status_event_count(), reported + 3);
 
     cli.exit().await;
 }

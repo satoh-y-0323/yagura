@@ -1194,6 +1194,40 @@ fn parse_args_rejects_an_empty_missing_or_repeated_credentials_path() {
 #[test]
 fn the_door_arguments_the_shipped_guest_hook_command_runs_with_are_read_as_a_hook_door() {
     use crate::hook_events_door::{GUEST_EVENT, GUEST_PROFILE, guest_hook_command, guest_shell};
+    use yagura_protocol::{GuestLineage, GuestStep};
+    // A Windows daemon reads what a guest hands over, so this part runs on any host.
+    let parent = "601 (sh) S 500 601 601 0 -1 0 0 0 0 0 0 0 0 0 20 0 1 0 960";
+    let cli = "500 (agy) S 1 500 500 0 -1 0 0 0 0 0 0 0 0 0 20 0 1 0 900";
+    let handed = args(&[
+        "--hook",
+        GUEST_PROFILE,
+        GUEST_EVENT,
+        "--guest-root",
+        "500:boot-a:900",
+        "--guest-step",
+        parent,
+        "--guest-step",
+        cli,
+    ]);
+    assert_eq!(
+        parse_args(&handed),
+        Ok(CliCommand::Hook {
+            profile: GUEST_PROFILE.to_string(),
+            event: GUEST_EVENT.to_string(),
+            guest: Some(GuestLineage {
+                root: Some("500:boot-a:900".to_string()),
+                steps: vec![
+                    GuestStep {
+                        stat: parent.to_string(),
+                    },
+                    GuestStep {
+                        stat: cli.to_string(),
+                    },
+                ],
+            }),
+        }),
+        "each --guest-step hands over one stat line"
+    );
     let Some(shell) = guest_shell() else {
         return;
     };
@@ -1219,19 +1253,27 @@ fn the_door_arguments_the_shipped_guest_hook_command_runs_with_are_read_as_a_hoo
         "the hook command must run the daemon it was given; it printed {shown:?}"
     );
     // What the command collected is handed to the door: the root it was given, and each step
-    // up from its parent as the stat line and the executable's name.
+    // up from its parent as its stat line alone.
     let at = argv
         .iter()
         .position(|arg| arg == "--guest-root")
         .unwrap_or_else(|| panic!("the door must be given --guest-root: {argv:?}"));
     assert_eq!(argv.get(at + 1).map(String::as_str), Some(ROOT), "{argv:?}");
+    let steps: Vec<usize> = (0..argv.len())
+        .filter(|&i| argv[i] == "--guest-step")
+        .collect();
     let own = format!("{} (", std::process::id());
-    let carries_this_process = argv
-        .windows(3)
-        .any(|w| w[0] == "--guest-step" && w[1].starts_with(&own) && !w[2].is_empty());
     assert!(
-        carries_this_process,
-        "one --guest-step carries the stat line of this process and its executable: {argv:?}"
+        steps
+            .iter()
+            .any(|&i| argv.get(i + 1).is_some_and(|stat| stat.starts_with(&own))),
+        "one --guest-step carries the stat line of this process: {argv:?}"
+    );
+    assert!(
+        steps
+            .iter()
+            .all(|&i| argv.get(i + 2).is_none_or(|next| next.starts_with("--"))),
+        "each --guest-step carries its stat line and nothing more: {argv:?}"
     );
     match parse_args(&argv) {
         Ok(CliCommand::Hook {

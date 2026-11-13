@@ -260,7 +260,7 @@ wire_sample!(enum HookPointerKind => Presence);
 wire_sample!(struct HookPointer { pointer, kind, value });
 wire_sample!(struct Declaration { profile, guest });
 wire_sample!(struct GuestLineage { root, steps });
-wire_sample!(struct GuestStep { stat, exe });
+wire_sample!(struct GuestStep { stat });
 
 /// Hand-written for the same reason as `Key`'s: `HookInputValue` carries data
 /// in one variant.
@@ -847,7 +847,7 @@ fn client_message_corpus() -> Vec<ClientMessage> {
                 "name": "sample",
                 "input": [{ "session": "sample" }],
             },
-            "guest": { "root": "sample", "steps": [{ "stat": "sample", "exe": "sample" }] },
+            "guest": { "root": "sample", "steps": [{ "stat": "sample" }] },
         })),
         message_from_wire::<ClientMessage>(serde_json::json!({ "type": "deliver_printed" })),
     ]

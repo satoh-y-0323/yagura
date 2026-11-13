@@ -87,7 +87,6 @@ fn every_relay_frame_has_the_catalogued_type_and_field_names() {
                         root: Some("7:boot:900".to_owned()),
                         steps: vec![GuestStep {
                             stat: "7 (agy) S 1".to_owned(),
-                            exe: "agy".to_owned(),
                         }],
                     }),
                 }),
@@ -101,7 +100,7 @@ fn every_relay_frame_has_the_catalogued_type_and_field_names() {
                     "profile": "wsl-antigravity-cli",
                     "guest": {
                         "root": "7:boot:900",
-                        "steps": [{"stat": "7 (agy) S 1", "exe": "agy"}],
+                        "steps": [{"stat": "7 (agy) S 1"}],
                     },
                 },
             }),

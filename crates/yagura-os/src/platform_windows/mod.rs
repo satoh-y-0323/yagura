@@ -662,7 +662,9 @@ fn process_image_path(process_id: u32) -> Option<PathBuf> {
 pub(crate) struct SnapshotEntry {
     /// Kept after that process exits, so the id may since name another.
     pub(crate) parent: u32,
-    pub(crate) image: String,
+    /// `None` when the name is not valid UTF-16 (an unpaired surrogate),
+    /// which no name a profile declares can be.
+    pub(crate) image: Option<String>,
 }
 
 /// Every process running at one instant, by id, from one toolhelp snapshot.
@@ -713,7 +715,7 @@ pub(crate) fn process_snapshot() -> std::io::Result<std::collections::HashMap<u3
             entry.th32ProcessID,
             SnapshotEntry {
                 parent: entry.th32ParentProcessID,
-                image: String::from_utf16_lossy(&name[..length]),
+                image: String::from_utf16(&name[..length]).ok(),
             },
         );
         // SAFETY: as for Process32FirstW above.

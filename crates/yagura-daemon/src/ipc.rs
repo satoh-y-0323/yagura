@@ -4770,12 +4770,7 @@ fn trace_guest(
         note(&err.to_string());
         LineageRefused::Undecided
     })?;
-    let lineage = guest_lineage(
-        &root,
-        steps
-            .iter()
-            .map(|step| (step.stat.as_str(), step.exe.as_str())),
-    );
+    let lineage = guest_lineage(&root, steps.iter().map(|step| step.stat.as_str()));
     Ok(judge_lineage(&lineage, Some(root.anchor()), images))
 }
 

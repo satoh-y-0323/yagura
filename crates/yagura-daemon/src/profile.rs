@@ -181,8 +181,8 @@ impl ProcessImage {
 }
 
 /// One image name type or a list of them. A type the rule refuses (more
-/// than one `*`, or not a file name) fails the decode, as a malformed table
-/// does.
+/// than one `*`, a leading `*`, or not a file name) fails the decode, as a
+/// malformed table does.
 #[derive(Debug, Clone, Default)]
 struct ImagePatterns(Vec<ImagePattern>);
 

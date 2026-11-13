@@ -20,9 +20,14 @@ fn start(text: &str) -> ProcessStart {
 }
 
 fn ancestor(pid: u32, image: &str, start_text: &str) -> yagura_os::ancestry::Ancestor {
+    ancestor_named(pid, image.as_bytes(), start_text)
+}
+
+/// An ancestor whose name is the bytes `image`, as a Unix source gives it.
+fn ancestor_named(pid: u32, image: &[u8], start_text: &str) -> yagura_os::ancestry::Ancestor {
     yagura_os::ancestry::Ancestor {
         pid,
-        image: image.to_owned(),
+        image: image.into(),
         start: start(start_text),
     }
 }
@@ -51,12 +56,12 @@ fn patterns(texts: &[&str]) -> Vec<yagura_os::ancestry::ImagePattern> {
 /// the anchor `(pid, start)`.
 fn judge(
     ancestors: Vec<yagura_os::ancestry::Ancestor>,
-    case: yagura_os::ancestry::NameCase,
+    rule: yagura_os::ancestry::NameRule,
     anchor: Option<(u32, &str)>,
     images: &[&str],
 ) -> &'static str {
     use yagura_os::ancestry::{Lineage, judge_lineage};
-    let lineage = Lineage::new(ancestors, case);
+    let lineage = Lineage::new(ancestors, rule);
     let anchor = anchor.map(|(pid, text)| (pid, start(text)));
     let verdict = judge_lineage(
         &lineage,
@@ -68,10 +73,14 @@ fn judge(
 
 /// Whether `image` counts under `pattern`: the image is the one ancestor,
 /// and the anchor, so one match accepts and none leaves nothing to count.
-fn counts(image: &str, pattern: &str, case: yagura_os::ancestry::NameCase) -> bool {
+fn counts(image: &str, pattern: &str, rule: yagura_os::ancestry::NameRule) -> bool {
+    counts_named(image.as_bytes(), pattern, rule)
+}
+
+fn counts_named(image: &[u8], pattern: &str, rule: yagura_os::ancestry::NameRule) -> bool {
     match judge(
-        vec![ancestor(7, image, "s7")],
-        case,
+        vec![ancestor_named(7, image, "s7")],
+        rule,
         Some((7, "s7")),
         &[pattern],
     ) {
@@ -83,7 +92,7 @@ fn counts(image: &str, pattern: &str, case: yagura_os::ancestry::NameCase) -> bo
 
 #[test]
 fn one_declared_image_up_to_the_pty_child_is_accepted() {
-    use yagura_os::ancestry::NameCase;
+    use yagura_os::ancestry::NameRule;
     // hook shell -> the window's CLI -> the PTY child (a shim).
     let verdict = judge(
         vec![
@@ -91,7 +100,7 @@ fn one_declared_image_up_to_the_pty_child_is_accepted() {
             ancestor(12, "agy.exe", "112"),
             ancestor(13, "cmd.exe", "113"),
         ],
-        NameCase::Insensitive,
+        NameRule::Windows,
         Some((13, "113")),
         &["agy.exe"],
     );
@@ -100,13 +109,13 @@ fn one_declared_image_up_to_the_pty_child_is_accepted() {
 
 #[test]
 fn the_pty_child_itself_counts_as_an_ancestor() {
-    use yagura_os::ancestry::NameCase;
+    use yagura_os::ancestry::NameRule;
     let verdict = judge(
         vec![
             ancestor(11, "cmd.exe", "111"),
             ancestor(12, "agy.exe", "112"),
         ],
-        NameCase::Insensitive,
+        NameRule::Windows,
         Some((12, "112")),
         &["agy.exe"],
     );
@@ -115,7 +124,7 @@ fn the_pty_child_itself_counts_as_an_ancestor() {
 
 #[test]
 fn two_declared_images_are_a_nested_cli() {
-    use yagura_os::ancestry::NameCase;
+    use yagura_os::ancestry::NameRule;
     // hook shell -> nested CLI -> tool shell -> the window's CLI -> PTY child.
     let verdict = judge(
         vec![
@@ -125,7 +134,7 @@ fn two_declared_images_are_a_nested_cli() {
             ancestor(12, "agy.exe", "112"),
             ancestor(13, "cmd.exe", "113"),
         ],
-        NameCase::Insensitive,
+        NameRule::Windows,
         Some((13, "113")),
         &["agy.exe"],
     );
@@ -134,7 +143,7 @@ fn two_declared_images_are_a_nested_cli() {
 
 #[test]
 fn images_above_the_pty_child_are_not_counted() {
-    use yagura_os::ancestry::NameCase;
+    use yagura_os::ancestry::NameRule;
     let verdict = judge(
         vec![
             ancestor(11, "cmd.exe", "111"),
@@ -142,7 +151,7 @@ fn images_above_the_pty_child_are_not_counted() {
             ancestor(13, "cmd.exe", "113"),
             ancestor(90, "agy.exe", "190"),
         ],
-        NameCase::Insensitive,
+        NameRule::Windows,
         Some((13, "113")),
         &["agy.exe"],
     );
@@ -151,13 +160,13 @@ fn images_above_the_pty_child_are_not_counted() {
 
 #[test]
 fn an_ancestor_matching_two_patterns_counts_once() {
-    use yagura_os::ancestry::NameCase;
+    use yagura_os::ancestry::NameRule;
     let verdict = judge(
         vec![
             ancestor(11, "cmd.exe", "111"),
             ancestor(12, "agy.exe", "112"),
         ],
-        NameCase::Insensitive,
+        NameRule::Windows,
         Some((12, "112")),
         &["agy.exe", "agy*"],
     );
@@ -166,13 +175,13 @@ fn an_ancestor_matching_two_patterns_counts_once() {
 
 #[test]
 fn no_declared_image_up_to_the_pty_child_is_undecidable() {
-    use yagura_os::ancestry::NameCase;
+    use yagura_os::ancestry::NameRule;
     let verdict = judge(
         vec![
             ancestor(11, "cmd.exe", "111"),
             ancestor(13, "cmd.exe", "113"),
         ],
-        NameCase::Insensitive,
+        NameRule::Windows,
         Some((13, "113")),
         &["agy.exe"],
     );
@@ -181,7 +190,7 @@ fn no_declared_image_up_to_the_pty_child_is_undecidable() {
 
 #[test]
 fn a_lineage_that_never_reaches_the_pty_child_is_undecidable() {
-    use yagura_os::ancestry::NameCase;
+    use yagura_os::ancestry::NameRule;
     // Out past the window: the holder, the daemon, the top of the tree.
     let verdict = judge(
         vec![
@@ -190,14 +199,14 @@ fn a_lineage_that_never_reaches_the_pty_child_is_undecidable() {
             ancestor(40, "yagura-holder.exe", "140"),
             ancestor(41, "yagura-daemon.exe", "141"),
         ],
-        NameCase::Insensitive,
+        NameRule::Windows,
         Some((13, "113")),
         &["agy.exe"],
     );
     assert_eq!(verdict, "undecidable");
     let verdict = judge(
         Vec::new(),
-        NameCase::Insensitive,
+        NameRule::Windows,
         Some((13, "113")),
         &["agy.exe"],
     );
@@ -209,14 +218,14 @@ fn a_lineage_that_never_reaches_the_pty_child_is_undecidable() {
 
 #[test]
 fn the_pty_childs_id_under_another_start_is_not_the_pty_child() {
-    use yagura_os::ancestry::NameCase;
+    use yagura_os::ancestry::NameRule;
     let verdict = judge(
         vec![
             ancestor(11, "cmd.exe", "111"),
             ancestor(12, "agy.exe", "112"),
             ancestor(13, "cmd.exe", "999"),
         ],
-        NameCase::Insensitive,
+        NameRule::Windows,
         Some((13, "113")),
         &["agy.exe"],
     );
@@ -225,7 +234,7 @@ fn the_pty_childs_id_under_another_start_is_not_the_pty_child() {
 
 #[test]
 fn a_pty_child_more_than_32_steps_up_is_undecidable() {
-    use yagura_os::ancestry::NameCase;
+    use yagura_os::ancestry::NameRule;
     // The parent is the first step; the PTY child at step `steps` carries the
     // one declared image.
     let lineage_of = |steps: u32| {
@@ -237,14 +246,14 @@ fn a_pty_child_more_than_32_steps_up_is_undecidable() {
     };
     let at_limit = judge(
         lineage_of(32),
-        NameCase::Insensitive,
+        NameRule::Windows,
         Some((13, "113")),
         &["agy.exe"],
     );
     assert_eq!(at_limit, "accepted", "the PTY child at step 32 was refused");
     let past_limit = judge(
         lineage_of(33),
-        NameCase::Insensitive,
+        NameRule::Windows,
         Some((13, "113")),
         &["agy.exe"],
     );
@@ -256,17 +265,17 @@ fn a_pty_child_more_than_32_steps_up_is_undecidable() {
 
 #[test]
 fn a_request_without_an_anchor_is_not_checked() {
-    use yagura_os::ancestry::NameCase;
+    use yagura_os::ancestry::NameRule;
     let nested = vec![
         ancestor(22, "agy.exe", "122"),
         ancestor(12, "agy.exe", "112"),
     ];
     assert_eq!(
-        judge(nested, NameCase::Insensitive, None, &["agy.exe"]),
+        judge(nested, NameRule::Windows, None, &["agy.exe"]),
         "unchecked"
     );
     assert_eq!(
-        judge(Vec::new(), NameCase::Sensitive, None, &["agy"]),
+        judge(Vec::new(), NameRule::Unix, None, &["agy"]),
         "unchecked"
     );
 }
@@ -275,14 +284,14 @@ fn a_request_without_an_anchor_is_not_checked() {
 /// window's command exports for the guest CLI.
 #[test]
 fn a_guest_lineage_is_counted_up_to_the_root_it_names() {
-    use yagura_os::ancestry::NameCase;
+    use yagura_os::ancestry::NameRule;
     let root = Some((500, "boot-a:900"));
     let window_hook = judge(
         vec![
             ancestor(601, "sh", "boot-a:960"),
             ancestor(500, "agy", "boot-a:900"),
         ],
-        NameCase::Sensitive,
+        NameRule::Unix,
         root,
         &["agy"],
     );
@@ -295,7 +304,7 @@ fn a_guest_lineage_is_counted_up_to_the_root_it_names() {
             ancestor(650, "bash", "boot-a:970"),
             ancestor(500, "agy", "boot-a:900"),
         ],
-        NameCase::Sensitive,
+        NameRule::Unix,
         root,
         &["agy"],
     );
@@ -306,7 +315,7 @@ fn a_guest_lineage_is_counted_up_to_the_root_it_names() {
             ancestor(601, "sh", "boot-a:960"),
             ancestor(500, "agy", "boot-a:901"),
         ],
-        NameCase::Sensitive,
+        NameRule::Unix,
         root,
         &["agy"],
     );
@@ -322,7 +331,7 @@ fn a_guest_lineage_is_counted_up_to_the_root_it_names() {
             ancestor(700, "agy", "boot-a:980"),
             ancestor(1, "init", "boot-a:1"),
         ],
-        NameCase::Sensitive,
+        NameRule::Unix,
         root,
         &["agy"],
     );
@@ -333,17 +342,71 @@ fn a_guest_lineage_is_counted_up_to_the_root_it_names() {
             ancestor(601, "sh", "boot-a:960"),
             ancestor(500, "agy", "boot-a:900"),
         ],
-        NameCase::Sensitive,
+        NameRule::Unix,
         None,
         &["agy"],
     );
     assert_eq!(rootless, "unchecked");
 }
 
+/// A `/proc/<pid>/stat` line of a guest process named `name`, whose parent is
+/// `ppid` and whose start is `ticks`.
+fn guest_stat(pid: u32, name: &str, ppid: u32, ticks: u32) -> String {
+    format!("{pid} ({name}) S {ppid} {pid} {pid} 0 -1 0 0 0 0 0 0 0 0 0 20 0 1 0 {ticks} 0 0")
+}
+
+/// WSL: what a guest collected is one stat line per step, and the name each
+/// step counts under is the one in its line, between the first `(` and the
+/// last `)`, compared by the Unix rule.
 #[test]
-fn a_star_stands_for_any_run_of_characters_in_the_last_path_element() {
-    use yagura_os::ancestry::NameCase;
-    let case = NameCase::Sensitive;
+fn a_guest_step_counts_under_the_name_in_its_stat_line() {
+    use yagura_os::ancestry::{GuestRoot, guest_lineage, judge_lineage};
+    let root: GuestRoot = "500:boot-a:900".parse().unwrap();
+    let verdict_of = |steps: &[String]| {
+        let lineage = guest_lineage(&root, steps.iter().map(String::as_str));
+        verdict_name(&judge_lineage(
+            &lineage,
+            Some(root.anchor()),
+            &patterns(&["a) b (c"]),
+        ))
+    };
+    let hook_shell = guest_stat(601, "sh", 500, 960);
+    let cli = guest_stat(500, "a) b (c", 1, 900);
+    let lineage = guest_lineage(&root, [hook_shell.as_str(), cli.as_str()]);
+    assert_eq!(
+        lineage
+            .ancestors()
+            .iter()
+            .map(|step| &step.image[..])
+            .collect::<Vec<_>>(),
+        [&b"sh"[..], &b"a) b (c"[..]],
+        "each step's name is the one in its stat line"
+    );
+    assert_eq!(verdict_of(&[hook_shell.clone(), cli.clone()]), "accepted");
+
+    let nested = [
+        guest_stat(701, "sh", 700, 990),
+        guest_stat(700, "a) b (c", 650, 980),
+        guest_stat(650, "bash", 500, 970),
+        cli.clone(),
+    ];
+    assert_eq!(verdict_of(&nested), "nested");
+
+    // A guest's kernel keeps 15 bytes of a name too.
+    let cut = guest_stat(500, "Lineage-Probe-a", 1, 900);
+    let lineage = guest_lineage(&root, [hook_shell.as_str(), cut.as_str()]);
+    let verdict = judge_lineage(
+        &lineage,
+        Some(root.anchor()),
+        &patterns(&["Lineage-Probe-abcdef"]),
+    );
+    assert_eq!(verdict_name(&verdict), "accepted");
+}
+
+#[test]
+fn a_star_stands_for_any_run_of_characters_in_the_name() {
+    use yagura_os::ancestry::NameRule;
+    let case = NameRule::Unix;
     assert!(counts(
         "muse-bin-1.4.15-R8339.1.exe",
         "muse-bin-*.exe",
@@ -351,40 +414,85 @@ fn a_star_stands_for_any_run_of_characters_in_the_last_path_element() {
     ));
     assert!(counts("muse-bin-.exe", "muse-bin-*.exe", case));
     assert!(counts("agy", "agy*", case));
-    assert!(counts("wsl-agy", "*agy", case));
-    assert!(counts("/home/u/.local/bin/agy", "agy", case));
-    assert!(counts("/home/u/.local/bin/agy", "a*y", case));
+    assert!(counts("agy", "a*y", case));
 
     assert!(!counts("cmd.exe", "muse-bin-*.exe", case));
     assert!(!counts("powershell.exe", "muse-bin-*.exe", case));
     assert!(!counts("muse-bin-1.4.15.exe.old", "muse-bin-*.exe", case));
     assert!(!counts("magy", "agy", case));
     assert!(!counts("agy2", "agy", case));
-    assert!(!counts("agy-tools/node", "agy*", case));
+    // A name is compared whole: a process may name itself `x/agy`.
+    assert!(!counts("x/agy", "agy", case));
 }
 
 #[test]
-fn a_pattern_with_two_stars_is_refused() {
-    assert!(
-        "muse-*-bin-*.exe"
-            .parse::<yagura_os::ancestry::ImagePattern>()
-            .is_err()
-    );
-    assert!("**".parse::<yagura_os::ancestry::ImagePattern>().is_err());
-    assert!("agy*".parse::<yagura_os::ancestry::ImagePattern>().is_ok());
+fn a_pattern_with_two_stars_or_an_empty_head_is_refused() {
+    use yagura_os::ancestry::ImagePattern;
+    assert!("muse-*-bin-*.exe".parse::<ImagePattern>().is_err());
+    assert!("**".parse::<ImagePattern>().is_err());
+    assert!("agy*".parse::<ImagePattern>().is_ok());
+    // Every 15-byte Unix name would start with an empty head, so a window
+    // holding one in its tree would read as nested.
+    assert!("*agy".parse::<ImagePattern>().is_err());
+    assert!("*".parse::<ImagePattern>().is_err());
 }
 
+/// Windows names fold case and Unix names do not. A Unix source keeps the
+/// first 15 bytes of a name: a name of that length is compared with the
+/// first 15 bytes of the pattern; a shorter one, and any name under the
+/// Windows rule, is compared whole.
 #[test]
-fn windows_names_fold_case_and_unix_names_do_not() {
-    use yagura_os::ancestry::NameCase;
-    assert!(counts("AGY.EXE", "agy.exe", NameCase::Insensitive));
+fn windows_names_fold_case_and_unix_names_are_cut_to_15_bytes() {
+    use yagura_os::ancestry::NameRule;
+    assert!(counts("AGY.EXE", "agy.exe", NameRule::Windows));
     assert!(counts(
         "Muse-Bin-1.4.15.EXE",
         "muse-bin-*.exe",
-        NameCase::Insensitive
+        NameRule::Windows
     ));
-    assert!(!counts("AGY", "agy", NameCase::Sensitive));
-    assert!(!counts("Agy", "agy*", NameCase::Sensitive));
+    assert!(!counts("AGY", "agy", NameRule::Unix));
+    assert!(!counts("Agy", "agy*", NameRule::Unix));
+
+    let unix = NameRule::Unix;
+    // `Lineage-Probe-a` is 15 bytes; `Lineage-Probe-` is 14.
+    assert!(counts("Lineage-Probe-a", "Lineage-Probe-abcdef", unix));
+    assert!(!counts("Lineage-Probe-b", "Lineage-Probe-abcdef", unix));
+    assert!(
+        !counts("Lineage-Probe-", "Lineage-Probe-abcdef", unix),
+        "a 14-byte name was taken for a cut one"
+    );
+    assert!(
+        !counts("agyagyagyagyagy", "agy", unix),
+        "a pattern shorter than 15 bytes matched a 15-byte name"
+    );
+    assert!(counts("Lineage-Probe-a", "Lineage-Probe-a", unix));
+
+    // A head of 15 bytes or more decides alone.
+    assert!(counts("Lineage-Probe-a", "Lineage-Probe-ab*.bin", unix));
+    assert!(!counts("Lineage-Probe-x", "Lineage-Probe-ab*.bin", unix));
+    // A shorter head: the name starts with it, and what follows the star was
+    // cut off, so it is not looked at.
+    assert!(counts("muse-bin-1.4.15", "muse-bin-*.exe", unix));
+    assert!(!counts("muse-bix-1.4.15", "muse-bin-*.exe", unix));
+    assert!(counts("abXXXXXXXXXXXXX", "ab*cd", unix));
+    assert!(!counts("abXXXXXXXXXXXX", "ab*cd", unix));
+
+    // Windows names are never cut.
+    let windows = NameRule::Windows;
+    assert!(!counts("Lineage-Probe-a", "Lineage-Probe-abcdef", windows));
+    assert!(!counts("Lineage-Probe-a", "Lineage-Probe-ab*", windows));
+    assert!(counts(
+        "LINEAGE-PROBE-ABCDEF.EXE",
+        "lineage-probe-abcdef.exe",
+        windows
+    ));
+
+    // A pattern whose 15th byte falls inside a character.
+    let cut = "Lineage-Probe-\u{e9}";
+    assert!(counts_named(&cut.as_bytes()[..15], cut, unix));
+    assert!(!counts("Lineage-Probe-e", cut, unix));
+    assert!(!counts_named(&cut.as_bytes()[..15], cut, windows));
+    assert!(!counts("Lineage-Probe-e", "Lineage-Probe-\u{e9}*", unix));
 }
 
 /// Windows: the parent id of a snapshot outlives the parent, so a "parent"
@@ -503,6 +611,7 @@ struct Chain {
     stdout: BufReader<ChildStdout>,
     leaf: u32,
     image: String,
+    exe: PathBuf,
     _dir: TempDir,
 }
 
@@ -535,9 +644,40 @@ impl Chain {
             stdout,
             leaf,
             image,
+            exe,
             _dir: dir,
         }
     }
+
+    /// Does to the chain's executable, while its links run, what a CLI does
+    /// to its own file to update itself.
+    fn update_file(&self, how: Update) {
+        let new_file = std::env::current_exe().unwrap();
+        match how {
+            Update::RenamedAside => {
+                let aside = self.exe.with_file_name(format!("{}.old", self.image));
+                std::fs::rename(&self.exe, aside).unwrap();
+                install_exe(&new_file, &self.exe);
+            }
+            Update::ReplacedOver => {
+                let staged = self.exe.with_file_name(format!("{}.new", self.image));
+                install_exe(&new_file, &staged);
+                std::fs::rename(staged, &self.exe).unwrap();
+            }
+            Update::Unlinked => std::fs::remove_file(&self.exe).unwrap(),
+        }
+    }
+}
+
+/// How a CLI replaces its own executable to update itself.
+#[derive(Debug, Clone, Copy)]
+enum Update {
+    /// Renames the running file aside and puts the new one under its name.
+    RenamedAside,
+    /// Renames the new file over the running one (refused by Windows).
+    ReplacedOver,
+    /// Removes the running file (refused by Windows).
+    Unlinked,
 }
 
 impl Drop for Chain {
@@ -549,11 +689,17 @@ impl Drop for Chain {
     }
 }
 
-fn last_element(image: &str) -> &str {
-    image.rsplit(['/', '\\']).next().unwrap_or(image)
+/// The name the OS keeps of a process started from the file `image`: all of
+/// it on Windows, its first 15 bytes on Unix.
+fn kept_name(image: &str) -> &[u8] {
+    if cfg!(windows) {
+        image.as_bytes()
+    } else {
+        &image.as_bytes()[..image.len().min(15)]
+    }
 }
 
-fn same_name(read: &str, expected: &str) -> bool {
+fn same_name(read: &[u8], expected: &[u8]) -> bool {
     if cfg!(windows) {
         read.eq_ignore_ascii_case(expected)
     } else {
@@ -589,9 +735,9 @@ fn the_os_reads_each_parent_its_image_and_its_start() {
         "the parent's start was misread"
     );
     assert!(
-        same_name(last_element(&relay.image), &chain.image),
-        "the parent's image read {:?}, not {:?}",
-        relay.image,
+        same_name(&relay.image[..], kept_name(&chain.image)),
+        "the parent's image read {:?}, not the name the OS keeps of {:?}",
+        String::from_utf8_lossy(&relay.image[..]),
         chain.image
     );
 
@@ -645,6 +791,48 @@ fn a_real_nested_chain_holds_two_images() {
         &patterns(&[&chain.image]),
     );
     assert_eq!(verdict_name(&verdict), "nested");
+
+    chain.update_file(Update::RenamedAside);
+    let verdict = judge_lineage(
+        &read_lineage(chain.leaf),
+        Some((own_pid, &own_start)),
+        &patterns(&[&chain.image]),
+    );
+    assert_eq!(
+        verdict_name(&verdict),
+        "nested",
+        "a nested CLI whose file was renamed aside"
+    );
+}
+
+/// A window's CLI that replaced its own executable to update itself still
+/// runs under the name it was started with, so a request of its child is
+/// still taken.
+#[test]
+fn a_cli_that_replaced_its_own_file_still_counts_under_the_name_it_started_with() {
+    use yagura_os::ancestry::{judge_lineage, read_lineage};
+    let mut updates = vec![Update::RenamedAside];
+    if cfg!(unix) {
+        updates.extend([Update::ReplacedOver, Update::Unlinked]);
+    }
+    let (own_pid, own_start) = own_anchor();
+    let verdicts: Vec<(Update, &str)> = updates
+        .into_iter()
+        .map(|how| {
+            let chain = Chain::start("updated", "relay:0");
+            chain.update_file(how);
+            let verdict = judge_lineage(
+                &read_lineage(chain.leaf),
+                Some((own_pid, &own_start)),
+                &patterns(&[&chain.image]),
+            );
+            (how, verdict_name(&verdict))
+        })
+        .collect();
+    assert!(
+        verdicts.iter().all(|(_, verdict)| *verdict == "accepted"),
+        "{verdicts:?}"
+    );
 }
 
 /// Unix hands a child whose parent ended to a subreaper or PID 1, so the

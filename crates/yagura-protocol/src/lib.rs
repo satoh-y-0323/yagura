@@ -503,7 +503,7 @@ pub struct Declaration {
 pub const GUEST_ROOT_FLAG: &str = "--guest-root";
 
 /// The argument, given once per step, that hands a claimant in a WSL guest
-/// one step of its lineage: `--guest-step <stat line> <exe link>`.
+/// one step of its lineage: `--guest-step <stat line>`.
 pub const GUEST_STEP_FLAG: &str = "--guest-step";
 
 /// What a hook door or MCP bridge running in a WSL guest collected of its
@@ -524,10 +524,9 @@ pub struct GuestLineage {
 /// One process of a [`GuestLineage`], as the guest's `/proc` shows it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GuestStep {
-    /// Its `/proc/<pid>/stat` line.
+    /// Its `/proc/<pid>/stat` line, which holds the name the guest's kernel
+    /// keeps of it as well as its parent and start.
     pub stat: String,
-    /// Where its `/proc/<pid>/exe` link points.
-    pub exe: String,
 }
 
 /// Guest lineage arguments that cannot be read.
@@ -565,16 +564,13 @@ pub fn guest_lineage_arg(args: &[String]) -> Result<Option<GuestLineage>, GuestA
             lineage.get_or_insert_with(GuestLineage::default).root =
                 (!root.is_empty()).then(|| root.clone());
         } else if arg == GUEST_STEP_FLAG {
-            let (Some(stat), Some(exe)) = (remaining.next(), remaining.next()) else {
-                return Err(GuestArgsError::MissingValue(GUEST_STEP_FLAG));
-            };
+            let stat = remaining
+                .next()
+                .ok_or(GuestArgsError::MissingValue(GUEST_STEP_FLAG))?;
             lineage
                 .get_or_insert_with(GuestLineage::default)
                 .steps
-                .push(GuestStep {
-                    stat: stat.clone(),
-                    exe: exe.clone(),
-                });
+                .push(GuestStep { stat: stat.clone() });
         }
     }
     Ok(lineage)

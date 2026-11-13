@@ -2,12 +2,11 @@
 //! verdict on whether that process runs under a window's CLI alone.
 //!
 //! A request in a window's name is the window's own only when, up to the
-//! window's PTY child, exactly one of the requester's ancestors runs an
-//! image the window's profile declares: two are a CLI nested in the
-//! window's CLI. A lineage that cannot be traced to the PTY child is
-//! refused, never guessed. Images are opaque names to this module.
+//! window's PTY child, exactly one of the requester's ancestors runs under a
+//! name the window's profile declares: two are a CLI nested in the window's
+//! CLI. A lineage that cannot be traced to the PTY child is refused, never
+//! guessed. Names are opaque to this module.
 
-use std::borrow::Cow;
 use std::fmt;
 use std::str::FromStr;
 
@@ -17,25 +16,34 @@ use crate::ProcessStart;
 /// the PTY child is looked for.
 const MOST_STEPS: usize = 32;
 
+/// The bytes of a name a Unix source keeps: Linux's command name and
+/// macOS's `pbi_comm` both hold 16 bytes with the closing NUL.
+const UNIX_NAME_BYTES: usize = 15;
+
 /// One process of a lineage.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Ancestor {
     /// Its id.
     pub pid: u32,
-    /// Its executable: a path, or the file name alone as [`read_lineage`]
-    /// gives it.
-    pub image: String,
+    /// The name the operating system keeps of it from its start, which an
+    /// update of its executable file does not change; compared under the
+    /// lineage's [`NameRule`].
+    pub image: Vec<u8>,
     /// Its start, which tells it from a later process with the same id.
     pub start: ProcessStart,
 }
 
-/// Whether two image names that differ only in letter case are the same.
+/// How the names of a lineage compare with the declared types, after the
+/// source the names were read from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum NameCase {
-    /// The same, as Windows file names are.
-    Insensitive,
-    /// Different, as Unix file names are.
-    Sensitive,
+pub enum NameRule {
+    /// A Windows image file name: kept whole, and compared folding letter
+    /// case as NTFS does. A name that is not UTF-8 matches no type.
+    Windows,
+    /// A Unix command name: bytes, letter case kept. The kernel keeps only
+    /// the first 15 bytes, so a name of that length may be the start of a
+    /// longer one and is compared with the start of the type.
+    Unix,
 }
 
 /// Why a lineage read from the operating system stops where it does.
@@ -54,26 +62,26 @@ pub enum LineageEnd {
 #[derive(Debug, Clone)]
 pub struct Lineage {
     ancestors: Vec<Ancestor>,
-    case: NameCase,
+    rule: NameRule,
     end: Option<LineageEnd>,
 }
 
 impl Lineage {
-    /// A lineage of already checked `ancestors`, nearest first, whose image
-    /// names compare under `case`.
+    /// A lineage of already checked `ancestors`, nearest first, whose names
+    /// compare under `rule`.
     #[must_use]
-    pub fn new(ancestors: Vec<Ancestor>, case: NameCase) -> Self {
+    pub fn new(ancestors: Vec<Ancestor>, rule: NameRule) -> Self {
         Self {
             ancestors,
-            case,
+            rule,
             end: None,
         }
     }
 
-    fn ended(ancestors: Vec<Ancestor>, case: NameCase, end: Option<LineageEnd>) -> Self {
+    fn ended(ancestors: Vec<Ancestor>, rule: NameRule, end: Option<LineageEnd>) -> Self {
         Self {
             ancestors,
-            case,
+            rule,
             end,
         }
     }
@@ -85,8 +93,8 @@ impl Lineage {
     }
 }
 
-/// The type of an image name: the last element of an image's path, with at
-/// most one `*` standing for any run of characters (none included).
+/// The type of a process's name, with at most one `*` standing for any run
+/// of characters (none included) and something before it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ImagePattern {
     head: String,
@@ -99,11 +107,15 @@ pub enum ImagePatternError {
     /// More than one `*`.
     #[error("the image pattern {0:?} has more than one `*`")]
     ManyStars(String),
-    // Not in the design: a type no last path element can match would refuse
-    // every request of its window without a word, so it is refused as read.
+    // Not in the design: a type no name can match would refuse every request
+    // of its window without a word, so it is refused as read.
     /// Empty, or holding a path separator.
     #[error("the image pattern {0:?} is not a file name")]
     NotAName(String),
+    /// Starting with `*`: every 15-byte Unix name starts with an empty head,
+    /// so any such process in a window's tree would count.
+    #[error("the image pattern {0:?} starts with `*`")]
+    EmptyHead(String),
 }
 
 impl FromStr for ImagePattern {
@@ -119,44 +131,71 @@ impl FromStr for ImagePattern {
         if parts.next().is_some() {
             return Err(ImagePatternError::ManyStars(text.to_owned()));
         }
+        if head.is_empty() {
+            return Err(ImagePatternError::EmptyHead(text.to_owned()));
+        }
         Ok(Self { head, tail })
     }
 }
 
 impl ImagePattern {
-    fn matches(&self, image: &str, case: NameCase) -> bool {
-        let name = image.rsplit('/').next().unwrap_or(image);
-        let name = fold(name, case);
-        let head = fold(&self.head, case);
-        match &self.tail {
-            None => name == head,
-            Some(tail) => {
-                let tail = fold(tail, case);
-                name.len() >= head.len() + tail.len()
-                    && name.starts_with(head.as_ref())
-                    && name.ends_with(tail.as_ref())
+    fn matches(&self, name: &[u8], rule: NameRule) -> bool {
+        match rule {
+            NameRule::Windows => {
+                let Ok(name) = std::str::from_utf8(name) else {
+                    return false;
+                };
+                let tail = self.tail.as_deref().map(fold);
+                whole_match(
+                    fold(name).as_bytes(),
+                    fold(&self.head).as_bytes(),
+                    tail.as_ref().map(String::as_bytes),
+                )
+            }
+            NameRule::Unix => {
+                let head = self.head.as_bytes();
+                let tail = self.tail.as_ref().map(String::as_bytes);
+                if name.len() == UNIX_NAME_BYTES {
+                    cut_match(name, head, tail)
+                } else {
+                    whole_match(name, head, tail)
+                }
             }
         }
     }
 }
 
-/// `text` with each letter that has a one-letter upper case replaced by it,
-/// as NTFS compares names, when `case` folds.
-fn fold(text: &str, case: NameCase) -> Cow<'_, str> {
-    match case {
-        NameCase::Sensitive => Cow::Borrowed(text),
-        NameCase::Insensitive => Cow::Owned(
-            text.chars()
-                .map(|letter| {
-                    let mut upper = letter.to_uppercase();
-                    match (upper.next(), upper.next()) {
-                        (Some(single), None) => single,
-                        _ => letter,
-                    }
-                })
-                .collect(),
-        ),
+fn whole_match(name: &[u8], head: &[u8], tail: Option<&[u8]>) -> bool {
+    match tail {
+        None => name == head,
+        Some(tail) => {
+            name.len() >= head.len() + tail.len() && name.starts_with(head) && name.ends_with(tail)
+        }
     }
+}
+
+/// `name` may be the first [`UNIX_NAME_BYTES`] of a longer name. A head that
+/// long decides alone; a shorter one is all there is to compare when a `*`
+/// follows it, since what the `*` and the tail stand for was cut off.
+fn cut_match(name: &[u8], head: &[u8], tail: Option<&[u8]>) -> bool {
+    match head.get(..UNIX_NAME_BYTES) {
+        Some(kept) => kept == name,
+        None => tail.is_some() && name.starts_with(head),
+    }
+}
+
+/// `text` with each letter that has a one-letter upper case replaced by it,
+/// as NTFS compares names.
+fn fold(text: &str) -> String {
+    text.chars()
+        .map(|letter| {
+            let mut upper = letter.to_uppercase();
+            match (upper.next(), upper.next()) {
+                (Some(single), None) => single,
+                _ => letter,
+            }
+        })
+        .collect()
 }
 
 /// Why a lineage could not be judged.
@@ -207,7 +246,7 @@ pub enum LineageVerdict {
 }
 
 /// Judges `lineage` against `anchor`, the window's PTY child (`pid` and
-/// start), counting the ancestors up to and including it whose image one of
+/// start), counting the ancestors up to and including it whose name one of
 /// `images` matches; an ancestor matching several counts once.
 #[must_use]
 pub fn judge_lineage(
@@ -235,7 +274,7 @@ pub fn judge_lineage(
         .filter(|step| {
             images
                 .iter()
-                .any(|pattern| pattern.matches(&step.image, lineage.case))
+                .any(|pattern| pattern.matches(&step.image, lineage.rule))
         })
         .count();
     match declared {
@@ -318,71 +357,65 @@ impl GuestRoot {
 }
 
 /// The lineage a WSL guest's hook command or bridge wrapper collected, as
-/// raw `steps` from its parent up: each a `/proc/<pid>/stat` line and the
-/// `/proc/<pid>/exe` link, each step the parent of the one before it. Starts
-/// are read against `root`'s boot, as the guest's kernel counts them. The
-/// lineage stops before a step that cannot be read (a line or link that is
-/// not one, or held bytes the way here could not carry, as the replacement
-/// character shows) or that is not the parent its child named.
+/// raw `steps` from its parent up: each a `/proc/<pid>/stat` line, each step
+/// the parent of the one before it. A step's name is the command name in its
+/// line, compared under [`NameRule::Unix`]; starts are read against `root`'s
+/// boot, as the guest's kernel counts them. The lineage stops before a step
+/// that cannot be read (a line that is not one, or that held bytes the way
+/// here could not carry, as the replacement character shows) or that is not
+/// the parent its child named.
 #[must_use]
-pub fn guest_lineage<'a>(
-    root: &GuestRoot,
-    steps: impl IntoIterator<Item = (&'a str, &'a str)>,
-) -> Lineage {
+pub fn guest_lineage<'a>(root: &GuestRoot, steps: impl IntoIterator<Item = &'a str>) -> Lineage {
     let mut ancestors: Vec<Ancestor> = Vec::new();
     let mut named_parent: Option<u32> = None;
-    for (stat, exe) in steps {
-        let Some((step, parent)) = guest_step(&root.boot, stat, exe) else {
-            return Lineage::ended(ancestors, NameCase::Sensitive, Some(LineageEnd::Unanswered));
+    for stat in steps {
+        let Some((step, parent)) = guest_step(&root.boot, stat) else {
+            return Lineage::ended(ancestors, NameRule::Unix, Some(LineageEnd::Unanswered));
         };
         if named_parent.is_some_and(|named| named != step.pid) {
-            return Lineage::ended(ancestors, NameCase::Sensitive, Some(LineageEnd::Reused));
+            return Lineage::ended(ancestors, NameRule::Unix, Some(LineageEnd::Reused));
         }
         ancestors.push(step);
         if parent == 0 {
-            return Lineage::ended(ancestors, NameCase::Sensitive, Some(LineageEnd::Top));
+            return Lineage::ended(ancestors, NameRule::Unix, Some(LineageEnd::Top));
         }
         named_parent = Some(parent);
     }
-    Lineage::ended(ancestors, NameCase::Sensitive, None)
+    Lineage::ended(ancestors, NameRule::Unix, None)
 }
 
 /// One step of a guest's lineage and the parent its stat line names.
-fn guest_step(boot: &str, stat: &str, exe: &str) -> Option<(Ancestor, u32)> {
-    if stat.contains(char::REPLACEMENT_CHARACTER) || exe.contains(char::REPLACEMENT_CHARACTER) {
+fn guest_step(boot: &str, stat: &str) -> Option<(Ancestor, u32)> {
+    if stat.contains(char::REPLACEMENT_CHARACTER) {
         return None;
     }
     let pid = crate::process_identity::stat_pid(stat)?;
     let (_, ticks) = crate::process_identity::state_and_start(stat)?;
     let (parent, _, _) = crate::process_identity::family(stat)?;
-    let image = proc_exe_image(exe)?;
+    let image = crate::process_identity::stat_name(stat)?;
+    if image.is_empty() {
+        return None;
+    }
     let start = format!("{boot}:{ticks}").parse().ok()?;
-    Some((Ancestor { pid, image, start }, parent))
-}
-
-/// The last element of an executable path; `None` when it has none.
-fn file_name(path: &str) -> Option<String> {
-    let name = path.rsplit('/').next().unwrap_or(path);
-    (!name.is_empty()).then(|| name.to_owned())
-}
-
-/// The image of a `/proc/<pid>/exe` link. proc(5): the link of an unlinked
-/// executable holds " (deleted)" appended to the path it was started from,
-/// as when a CLI replaces its own file to update; that mark alone is taken
-/// off. Read on any host, as a WSL guest's links reach a Windows daemon too.
-fn proc_exe_image(link: &str) -> Option<String> {
-    file_name(link.strip_suffix(" (deleted)").unwrap_or(link))
+    Some((
+        Ancestor {
+            pid,
+            image: image.as_bytes().to_vec(),
+            start,
+        },
+        parent,
+    ))
 }
 
 #[cfg(windows)]
 mod platform {
-    use super::{Ancestor, Lineage, LineageEnd, MOST_STEPS, NameCase, windows_link_holds};
+    use super::{Ancestor, Lineage, LineageEnd, MOST_STEPS, NameRule, windows_link_holds};
     use crate::platform_windows::process_snapshot;
     use crate::process_identity::process_creation;
 
     pub(super) fn read_lineage(pid: u32) -> Lineage {
         let (ancestors, end) = walk(pid);
-        Lineage::ended(ancestors, NameCase::Insensitive, end)
+        Lineage::ended(ancestors, NameRule::Windows, end)
     }
 
     /// Walks one snapshot from `pid` up, each parent opened for its creation
@@ -415,9 +448,15 @@ mod platform {
             if !windows_link_holds(parent_created, child_created) {
                 return (ancestors, Some(LineageEnd::Reused));
             }
+            // A name that is not UTF-16 is kept as none: no type, which
+            // always has a head, matches it, and the walk goes on.
             ancestors.push(Ancestor {
                 pid: parent,
-                image: parent_entry.image.clone(),
+                image: parent_entry
+                    .image
+                    .clone()
+                    .map(String::into_bytes)
+                    .unwrap_or_default(),
                 start,
             });
             child = parent;
@@ -430,25 +469,12 @@ mod platform {
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod platform {
-    use super::{Ancestor, Lineage, LineageEnd, MOST_STEPS, NameCase, unix_link_holds};
-    use crate::platform_unix::executable_path;
+    use super::{Ancestor, Lineage, LineageEnd, MOST_STEPS, NameRule, unix_link_holds};
     use crate::process_identity::process_facts;
 
     pub(super) fn read_lineage(pid: u32) -> Lineage {
         let (ancestors, end) = walk(pid);
-        Lineage::ended(ancestors, NameCase::Sensitive, end)
-    }
-
-    #[cfg(target_os = "linux")]
-    fn image_of(path: &std::path::Path) -> Option<String> {
-        super::proc_exe_image(&path.to_string_lossy())
-    }
-
-    /// XNU's `proc_pidpathinfo_internal` fails rather than marks a path that
-    /// no longer looks up, so the path is taken as it is.
-    #[cfg(target_os = "macos")]
-    fn image_of(path: &std::path::Path) -> Option<String> {
-        super::file_name(&path.to_string_lossy())
+        Lineage::ended(ancestors, NameRule::Unix, end)
     }
 
     /// Reads the child, then its parent, then the child again: the parent
@@ -466,7 +492,7 @@ mod platform {
             let Ok(Some(parent)) = process_facts(before.ppid) else {
                 return (ancestors, Some(LineageEnd::Unanswered));
             };
-            let Some(image) = executable_path(before.ppid).and_then(|path| image_of(&path)) else {
+            let Some(image) = parent.name.filter(|name| !name.is_empty()) else {
                 return (ancestors, Some(LineageEnd::Unanswered));
             };
             let Ok(Some(after)) = process_facts(child) else {
@@ -489,56 +515,9 @@ mod platform {
 
 #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
 mod platform {
-    use super::{Lineage, LineageEnd, NameCase};
+    use super::{Lineage, LineageEnd, NameRule};
 
     pub(super) fn read_lineage(_pid: u32) -> Lineage {
-        Lineage::ended(
-            Vec::new(),
-            NameCase::Sensitive,
-            Some(LineageEnd::Unanswered),
-        )
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::proc_exe_image as executable_image;
-
-    #[test]
-    fn an_unlinked_executable_reads_as_the_name_it_was_started_from() {
-        let started = executable_image("/home/u/.local/bin/agy");
-        assert_eq!(started.as_deref(), Some("agy"));
-        assert_eq!(
-            executable_image("/home/u/.local/bin/agy (deleted)"),
-            started
-        );
-    }
-
-    #[test]
-    fn only_the_trailing_mark_is_taken_off() {
-        assert_eq!(
-            executable_image("/bin/agy (deleted).old").as_deref(),
-            Some("agy (deleted).old")
-        );
-        assert_eq!(
-            executable_image("/bin/agy (deleted) (deleted)").as_deref(),
-            Some("agy (deleted)")
-        );
-        assert_eq!(
-            executable_image("/bin/agy  (deleted)").as_deref(),
-            Some("agy ")
-        );
-        assert_eq!(
-            executable_image("/opt/x (deleted)/agy").as_deref(),
-            Some("agy")
-        );
-    }
-
-    #[test]
-    fn a_path_without_a_name_is_no_image() {
-        assert_eq!(executable_image(""), None);
-        assert_eq!(executable_image(" (deleted)"), None);
-        assert_eq!(executable_image("/usr/bin/"), None);
-        assert_eq!(executable_image("/usr/bin/ (deleted)"), None);
+        Lineage::ended(Vec::new(), NameRule::Unix, Some(LineageEnd::Unanswered))
     }
 }
