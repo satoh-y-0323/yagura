@@ -15,16 +15,20 @@ use yagura_protocol::{
 
 use crate::inbox::{DeliverySpec, DoorRead, silence};
 use crate::profile::{self, ListedProfileFile, validate_profile_id};
-use crate::profile_hook_events::{HookDeliver, HookEvent, is_hook_event_name};
+use crate::profile_hook_events::{
+    HookDeliver, HookEffect, HookEvent, HookOrigin, is_hook_event_name,
+};
 use crate::window::WindowEntry;
 
 use super::inbox::{HeldSlot, StopEnd, answer_read, answer_read_ending};
 use super::{IpcServer, Outbound, error_msg};
 
-/// What a profile says about one event: the event, how that profile's CLI
-/// wants the text a hook prints, and the time its CLI gives the hook.
+/// What a profile says about one event: the event, how its CLI marks a
+/// subagent's hook, how it wants the text a hook prints, and the time its CLI
+/// gives the hook.
 struct Resolved {
     event: HookEvent,
+    subagent: Option<String>,
     delivery: Option<DeliverySpec>,
     hook_timeout_sec: Option<u64>,
 }
@@ -40,10 +44,10 @@ pub(super) enum HookRead<'a> {
 }
 
 /// The values `event` reads from a hook's input, in the order they are asked
-/// for and answered.
-fn wanted_pointers(event: &HookEvent) -> Vec<HookPointer> {
-    let skip_if = event.skip_if.iter().map(|pointer| HookPointer {
-        pointer: pointer.clone(),
+/// for and answered: the profile's `subagent` pointer first, on every event.
+fn wanted_pointers(subagent: Option<&str>, event: &HookEvent) -> Vec<HookPointer> {
+    let subagent = subagent.into_iter().map(|pointer| HookPointer {
+        pointer: pointer.to_string(),
         kind: HookPointerKind::Presence,
         value: None,
     });
@@ -57,7 +61,7 @@ fn wanted_pointers(event: &HookEvent) -> Vec<HookPointer> {
         kind: HookPointerKind::Equals,
         value: Some(value.clone()),
     });
-    skip_if.chain(session).chain(when).collect()
+    subagent.chain(session).chain(when).collect()
 }
 
 fn warn_status_not_recorded(entry: &WindowEntry, profile_id: &str, name: &str) {
@@ -125,6 +129,7 @@ impl IpcServer {
         }
         let Some(Resolved {
             event,
+            subagent,
             delivery,
             hook_timeout_sec,
         }) = self.resolve_hook_event(profile_id, name).await
@@ -139,7 +144,7 @@ impl IpcServer {
             return;
         };
 
-        let pointers = wanted_pointers(&event);
+        let pointers = wanted_pointers(subagent.as_deref(), &event);
         let values = match input {
             None if !pointers.is_empty() => {
                 outbound.reply(&DaemonMessage::HookInputWanted { pointers });
@@ -157,12 +162,12 @@ impl IpcServer {
         };
         let mut values = values.into_iter();
 
-        if event.skip_if.is_some() && !matches!(values.next(), Some(HookInputValue::Absent)) {
-            finish(DoorRead::silent(), hook_timeout_sec);
-            return;
-        }
+        let origin = HookOrigin::from_subagent_value(
+            subagent.is_some() && !matches!(values.next(), Some(HookInputValue::Absent)),
+        );
         if event.session.is_some()
             && let Some(HookInputValue::Session(session)) = values.next()
+            && HookEffect::Session.applies_to(origin)
         {
             entry.record_session_id(&session);
         }
@@ -171,7 +176,8 @@ impl IpcServer {
         let spec = delivery
             .unwrap_or_else(|| entry.inbox().spec().clone())
             .for_event(name);
-        let reads = matches!(read, HookRead::Door(_)) && met;
+        let reads =
+            matches!(read, HookRead::Door(_)) && met && HookEffect::Deliver.applies_to(origin);
 
         if event.deliver == Some(HookDeliver::Block) {
             let block = reads.then(|| entry.inbox().read_block(Some(&spec)));
@@ -185,7 +191,9 @@ impl IpcServer {
                 return;
             }
         }
-        if let Some(status) = event.status {
+        if let Some(status) = event.status
+            && HookEffect::Status(status).applies_to(origin)
+        {
             self.record_hook_status(&entry, status, profile_id, name);
         }
         let taken = match event.deliver {
@@ -251,11 +259,14 @@ impl IpcServer {
     async fn resolve_hook_event(&self, profile_id: &str, name: &str) -> Option<Resolved> {
         let name = name.to_string();
         self.read_hook_profile(profile_id, move |listed| {
-            let event = listed.profile.hook_events.as_ref()?.get(&name)?.clone();
+            let events = listed.profile.hook_events.as_ref()?;
+            let event = events.get(&name)?.clone();
+            let subagent = events.subagent_pointer().map(str::to_string);
             let delivery = listed.profile.delivery.as_ref().map(|d| d.spec());
             let hook_timeout_sec = listed.profile.hook_timeouts.for_event(&name);
             Some(Resolved {
                 event,
+                subagent,
                 delivery,
                 hook_timeout_sec,
             })

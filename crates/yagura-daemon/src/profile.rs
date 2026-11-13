@@ -644,7 +644,7 @@ pub enum ProfileParseError {
     #[error("invalid delivery table")]
     InvalidDelivery(#[source] DeliveryError),
     /// A `[hook_events]` table breaks its rule ([`HookEventsError`]).
-    #[error("invalid hook events table")]
+    #[error("{}", .0.listed_reason())]
     InvalidHookEvents(#[source] HookEventsError),
     /// A `[mcp_registration]` table breaks its rule
     /// ([`crate::mcp_registration::McpRegistrationError`]). A valid table
@@ -898,6 +898,10 @@ struct RawProfile {
     /// [`ProfileParseError::InvalidHookEvents`].
     #[serde(default)]
     hook_events: Option<toml::Value>,
+    /// Untyped for the same reason: every rule it breaks is
+    /// [`ProfileParseError::InvalidHookEvents`].
+    #[serde(default)]
+    subagent_pointer: Option<toml::Value>,
     /// Untyped for the same reason: every rule it breaks is
     /// [`ProfileParseError::InvalidHookEvents`].
     #[serde(default)]
@@ -1159,8 +1163,8 @@ pub fn parse_profile(id: &str, source: &str) -> Result<Profile, ProfileParseErro
     let mut warnings = Vec::new();
     let delivery =
         parse_delivery(raw.delivery, &mut warnings).map_err(ProfileParseError::InvalidDelivery)?;
-    let hook_events =
-        parse_hook_events(raw.hook_events).map_err(ProfileParseError::InvalidHookEvents)?;
+    let hook_events = parse_hook_events(raw.hook_events, raw.subagent_pointer, &mut warnings)
+        .map_err(ProfileParseError::InvalidHookEvents)?;
     let shim_guidance = raw
         .shim_guidance
         .map(|raw| parse_guidance(raw).ok_or(ProfileParseError::InvalidShimGuidance))

@@ -39,6 +39,7 @@ use yagura_daemon::inbox::{PointerValue, is_session_id, values_at_pointers};
 use yagura_daemon::ipc::{chat, plan, ticket};
 use yagura_daemon::palette_store::PaletteStore;
 use yagura_daemon::profile::ProfileOs;
+use yagura_daemon::profile_hook_events::HookOrigin;
 use yagura_daemon::store;
 use yagura_daemon::{DaemonConfig, IpcServer, WindowRegistry, WindowsShellSearch, resolve_shell};
 use yagura_protocol::{
@@ -885,9 +886,14 @@ async fn run_hook(
         .await
         .context("reading the hook input failed")?
         .into_iter();
-    let skips = skip_pointer.is_some() && values.next().flatten().is_some();
+    let origin = HookOrigin::from_subagent_value(
+        skip_pointer.is_some() && values.next().flatten().is_some(),
+    );
     let session = values.next().flatten().and_then(PointerValue::into_text);
-    let result = if skips {
+    let applies = command
+        .effect()
+        .is_none_or(|effect| effect.applies_to(origin));
+    let result = if !applies {
         Ok(ExitCode::SUCCESS)
     } else {
         match command {

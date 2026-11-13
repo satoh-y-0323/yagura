@@ -26,7 +26,7 @@ use yagura_protocol::{CREDENTIALS_FLAG, WindowStatus, is_valid_source};
 use crate::detector::definition::is_valid_detection_name;
 use crate::mcp_registration::RegistrationTarget;
 use crate::profile::validate_profile_id;
-use crate::profile_hook_events::{is_hook_event_name, parse_window_status};
+use crate::profile_hook_events::{HookEffect, is_hook_event_name, parse_window_status};
 
 /// `--source` value used when `--emit-status` is invoked without one.
 const DEFAULT_EMIT_STATUS_SOURCE: &str = "cli";
@@ -120,8 +120,9 @@ pub enum CliCommand {
 
 impl CliCommand {
     /// The JSON pointer (RFC 6901) given with `--skip-if` to a hook door: when
-    /// the hook's stdin has a value there, the hook does nothing. The pointer
-    /// is profile data, so the daemon names no CLI's field.
+    /// the hook's stdin has a value there, the hook is a subagent's, and the
+    /// door does only what [`HookEffect::applies_to`] a subagent's hook. The
+    /// pointer is profile data, so the daemon names no CLI's field.
     #[must_use]
     pub fn skip_if(&self) -> Option<&str> {
         match self {
@@ -131,6 +132,20 @@ impl CliCommand {
             | Self::DeliverWait { skip_if }
             | Self::ReportSession { skip_if, .. } => skip_if.as_deref(),
             // The pointer of a `--hook` door is profile data, never an argument.
+            Self::Run { .. } | Self::Shutdown | Self::Hook { .. } => None,
+        }
+    }
+
+    /// What a hook door that names its doing does to its window; `None` for a
+    /// command that is no such door.
+    #[must_use]
+    pub fn effect(&self) -> Option<HookEffect> {
+        match self {
+            Self::EmitStatus { status, .. } => Some(HookEffect::Status(*status)),
+            Self::DeliverContext { .. } | Self::DeliverTake { .. } | Self::DeliverWait { .. } => {
+                Some(HookEffect::Deliver)
+            }
+            Self::ReportSession { .. } => Some(HookEffect::Session),
             Self::Run { .. } | Self::Shutdown | Self::Hook { .. } => None,
         }
     }

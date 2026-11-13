@@ -10,6 +10,9 @@
 schema = 1
 display_name = "WSL: Grok Build"
 detection = "grok-build"
+# A sub-agent's hooks carry `subagentType`: the daemon reports their running and
+# waiting for approval, and does nothing else for them.
+subagent_pointer = "/subagentType"
 
 [command]
 windows = ["wsl", "-e", "bash", "-lic", "exec \"$0\" \"$@\"", "grok"]
@@ -108,7 +111,7 @@ confirm = {}
 # One hooks file per instance, so removing one registration leaves the others.
 # The handlers run the daemon directly with `args` (no shell), so outside a
 # window the daemon itself does nothing. A sub-agent's session runs these hooks
-# too; [hook_events] skips it by its `subagentType` payload key. The order of
+# too; `subagent_pointer` tells it apart by its `subagentType` payload key. The order of
 # events and the approval notification follow a real session (1.0.70).
 # The inbox is taken once a call has run, where its output reaches the model.
 [mcp_registration.json_entry]
@@ -131,11 +134,11 @@ StopCancelled = [{ hooks = [{ type = "command", command = "{daemon}", args = ["-
 default = 10
 
 [hook_events]
-UserPromptSubmit = { status = "running", skip_if = "/subagentType" }
-PreToolUse = { status = "running", skip_if = "/subagentType" }
-PostToolUse = { status = "running", deliver = "take", skip_if = "/subagentType" }
-PostToolUseFailure = { status = "running", deliver = "take", skip_if = "/subagentType" }
-Notification = { status = "waiting_approval", skip_if = "/subagentType" }
-Stop = { status = "waiting_input", deliver = "block", skip_if = "/subagentType", when = { "/stop_hook_active" = false, "/stopHookActive" = false } }
-StopFailure = { status = "waiting_input", skip_if = "/subagentType" }
-StopCancelled = { status = "waiting_input", skip_if = "/subagentType" }
+UserPromptSubmit = { status = "running" }
+PreToolUse = { status = "running" }
+PostToolUse = { status = "running", deliver = "take" }
+PostToolUseFailure = { status = "running", deliver = "take" }
+Notification = { status = "waiting_approval" }
+Stop = { status = "waiting_input", deliver = "block", when = { "/stop_hook_active" = false, "/stopHookActive" = false } }
+StopFailure = { status = "waiting_input" }
+StopCancelled = { status = "waiting_input" }

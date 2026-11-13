@@ -1435,6 +1435,68 @@ fn enumeration_reads_the_directory_again_on_every_call() {
     );
 }
 
+/// An older per-event `skip_if` is read as the profile's one subagent pointer when every
+/// event that writes it writes the same value, and reported naming the key to write
+/// instead. With values that differ it cannot be one pointer, so the profile is refused
+/// and the listing names that key: ignoring it would hand a subagent's hook the inbox.
+#[test]
+fn an_older_skip_if_is_read_as_the_subagent_pointer_only_when_every_event_agrees() {
+    let profile = |events: &str| {
+        format!(
+            "schema = 1\ndisplay_name = \"Older Skip If\"\n\n[command]\ndefault = ['x']\n\n\
+             [hook_events]\n{events}"
+        )
+    };
+    let agreeing = profile(
+        "Start = { deliver = \"context\", skip_if = \"/agentId\" }\n\
+         Stop = { status = \"waiting_input\", skip_if = \"/agentId\" }\n\
+         Submit = { status = \"running\" }\n",
+    );
+    let differing = profile(
+        "Start = { deliver = \"context\", skip_if = \"/agentId\" }\n\
+         Stop = { status = \"waiting_input\", skip_if = \"/subagentType\" }\n",
+    );
+
+    let read = parse_profile("older-skip-if", &agreeing)
+        .unwrap_or_else(|err| panic!("one value across the events is read, got {err:?}"));
+    assert!(
+        !read.warnings.is_empty(),
+        "the older skip_if is reported when it is read"
+    );
+    let key = crate::hook_events_door::subagent_pointer_path()
+        .pop()
+        .expect("the pointer has a key");
+    assert!(
+        read.warnings.iter().any(|warning| warning.contains(&key)),
+        "the report names {key:?}, the key to write instead; got {:?}",
+        read.warnings
+    );
+    assert!(
+        parse_profile("differing-skip-if", &differing).is_err(),
+        "values that differ between the events are refused"
+    );
+
+    let tree = TempDir::new("yagura-cli-test", "profile-list-older-skip-if");
+    let dir = tree.make_dir("profiles");
+    write_profile(&dir, "older-skip-if", &agreeing);
+    write_profile(&dir, "differing-skip-if", &differing);
+    let listing = list_profiles(&config_with(
+        Some(dir),
+        empty_lookup(),
+        ProfileOs::host(),
+        None,
+    ));
+    assert_eq!(listed_ids(&listing), strings(&["older-skip-if"]));
+    assert!(
+        listing
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("differing-skip-if.toml") && warning.contains(&key)),
+        "the refused file's warning names {key:?}; warnings were {:?}",
+        listing.warnings
+    );
+}
+
 // --- the argv a listing surfaces as `command` -----------------------------
 //
 // `ProfileEntry::command` is the same unresolved argv `resolve_launch` would

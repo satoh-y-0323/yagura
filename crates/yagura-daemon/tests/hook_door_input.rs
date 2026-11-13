@@ -315,37 +315,60 @@ async fn a_session_report_finds_the_session_after_a_large_field() {
     assert_eq!(setup.entry().session_id().as_deref(), Some("late-2"));
 }
 
-/// A status report has no answer to wait for, so whether the door sent one is measured
-/// where sending fails: inside a window whose daemon is not listening, a report that is
-/// sent ends with an error and one that is skipped ends silently with 0.
+/// What a door sends is measured where sending fails: inside a window whose daemon is not
+/// listening, a request that is sent ends with an error and one that is not ends silently
+/// with 0. A subagent's work is the window's work, so its `running` and
+/// `waiting_approval` are sent; the end of a subagent is not the end of the window's turn,
+/// and the session and the inbox are the main session's, so nothing else is.
 #[test]
-fn a_status_whose_input_has_the_skip_pointer_sends_nothing_to_the_daemon() {
+fn a_door_given_a_subagent_s_input_sends_only_a_running_or_waiting_for_approval_status() {
     let instance = unique_instance();
     let _endpoint = InstanceEndpoint::new(&instance);
     let bases = TempDir::new("yagura-door", "bases");
-    let mut args = vec!["--emit-status", "waiting_input", "--source", "hook"];
-    args.extend(SKIP_IF_SUBAGENT);
     let in_window = Some(("w-1", VALID_TOKEN));
-
-    let (skipped, written) = run_with_input(
-        door_command(&args, &instance, &bases, in_window),
-        br#"{"subagentType":"explore"}"#.to_vec(),
-    );
-    assert!(written.is_ok(), "{written:?}");
-    assert_silent_success(&skipped, "a status from a subagent's hook");
-
-    let (sent, written) = run_with_input(
-        door_command(&args, &instance, &bases, in_window),
-        br#"{"session_id":"s-1"}"#.to_vec(),
-    );
-    assert!(written.is_ok(), "{written:?}");
-    let code = sent.status.code();
-    assert!(
-        code.is_some_and(|code| code != 0 && code != 2),
-        "a status whose input has no value at the pointer must be sent, and fail with no \
-         daemon listening; {}",
-        describe(&sent)
-    );
+    let subagent = br#"{"subagentType":"explore","session_id":"s-1"}"#;
+    // (the door, whether a subagent's input is sent)
+    let doors: [(&[&str], bool); 6] = [
+        (&["--emit-status", "running", "--source", "hook"], true),
+        (
+            &["--emit-status", "waiting_approval", "--source", "hook"],
+            true,
+        ),
+        (
+            &["--emit-status", "waiting_input", "--source", "hook"],
+            false,
+        ),
+        (&["--emit-status", "idle", "--source", "hook"], false),
+        (&["--deliver-take"], false),
+        (&["--report-session", "/session_id"], false),
+    ];
+    for (door, sent_for_a_subagent) in doors {
+        let mut args = door.to_vec();
+        args.extend(SKIP_IF_SUBAGENT);
+        for (whose, input, sent) in [
+            ("a subagent's", subagent.to_vec(), sent_for_a_subagent),
+            (
+                "the main session's",
+                br#"{"session_id":"s-1"}"#.to_vec(),
+                true,
+            ),
+        ] {
+            let (output, written) =
+                run_with_input(door_command(&args, &instance, &bases, in_window), input);
+            assert!(written.is_ok(), "{args:?}, {whose} input: {written:?}");
+            if sent {
+                let code = output.status.code();
+                assert!(
+                    code.is_some_and(|code| code != 0 && code != 2),
+                    "{args:?}, {whose} input: the request must be sent, and fail with no \
+                     daemon listening; {}",
+                    describe(&output)
+                );
+            } else {
+                assert_silent_success(&output, &format!("{args:?}, {whose} input"));
+            }
+        }
+    }
 }
 
 /// The strings anywhere in `value`.
@@ -461,7 +484,7 @@ async fn a_take_for_another_instance_leaves_the_parcels_and_one_for_this_instanc
 }
 
 /// Measured where sending fails, as in
-/// `a_status_whose_input_has_the_skip_pointer_sends_nothing_to_the_daemon`.
+/// `a_door_given_a_subagent_s_input_sends_only_a_running_or_waiting_for_approval_status`.
 #[test]
 fn a_status_for_another_instance_sends_nothing_to_the_daemon() {
     let instance = unique_instance();

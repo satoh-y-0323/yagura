@@ -148,8 +148,8 @@ fn the_wsl_profile_forwards_the_model_variable_into_wsl() {
 }
 
 /// Every handler runs the daemon directly (no shell) through the `--hook` door of its own
-/// profile, one handler per event, and what each event does (its status, the inbox, skipping
-/// a sub-agent) is the profile's `[hook_events]` table, not the registered text. Every call
+/// profile, one handler per event, and what each event does (its status, the inbox, what a
+/// sub-agent's hook does) is the profile's data, not the registered text. Every call
 /// also names the instance it was registered for, so another instance's hook file stays
 /// silent in this instance's windows.
 #[test]

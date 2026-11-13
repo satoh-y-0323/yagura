@@ -37,6 +37,9 @@ const WINDOW_ID_VAR: &str = "YAGURA_WINDOW_ID";
 const STATUS_TOKEN_VAR: &str = "YAGURA_STATUS_TOKEN";
 const PROFILE_ID: &str = "hook-door-fixture";
 const EVENT: &str = "PostToolUse";
+/// Two more events of [`PROFILE_ID`]'s, which name no `skip_if` of their own.
+const APPROVAL_EVENT: &str = "PermissionRequest";
+const END_EVENT: &str = "Stop";
 const NO_RULES_DETECTION: &str = "hook-door-no-rules";
 const NO_RULES_DEFINITION: &str = "schema_version = 1
 name = \"hook-door-no-rules\"
@@ -84,7 +87,10 @@ fn fixture_profile_source() -> String {
          [command]\ndefault = ['{}']\n\n\
          [delivery]\noutput = '{{\"fixtureOut\":{{text}}}}'\n\n\
          [hook_events]\n{EVENT} = {{ status = \"running\", deliver = \"take\", \
-         session = \"/session_id\", skip_if = \"/subagentType\" }}\n",
+         session = \"/session_id\", skip_if = \"/subagentType\" }}\n\
+         {APPROVAL_EVENT} = {{ status = \"waiting_approval\" }}\n\
+         {END_EVENT} = {{ status = \"waiting_input\", deliver = \"take\", \
+         session = \"/session_id\" }}\n",
         common::echo_child_path().display()
     )
 }
@@ -169,6 +175,7 @@ struct Setup {
     instance: String,
     bases: TempDir,
     window_id: String,
+    profiles_dir: PathBuf,
 }
 
 /// What a window's screen shows its detection definition.
@@ -202,6 +209,15 @@ impl Setup {
     }
 
     async fn start_with(screen: Screen, shipped_profiles: bool) -> Self {
+        Self::start_with_config(screen, shipped_profiles, |_| {}).await
+    }
+
+    /// [`Setup::start_with`], with the daemon's configuration changed by `adjust` first.
+    async fn start_with_config(
+        screen: Screen,
+        shipped_profiles: bool,
+        adjust: impl FnOnce(&mut yagura_daemon::DaemonConfig),
+    ) -> Self {
         let instance = unique_instance();
         let profiles_dir = unique_temp_dir("hook-events-profiles");
         std::fs::create_dir_all(&profiles_dir).expect("create the profiles directory");
@@ -213,8 +229,9 @@ impl Setup {
         );
         let detection_dir = unique_temp_dir("hook-events");
         let mut config = detection_config(&detection_dir, approver_base_config());
-        config.profiles_dir = Some(profiles_dir);
+        config.profiles_dir = Some(profiles_dir.clone());
         config.bundled_profiles = shipped_profiles;
+        adjust(&mut config);
         let h = Harness::start_on_instance(&instance, config).await;
         // The window is opened with a raw argv: no profile of its own declares
         // `[hook_events]`.
@@ -255,6 +272,7 @@ impl Setup {
             instance,
             bases: TempDir::new("yagura-door", "bases"),
             window_id,
+            profiles_dir,
         }
     }
 
@@ -300,35 +318,327 @@ fn hook_args() -> [&'static str; 3] {
 
 // --- the named profile's table decides, not the window's -------------------------------
 
-#[tokio::test]
-async fn a_hook_whose_input_has_the_skip_pointer_does_nothing() {
-    let setup = Setup::start().await;
-    setup.deposit("PARCEL-FOR-THE-MAIN-SESSION");
-    let input = br#"{"subagentType":"explore","session_id":"sub-1"}"#.to_vec();
-
-    let (output, written) = setup.run(&hook_args(), input).await;
-
-    assert!(written.is_ok(), "{written:?}");
+/// Runs `name` of [`PROFILE_ID`] with `input` and checks that it printed nothing, exited 0,
+/// recorded no session and left `pending` parcels in the inbox; returns how many statuses
+/// it reported.
+async fn run_quiet_event(setup: &Setup, name: &str, input: &[u8], pending: usize) -> u64 {
+    let entry = setup.entry();
+    let before = entry.status_event_count();
+    let (output, written) = setup
+        .run(&["--hook", PROFILE_ID, name], input.to_vec())
+        .await;
+    assert!(written.is_ok(), "{name}: {written:?}");
     assert!(
         output.status.code() == Some(0) && output.stdout.is_empty(),
-        "a hook whose input has a value at the skip pointer must print nothing and exit 0; {}",
+        "{name}: a subagent's hook prints nothing and exits 0; {}",
         describe(&output)
     );
     assert_eq!(
-        setup.entry().inbox().pending_count(),
-        1,
-        "a skipped hook must leave the parcel in the inbox"
+        entry.inbox().pending_count(),
+        pending,
+        "{name}: a subagent's hook leaves the parcel in the inbox"
     );
     assert_eq!(
-        setup.status().await,
-        WindowStatus::Idle,
-        "a skipped hook must not record a status"
-    );
-    assert_eq!(
-        setup.entry().session_id(),
+        entry.session_id(),
         None,
-        "a skipped hook must not record a session"
+        "{name}: a subagent's hook records no session"
     );
+    entry.status_event_count() - before
+}
+
+/// A subagent's hook is told apart on every event of a profile that names the pointer
+/// once, here through an older `skip_if` written on one event alone. Its `running` and
+/// `waiting_approval` are the window's (a subagent's work is the window's work); its
+/// session, its take and any other status are not, since the session and the inbox are the
+/// main session's and a subagent's end is not the end of the window's turn.
+#[tokio::test]
+async fn a_subagent_s_hook_reports_only_running_or_waiting_for_approval_on_every_event_of_its_profile()
+ {
+    let setup = Setup::start_without_screen_rules().await;
+    let mut client = setup.h.connect().await;
+    setup.deposit("PARCEL-FOR-THE-MAIN-SESSION");
+    let subagent = br#"{"subagentType":"explore","session_id":"sub-1"}"#;
+
+    let reported = run_quiet_event(&setup, EVENT, subagent, 1).await;
+    assert_eq!(reported, 1, "{EVENT}: a subagent's running is reported");
+    wait_until_status(&mut client, &setup.window_id, WindowStatus::Running).await;
+
+    let reported = run_quiet_event(&setup, APPROVAL_EVENT, subagent, 1).await;
+    assert_eq!(
+        reported, 1,
+        "{APPROVAL_EVENT}: a subagent's waiting_approval is reported"
+    );
+    wait_until_status(&mut client, &setup.window_id, WindowStatus::WaitingApproval).await;
+
+    let reported = run_quiet_event(&setup, END_EVENT, subagent, 1).await;
+    assert_eq!(
+        reported, 0,
+        "{END_EVENT}: a subagent's waiting_input is not reported, though the event names no \
+         skip_if of its own"
+    );
+
+    // The main session's end does all its event says.
+    let before = setup.entry().status_event_count();
+    let (output, written) = setup
+        .run(
+            &["--hook", PROFILE_ID, END_EVENT],
+            br#"{"session_id":"main-1"}"#.to_vec(),
+        )
+        .await;
+    assert!(written.is_ok(), "{written:?}");
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("PARCEL-FOR-THE-MAIN-SESSION"),
+        "the main session's hook takes the parcel; {}",
+        describe(&output)
+    );
+    assert_eq!(setup.entry().inbox().pending_count(), 0);
+    assert_eq!(setup.entry().session_id().as_deref(), Some("main-1"));
+    assert_eq!(setup.entry().status_event_count(), before + 1);
+}
+
+/// Every event of a profile that names the subagent pointer asks for its value, so an
+/// event whose own entry names none still tells a subagent's hook apart.
+#[tokio::test]
+async fn every_event_of_a_profile_that_names_the_subagent_pointer_asks_for_its_value() {
+    use yagura_protocol::{ClientMessage, DaemonMessage};
+
+    let setup = Setup::start_without_screen_rules().await;
+    for name in [EVENT, APPROVAL_EVENT, END_EVENT] {
+        let mut door = setup.h.connect().await;
+        common::send(
+            &mut door,
+            &ClientMessage::RunHook {
+                window_id: setup.window_id.clone(),
+                token: VALID_TOKEN.to_string(),
+                profile: PROFILE_ID.to_string(),
+                name: name.to_string(),
+                input: None,
+                held: true,
+            },
+        )
+        .await;
+        match common::read_response(&mut door).await {
+            DaemonMessage::HookInputWanted { pointers } => assert!(
+                pointers
+                    .iter()
+                    .any(|wanted| wanted.pointer == "/subagentType"),
+                "{name}: the subagent pointer is asked for; asked {pointers:?}"
+            ),
+            other => panic!("{name}: the event's values are asked for: {other:?}"),
+        }
+    }
+}
+
+/// A Copilot CLI hook is a subagent's when its input has `agentId`, a Grok Build hook when
+/// it has `subagentType`, and a Codex CLI hook when it has `agent_id`; a Muse Code hook is
+/// always the main session's. A subagent's hook reports only `running` and
+/// `waiting_approval`; it takes, hands over and records nothing else, while the same
+/// profile's hook of the main session still takes.
+#[tokio::test]
+async fn a_shipped_profile_s_subagent_hooks_report_only_running_or_waiting_for_approval() {
+    const COPILOT_SUB: &str = r#"{"agentId":"sub-1","sessionId":"s-1","stop_hook_active":false}"#;
+    const GROK_SUB: &str = r#"{"subagentType":"explore","session_id":"s-1","stop_hook_active":false,"stopHookActive":false}"#;
+    const CODEX_SUB: &str = r#"{"agent_id":"sub-1","session_id":"sub-session-1"}"#;
+    // Every hook below reports at most one status, and none may be lost to the rate limit.
+    let setup = Setup::start_with_config(Screen::NoRules, true, |config| {
+        config.status_event_burst = 1_000;
+    })
+    .await;
+    setup.deposit("PARCEL-FOR-THE-MAIN-SESSION");
+    let copilot: &[(&str, bool)] = &[
+        ("sessionStart", false),
+        ("userPromptSubmitted", true),
+        ("preToolUse", true),
+        ("postToolUse", true),
+        ("postToolUseFailure", true),
+        ("agentStop", false),
+    ];
+    let grok: &[(&str, bool)] = &[
+        ("UserPromptSubmit", true),
+        ("PreToolUse", true),
+        ("PostToolUse", true),
+        ("PostToolUseFailure", true),
+        ("Notification", true),
+        ("Stop", false),
+        ("StopFailure", false),
+        ("StopCancelled", false),
+    ];
+    let codex: &[(&str, bool)] = &[
+        ("SessionStart", false),
+        ("UserPromptSubmit", true),
+        ("PreToolUse", true),
+        ("PostToolUse", true),
+        ("PermissionRequest", true),
+        ("Stop", false),
+        ("Interrupt", false),
+    ];
+    let copilot_main = ("postToolUse", r#"{"sessionId":"s-1"}"#);
+    let grok_main = ("PostToolUse", r#"{"session_id":"s-1"}"#);
+    let codex_main = ("UserPromptSubmit", r#"{"session_id":"main-1"}"#);
+    // (profile, a subagent's input, its events and whether each reports a status, an event
+    // of the main session's that takes and its input)
+    let cases = [
+        ("copilot-cli", COPILOT_SUB, copilot, copilot_main),
+        ("wsl-copilot-cli", COPILOT_SUB, copilot, copilot_main),
+        ("grok-build", GROK_SUB, grok, grok_main),
+        ("wsl-grok-build", GROK_SUB, grok, grok_main),
+        ("codex-cli", CODEX_SUB, codex, codex_main),
+        ("wsl-codex-cli", CODEX_SUB, codex, codex_main),
+    ];
+    let entry = setup.entry();
+    for (profile, subagent, events, (take, main)) in cases {
+        for &(name, reports) in events {
+            let who = format!("{profile} {name}");
+            let before = entry.status_event_count();
+            let session = entry.session_id();
+            let (output, written) = setup
+                .run(&["--hook", profile, name], subagent.as_bytes().to_vec())
+                .await;
+            assert!(written.is_ok(), "{who}: {written:?}");
+            assert!(
+                output.status.code() == Some(0) && output.stdout.is_empty(),
+                "{who}: a subagent's hook prints nothing and exits 0; {}",
+                describe(&output)
+            );
+            assert_eq!(
+                entry.inbox().pending_count(),
+                1,
+                "{who}: a subagent's hook leaves the parcel in the inbox"
+            );
+            assert_eq!(
+                entry.session_id(),
+                session,
+                "{who}: a subagent's hook records no session"
+            );
+            assert_eq!(
+                entry.status_event_count() - before,
+                u64::from(reports),
+                "{who}: a subagent's hook reports its status only when it is running or \
+                 waiting for approval"
+            );
+        }
+        let (output, written) = setup
+            .run(&["--hook", profile, take], main.as_bytes().to_vec())
+            .await;
+        assert!(written.is_ok(), "{profile} {take}: {written:?}");
+        assert!(
+            String::from_utf8_lossy(&output.stdout).contains("PARCEL-FOR-THE-MAIN-SESSION"),
+            "{profile} {take}: the main session's hook takes the parcel; {}",
+            describe(&output)
+        );
+        assert_eq!(entry.inbox().pending_count(), 0, "{profile} {take}");
+        setup.deposit("PARCEL-FOR-THE-MAIN-SESSION");
+    }
+
+    // Muse Code names no subagent pointer: whatever its input holds, its hook is the main
+    // session's.
+    let (output, written) = setup
+        .run(
+            &["--hook", "muse-code", "UserPromptSubmit"],
+            br#"{"agentId":"x","subagentType":"x","agent_id":"x"}"#.to_vec(),
+        )
+        .await;
+    assert!(written.is_ok(), "{written:?}");
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("PARCEL-FOR-THE-MAIN-SESSION"),
+        "a profile that names no subagent pointer takes for every hook; {}",
+        describe(&output)
+    );
+}
+
+/// The path of keys at which a profile names the pointer that tells a subagent's hook
+/// apart, read from the shipped Copilot CLI profile, which names `/agentId` there once and
+/// nowhere else outside `[hook_events]`.
+pub(crate) fn subagent_pointer_path() -> Vec<String> {
+    fn collect(value: &toml::Value, path: &mut Vec<String>, found: &mut Vec<Vec<String>>) {
+        match value {
+            toml::Value::String(text) if text == "/agentId" => found.push(path.clone()),
+            toml::Value::Table(table) => {
+                for (key, value) in table {
+                    path.push(key.clone());
+                    collect(value, path, found);
+                    path.pop();
+                }
+            }
+            _ => {}
+        }
+    }
+    let document: toml::Value = common::docs::read_doc_verbatim("../../profiles/copilot-cli.toml")
+        .parse()
+        .expect("the shipped Copilot CLI profile is TOML");
+    let mut found = Vec::new();
+    collect(&document, &mut Vec::new(), &mut found);
+    found.retain(|path| path.first().map(String::as_str) != Some("hook_events"));
+    assert_eq!(
+        found.len(),
+        1,
+        "the shipped Copilot CLI profile names its subagent pointer once, outside \
+         [hook_events]; found it at {found:?}"
+    );
+    found.remove(0)
+}
+
+/// `source` with the profile's subagent pointer set to `pointer`, at the place
+/// [`subagent_pointer_path`] reads it from.
+pub(crate) fn with_subagent_pointer(source: &str, pointer: &str) -> String {
+    let mut document: toml::Table = source.parse().expect("the profile source is TOML");
+    let path = subagent_pointer_path();
+    let (key, tables) = path.split_last().expect("a path has a key");
+    let mut table = &mut document;
+    for name in tables {
+        table = table
+            .entry(name.clone())
+            .or_insert_with(|| toml::Value::Table(toml::Table::new()))
+            .as_table_mut()
+            .expect("the subagent pointer is read from inside tables");
+    }
+    table.insert(key.clone(), toml::Value::String(pointer.to_string()));
+    toml::to_string(&document).expect("the profile encodes as TOML")
+}
+
+/// A profile that names the subagent pointer and also keeps an older `skip_if` uses the
+/// pointer it names, and reports the older key.
+#[tokio::test]
+async fn a_profile_naming_the_subagent_pointer_uses_it_over_an_older_skip_if() {
+    let setup = Setup::start_without_screen_rules().await;
+    let id = "hook-door-both-keys";
+    let source = with_subagent_pointer(&fixture_profile_source(), "/agentId");
+    let parsed = parse_profile(id, &source).expect("the profile is read");
+    assert!(
+        !parsed.warnings.is_empty(),
+        "the older skip_if beside the pointer is reported"
+    );
+    write_profile(&setup.profiles_dir, id, &source);
+    setup.deposit("PARCEL-FOR-THE-MAIN-SESSION");
+
+    let (output, written) = setup
+        .run(
+            &["--hook", id, EVENT],
+            br#"{"agentId":"sub-1","session_id":"sub-1"}"#.to_vec(),
+        )
+        .await;
+    assert!(written.is_ok(), "{written:?}");
+    assert!(
+        output.status.code() == Some(0) && output.stdout.is_empty(),
+        "a hook with a value at the named pointer is a subagent's; {}",
+        describe(&output)
+    );
+    assert_eq!(setup.entry().inbox().pending_count(), 1);
+    assert_eq!(setup.entry().session_id(), None);
+
+    let (output, written) = setup
+        .run(
+            &["--hook", id, EVENT],
+            br#"{"subagentType":"explore","session_id":"main-1"}"#.to_vec(),
+        )
+        .await;
+    assert!(written.is_ok(), "{written:?}");
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("PARCEL-FOR-THE-MAIN-SESSION"),
+        "a hook with a value only at the older skip_if is the main session's; {}",
+        describe(&output)
+    );
+    assert_eq!(setup.entry().session_id().as_deref(), Some("main-1"));
 }
 
 #[tokio::test]

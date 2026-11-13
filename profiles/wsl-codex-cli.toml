@@ -9,6 +9,9 @@
 schema = 1
 display_name = "WSL: Codex CLI"
 detection = "codex-cli"
+# A sub-agent's hooks carry `agent_id`: the daemon reports their running and
+# waiting for approval, and does nothing else for them.
+subagent_pointer = "/agent_id"
 
 [command]
 windows = ["wsl", "-e", "bash", "-lic", "exec \"$0\" \"$@\"", "codex"]

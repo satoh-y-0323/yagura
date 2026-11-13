@@ -608,19 +608,17 @@ fn event(
     status: Option<WindowStatus>,
     deliver: Option<HookDeliver>,
     session: Option<&str>,
-    skip_if: Option<&str>,
 ) -> HookEvent {
     HookEvent {
         status,
         deliver,
         session: session.map(str::to_string),
-        skip_if: skip_if.map(str::to_string),
         when: std::collections::BTreeMap::new(),
     }
 }
 
 /// A stop whose door hands what waits over as a block, when the hook's input holds `when`.
-fn blocking_stop(skip_if: Option<&str>, when: &[(&str, serde_json::Value)]) -> HookEvent {
+fn blocking_stop(when: &[(&str, serde_json::Value)]) -> HookEvent {
     HookEvent {
         when: when
             .iter()
@@ -630,108 +628,94 @@ fn blocking_stop(skip_if: Option<&str>, when: &[(&str, serde_json::Value)]) -> H
             Some(WindowStatus::WaitingInput),
             Some(HookDeliver::Block),
             None,
-            skip_if,
         )
+    }
+}
+
+/// The pointer each profile's hooks were skipped at by the older doors' `--skip-if P`, now
+/// the profile's one `subagent_pointer`.
+fn expected_subagent_pointer(id: &str) -> Option<&'static str> {
+    match id {
+        "copilot-cli" | "wsl-copilot-cli" => Some("/agentId"),
+        "grok-build" | "wsl-grok-build" => Some("/subagentType"),
+        "codex-cli" | "wsl-codex-cli" => Some("/agent_id"),
+        _ => None,
     }
 }
 
 /// Each event's handling: what the handlers of the older doors that ran for it did
 /// (`--emit-status X` is `status`, `--deliver-take` / `--deliver-context` is `deliver`,
-/// `--report-session P` is `session`, `--skip-if P` is `skip_if`), with a stop's block
-/// where the CLI takes one.
+/// `--report-session P` is `session`), with a stop's block where the CLI takes one.
 fn expected_hook_events(id: &str) -> Vec<(&'static str, HookEvent)> {
     use HookDeliver::{Context, Take};
     use WindowStatus::{Running, WaitingApproval, WaitingInput};
     let not_a_continuation = ("/stop_hook_active", serde_json::json!(false));
     match id {
         "antigravity-cli" | "wsl-antigravity-cli" => vec![
-            (
-                "PreInvocation",
-                event(Some(Running), Some(Take), None, None),
-            ),
-            ("SessionStart", event(None, Some(Context), None, None)),
-            ("PostToolUse", event(Some(Running), None, None, None)),
+            ("PreInvocation", event(Some(Running), Some(Take), None)),
+            ("SessionStart", event(None, Some(Context), None)),
+            ("PostToolUse", event(Some(Running), None, None)),
             (
                 "Stop",
-                blocking_stop(
-                    None,
-                    &[
-                        ("/terminationReason", serde_json::json!("NO_TOOL_CALL")),
-                        ("/executionNum", serde_json::json!(0)),
-                    ],
-                ),
+                blocking_stop(&[
+                    ("/terminationReason", serde_json::json!("NO_TOOL_CALL")),
+                    ("/executionNum", serde_json::json!(0)),
+                ]),
             ),
         ],
         "copilot-cli" | "wsl-copilot-cli" => {
-            let skip = Some("/agentId");
             vec![
-                ("sessionStart", event(None, Some(Context), None, skip)),
-                (
-                    "userPromptSubmitted",
-                    event(Some(Running), None, None, skip),
-                ),
-                ("preToolUse", event(Some(Running), None, None, skip)),
-                ("postToolUse", event(Some(Running), Some(Take), None, skip)),
-                ("postToolUseFailure", event(Some(Running), None, None, skip)),
-                ("agentStop", blocking_stop(skip, &[not_a_continuation])),
+                ("sessionStart", event(None, Some(Context), None)),
+                ("userPromptSubmitted", event(Some(Running), None, None)),
+                ("preToolUse", event(Some(Running), None, None)),
+                ("postToolUse", event(Some(Running), Some(Take), None)),
+                ("postToolUseFailure", event(Some(Running), None, None)),
+                ("agentStop", blocking_stop(&[not_a_continuation])),
             ]
         }
         "grok-build" | "wsl-grok-build" => {
-            let skip = Some("/subagentType");
             vec![
-                ("UserPromptSubmit", event(Some(Running), None, None, skip)),
-                ("PreToolUse", event(Some(Running), None, None, skip)),
-                ("PostToolUse", event(Some(Running), Some(Take), None, skip)),
-                (
-                    "PostToolUseFailure",
-                    event(Some(Running), Some(Take), None, skip),
-                ),
-                (
-                    "Notification",
-                    event(Some(WaitingApproval), None, None, skip),
-                ),
+                ("UserPromptSubmit", event(Some(Running), None, None)),
+                ("PreToolUse", event(Some(Running), None, None)),
+                ("PostToolUse", event(Some(Running), Some(Take), None)),
+                ("PostToolUseFailure", event(Some(Running), Some(Take), None)),
+                ("Notification", event(Some(WaitingApproval), None, None)),
                 (
                     "Stop",
-                    blocking_stop(
-                        skip,
-                        &[
-                            not_a_continuation,
-                            ("/stopHookActive", serde_json::json!(false)),
-                        ],
-                    ),
+                    blocking_stop(&[
+                        not_a_continuation,
+                        ("/stopHookActive", serde_json::json!(false)),
+                    ]),
                 ),
-                ("StopFailure", event(Some(WaitingInput), None, None, skip)),
-                ("StopCancelled", event(Some(WaitingInput), None, None, skip)),
+                ("StopFailure", event(Some(WaitingInput), None, None)),
+                ("StopCancelled", event(Some(WaitingInput), None, None)),
             ]
         }
         "muse-code" => vec![
-            ("SessionStart", event(None, Some(Context), None, None)),
-            (
-                "UserPromptSubmit",
-                event(Some(Running), Some(Take), None, None),
-            ),
+            ("SessionStart", event(None, Some(Context), None)),
+            ("UserPromptSubmit", event(Some(Running), Some(Take), None)),
             (
                 "PermissionRequest",
-                event(Some(WaitingApproval), None, None, None),
+                event(Some(WaitingApproval), None, None),
             ),
-            ("Stop", blocking_stop(None, &[not_a_continuation])),
-            ("StopFailure", event(Some(WaitingInput), None, None, None)),
-            ("Interrupt", event(Some(WaitingInput), None, None, None)),
+            ("Stop", blocking_stop(&[not_a_continuation])),
+            ("StopFailure", event(Some(WaitingInput), None, None)),
+            ("Interrupt", event(Some(WaitingInput), None, None)),
         ],
         "codex-cli" | "wsl-codex-cli" => vec![
-            ("SessionStart", event(None, Some(Context), None, None)),
+            ("SessionStart", event(None, Some(Context), None)),
             (
                 "UserPromptSubmit",
-                event(Some(Running), Some(Take), Some("/session_id"), None),
+                event(Some(Running), Some(Take), Some("/session_id")),
             ),
-            ("PreToolUse", event(Some(Running), None, None, None)),
-            ("PostToolUse", event(Some(Running), None, None, None)),
+            ("PreToolUse", event(Some(Running), None, None)),
+            ("PostToolUse", event(Some(Running), None, None)),
             (
                 "PermissionRequest",
-                event(Some(WaitingApproval), None, None, None),
+                event(Some(WaitingApproval), None, None),
             ),
-            ("Stop", event(Some(WaitingInput), None, None, None)),
-            ("Interrupt", event(Some(WaitingInput), None, None, None)),
+            ("Stop", event(Some(WaitingInput), None, None)),
+            ("Interrupt", event(Some(WaitingInput), None, None)),
         ],
         other => panic!("{other} is not one of the profiles that moved to the hook door"),
     }
@@ -749,6 +733,11 @@ fn each_hook_events_table_is_the_sum_of_what_the_handlers_of_that_event_did() {
         for (name, handling) in &expected {
             assert_eq!(table.get(name), Some(handling), "{id}/{name}");
         }
+        assert_eq!(
+            table.subagent_pointer(),
+            expected_subagent_pointer(id),
+            "{id}: the pointer that tells a sub-agent's hook apart"
+        );
         // No event beyond these: the raw table's keys are exactly the expected names.
         let raw: toml::Table = read_doc_verbatim(&format!("../../profiles/{id}.toml"))
             .parse()
@@ -938,7 +927,7 @@ const HOOK_REGISTRATION_TEXT_SHA256: &[(&str, &str)] = &[
     ),
     (
         "claude-code",
-        "7eb52cfd916af6d83b44317f043a352b64270ef43bef78ddd3670cca4e9953fb",
+        "3eade0ff85b1ce356b9f0da18fe38e9df4a69544ed096509cd207a8e9ee4e567",
     ),
     (
         "codex-cli",
@@ -962,7 +951,7 @@ const HOOK_REGISTRATION_TEXT_SHA256: &[(&str, &str)] = &[
     ),
     (
         "wsl-claude-code",
-        "5a9ab51f54a14f0d39b8f25a0d77fcf9544c64aff8debb35a81402c27b1cfc9c",
+        "b74899b4c3d29bd80100d362f3c70a55643df6c45d83d6b806ee74e90d9ae12c",
     ),
     (
         "wsl-codex-cli",

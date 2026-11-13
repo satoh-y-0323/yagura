@@ -7,6 +7,9 @@
 schema = 1
 display_name = "WSL: GitHub Copilot CLI"
 detection = "copilot-cli"
+# A sub-agent's hooks carry `agentId`: the daemon reports their running and
+# waiting for approval, and does nothing else for them.
+subagent_pointer = "/agentId"
 
 [command]
 windows = ["wsl", "-e", "bash", "-lic", "exec \"$0\" \"$@\"", "copilot"]
@@ -93,13 +96,13 @@ command = "/command"
 disable = ["--disable-mcp-server", "{server}"]
 
 # What each hook does is this table: the hooks above all call the `--hook`
-# door. A sub-agent's hooks carry `agentId`, so they are skipped. `agentStop`
-# hands what waits over as a block, once per stop that is not a continuation
-# (`stop_hook_active` is false), which makes Copilot go on with it.
+# door. `agentStop` hands what waits over as a block, once per stop that is
+# not a continuation (`stop_hook_active` is false), which makes Copilot go on
+# with it.
 [hook_events]
-sessionStart = { deliver = "context", skip_if = "/agentId" }
-userPromptSubmitted = { status = "running", skip_if = "/agentId" }
-preToolUse = { status = "running", skip_if = "/agentId" }
-postToolUse = { status = "running", deliver = "take", skip_if = "/agentId" }
-postToolUseFailure = { status = "running", skip_if = "/agentId" }
-agentStop = { status = "waiting_input", deliver = "block", skip_if = "/agentId", when = { "/stop_hook_active" = false } }
+sessionStart = { deliver = "context" }
+userPromptSubmitted = { status = "running" }
+preToolUse = { status = "running" }
+postToolUse = { status = "running", deliver = "take" }
+postToolUseFailure = { status = "running" }
+agentStop = { status = "waiting_input", deliver = "block", when = { "/stop_hook_active" = false } }

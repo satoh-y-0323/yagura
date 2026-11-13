@@ -4,7 +4,7 @@
 //! The table is data. The core reads it and acts on it; it never branches on
 //! which CLI a profile is for.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::Deserialize;
 use serde::de::IntoDeserializer;
@@ -15,6 +15,62 @@ use yagura_protocol::WindowStatus;
 pub(crate) const MAX_EVENT_NAME_LEN: usize = 64;
 /// The longest JSON pointer, in characters, an event may name.
 const MAX_POINTER_CHARS: usize = 256;
+/// The top-level profile key naming the pointer that tells a subagent's hook
+/// apart ([`ProfileHookEvents::subagent_pointer`]).
+pub(crate) const SUBAGENT_POINTER_KEY: &str = "subagent_pointer";
+/// The per-event key [`SUBAGENT_POINTER_KEY`] replaced, still read once.
+const OLDER_SKIP_IF_KEY: &str = "skip_if";
+
+/// Whether a hook came from the window's main session or from a subagent the
+/// session started: a fact of the CLI's hook input.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HookOrigin {
+    /// The window's own session.
+    Main,
+    /// A subagent of it, foreground or background.
+    Subagent,
+}
+
+impl HookOrigin {
+    /// The origin of a hook whose input has (`true`) or lacks a value at the
+    /// subagent pointer.
+    #[must_use]
+    pub fn from_subagent_value(present: bool) -> Self {
+        if present { Self::Subagent } else { Self::Main }
+    }
+}
+
+/// What a hook can do to its window. Which of these a subagent's hook does is
+/// yagura's decision, made once in [`HookEffect::applies_to`]; a profile only
+/// says how its CLI marks a subagent's hook.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HookEffect {
+    /// Recording this status.
+    Status(WindowStatus),
+    /// Recording the session the hook names.
+    Session,
+    /// Handing the inbox over: a take, the context, a wait or a block.
+    Deliver,
+}
+
+impl HookEffect {
+    /// Whether a hook of `origin` has this effect.
+    #[must_use]
+    pub fn applies_to(self, origin: HookOrigin) -> bool {
+        match (self, origin) {
+            (_, HookOrigin::Main) => true,
+            // A subagent's work is the window's work, a background subagent's included.
+            (
+                Self::Status(WindowStatus::Running | WindowStatus::WaitingApproval),
+                HookOrigin::Subagent,
+            ) => true,
+            // A subagent's end is not the end of the window's turn.
+            (Self::Status(_), HookOrigin::Subagent) => false,
+            // The session and the inbox are the main session's.
+            (Self::Session | Self::Deliver, HookOrigin::Subagent) => false,
+        }
+    }
+}
 
 /// What a hook's event asks the daemon to read from the window's inbox.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -31,10 +87,10 @@ pub enum HookDeliver {
     Block,
 }
 
-/// What the daemon does for one event. Applied in a fixed order:
-/// `skip_if`, then `session`, then `status`, then `deliver` (which `when`
-/// gates; a block moves `status` to where its door ends, see
-/// [`HookDeliver::Block`]).
+/// What the daemon does for one event. Applied in a fixed order: `session`,
+/// then `status`, then `deliver` (which `when` gates; a block moves `status`
+/// to where its door ends, see [`HookDeliver::Block`]), each only when it
+/// [`HookEffect::applies_to`] the hook's [`HookOrigin`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HookEvent {
     /// The status the window is recorded in.
@@ -43,9 +99,6 @@ pub struct HookEvent {
     pub deliver: Option<HookDeliver>,
     /// The JSON pointer to the session identifier in the hook's input.
     pub session: Option<String>,
-    /// The JSON pointer that, when the hook's input has a value there, makes
-    /// the event do nothing.
-    pub skip_if: Option<String>,
     /// The values the hook's input must hold, at these JSON pointers, for
     /// `deliver` to hand anything over. The door compares them and tells the
     /// daemon only whether each one matched; a value that is missing does not.
@@ -56,6 +109,7 @@ pub struct HookEvent {
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ProfileHookEvents {
     events: BTreeMap<String, HookEvent>,
+    subagent: Option<String>,
 }
 
 impl ProfileHookEvents {
@@ -63,6 +117,14 @@ impl ProfileHookEvents {
     #[must_use]
     pub fn get(&self, name: &str) -> Option<&HookEvent> {
         self.events.get(name)
+    }
+
+    /// The JSON pointer at which a subagent's hook input, on every event, has
+    /// a value and the main session's has none. `None` when the profile names
+    /// none: every hook is the main session's.
+    #[must_use]
+    pub fn subagent_pointer(&self) -> Option<&str> {
+        self.subagent.as_deref()
     }
 }
 
@@ -90,6 +152,25 @@ pub enum HookEventsError {
     /// nothing.
     #[error("an event has none of `status`, `deliver` and `session`")]
     NoAction,
+    /// The events' older `skip_if` values differ, so no one subagent pointer
+    /// keeps what each event told apart.
+    #[error("the events' `skip_if` values differ")]
+    SkipIfDiffers,
+}
+
+impl HookEventsError {
+    /// The fixed phrase a profile listing shows for this error. Only the one
+    /// that asks for a rewrite names the key to write; none names anything
+    /// read from the document.
+    #[must_use]
+    pub(crate) fn listed_reason(&self) -> &'static str {
+        match self {
+            Self::SkipIfDiffers => {
+                "invalid hook events table: the events' skip_if differ; name one subagent_pointer instead"
+            }
+            _ => "invalid hook events table",
+        }
+    }
 }
 
 /// Whether `name` is an event name: `[A-Za-z0-9_-]{1,64}`.
@@ -102,27 +183,69 @@ pub fn is_hook_event_name(name: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
 }
 
-/// Reads and validates a profile's `hook_events` value. `None` in, `None` out.
+/// Reads and validates a profile's `hook_events` value with its top-level
+/// [`SUBAGENT_POINTER_KEY`]. `None` in, `None` out.
+///
+/// An older per-event `skip_if` becomes the subagent pointer when every event
+/// that writes it writes the same value, with a warning naming the key to
+/// write instead; values that differ are refused, since one pointer would
+/// change how some event tells a subagent apart.
 pub(crate) fn parse_hook_events(
     raw: Option<toml::Value>,
+    raw_subagent: Option<toml::Value>,
+    warnings: &mut Vec<String>,
 ) -> Result<Option<ProfileHookEvents>, HookEventsError> {
+    let subagent = raw_subagent
+        .map(|value| match value {
+            toml::Value::String(pointer) if is_pointer(&pointer) => Ok(pointer),
+            _ => Err(HookEventsError::Invalid(SUBAGENT_POINTER_KEY)),
+        })
+        .transpose()?;
     let Some(raw) = raw else {
+        if subagent.is_some() {
+            warnings.push(format!(
+                "{SUBAGENT_POINTER_KEY} is read only with a [hook_events] table and was ignored"
+            ));
+        }
         return Ok(None);
     };
     let toml::Value::Table(table) = raw else {
         return Err(HookEventsError::NotATable);
     };
     let mut events = BTreeMap::new();
+    let mut older = BTreeSet::new();
     for (name, value) in table {
         if !is_hook_event_name(&name) {
             return Err(HookEventsError::InvalidEventName);
         }
-        events.insert(name, parse_event(value)?);
+        let (event, skip_if) = parse_event(value)?;
+        older.extend(skip_if);
+        events.insert(name, event);
     }
-    Ok(Some(ProfileHookEvents { events }))
+    let subagent = match (subagent, older.len()) {
+        (subagent, 0) => subagent,
+        (Some(subagent), _) => {
+            warnings.push(format!(
+                "[hook_events] {OLDER_SKIP_IF_KEY} was ignored, as {SUBAGENT_POINTER_KEY} is \
+                 given; remove {OLDER_SKIP_IF_KEY}"
+            ));
+            Some(subagent)
+        }
+        (None, 1) => {
+            warnings.push(format!(
+                "[hook_events] {OLDER_SKIP_IF_KEY} is read as {SUBAGENT_POINTER_KEY}, which \
+                 tells a subagent's hook apart on every event, those without {OLDER_SKIP_IF_KEY} \
+                 too; write {SUBAGENT_POINTER_KEY} instead"
+            ));
+            older.pop_first()
+        }
+        (None, _) => return Err(HookEventsError::SkipIfDiffers),
+    };
+    Ok(Some(ProfileHookEvents { events, subagent }))
 }
 
-fn parse_event(value: toml::Value) -> Result<HookEvent, HookEventsError> {
+/// One event and the older `skip_if` it wrote, if any.
+fn parse_event(value: toml::Value) -> Result<(HookEvent, Option<String>), HookEventsError> {
     let toml::Value::Table(mut table) = value else {
         return Err(HookEventsError::EventNotATable);
     };
@@ -137,7 +260,7 @@ fn parse_event(value: toml::Value) -> Result<HookEvent, HookEventsError> {
         Some(_) => return Err(HookEventsError::Invalid("deliver")),
     };
     let session = take_pointer(&mut table, "session")?;
-    let skip_if = take_pointer(&mut table, "skip_if")?;
+    let skip_if = take_pointer(&mut table, OLDER_SKIP_IF_KEY)?;
     let when = parse_when(table.remove("when"))?;
     if let Some(key) = table.keys().next() {
         return Err(HookEventsError::UnknownKey(key.clone()));
@@ -148,13 +271,13 @@ fn parse_event(value: toml::Value) -> Result<HookEvent, HookEventsError> {
     if !when.is_empty() && deliver.is_none() {
         return Err(HookEventsError::Invalid("when"));
     }
-    Ok(HookEvent {
+    let event = HookEvent {
         status,
         deliver,
         session,
-        skip_if,
         when,
-    })
+    };
+    Ok((event, skip_if))
 }
 
 /// `when`: a table of JSON pointers to a string, an integer or a boolean.

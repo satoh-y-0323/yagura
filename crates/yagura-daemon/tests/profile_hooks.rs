@@ -204,7 +204,7 @@ fn expected_commands(program: &str, credentials: &str) -> BTreeMap<String, Vec<S
         hook_command(
             program,
             credentials,
-            &format!("--emit-status {status} --source claude-code"),
+            &format!("--emit-status {status} --source claude-code --skip-if /agent_id"),
         )
     };
     let door = |name: &str| hook_command(program, credentials, &format!("--deliver-{name}"));
