@@ -831,7 +831,8 @@ impl DetectionEngine {
     /// [`TURN_ACTIVE_QUIET`], or no report for [`TURN_REPORT_STALE`]. It stays
     /// closed -- later output does not reopen it -- until the next opening
     /// report, so a redraw long after an interrupt no report announced cannot
-    /// bring `Running` back.
+    /// bring `Running` back. Ends a taken-back window's inherited turn by the
+    /// same limits, so both are judged before new output moves the quiet time.
     fn close_quiet_turn(&mut self, now: Instant) {
         let quiet = self.turn.closes_on_silence()
             && now.saturating_duration_since(self.turn_output_at) >= TURN_ACTIVE_QUIET;

@@ -196,7 +196,7 @@ async fn the_grace_runs_from_the_first_running_the_screen_confirmed() {
 
     let mut c = Driver::new(Some(ReportsExpected::FromTakeBack));
     c.feed_at(0, &approval()).await;
-    let at = 2 * QUIET_MS;
+    let at = STALE_MS + 1_000;
     c.feed_at(at, &running()).await;
     for offset in (1_000..=GRACE_MS).step_by(1_000) {
         c.feed_at(at + offset, &running()).await;
@@ -208,7 +208,7 @@ async fn the_grace_runs_from_the_first_running_the_screen_confirmed() {
 
     let mut d = Driver::new(Some(ReportsExpected::FromTakeBack));
     d.feed_at(0, &approval()).await;
-    let at = 2 * QUIET_MS;
+    let at = STALE_MS + 1_000;
     d.input_at(at, InputEcho::EchoOnly).await;
     d.feed_at(at + 50, &running()).await;
     for offset in (1_000..=GRACE_MS).step_by(1_000) {
