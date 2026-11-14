@@ -1,7 +1,7 @@
 /**
- * Drives one window's session: runs the attach handshake, keeps that window's
- * store in sync, applies the frames the daemon sends to the window's grid and
- * forwards the user's input.
+ * Drives one window's session: asks the core to attach it, keeps that window's
+ * store in step with the core's link reports, applies the frames the daemon
+ * sends to the window's grid and forwards the user's input.
  *
  * The grid lives here rather than in the pane, because the controller
  * outlives it: a frame that arrives while no pane is mounted is applied and
@@ -10,13 +10,15 @@
  *
  * It does not subscribe to events itself: the subscription is taken once for
  * the application and routed by window id, so the controller exposes its
- * handlers instead of installing them. It also does not open or
- * tear down the connection to the daemon; the Tauri core owns that lifecycle.
+ * handlers instead of installing them. It also does not open or tear down the
+ * connection to the daemon, nor restore what a new connection forgot: the
+ * Tauri core owns that lifecycle and the window's state, so everything the
+ * view asks for is handed to the core whatever the phase.
  */
 
 import { get } from 'svelte/store';
 
-import { isValidSize, type Frame } from '../ipc/session-boundary';
+import { isValidSize, type Frame, type WindowLinkPayload } from '../ipc/session-boundary';
 import {
   invokeAttachWindow,
   invokeClearWindowSelection,
@@ -32,6 +34,7 @@ import {
 import { isSessionInteractive, type SessionStore } from '../stores/session-store';
 import type { DirtyRows } from '../terminal/canvas-renderer';
 import { applyFrame, createGrid, type TerminalGrid } from '../terminal/frame-grid';
+import { canApplyTerminalSize } from './size-report';
 
 /** Measured size of the terminal view, in character cells. */
 export interface TerminalSize {
@@ -49,6 +52,8 @@ export interface TerminalSink {
   measure: () => TerminalSize | null;
   /** Moves keyboard focus into the terminal. */
   focus: () => void;
+  /** Whether the view's pane is displayed. */
+  isVisible: () => boolean;
 }
 
 /** Session lifecycle for a single terminal pane. */
@@ -56,12 +61,11 @@ export class SessionController {
   /** What the window shows, as the frames applied so far left it. */
   private grid: TerminalGrid = createGrid();
   private sink: TerminalSink | null = null;
-  private isSuperseded = false;
   private isRecovering = false;
-  private lastSentSize: TerminalSize | null = null;
-  private palette: WirePalette | null = null;
-  /** Whether the window is on screen; the daemon assumes so on every attach. */
+  /** Whether the pane is on screen now, so the same value is not sent twice. */
   private isShown = true;
+  /** The epoch of the last link report applied; an older one is stale. */
+  private appliedEpoch = -1;
 
   constructor(
     /** The window this controller drives. */
@@ -87,63 +91,34 @@ export class SessionController {
     return {
       onFrame: (frame) => this.applyFrame(frame),
       onExit: (payload) => {
-        this.handleExit(payload.exit_code);
+        this.store.markExited(payload.exit_code);
       },
-      onDisconnected: (payload) => {
-        this.store.markFailed(payload.reason);
-      },
-      onSuperseded: () => {
-        this.isSuperseded = true;
-        this.store.markSuperseded();
+      onLink: (payload) => {
+        this.applyLink(payload);
       },
     };
   }
 
   /**
-   * Runs the attach handshake; the window's screen follows as frames.
-   * Failures land in the store as `failed`, which is what the retry banner
-   * reacts to.
+   * Asks the core to attach the window at the size the terminal is drawn at,
+   * so the daemon lays the screen out for it before sending it as frames. How
+   * it went arrives as link reports; a window another client took over is
+   * left to it.
    */
   async start(): Promise<void> {
-    this.store.markConnecting();
+    if (get(this.store).phase === 'superseded') {
+      return;
+    }
     try {
-      // The attach names the size the terminal is drawn at, so the daemon lays
-      // the screen out for it before sending it.
-      const size = this.measuredSize();
-      const response = await invokeAttachWindow(this.windowId, size);
-      if (response.child_exited) {
-        // The daemon does not resize a window whose child has exited.
-        this.handleExit(response.exit_code);
-      } else {
-        this.lastSentSize = size;
-        this.store.markAttached();
-      }
-      this.sendPalette();
-      if (!this.isShown) {
-        this.sendVisibility();
-      }
-    } catch (error) {
-      this.store.markFailed(describeError(error));
+      await invokeAttachWindow(this.windowId, this.reportableSize());
+    } catch (error: unknown) {
+      console.warn(`failed to attach ${this.windowId}:`, error);
     }
   }
 
-  /**
-   * Retries a failed connection. A superseded session never reconnects: the
-   * client that took over owns the window now.
-   */
-  async retry(): Promise<void> {
-    if (this.isSuperseded) {
-      return;
-    }
-    await this.start();
-  }
-
-  /** Forwards input to the window, unless input is currently disabled. */
+  /** Forwards input to the window; whether it is held while the window reconnects is the core's call. */
   sendInput(input: WindowInput): void {
-    if (!isSessionInteractive(get(this.store))) {
-      return;
-    }
-    this.report(invokeSendWindowInput(this.windowId, input));
+    this.reportQuietly(invokeSendWindowInput(this.windowId, input), 'forward the input');
   }
 
   /** The text selected in the window, `null` when nothing is. */
@@ -156,25 +131,24 @@ export class SessionController {
     if (!isSessionInteractive(get(this.store))) {
       return;
     }
-    this.report(invokeClearWindowSelection(this.windowId));
+    this.reportQuietly(invokeClearWindowSelection(this.windowId), 'clear the selection');
   }
 
-  /** Records the colors the window is drawn with and gives them to the daemon. */
+  /** Gives the core the colors the window is drawn with. */
   setPalette(palette: WirePalette): void {
-    this.palette = palette;
-    this.sendPalette();
+    this.reportQuietly(invokeSetWindowPalette(this.windowId, palette), 'send the palette');
   }
 
   /**
-   * Tells the daemon when the window goes on or off screen (its pane hidden,
-   * or the whole app hidden), so it builds no frames for it meanwhile.
+   * Tells the core when the window goes on or off screen (its pane hidden,
+   * or the whole app hidden), so the daemon builds no frames for it meanwhile.
    */
   setVisible(isVisible: boolean): void {
     if (this.isShown === isVisible) {
       return;
     }
     this.isShown = isVisible;
-    this.sendVisibility();
+    this.reportQuietly(invokeSetWindowVisible(this.windowId, this.isShown), 'send the visibility');
   }
 
   /** Moves keyboard focus into this window's terminal; a no-op while none is connected. */
@@ -182,19 +156,13 @@ export class SessionController {
     this.sink?.focus();
   }
 
-  /** Reports a new terminal size to the PTY. */
-  notifyResize(size: TerminalSize): void {
-    if (!isSessionInteractive(get(this.store))) {
+  /** Measures the terminal and reports the size to the PTY, when it is one a window may take. */
+  reportMeasuredSize(): void {
+    const size = this.reportableSize();
+    if (size === null) {
       return;
     }
-    if (!isValidSize(size)) {
-      return;
-    }
-    if (this.lastSentSize?.cols === size.cols && this.lastSentSize.rows === size.rows) {
-      return;
-    }
-    this.lastSentSize = size;
-    this.report(invokeResize(this.windowId, size.cols, size.rows));
+    this.reportQuietly(invokeResize(this.windowId, size.cols, size.rows), 'report the size');
   }
 
   /** Releases the view; the connection itself is the core's to close. */
@@ -202,10 +170,45 @@ export class SessionController {
     this.sink = null;
   }
 
-  /** The terminal's measured size, or `null` when there is none a window can take. */
-  private measuredSize(): TerminalSize | null {
-    const size = this.sink?.measure() ?? null;
-    return size !== null && isValidSize(size) ? size : null;
+  /**
+   * The terminal's measured size when the size gate lets it through, `null`
+   * otherwise: every size this controller hands the core passes the gate here.
+   */
+  private reportableSize(): TerminalSize | null {
+    if (this.sink === null) {
+      return null;
+    }
+    const size = this.sink.measure();
+    if (size === null || !isValidSize(size)) {
+      return null;
+    }
+    return canApplyTerminalSize(this.sink.isVisible(), size) ? size : null;
+  }
+
+  /**
+   * Applies a link report newer than the last one applied. A session that
+   * ended (exited or superseded) stays ended.
+   */
+  private applyLink(payload: WindowLinkPayload): void {
+    const { phase } = get(this.store);
+    if (payload.epoch <= this.appliedEpoch || phase === 'exited' || phase === 'superseded') {
+      return;
+    }
+    this.appliedEpoch = payload.epoch;
+    switch (payload.state) {
+      case 'connecting':
+        this.store.markConnecting();
+        break;
+      case 'attached':
+        this.store.markAttached();
+        break;
+      case 'lost':
+        this.store.markFailed(payload.reason);
+        break;
+      case 'superseded':
+        this.store.markSuperseded();
+        break;
+    }
   }
 
   /**
@@ -231,8 +234,6 @@ export class SessionController {
       return null;
     }
     if (frame.reset) {
-      // The first frame of a view: a daemon that came back has no palette yet.
-      this.sendPalette();
       this.sink?.invalidate('all');
     } else {
       this.sink?.invalidate([cursorRow, ...frame.lines.map((line) => line.row)]);
@@ -241,7 +242,7 @@ export class SessionController {
   }
 
   private recover(): void {
-    if (this.isRecovering || this.isSuperseded) {
+    if (this.isRecovering || get(this.store).phase === 'superseded') {
       return;
     }
     this.isRecovering = true;
@@ -250,54 +251,13 @@ export class SessionController {
     });
   }
 
-  private sendPalette(): void {
-    if (this.palette === null) {
-      return;
-    }
-    if (!isSessionInteractive(get(this.store))) {
-      return;
-    }
-    this.reportQuietly(invokeSetWindowPalette(this.windowId, this.palette), 'send the palette');
-  }
-
-  private sendVisibility(): void {
-    if (!isSessionInteractive(get(this.store))) {
-      return;
-    }
-    this.reportQuietly(invokeSetWindowVisible(this.windowId, this.isShown), 'send the visibility');
-  }
-
-  /** The single termination path: a live `exit` and re-attaching to an already
-   * exited child are reported the same way. */
-  private handleExit(exitCode: number | null): void {
-    this.store.markExited(exitCode);
-  }
-
   /**
-   * Logs a rejected command that only follows the connection: when it fails
-   * the connection is gone, which the disconnect or exit path reports.
+   * Logs a rejected command: the phase is the core's link reports' to set, so
+   * a refusal changes nothing here.
    */
   private reportQuietly(operation: Promise<void>, what: string): void {
     operation.catch((error: unknown) => {
       console.warn(`failed to ${what} for ${this.windowId}:`, error);
     });
   }
-
-  /** Surfaces a rejected fire-and-forget command through the banner. */
-  private report(operation: Promise<void>): void {
-    operation.catch((error: unknown) => {
-      this.store.markFailed(describeError(error));
-    });
-  }
-}
-
-/** Tauri command errors arrive as the string the Rust side returned. */
-function describeError(error: unknown): string {
-  if (typeof error === 'string') {
-    return error;
-  }
-  if (error instanceof Error) {
-    return error.message;
-  }
-  return JSON.stringify(error) ?? 'unexpected error';
 }

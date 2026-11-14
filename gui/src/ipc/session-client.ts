@@ -29,7 +29,6 @@ import {
   narrowApprovalResetPayload,
   narrowApprovalSyncOutcome,
   narrowApprovalWithdrawnPayload,
-  narrowAttachResponse,
   narrowChatChanged,
   narrowChatHistoryCleared,
   narrowChatMessages,
@@ -39,7 +38,6 @@ import {
   narrowDaemonRecoveryPayload,
   narrowDaemonSpawnWarningPayload,
   narrowDecideApprovalOutcome,
-  narrowDisconnectedPayload,
   narrowExitPayload,
   narrowFrame,
   narrowRecoveryStatusReport,
@@ -48,8 +46,8 @@ import {
   narrowSelectionText,
   narrowStatusPayload,
   narrowStringResult,
-  narrowSupersededPayload,
   narrowWindowInfoList,
+  narrowWindowLinkPayload,
   narrowWindowListPayload,
   narrowWindowOpenFailure,
   ownEntries,
@@ -68,7 +66,6 @@ import {
   type ApprovalResetPayload,
   type ApprovalSyncOutcome,
   type ApprovalWithdrawnPayload,
-  type AttachResponse,
   type ChatChanged,
   type ChatHistoryCleared,
   type ChatMessages,
@@ -79,7 +76,6 @@ import {
   type DaemonRecoveryPayload,
   type DaemonSpawnWarningPayload,
   type DecideApprovalOutcome,
-  type DisconnectedPayload,
   type ExitPayload,
   type Frame,
   type OnNameTaken,
@@ -88,9 +84,9 @@ import {
   type RestoreEntry,
   type SessionEventName,
   type StatusPayload,
-  type SupersededPayload,
   type UntrustedRecord,
   type WindowInfo,
+  type WindowLinkPayload,
   type WindowListPayload,
   type WindowScoped,
 } from './session-boundary';
@@ -107,10 +103,8 @@ export interface WindowEventHandlers {
   onFrame: (frame: Frame) => number | null;
   /** The child process of this window exited. */
   onExit: (payload: ExitPayload) => void;
-  /** This window's connection was lost and could not be recovered. */
-  onDisconnected: (payload: DisconnectedPayload) => void;
-  /** Another client took this window over; it must not reconnect. */
-  onSuperseded: (payload: SupersededPayload) => void;
+  /** This window's link to the daemon moved; the only source of its phase. */
+  onLink: (payload: WindowLinkPayload) => void;
 }
 
 /** Callbacks for events that belong to the application, not to one window. */
@@ -153,17 +147,16 @@ export type WindowHandlerResolver = (windowId: string) => WindowEventHandlers | 
 
 /**
  * Attaches to one window's session at the size the window will be drawn at
- * (`null` keeps the window's own size).
+ * (`null` keeps the window's own size). How the attach went arrives as the
+ * window's link and exit events.
  *
- * @throws when the core rejects the request or the reply fails validation.
+ * @throws when the core rejects the request.
  */
 export async function invokeAttachWindow(
   windowId: string,
   size: { cols: number; rows: number } | null
-): Promise<AttachResponse> {
-  return narrowAttachResponse(
-    await invoke<unknown>('attach_window', { window_id: windowId, size })
-  );
+): Promise<void> {
+  await invoke('attach_window', { window_id: windowId, size });
 }
 
 /** A cell of a window's view, counted from 0 at the top-left. */
@@ -1367,21 +1360,12 @@ export async function subscribeSession(
       handlers.onExit(payload);
     }),
     listenWindowEvent(
-      SESSION_EVENT.disconnected,
-      narrowDisconnectedPayload,
+      SESSION_EVENT.windowLink,
+      narrowWindowLinkPayload,
       resolve,
       app,
       (handlers, payload) => {
-        handlers.onDisconnected(payload);
-      }
-    ),
-    listenWindowEvent(
-      SESSION_EVENT.superseded,
-      narrowSupersededPayload,
-      resolve,
-      app,
-      (handlers, payload) => {
-        handlers.onSuperseded(payload);
+        handlers.onLink(payload);
       }
     ),
     listenAppEvent(

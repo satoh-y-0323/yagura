@@ -24,3 +24,4 @@ pub mod pool_outcomes;
 pub mod recovery_state;
 pub mod themes;
 pub mod window_list_poll;
+pub mod window_record;

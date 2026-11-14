@@ -17,7 +17,6 @@ vi.mock('@tauri-apps/api/event', () => ({
   listen: listenMock,
 }));
 
-import { BoundaryError } from './session-boundary';
 import { invokeAttachWindow } from './session-client';
 
 type ListenCallback = (event: { payload: unknown }) => void;
@@ -38,7 +37,7 @@ beforeEach(() => {
 
 describe('invokeAttachWindow', () => {
   it('sends the size the window will be drawn at', async () => {
-    invokeMock.mockResolvedValueOnce({ child_exited: false, exit_code: null });
+    invokeMock.mockResolvedValueOnce(undefined);
 
     const result = await invokeAttachWindow(WINDOW_ID, { cols: 120, rows: 40 });
 
@@ -47,22 +46,16 @@ describe('invokeAttachWindow', () => {
       window_id: WINDOW_ID,
       size: { cols: 120, rows: 40 },
     });
-    expect(result).toEqual({ child_exited: false, exit_code: null });
+    expect(result).toBeUndefined();
   });
 
   it('sends no size when there is none to send', async () => {
-    invokeMock.mockResolvedValueOnce({ child_exited: false, exit_code: null });
+    invokeMock.mockResolvedValueOnce(undefined);
 
     await invokeAttachWindow(WINDOW_ID, null);
 
     const args = invokeMock.mock.calls[0]?.[1] as Record<string, unknown>;
     expect(args.window_id).toBe(WINDOW_ID);
     expect(args.size ?? null).toBeNull();
-  });
-
-  it('rejects a result that does not say whether the child exited', async () => {
-    invokeMock.mockResolvedValueOnce({ exit_code: null });
-
-    await expect(invokeAttachWindow(WINDOW_ID, null)).rejects.toBeInstanceOf(BoundaryError);
   });
 });

@@ -1,5 +1,4 @@
-//! The WebView boundary: the canonical Tauri event set and the return
-//! type of the `attach` command.
+//! The WebView boundary: the canonical Tauri event set.
 //!
 //! Every field name here is `snake_case` and is mirrored verbatim by the
 //! TypeScript narrowing layer (`gui/src/`), per the cross-boundary naming
@@ -20,13 +19,10 @@ use crate::recovery_state::RecoveryStatus;
 /// termination path.
 pub const EVENT_EXIT: &str = "session://exit";
 
-/// The connection was lost and could not be recovered. Payload:
-/// [`DisconnectedPayload`].
-pub const EVENT_DISCONNECTED: &str = "session://disconnected";
-
-/// Another GUI window took over the session; this one must not reconnect.
-/// Payload: [`SupersededPayload`].
-pub const EVENT_SUPERSEDED: &str = "session://superseded";
+/// A window's link to the daemon moved, or an attach reported where it
+/// stands. The only source of a window's connection phase: a command's result
+/// never sets it. Payload: [`WindowLinkPayload`].
+pub const EVENT_WINDOW_LINK: &str = "session://window-link";
 
 /// The daemon had to be started with the weaker detachment fallback
 /// (`DetachedSpawn::used_fallback`). On Windows this means
@@ -113,22 +109,43 @@ pub struct ExitPayload {
     pub exit_code: i32,
 }
 
-/// Payload of [`EVENT_DISCONNECTED`].
-#[derive(Debug, Clone, Serialize)]
-pub struct DisconnectedPayload {
-    /// The window this disconnection belongs to (protocol v2).
-    pub window_id: String,
-    /// Machine-readable reason, currently always `"reconnect_failed"`.
-    pub reason: String,
+/// The state a [`WindowLinkPayload`] reports.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WindowLinkState {
+    /// Not attached yet, or attaching again after the link went down.
+    Connecting,
+    /// Attached to a live child.
+    Attached,
+    /// The window could not be reached; the next window-list poll tries
+    /// again.
+    Lost,
+    /// Another GUI took the window over; this one never reconnects it.
+    Superseded,
 }
 
-/// Payload of [`EVENT_SUPERSEDED`].
+/// Why a window's link was lost: a fixed code, never a rendered error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LinkLostReason {
+    /// The reconnect after the connection dropped gave up.
+    ReconnectFailed,
+    /// An attach of the window failed.
+    AttachFailed,
+}
+
+/// Payload of [`EVENT_WINDOW_LINK`].
 #[derive(Debug, Clone, Serialize)]
-pub struct SupersededPayload {
-    /// The window that was superseded (protocol v2).
+pub struct WindowLinkPayload {
+    /// The window whose link this is.
     pub window_id: String,
-    /// Machine-readable reason, currently always `"superseded"`.
-    pub reason: String,
+    /// Where the link stands.
+    pub state: WindowLinkState,
+    /// Why the link was lost; present on [`WindowLinkState::Lost`] only.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<LinkLostReason>,
+    /// Larger than the epoch of every link report before it, of any window.
+    pub epoch: u64,
 }
 
 /// Payload of [`EVENT_DAEMON_SPAWN_WARNING`].
@@ -300,13 +317,10 @@ pub struct DaemonRecoveryPayload {
     pub rev: u64,
 }
 
-/// Return value of the `attach` command. The window's screen follows as
-/// frames, which the WebView pulls with `next_frames`.
-///
-/// Mirrors `DaemonMessage::Attached` field for field so the TypeScript side
-/// can validate the command result with the same narrowing style it uses for
-/// event payloads ("boundary validation on the TS side").
-#[derive(Debug, Clone, Serialize)]
+/// What the daemon answered an attach with (`DaemonMessage::Attached`). Read
+/// in the core only: the window's link reaches the WebView as
+/// [`EVENT_WINDOW_LINK`] and [`EVENT_EXIT`].
+#[derive(Debug, Clone)]
 pub struct AttachResponse {
     /// Whether the child process has already exited.
     pub child_exited: bool,

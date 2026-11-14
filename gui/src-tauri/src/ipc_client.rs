@@ -16,7 +16,7 @@
 //! this module names no platform type and is not conditionally compiled.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use tokio::io::WriteHalf;
 use tokio::sync::{Mutex, oneshot};
@@ -41,13 +41,13 @@ use crate::constants::{
 use crate::daemon_launch::connect_after_spawn;
 use crate::events::{
     ApprovalRegistrationRefusedPayload, ApprovalRequestedPayload, ApprovalResetPayload,
-    AttachResponse, DisconnectedPayload, EVENT_APPROVAL_REGISTRATION_REFUSED,
-    EVENT_APPROVAL_REQUESTED, EVENT_APPROVAL_RESET, EVENT_DISCONNECTED, EVENT_EXIT,
-    EVENT_SUPERSEDED, ExitPayload, SupersededPayload,
+    AttachResponse, EVENT_APPROVAL_REGISTRATION_REFUSED, EVENT_APPROVAL_REQUESTED,
+    EVENT_APPROVAL_RESET, EVENT_EXIT, ExitPayload, LinkLostReason,
 };
 use crate::host::GuiHost;
 use crate::instance::InstanceResolution;
 use crate::message_dispatch::read_loop;
+use crate::window_record::{LinkState, RecordState, SentSize, WindowRecord};
 
 /// A client-side connection to the daemon's endpoint.
 pub(crate) type Connection = <PlatformIpc as IpcTransport>::ClientConnection;
@@ -302,7 +302,7 @@ struct Pending {
 /// operations. `IpcClient::default()` -- and so
 /// `IpcClient::new()` -- yields `Control`, which is what the connection pool's
 /// single control connection relies on without naming a role explicitly;
-/// `IpcClient::new_window()` is the one way to get `Window` instead, so a
+/// `IpcClient::new_window(record)` is the one way to get `Window` instead, so a
 /// per-window connection always states its role rather than inheriting one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Role {
@@ -350,20 +350,25 @@ pub struct IpcClient {
     /// The window this client is attached to, or `None` for a control connection.
     /// Set by `request_attach` and cleared by `on_disconnect`.
     window_id: Mutex<Option<String>>,
-    /// The size last sent for this window, by an attach or a resize. A
-    /// reconnect attaches at it, so a daemon that came back with the window at
-    /// its default size is brought to the size the view is drawn at.
-    last_size: Mutex<Option<TerminalSize>>,
-    /// The visibility last sent for this window. A reconnect restores it: the
-    /// daemon forgets it with the connection, and a window that was hidden
-    /// would otherwise be built frames for again.
-    last_visible: Mutex<Option<bool>>,
+    /// The record of the window this client serves, `None` for a control
+    /// connection. It outlives this client: what the daemon forgets with a
+    /// connection is restored from it by [`Self::attach_restoring`].
+    record: Option<Arc<WindowRecord>>,
+    /// Tells this client apart from every other one, as a record's owner.
+    serial: u64,
+    /// Set by [`Self::disconnect`] on a window client: one the pool let go of
+    /// changes no record and never attaches again.
+    retired: AtomicBool,
     /// The default palettes last asked for, sent again on every new
     /// connection: a daemon that started again without a store would
     /// otherwise answer with its built-in ones.
     default_palettes: Mutex<SentDefaultPalettes>,
     role: Role,
 }
+
+/// The serial of the next client built. Starts above `0`, which no record
+/// names as its owner.
+static NEXT_SERIAL: AtomicU64 = AtomicU64::new(1);
 
 /// [`IpcClient::set_default_palettes`]'s memory: the palettes, and the
 /// connection `generation` they were last sent on.
@@ -385,8 +390,9 @@ impl Default for IpcClient {
             refused_generation: AtomicU64::new(u64::MAX),
             settled: wire::SettledRevision::new(),
             window_id: Mutex::new(None),
-            last_size: Mutex::new(None),
-            last_visible: Mutex::new(None),
+            record: None,
+            serial: NEXT_SERIAL.fetch_add(1, Ordering::SeqCst),
+            retired: AtomicBool::new(false),
             default_palettes: Mutex::new(SentDefaultPalettes::default()),
             role: Role::Control,
         }
@@ -399,13 +405,18 @@ impl IpcClient {
         Self::default()
     }
 
-    /// Creates a per-window client with no connection established yet. Never
-    /// `Control`: only the connection pool's single control connection may
-    /// register as an approver.
-    pub(crate) fn new_window() -> Self {
-        Self {
+    /// Creates a per-window client with no connection established yet, which
+    /// becomes the owner of `record`. Never `Control`: only the connection
+    /// pool's single control connection may register as an approver.
+    pub(crate) fn new_window(record: Arc<WindowRecord>) -> Self {
+        let client = Self {
             role: Role::Window,
             ..Self::default()
+        };
+        record.set_owner(client.serial);
+        Self {
+            record: Some(record),
+            ..client
         }
     }
 
@@ -429,22 +440,32 @@ impl IpcClient {
         self.connect_inner(app, ConnectMode::Once).await
     }
 
-    /// Attaches this connection to `window_id`, connecting first if needed.
+    /// Attaches this connection to `window_id`, connecting first if needed,
+    /// and restores what the window's record asks for. A failure leaves the
+    /// window's link lost.
     ///
     /// The connect retries a refused endpoint but never starts a
     /// daemon: a window can only exist if one is already running.
     ///
     /// # Errors
     /// Returns [`IpcError`] when the daemon cannot be reached or the window
-    /// does not exist.
+    /// does not exist, and [`IpcError::WindowNotAttached`] on a control
+    /// connection.
     pub async fn attach_window(
         self: &Arc<Self>,
         app: &impl GuiHost,
         window_id: &str,
         size: Option<TerminalSize>,
     ) -> Result<AttachResponse, IpcError> {
-        self.connect_inner(app, ConnectMode::Retry).await?;
-        self.request_attach(window_id, size).await
+        let attached = match self.connect_inner(app, ConnectMode::Retry).await {
+            Ok(()) => self.attach_restoring(app, window_id, size).await,
+            Err(error) => Err(error),
+        };
+        if attached.is_err() {
+            self.lose_link(app, window_id, LinkLostReason::AttachFailed)
+                .await;
+        }
+        attached
     }
 
     /// Lists all windows the daemon currently manages.
@@ -1271,22 +1292,6 @@ impl IpcClient {
         }
     }
 
-    /// Sends an already validated message that needs no reply to the window
-    /// this connection is attached to. Routing is the pool's job: the daemon
-    /// applies it to the connection's own attachment.
-    ///
-    /// # Errors
-    /// Returns [`IpcError`] when no connection is established or the write
-    /// fails.
-    pub async fn send_attached(&self, message: &ClientMessage) -> Result<(), IpcError> {
-        // Remembered even when the send fails: a reconnect restores what the
-        // WebView asked for, and the WebView does not ask again.
-        if let Some(visible) = visibility_set_by(message) {
-            *self.last_visible.lock().await = Some(visible);
-        }
-        self.send(message).await
-    }
-
     /// Gives the daemon the palettes a window it opens from now on answers
     /// color queries with, unless this connection already sent the same ones.
     /// They are remembered and sent again whenever a new connection is made,
@@ -1353,20 +1358,27 @@ impl IpcClient {
     }
 
     /// Sends an already validated resize request for the window this
-    /// connection is attached to.
+    /// connection is attached to. Remembers nothing: the size a window asked
+    /// for is its record's.
     ///
     /// # Errors
     /// Returns [`IpcError`] when no connection is established or the write
     /// fails.
     pub async fn resize(&self, cols: u16, rows: u16) -> Result<(), IpcError> {
-        *self.last_size.lock().await = Some(TerminalSize { cols, rows });
         self.send(&ClientMessage::Resize { cols, rows }).await
     }
 
     /// Releases the connection on purpose: the reader task is cancelled, and
     /// the bumped generation keeps it from reconnecting or reporting a
-    /// disconnect for a window that was retired deliberately.
+    /// disconnect for a window that was retired deliberately. A window client
+    /// is retired for good: it never changes its record again.
     pub async fn disconnect(&self) {
+        if let Some(record) = &self.record {
+            // Under the record's lock, so no change this client makes to the
+            // record is midway.
+            let _record = record.lock().await;
+            self.retired.store(true, Ordering::SeqCst);
+        }
         self.generation.fetch_add(1, Ordering::SeqCst);
         {
             let mut slot = self.writer.lock().await;
@@ -1395,6 +1407,30 @@ impl IpcClient {
     /// connection's internal state.
     pub(crate) async fn window_id(&self) -> Option<String> {
         self.window_id.lock().await.clone()
+    }
+
+    /// This client's current connection: its serial, and the generation of
+    /// the connection installed now.
+    pub(crate) fn connection_id(&self) -> (u64, u64) {
+        (self.serial, self.generation.load(Ordering::SeqCst))
+    }
+
+    /// Whether this client may change `record`: it is the record's owner and
+    /// the pool has not let go of it.
+    fn holds(&self, record: &WindowRecord) -> bool {
+        record.owner() == self.serial && !self.retired.load(Ordering::SeqCst)
+    }
+
+    /// Moves the window's link to lost, when this client still holds the
+    /// record.
+    async fn lose_link(&self, app: &impl GuiHost, window_id: &str, reason: LinkLostReason) {
+        let Some(record) = &self.record else {
+            return;
+        };
+        let mut state = record.lock().await;
+        if self.holds(record) {
+            state.move_to(app, window_id, LinkState::Lost(reason));
+        }
     }
 
     /// The generation whose `register_approver` round trip is still owed, or
@@ -1708,8 +1744,121 @@ impl IpcClient {
         }
     }
 
-    /// Attaches at `size` (`None` keeps the window's own size), remembering a
-    /// size that was sent for the next reconnect.
+    /// Attaches at `size`, or at the size the window's record holds when
+    /// `size` is `None`, and then brings the daemon to what the record asks
+    /// for: the one place a window's state is restored, whether the attach is
+    /// the WebView's, the window-list poll's or a reconnect's.
+    ///
+    /// Restoring happens under the record's lock taken again after the reply,
+    /// in this order: the visibility, palette and size, then the input held
+    /// meanwhile in the order it was typed, then the link becomes attached,
+    /// only if all of it was written on the connection that answered and that
+    /// connection is still installed.
+    /// The state goes first because it is what the screen was when the input
+    /// was typed. A child that has exited is restored nothing: its held input
+    /// is dropped and the exit is reported.
+    async fn attach_restoring(
+        &self,
+        app: &impl GuiHost,
+        window_id: &str,
+        size: Option<TerminalSize>,
+    ) -> Result<AttachResponse, IpcError> {
+        // A control connection has no record, and attaches no window.
+        let Some(record) = &self.record else {
+            return Err(IpcError::WindowNotAttached {
+                window_id: window_id.to_owned(),
+            });
+        };
+        let size = {
+            let mut state = record.lock().await;
+            if size.is_some() {
+                state.size = size;
+            }
+            state.size
+        };
+        let generation = self.generation.load(Ordering::SeqCst);
+        let response = self.request_attach(window_id, size).await?;
+        let mut state = record.lock().await;
+        if !self.holds(record) || state.link == LinkState::Superseded {
+            return Ok(response);
+        }
+        if response.child_exited {
+            state.move_to(app, window_id, LinkState::Exited);
+            app.emit_event(
+                EVENT_EXIT,
+                ExitPayload {
+                    window_id: window_id.to_owned(),
+                    exit_code: response.exit_code.unwrap_or(-1),
+                },
+            );
+            return Ok(response);
+        }
+        if state.link == LinkState::Exited {
+            return Ok(response);
+        }
+        let restored = match self.restore_state(&state, size, generation).await {
+            Ok(()) => self.send_held(&mut state, generation).await,
+            Err(error) => Err(error),
+        };
+        let still_connected = {
+            let slot = self.writer.lock().await;
+            slot.is_connected() && self.generation.load(Ordering::SeqCst) == generation
+        };
+        if restored.is_err() || !still_connected {
+            // The answering connection is gone or going; its disconnect or its
+            // replacement attaches again. Every attach still reports its outcome.
+            state.report(app, window_id);
+            return Ok(response);
+        }
+        state.sent = Some(SentSize {
+            size: state.size,
+            connection: (self.serial, generation),
+        });
+        state.move_to(app, window_id, LinkState::Attached);
+        Ok(response)
+    }
+
+    /// Sends what the record asks for that the daemon forgot with the old
+    /// connection, on the connection of `generation`, stopping at the first
+    /// write that fails.
+    async fn restore_state(
+        &self,
+        state: &RecordState,
+        attached_at: Option<TerminalSize>,
+        generation: u64,
+    ) -> Result<(), IpcError> {
+        let resize = state
+            .size
+            .filter(|size| Some(*size) != attached_at)
+            .map(|size| ClientMessage::Resize {
+                cols: size.cols,
+                rows: size.rows,
+            });
+        let restoring = [
+            visibility_restore(state.visible),
+            state.palette.clone().map(ClientMessage::SetPalette),
+            resize,
+        ];
+        for message in restoring.into_iter().flatten() {
+            self.send_on(&message, generation).await?;
+        }
+        Ok(())
+    }
+
+    /// Writes the held input, oldest first, on the connection of `generation`.
+    /// Each input is let go of only once it is written; a write that fails, or
+    /// a connection that is no longer the one the attach was answered on,
+    /// leaves the rest held for the next attach.
+    async fn send_held(&self, state: &mut RecordState, generation: u64) -> Result<(), IpcError> {
+        while let Some(input) = state.first_pending() {
+            self.send_on(input, generation).await?;
+            state.sent_first();
+        }
+        state.release_bound_if_drained();
+        Ok(())
+    }
+
+    /// Attaches at `size` (`None` keeps the window's own size).
     ///
     /// `attach_view` is gated on the daemon's wire revision, so a revision the
     /// connection has not settled yet is settled first; an older daemon is
@@ -1729,12 +1878,7 @@ impl IpcClient {
             size,
         };
         match self.request(&message, PendingKind::Attach).await {
-            Ok(Reply::Attached(response)) => {
-                if size.is_some() {
-                    *self.last_size.lock().await = size;
-                }
-                Ok(response)
-            }
+            Ok(Reply::Attached(response)) => Ok(response),
             Ok(_) => {
                 *self.window_id.lock().await = None;
                 Err(IpcError::UnexpectedReply)
@@ -1746,12 +1890,29 @@ impl IpcClient {
         }
     }
 
-    async fn send(&self, message: &ClientMessage) -> Result<(), IpcError> {
+    /// Writes `message` on the connection installed now.
+    ///
+    /// # Errors
+    /// Returns [`IpcError`] when no connection is established, the
+    /// connection's revision cannot carry the message, or the write fails.
+    pub(crate) async fn send(&self, message: &ClientMessage) -> Result<(), IpcError> {
         self.writer
             .lock()
             .await
             .send(message, &self.settled, &self.generation)
             .await
+    }
+
+    /// Writes `message` on the connection of `generation` only. The
+    /// generation is compared under the writer's guard, which `install`
+    /// also holds, so the connection cannot be replaced between the
+    /// comparison and the write.
+    async fn send_on(&self, message: &ClientMessage, generation: u64) -> Result<(), IpcError> {
+        let mut slot = self.writer.lock().await;
+        if self.generation.load(Ordering::SeqCst) != generation {
+            return Err(IpcError::NotConnected);
+        }
+        slot.send(message, &self.settled, &self.generation).await
     }
 
     /// Kind of the outstanding request, if any.
@@ -1809,18 +1970,22 @@ impl IpcClient {
 
         self.fail_pending(IpcError::NotConnected).await;
 
+        // Taken only now that the writer's guard is released: the order is
+        // always the record, then the writer.
+        if let (Some(record), Some(window_id)) = (&self.record, wid.as_deref()) {
+            let mut state = record.lock().await;
+            if self.holds(record) {
+                if superseded {
+                    state.move_to(app, window_id, LinkState::Superseded);
+                } else if state.link == LinkState::Attached {
+                    state.move_to(app, window_id, LinkState::Connecting);
+                }
+            }
+        }
+
         // A superseded session must not fight the new GUI for the
         // daemon, so it never reconnects.
         if superseded {
-            if let Some(window_id) = wid {
-                app.emit_event(
-                    EVENT_SUPERSEDED,
-                    SupersededPayload {
-                        window_id,
-                        reason: ERROR_CODE_SUPERSEDED.to_owned(),
-                    },
-                );
-            }
             return;
         }
 
@@ -1829,14 +1994,9 @@ impl IpcClient {
                 return;
             }
         }
-        if let Some(window_id) = wid {
-            app.emit_event(
-                EVENT_DISCONNECTED,
-                DisconnectedPayload {
-                    window_id,
-                    reason: "reconnect_failed".to_owned(),
-                },
-            );
+        if let Some(window_id) = wid.as_deref() {
+            self.lose_link(app, window_id, LinkLostReason::ReconnectFailed)
+                .await;
         }
     }
 
@@ -1845,6 +2005,9 @@ impl IpcClient {
     /// reconnect only recovers from a lost connection, not from a daemon that
     /// is gone.
     async fn try_reconnect(self: &Arc<Self>, app: &impl GuiHost, window_id: Option<&str>) -> bool {
+        if self.retired.load(Ordering::SeqCst) {
+            return false;
+        }
         let Ok(endpoint) = app.endpoint() else {
             return false;
         };
@@ -1856,6 +2019,11 @@ impl IpcClient {
         };
         {
             let mut slot = self.writer.lock().await;
+            // A client the pool let go of meanwhile must not take the window
+            // back from the one that replaced it.
+            if self.retired.load(Ordering::SeqCst) {
+                return false;
+            }
             self.install(app, connection, &mut slot);
         }
         self.ensure_approver_registered(app).await;
@@ -1866,30 +2034,14 @@ impl IpcClient {
         let Some(window_id) = window_id else {
             return true;
         };
+        if self.retired.load(Ordering::SeqCst) {
+            return false;
+        }
 
-        let size = *self.last_size.lock().await;
-        let restore_visibility = visibility_restore(*self.last_visible.lock().await);
-        match self.request_attach(window_id, size).await {
+        match self.attach_restoring(app, window_id, None).await {
             // The daemon follows the answer with a frame of the whole screen,
             // which replaces whatever the WebView drew before.
-            Ok(response) => {
-                if let Some(message) = restore_visibility {
-                    // A failed write is the next disconnect's business.
-                    let _ = self.send(&message).await;
-                }
-                if response.child_exited {
-                    // Re-attaching to an exited child reports the
-                    // termination through the same event as a live `exit`.
-                    app.emit_event(
-                        EVENT_EXIT,
-                        ExitPayload {
-                            window_id: window_id.to_owned(),
-                            exit_code: response.exit_code.unwrap_or(-1),
-                        },
-                    );
-                }
-                true
-            }
+            Ok(_) => true,
             Err(_) => {
                 // Retire the connection so its reader task stays silent and the
                 // next explicit attach starts from a clean state.
@@ -2006,16 +2158,8 @@ mod wire {
     }
 }
 
-/// The visibility a message sets, if it is one that sets it.
-fn visibility_set_by(message: &ClientMessage) -> Option<bool> {
-    match message {
-        ClientMessage::SetVisible { visible } => Some(*visible),
-        _ => None,
-    }
-}
-
 /// The message that puts a re-attached window back to the visibility it last
-/// had, or `None` when none was ever sent and the daemon's default stands.
+/// asked for, or `None` when it never asked and the daemon's default stands.
 fn visibility_restore(last_visible: Option<bool>) -> Option<ClientMessage> {
     last_visible.map(|visible| ClientMessage::SetVisible { visible })
 }
@@ -2098,6 +2242,7 @@ mod host_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::window_record::WindowRecord;
 
     /// A message the baseline revision cannot carry.
     fn frame_gated_message() -> ClientMessage {
@@ -2179,42 +2324,6 @@ mod tests {
         assert!(written.is_empty(), "wrote {written:?}");
     }
 
-    #[tokio::test]
-    async fn a_visibility_and_size_set_while_disconnected_are_restored_on_reconnect() {
-        let client = IpcClient::new_window();
-        assert!(
-            client
-                .send_attached(&ClientMessage::SetVisible { visible: false })
-                .await
-                .is_err()
-        );
-        assert!(client.resize(100, 30).await.is_err());
-        assert_eq!(
-            visibility_restore(*client.last_visible.lock().await),
-            Some(ClientMessage::SetVisible { visible: false })
-        );
-        assert_eq!(
-            *client.last_size.lock().await,
-            Some(TerminalSize {
-                cols: 100,
-                rows: 30
-            })
-        );
-    }
-
-    #[test]
-    fn only_a_set_visible_message_sets_a_visibility() {
-        assert_eq!(
-            visibility_set_by(&ClientMessage::SetVisible { visible: false }),
-            Some(false)
-        );
-        assert_eq!(
-            visibility_set_by(&ClientMessage::SetVisible { visible: true }),
-            Some(true)
-        );
-        assert_eq!(visibility_set_by(&ClientMessage::FrameAck { seq: 1 }), None);
-    }
-
     #[test]
     fn a_reconnect_restores_the_last_visibility_that_was_sent() {
         assert_eq!(
@@ -2255,7 +2364,7 @@ mod tests {
 
     #[test]
     fn approver_registration_due_is_always_none_for_a_window_role_client() {
-        let client = IpcClient::new_window();
+        let client = IpcClient::new_window(Arc::new(WindowRecord::new()));
         assert_eq!(client.approver_registration_due(), None);
         client.mark_approver_registered(0);
         assert_eq!(client.approver_registration_due(), None);
@@ -2324,7 +2433,7 @@ mod tests {
 
     #[tokio::test]
     async fn is_connected_is_false_for_a_freshly_created_window_client() {
-        let client = IpcClient::new_window();
+        let client = IpcClient::new_window(Arc::new(WindowRecord::new()));
         assert!(!client.is_connected().await);
     }
 

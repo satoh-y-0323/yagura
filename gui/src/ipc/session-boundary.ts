@@ -1,6 +1,6 @@
 /**
  * The single WebView-side boundary for everything that crosses the Tauri IPC
- * edge: the canonical session events and the `attach` command result.
+ * edge: the canonical session events and the command results.
  *
  * `gui/src-tauri/src/events.rs` is the source of truth for these shapes, so
  * the field names are copied verbatim (snake_case). Everything the core sends
@@ -18,8 +18,7 @@ import type {
 /** The canonical session events emitted by the Tauri core. */
 export const SESSION_EVENT = {
   exit: 'session://exit',
-  disconnected: 'session://disconnected',
-  superseded: 'session://superseded',
+  windowLink: 'session://window-link',
   daemonSpawnWarning: 'session://daemon-spawn-warning',
   status: 'session://status',
   approvalRequested: 'session://approval-requested',
@@ -196,17 +195,19 @@ export interface Frame {
   overrides: ColorOverride[];
 }
 
-/** Payload of `session://disconnected`. */
-export interface DisconnectedPayload extends WindowScoped {
-  /** Machine-readable reason. */
-  reason: string;
-}
+/** Where a window's link to the daemon stands (`WindowLinkState`, `events.rs`). */
+export type WindowLinkState = 'connecting' | 'attached' | 'lost' | 'superseded';
 
-/** Payload of `session://superseded`. */
-export interface SupersededPayload extends WindowScoped {
-  /** Machine-readable reason. */
-  reason: string;
-}
+/** Why a window's link was lost: a fixed code (`LinkLostReason`, `events.rs`). */
+export type WindowLinkLostReason = 'reconnect_failed' | 'attach_failed';
+
+/**
+ * Payload of `session://window-link`: the only source of a window's connection
+ * phase. A report whose `epoch` is not larger than the last one applied is stale.
+ */
+export type WindowLinkPayload = WindowScoped & { epoch: number } & (
+    { state: 'lost'; reason: WindowLinkLostReason } | { state: Exclude<WindowLinkState, 'lost'> }
+  );
 
 /** Payload of `session://daemon-spawn-warning`. */
 export interface DaemonSpawnWarningPayload {
@@ -700,14 +701,6 @@ export interface DaemonProblem {
   detail: string;
 }
 
-/** Return value of the `attach` command; the screen follows as frames. */
-export interface AttachResponse {
-  /** Whether the child process has already exited. */
-  child_exited: boolean;
-  /** Exit code of the child process, `null` while it is still running. */
-  exit_code: number | null;
-}
-
 /**
  * Why an `open_window` attempt failed, in a shape a caller can branch on
  * without reading the English reason text.
@@ -1012,32 +1005,48 @@ function narrowPaletteSlot(value: unknown, context: string): PaletteSlot {
   return { indexed: requireColorComponent(record, 'indexed', context) };
 }
 
-/**
- * Validates a `session://disconnected` payload.
- *
- * @throws {BoundaryError} when the payload does not match the contract.
- */
-export function narrowDisconnectedPayload(value: unknown): DisconnectedPayload {
-  const context = SESSION_EVENT.disconnected;
-  const record = requireRecord(value, context);
-  return {
-    reason: requireString(record, 'reason', context),
-    window_id: requireString(record, 'window_id', context),
-  };
-}
+const WINDOW_LINK_STATES: ReadonlySet<string> = new Set<WindowLinkState>([
+  'connecting',
+  'attached',
+  'lost',
+  'superseded',
+]);
+
+const WINDOW_LINK_LOST_REASONS: ReadonlySet<string> = new Set<WindowLinkLostReason>([
+  'reconnect_failed',
+  'attach_failed',
+]);
 
 /**
- * Validates a `session://superseded` payload.
+ * Validates a `session://window-link` payload: a known state, a `reason` that
+ * is one of the fixed codes on `lost` and absent otherwise, and an `epoch` that
+ * is a safe non-negative integer.
  *
  * @throws {BoundaryError} when the payload does not match the contract.
  */
-export function narrowSupersededPayload(value: unknown): SupersededPayload {
-  const context = SESSION_EVENT.superseded;
+export function narrowWindowLinkPayload(value: unknown): WindowLinkPayload {
+  const context = SESSION_EVENT.windowLink;
   const record = requireRecord(value, context);
-  return {
-    reason: requireString(record, 'reason', context),
-    window_id: requireString(record, 'window_id', context),
-  };
+  const window_id = requireString(record, 'window_id', context);
+  const state = requireString(record, 'state', context);
+  if (!WINDOW_LINK_STATES.has(state)) {
+    throw new BoundaryError(`${context}.state: unrecognized state "${state}"`);
+  }
+  const epoch = requireNonNegativeInteger(record, 'epoch', context);
+  if (!Number.isSafeInteger(epoch)) {
+    throw new BoundaryError(`${context}.epoch: expected a safe integer`);
+  }
+  if (state !== 'lost') {
+    if (ownsField(record, 'reason')) {
+      throw new BoundaryError(`${context}.reason: only a lost link carries a reason`);
+    }
+    return { window_id, state: state as Exclude<WindowLinkState, 'lost'>, epoch };
+  }
+  const reason = requireString(record, 'reason', context);
+  if (!WINDOW_LINK_LOST_REASONS.has(reason)) {
+    throw new BoundaryError(`${context}.reason: unrecognized reason "${reason}"`);
+  }
+  return { window_id, state, reason: reason as WindowLinkLostReason, epoch };
 }
 
 /**
@@ -1517,20 +1526,6 @@ function narrowChatHalt(value: unknown, context: string): ChatHalt | null {
   return {
     reason: requireString(record, 'reason', context),
     since_ms: requireInteger(record, 'since_ms', context),
-  };
-}
-
-/**
- * Validates the result of the `attach` command.
- *
- * @throws {BoundaryError} when the result does not match the contract.
- */
-export function narrowAttachResponse(value: unknown): AttachResponse {
-  const context = 'attach';
-  const record = requireRecord(value, context);
-  return {
-    child_exited: requireBoolean(record, 'child_exited', context),
-    exit_code: readOptionalInteger(record, 'exit_code', context),
   };
 }
 

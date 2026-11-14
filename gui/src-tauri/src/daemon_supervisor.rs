@@ -160,7 +160,9 @@ mod tests {
 
     use super::*;
     use crate::events::EVENT_DAEMON_RECOVERY;
-    use crate::host::fake::FakeHost;
+    use yagura_protocol::WindowStatus;
+
+    use crate::host::fake::{FakeHost, window_info};
     use crate::ipc_client::{IpcClient, IpcError};
 
     /// A recovery state that has already seen the daemon answer, as an earlier
@@ -179,10 +181,13 @@ mod tests {
 
     async fn pool_holding_a_window() -> Arc<ConnectionPool> {
         let pool = Arc::new(ConnectionPool::new());
+        pool.track_window_list(&[window_info("a", WindowStatus::Running)])
+            .await;
         let failed = pool
-            .connect_windows(&["a".to_owned()], |_id: String| async move {
-                Ok::<_, IpcError>(Arc::new(IpcClient::new()))
-            })
+            .connect_windows(
+                &["a".to_owned()],
+                |_id: String, _client: Arc<IpcClient>| async move { Ok::<_, IpcError>(()) },
+            )
             .await;
         assert!(failed.is_empty());
         pool
@@ -233,10 +238,13 @@ mod tests {
     #[tokio::test]
     async fn a_pool_with_a_window_is_observed_holding_windows() {
         let pool = ConnectionPool::new();
+        pool.track_window_list(&[window_info("a", WindowStatus::Running)])
+            .await;
         let failed = pool
-            .connect_windows(&["a".to_owned()], |_id: String| async move {
-                Ok::<_, IpcError>(Arc::new(IpcClient::new()))
-            })
+            .connect_windows(
+                &["a".to_owned()],
+                |_id: String, _client: Arc<IpcClient>| async move { Ok::<_, IpcError>(()) },
+            )
             .await;
         assert!(failed.is_empty());
 

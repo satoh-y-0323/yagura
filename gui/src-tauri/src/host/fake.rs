@@ -10,15 +10,17 @@ use std::sync::{Arc, Mutex};
 use serde::Serialize;
 use serde_json::Value;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{Notify, mpsc, watch};
 use yagura_os::{IpcTransport, PeerAuth, PlatformIpc};
 use yagura_protocol::{
-    ClientMessage, DaemonMessage, PROTOCOL_REVISION, WindowInfo, WindowStatus,
-    decode_client_message, encode_daemon_message, frame_encode,
+    ClientMessage, DaemonMessage, PROTOCOL_REVISION, Palette, TerminalSize, WindowInfo,
+    WindowStatus, decode_client_message, encode_daemon_message, frame_encode,
 };
 use yagura_test_support::ipc::{reply_within, unique_endpoint_name};
 
 use super::GuiHost;
+use crate::connection_pool::ConnectionPool;
+use crate::events::EVENT_WINDOW_LINK;
 use crate::frame_mailbox::FrameMailbox;
 use crate::ipc_client::IpcError;
 
@@ -29,6 +31,8 @@ type PeerConnection = <PlatformIpc as PeerAuth>::Connection;
 /// What a scripted daemon does with one request: the frames to send back.
 pub(crate) struct Reaction {
     send: Vec<DaemonMessage>,
+    /// Told when the request has arrived, then waited on before answering.
+    hold: Option<(Arc<Notify>, Arc<Notify>)>,
 }
 
 impl Reaction {
@@ -39,7 +43,24 @@ impl Reaction {
 
     /// Answers with `messages`, in order.
     pub(crate) fn replies(messages: Vec<DaemonMessage>) -> Option<Self> {
-        Some(Self { send: messages })
+        Some(Self {
+            send: messages,
+            hold: None,
+        })
+    }
+
+    /// Answers with `messages` only once the test opens `gate`, after telling
+    /// `reached` that the request has arrived. Both use `notify_one`, which
+    /// keeps a permit for a waiter that comes later.
+    pub(crate) fn replies_after(
+        reached: Arc<Notify>,
+        gate: Arc<Notify>,
+        messages: Vec<DaemonMessage>,
+    ) -> Option<Self> {
+        Some(Self {
+            send: messages,
+            hold: Some((reached, gate)),
+        })
     }
 }
 
@@ -69,6 +90,60 @@ pub(crate) fn window_info(window_id: &str, status: WindowStatus) -> WindowInfo {
         mcp_connected: None,
         status_reports_missing: None,
         queued_count: None,
+    }
+}
+
+/// A palette that holds the 16 ANSI colors a window palette needs.
+pub(crate) fn sample_palette() -> Palette {
+    let color: yagura_protocol::Rgb = [1, 2, 3];
+    Palette {
+        foreground: color,
+        background: color,
+        cursor: color,
+        ansi: vec![color; 16],
+    }
+}
+
+/// Attaches `window_id` through `pool` the way a pane does: the window is
+/// listed first, a hidden pane says so, and then it attaches at `size`.
+pub(crate) async fn attach_pane(
+    pool: &ConnectionPool,
+    host: &FakeHost,
+    window_id: &str,
+    size: Option<TerminalSize>,
+    visible: bool,
+) -> Result<(), IpcError> {
+    pool.track_window_list(&[window_info(window_id, WindowStatus::Running)])
+        .await;
+    if !visible {
+        pool.set_window_visible(window_id, false).await?;
+    }
+    pool.attach_window(host, window_id, size).await
+}
+
+/// The daemon's answer to an attach, with no exit code.
+pub(crate) fn attached(child_exited: bool) -> DaemonMessage {
+    DaemonMessage::Attached {
+        child_exited,
+        exit_code: None,
+    }
+}
+
+/// A text input of `text`.
+pub(crate) fn text(text: &str) -> ClientMessage {
+    ClientMessage::Text {
+        text: text.to_owned(),
+    }
+}
+
+/// A request as a failure message shows it: a paste by its size and first
+/// character rather than in full.
+pub(crate) fn brief(request: &ClientMessage) -> String {
+    match request {
+        ClientMessage::Paste { text } => {
+            format!("Paste of {} bytes of {:?}", text.len(), text.chars().next())
+        }
+        other => format!("{other:?}"),
     }
 }
 
@@ -167,6 +242,13 @@ async fn serve(
         };
         let reaction = (state.script)(&request).or_else(|| housekeeping(&request));
         if let Some(reaction) = reaction {
+            if let Some((reached, gate)) = &reaction.hold {
+                reached.notify_one();
+                tokio::select! {
+                    () = gate.notified() => {}
+                    _ = hang_up.changed() => return,
+                }
+            }
             for message in &reaction.send {
                 let frame = frame_encode(&encode_daemon_message(message));
                 if connection.write_all(&frame).await.is_err() {
@@ -199,6 +281,45 @@ fn housekeeping(request: &ClientMessage) -> Option<Reaction> {
             revision: PROTOCOL_REVISION,
         }),
         _ => None,
+    }
+}
+
+/// One window-link report as the WebView reads it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Link {
+    pub(crate) state: String,
+    /// Present on `lost` only; any other state carries no `reason` key.
+    pub(crate) reason: Option<String>,
+    pub(crate) epoch: u64,
+}
+
+impl Link {
+    /// Reads a window-link payload, failing the test when it is not the shape
+    /// the WebView narrows.
+    pub(crate) fn from_payload(payload: &Value) -> Self {
+        let state = payload["state"]
+            .as_str()
+            .unwrap_or_else(|| panic!("a link report names its state: {payload}"))
+            .to_owned();
+        let reason = payload.get("reason").map(|reason| {
+            reason
+                .as_str()
+                .unwrap_or_else(|| panic!("a link reason is a code: {payload}"))
+                .to_owned()
+        });
+        assert_eq!(
+            reason.is_some(),
+            state == "lost",
+            "only a lost link carries a reason: {payload}"
+        );
+        let epoch = payload["epoch"]
+            .as_u64()
+            .unwrap_or_else(|| panic!("a link report carries its epoch: {payload}"));
+        Self {
+            state,
+            reason,
+            epoch,
+        }
     }
 }
 
@@ -284,6 +405,17 @@ impl FakeHost {
             .expect("the host state outlives the wait");
     }
 
+    /// The next window-link report about `window_id`, skipping every other
+    /// event.
+    pub(crate) async fn next_link(&self, window_id: &str) -> Link {
+        loop {
+            let payload = self.next_event(EVENT_WINDOW_LINK).await;
+            if payload["window_id"] == window_id {
+                return Link::from_payload(&payload);
+            }
+        }
+    }
+
     /// The payload of the next event named `name`, skipping the others.
     pub(crate) async fn next_event(&self, name: &str) -> Value {
         reply_within(name, async {
@@ -292,6 +424,24 @@ impl FakeHost {
                 let event = recorded.recv().await.expect("the host keeps its sender");
                 if event.name == name {
                     return event.payload;
+                }
+            }
+        })
+        .await
+    }
+
+    /// Every event up to and including the next one named `name`, oldest
+    /// first, so a test can see what came before it as well.
+    pub(crate) async fn events_through(&self, name: &str) -> Vec<RecordedEvent> {
+        reply_within(name, async {
+            let mut recorded = self.state.recorded.lock().await;
+            let mut events = Vec::new();
+            loop {
+                let event = recorded.recv().await.expect("the host keeps its sender");
+                let found = event.name == name;
+                events.push(event);
+                if found {
+                    return events;
                 }
             }
         })

@@ -7,8 +7,9 @@ use yagura_protocol::{ClientMessage, CursorShape, CursorState, ViewState, Withdr
 use yagura_test_support::ipc::reply_within;
 
 use super::*;
-use crate::events::{EVENT_CHAT_HISTORY_CLEARED, EVENT_SUPERSEDED};
-use crate::host::fake::{FakeHost, Reaction, ScriptedDaemon, error_frame};
+use crate::events::EVENT_CHAT_HISTORY_CLEARED;
+use crate::host::fake::{FakeHost, Reaction, ScriptedDaemon, attached, error_frame};
+use crate::window_record::WindowRecord;
 
 fn frame(seq: u64) -> Frame {
     Frame {
@@ -35,13 +36,6 @@ fn frame(seq: u64) -> Frame {
     }
 }
 
-fn attached() -> DaemonMessage {
-    DaemonMessage::Attached {
-        child_exited: false,
-        exit_code: None,
-    }
-}
-
 /// A daemon that answers every attach with `answer`.
 fn attaching_with(answer: Vec<DaemonMessage>) -> ScriptedDaemon {
     ScriptedDaemon::new(move |request| match request {
@@ -57,7 +51,7 @@ fn is_rejected_with<T>(outcome: &Result<T, IpcError>, wanted: &str) -> bool {
 #[tokio::test]
 async fn an_attached_windows_frame_goes_to_the_mailbox() {
     let host = FakeHost::new("dispatch-frame");
-    let client = Arc::new(IpcClient::new_window());
+    let client = Arc::new(IpcClient::new_window(Arc::new(WindowRecord::new())));
 
     let superseded = dispatch(
         &host,
@@ -76,7 +70,7 @@ async fn an_attached_windows_frame_goes_to_the_mailbox() {
 #[tokio::test]
 async fn an_attached_windows_exit_is_emitted_to_the_webview() {
     let host = FakeHost::new("dispatch-exit");
-    let client = Arc::new(IpcClient::new_window());
+    let client = Arc::new(IpcClient::new_window(Arc::new(WindowRecord::new())));
 
     let superseded = dispatch(
         &host,
@@ -239,7 +233,7 @@ async fn any_error_answers_the_request_of_a_control_connection() {
 async fn an_internal_error_answers_the_attach_it_arrives_during() {
     let daemon = attaching_with(vec![error_frame(ERROR_CODE_INTERNAL)]);
     let host = FakeHost::served_by("attach-internal", &daemon).await;
-    let client = Arc::new(IpcClient::new_window());
+    let client = Arc::new(IpcClient::new_window(Arc::new(WindowRecord::new())));
 
     let outcome = client.attach_window(&host, "w1", None).await;
 
@@ -251,9 +245,9 @@ async fn an_internal_error_answers_the_attach_it_arrives_during() {
 
 #[tokio::test]
 async fn an_error_that_may_answer_something_else_does_not_answer_the_attach() {
-    let daemon = attaching_with(vec![error_frame("invalid_argument"), attached()]);
+    let daemon = attaching_with(vec![error_frame("invalid_argument"), attached(false)]);
     let host = FakeHost::served_by("attach-other-error", &daemon).await;
-    let client = Arc::new(IpcClient::new_window());
+    let client = Arc::new(IpcClient::new_window(Arc::new(WindowRecord::new())));
 
     let outcome = client.attach_window(&host, "w1", None).await;
 
@@ -263,12 +257,12 @@ async fn an_error_that_may_answer_something_else_does_not_answer_the_attach() {
 #[tokio::test]
 async fn a_superseded_error_ends_the_window_session_and_it_does_not_reconnect() {
     let daemon = ScriptedDaemon::new(|request| match request {
-        ClientMessage::AttachView { .. } => Reaction::reply(attached()),
+        ClientMessage::AttachView { .. } => Reaction::reply(attached(false)),
         ClientMessage::Resize { .. } => Reaction::reply(error_frame(ERROR_CODE_SUPERSEDED)),
         _ => None,
     });
     let host = FakeHost::served_by("superseded", &daemon).await;
-    let client = Arc::new(IpcClient::new_window());
+    let client = Arc::new(IpcClient::new_window(Arc::new(WindowRecord::new())));
     client
         .attach_window(&host, "w1", None)
         .await
@@ -276,10 +270,13 @@ async fn a_superseded_error_ends_the_window_session_and_it_does_not_reconnect() 
 
     client.resize(100, 30).await.expect("resize");
 
-    assert_eq!(
-        host.next_event(EVENT_SUPERSEDED).await,
-        json!({ "window_id": "w1", "reason": ERROR_CODE_SUPERSEDED })
-    );
+    let superseded = loop {
+        let link = host.next_link("w1").await;
+        if link.state == "superseded" {
+            break link;
+        }
+    };
+    assert_eq!(superseded.reason, None);
     assert!(!client.is_connected().await);
     assert_eq!(
         daemon.received().len(),

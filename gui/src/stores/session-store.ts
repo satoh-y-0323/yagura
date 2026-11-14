@@ -18,7 +18,7 @@ export type SessionPhase =
   | 'exited'
   /** Another window took the session over; no reconnect is attempted. */
   | 'superseded'
-  /** The connection failed or was lost; the user can retry. */
+  /** The window could not be reached; it leaves this phase once the core attaches it again. */
   | 'failed';
 
 /** Observable state of the session one window shows. */

@@ -1,6 +1,7 @@
 /**
- * Regression lock for the isSessionInteractive guard: no input reaches the core
- * while the session is not interactive.
+ * Input reaches the core whatever the session's phase: whether it is held for a
+ * reconnect or dropped is the core's decision. Clearing the selection still waits
+ * for an interactive session.
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
@@ -26,14 +27,17 @@ describe('SessionController.sendInput', () => {
     vi.clearAllMocks();
   });
 
-  it('does not forward input while the session is not interactive', () => {
+  it('forwards input while the session is not interactive, leaving its holding to the core', () => {
     const store = createWindowSessionStore();
     store.markConnecting();
     const controller = new SessionController(WINDOW_ID, store);
 
     controller.sendInput(SHIFT_ENTER);
 
-    expect(vi.mocked(invokeSendWindowInput)).toHaveBeenCalledTimes(0);
+    expect(vi.mocked(invokeSendWindowInput)).toHaveBeenCalledExactlyOnceWith(
+      WINDOW_ID,
+      SHIFT_ENTER
+    );
   });
 
   it('forwards the input with the window id when the session is interactive', () => {

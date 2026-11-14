@@ -17,7 +17,6 @@ import { describe, it, expect } from 'vitest';
 
 import {
   BoundaryError,
-  narrowAttachResponse,
   narrowChatRooms,
   narrowStatusPayload,
   narrowWindowInfo,
@@ -113,14 +112,6 @@ describe('the optional integers that are not generations keep their range', () =
     ]);
     expect(list.map((entry) => entry.window_id)).toEqual(['w-a', 'w-b', 'w-c']);
     expect(list.map((entry) => entry.exit_code)).toEqual([0, -1, null]);
-  });
-
-  it('accepts a negative exit code on the attach reply', () => {
-    const response = narrowAttachResponse({
-      child_exited: true,
-      exit_code: -1,
-    });
-    expect(response.exit_code).toBe(-1);
   });
 
   it('accepts a negative last_at_ms on a room row', () => {

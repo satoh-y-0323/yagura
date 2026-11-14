@@ -8,7 +8,6 @@
   import { hostKeyboardPlatform } from '../keymap/keyboard-platform';
   import { appHidden } from '../session/app-visibility';
   import { effectiveVisibility } from '../session/effective-visibility';
-  import { canApplyTerminalSize } from '../session/size-report';
   import type { SessionController } from '../session/session-controller';
   import { copyAndClearSelection } from '../terminal/copy-selection';
   import { completeTheme, wirePaletteOf } from '../terminal/terminal-colors';
@@ -109,10 +108,7 @@
   }
 
   function reportSize(): void {
-    const size = view?.measure() ?? null;
-    if (size !== null && canApplyTerminalSize(isVisible, size)) {
-      controller.notifyResize(size);
-    }
+    controller.reportMeasuredSize();
   }
 
   onMount(() => {

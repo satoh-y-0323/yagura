@@ -28,8 +28,7 @@ function makeHandlers(): WindowEventHandlers {
   return {
     onFrame: vi.fn(),
     onExit: vi.fn(),
-    onDisconnected: vi.fn(),
-    onSuperseded: vi.fn(),
+    onLink: vi.fn(),
   };
 }
 

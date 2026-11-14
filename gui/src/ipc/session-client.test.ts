@@ -77,11 +77,11 @@ interface WrapperCase {
 const WRAPPER_CASES: WrapperCase[] = [
   {
     label: 'invokeAttachWindow',
-    resolvedValue: { child_exited: false, exit_code: null },
+    resolvedValue: undefined,
     invoke: () => invokeAttachWindow(WINDOW_A, null),
     expectedCommand: 'attach_window',
     expectedArgs: { window_id: WINDOW_A, size: null },
-    expectedReturn: { child_exited: false, exit_code: null },
+    expectedReturn: undefined,
   },
   {
     label: 'invokeSendWindowInput',
@@ -1042,14 +1042,12 @@ describe('subscribeSession', () => {
       [WINDOW_A]: {
         onFrame: vi.fn(),
         onExit: onExitA,
-        onDisconnected: vi.fn(),
-        onSuperseded: vi.fn(),
+        onLink: vi.fn(),
       },
       [WINDOW_B]: {
         onFrame: vi.fn(),
         onExit: onExitB,
-        onDisconnected: vi.fn(),
-        onSuperseded: vi.fn(),
+        onLink: vi.fn(),
       },
     };
     const app: AppEventHandlers = {

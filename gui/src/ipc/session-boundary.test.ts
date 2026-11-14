@@ -5,10 +5,8 @@ import {
   MIN_PTY_ROWS,
   MAX_PTY_DIMENSION,
   narrowExitPayload,
-  narrowDisconnectedPayload,
-  narrowSupersededPayload,
+  narrowWindowLinkPayload,
   narrowDaemonSpawnWarningPayload,
-  narrowAttachResponse,
   narrowWindowInfo,
   narrowWindowInfoList,
   isValidSize,
@@ -38,8 +36,7 @@ const WINDOW_ID = 'w1-k3f9xa';
 describe('SESSION_EVENT', () => {
   it('defines the five canonical session events of a window', () => {
     expect(SESSION_EVENT.exit).toBe('session://exit');
-    expect(SESSION_EVENT.disconnected).toBe('session://disconnected');
-    expect(SESSION_EVENT.superseded).toBe('session://superseded');
+    expect(SESSION_EVENT.windowLink).toBe('session://window-link');
     expect(SESSION_EVENT.daemonSpawnWarning).toBe('session://daemon-spawn-warning');
   });
 
@@ -106,118 +103,73 @@ describe('narrowExitPayload', () => {
   });
 });
 
-describe('narrowDisconnectedPayload', () => {
-  it('accepts valid disconnected payload', () => {
-    const payload = narrowDisconnectedPayload({ reason: 'pipe_closed', window_id: WINDOW_ID });
-    expect(payload).toEqual({ reason: 'pipe_closed', window_id: WINDOW_ID });
+describe('narrowWindowLinkPayload', () => {
+  it.each<[string, unknown, unknown]>([
+    [
+      'a connecting report',
+      { window_id: WINDOW_ID, state: 'connecting', epoch: 0 },
+      { window_id: WINDOW_ID, state: 'connecting', epoch: 0 },
+    ],
+    [
+      'an attached report',
+      { window_id: WINDOW_ID, state: 'attached', epoch: 7 },
+      { window_id: WINDOW_ID, state: 'attached', epoch: 7 },
+    ],
+    [
+      'a superseded report',
+      { window_id: WINDOW_ID, state: 'superseded', epoch: 3 },
+      { window_id: WINDOW_ID, state: 'superseded', epoch: 3 },
+    ],
+    [
+      'a reconnect that gave up',
+      { window_id: WINDOW_ID, state: 'lost', reason: 'reconnect_failed', epoch: 4 },
+      { window_id: WINDOW_ID, state: 'lost', reason: 'reconnect_failed', epoch: 4 },
+    ],
+    [
+      'an attach that failed',
+      { window_id: WINDOW_ID, state: 'lost', reason: 'attach_failed', epoch: 5 },
+      { window_id: WINDOW_ID, state: 'lost', reason: 'attach_failed', epoch: 5 },
+    ],
+    [
+      'a report with keys it does not know, which are dropped',
+      { window_id: 'w7-k3f9xa', state: 'attached', epoch: 1, extra: 'ignored' },
+      { window_id: 'w7-k3f9xa', state: 'attached', epoch: 1 },
+    ],
+  ])('accepts %s', (_label, value, narrowed) => {
+    expect(narrowWindowLinkPayload(value)).toEqual(narrowed);
   });
 
-  it('accepts empty reason string', () => {
-    const payload = narrowDisconnectedPayload({ reason: '', window_id: WINDOW_ID });
-    expect(payload).toEqual({ reason: '', window_id: WINDOW_ID });
-  });
-
-  it('rejects missing reason field', () => {
-    expect(() => narrowDisconnectedPayload({ window_id: WINDOW_ID })).toThrow(BoundaryError);
-  });
-
-  it('rejects non-string reason', () => {
-    expect(() => narrowDisconnectedPayload({ reason: 123, window_id: WINDOW_ID })).toThrow(
-      BoundaryError
-    );
-    expect(() => narrowDisconnectedPayload({ reason: null, window_id: WINDOW_ID })).toThrow(
-      BoundaryError
-    );
-  });
-
-  it('ignores extra fields', () => {
-    const payload = narrowDisconnectedPayload({
-      reason: 'pipe_closed',
-      window_id: WINDOW_ID,
-      extra: 'ignored',
-    });
-    expect(payload).toEqual({ reason: 'pipe_closed', window_id: WINDOW_ID });
-  });
-
-  it('keeps the window id the core reported', () => {
-    const payload = narrowDisconnectedPayload({ reason: 'pipe_closed', window_id: 'w7-k3f9xa' });
-    expect(payload.window_id).toBe('w7-k3f9xa');
-  });
-
-  it('rejects missing window_id field', () => {
-    expect(() => narrowDisconnectedPayload({ reason: 'pipe_closed' })).toThrow(BoundaryError);
-  });
-
-  it('rejects non-string window_id', () => {
-    expect(() => narrowDisconnectedPayload({ reason: 'pipe_closed', window_id: 1 })).toThrow(
-      BoundaryError
-    );
-    expect(() => narrowDisconnectedPayload({ reason: 'pipe_closed', window_id: null })).toThrow(
-      BoundaryError
-    );
-    expect(() =>
-      narrowDisconnectedPayload({ reason: 'pipe_closed', window_id: undefined })
-    ).toThrow(BoundaryError);
-  });
-});
-
-describe('narrowSupersededPayload', () => {
-  it('accepts valid superseded payload', () => {
-    const payload = narrowSupersededPayload({
-      reason: 'new_session_attached',
-      window_id: WINDOW_ID,
-    });
-    expect(payload).toEqual({ reason: 'new_session_attached', window_id: WINDOW_ID });
-  });
-
-  it('accepts empty reason string', () => {
-    const payload = narrowSupersededPayload({ reason: '', window_id: WINDOW_ID });
-    expect(payload).toEqual({ reason: '', window_id: WINDOW_ID });
-  });
-
-  it('rejects missing reason field', () => {
-    expect(() => narrowSupersededPayload({ window_id: WINDOW_ID })).toThrow(BoundaryError);
-  });
-
-  it('rejects non-string reason', () => {
-    expect(() => narrowSupersededPayload({ reason: 123, window_id: WINDOW_ID })).toThrow(
-      BoundaryError
-    );
-  });
-
-  it('ignores extra fields', () => {
-    const payload = narrowSupersededPayload({
-      reason: 'new_session_attached',
-      window_id: WINDOW_ID,
-      extra: 'ignored',
-    });
-    expect(payload).toEqual({ reason: 'new_session_attached', window_id: WINDOW_ID });
-  });
-
-  it('keeps the window id the core reported', () => {
-    const payload = narrowSupersededPayload({
-      reason: 'new_session_attached',
-      window_id: 'w7-k3f9xa',
-    });
-    expect(payload.window_id).toBe('w7-k3f9xa');
-  });
-
-  it('rejects missing window_id field', () => {
-    expect(() => narrowSupersededPayload({ reason: 'new_session_attached' })).toThrow(
-      BoundaryError
-    );
-  });
-
-  it('rejects non-string window_id', () => {
-    expect(() => narrowSupersededPayload({ reason: 'new_session_attached', window_id: 1 })).toThrow(
-      BoundaryError
-    );
-    expect(() =>
-      narrowSupersededPayload({ reason: 'new_session_attached', window_id: null })
-    ).toThrow(BoundaryError);
-    expect(() =>
-      narrowSupersededPayload({ reason: 'new_session_attached', window_id: undefined })
-    ).toThrow(BoundaryError);
+  it.each<[string, unknown]>([
+    ['a value that is not an object', 5],
+    ['null', null],
+    ['a state it does not know', { window_id: WINDOW_ID, state: 'reconnecting', epoch: 1 }],
+    ['no state', { window_id: WINDOW_ID, epoch: 1 }],
+    ['the exit, which has its own event', { window_id: WINDOW_ID, state: 'exited', epoch: 1 }],
+    [
+      'a reason that is not one of the two codes',
+      { window_id: WINDOW_ID, state: 'lost', reason: 'invalid_argument', epoch: 1 },
+    ],
+    [
+      'a reason that is free text',
+      { window_id: WINDOW_ID, state: 'lost', reason: 'pipe closed', epoch: 1 },
+    ],
+    [
+      'a reason on a state other than lost',
+      { window_id: WINDOW_ID, state: 'attached', reason: 'reconnect_failed', epoch: 1 },
+    ],
+    ['a negative epoch', { window_id: WINDOW_ID, state: 'attached', epoch: -1 }],
+    ['a fractional epoch', { window_id: WINDOW_ID, state: 'attached', epoch: 1.5 }],
+    [
+      'an epoch past the safe integers',
+      { window_id: WINDOW_ID, state: 'attached', epoch: Number.MAX_SAFE_INTEGER + 1 },
+    ],
+    ['an epoch that is text', { window_id: WINDOW_ID, state: 'attached', epoch: '1' }],
+    ['no epoch', { window_id: WINDOW_ID, state: 'attached' }],
+    ['a window id that is not text', { window_id: 1, state: 'attached', epoch: 1 }],
+    ['a null window id', { window_id: null, state: 'attached', epoch: 1 }],
+    ['no window id', { state: 'attached', epoch: 1 }],
+  ])('rejects %s', (_label, value) => {
+    expect(() => narrowWindowLinkPayload(value)).toThrow(BoundaryError);
   });
 });
 
@@ -243,89 +195,6 @@ describe('narrowDaemonSpawnWarningPayload', () => {
   it('ignores extra fields', () => {
     const payload = narrowDaemonSpawnWarningPayload({ message: 'Warning', extra: 'ignored' });
     expect(payload).toEqual({ message: 'Warning' });
-  });
-});
-
-describe('narrowAttachResponse', () => {
-  it('accepts valid attach response', () => {
-    const response = narrowAttachResponse({
-      child_exited: false,
-      exit_code: null,
-    });
-    expect(response).toEqual({
-      child_exited: false,
-      exit_code: null,
-    });
-  });
-
-  it('accepts child_exited with exit code', () => {
-    const response = narrowAttachResponse({
-      child_exited: true,
-      exit_code: 42,
-    });
-    expect(response).toEqual({
-      child_exited: true,
-      exit_code: 42,
-    });
-  });
-
-  it('accepts undefined exit_code as null', () => {
-    const response = narrowAttachResponse({
-      child_exited: false,
-      exit_code: undefined,
-    });
-    expect(response).toEqual({
-      child_exited: false,
-      exit_code: null,
-    });
-  });
-
-  it('rejects missing child_exited', () => {
-    expect(() =>
-      narrowAttachResponse({
-        exit_code: null,
-      })
-    ).toThrow(BoundaryError);
-  });
-
-  it('accepts missing exit_code field and treats as null', () => {
-    const response = narrowAttachResponse({
-      child_exited: false,
-    });
-    expect(response).toEqual({
-      child_exited: false,
-      exit_code: null,
-    });
-  });
-
-  it('rejects non-boolean child_exited', () => {
-    expect(() =>
-      narrowAttachResponse({
-        child_exited: 'false',
-        exit_code: null,
-      })
-    ).toThrow(BoundaryError);
-  });
-
-  it('rejects non-integer exit_code when not null', () => {
-    expect(() =>
-      narrowAttachResponse({
-        child_exited: true,
-        exit_code: 3.14,
-      })
-    ).toThrow(BoundaryError);
-  });
-
-  it('ignores extra fields', () => {
-    const response = narrowAttachResponse({
-      child_exited: false,
-      exit_code: null,
-      extra: 'ignored',
-    });
-    expect(response).toEqual({
-      child_exited: false,
-      exit_code: null,
-    });
   });
 });
 

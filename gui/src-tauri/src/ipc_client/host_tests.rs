@@ -4,39 +4,70 @@
 use std::sync::atomic::AtomicUsize;
 
 use serde_json::json;
+use tokio::sync::Notify;
 use yagura_protocol::{
-    ApprovalRequester, ApprovalRequesterKind, ApprovalTarget, DaemonMessage, WindowStatus,
+    ApprovalRequester, ApprovalRequesterKind, ApprovalTarget, DaemonMessage, MAX_PASTE_BYTES,
+    WindowStatus,
 };
+use yagura_test_support::ipc::reply_within;
 
 use super::*;
-use crate::host::fake::{FakeHost, Reaction, ScriptedDaemon, error_frame};
-
-fn attached(child_exited: bool, exit_code: Option<i32>) -> DaemonMessage {
-    DaemonMessage::Attached {
-        child_exited,
-        exit_code,
-    }
-}
+use crate::connection_pool::ConnectionPool;
+use crate::events::EVENT_WINDOW_LINK;
+use crate::host::fake::{
+    FakeHost, Link, Reaction, ScriptedDaemon, attach_pane, attached, brief, error_frame,
+    sample_palette, text,
+};
 
 /// A daemon that lets every window attach.
 fn attaching_daemon() -> ScriptedDaemon {
     ScriptedDaemon::new(|request| match request {
-        ClientMessage::AttachView { .. } => Reaction::reply(attached(false, None)),
+        ClientMessage::AttachView { .. } => Reaction::reply(attached(false)),
         _ => None,
     })
 }
 
 const ATTACH_SIZE: TerminalSize = TerminalSize { cols: 80, rows: 24 };
 
-/// A host served by `daemon` and a window client attached to `w1` through it.
-async fn attached_window(daemon: &ScriptedDaemon, tag: &str) -> (FakeHost, Arc<IpcClient>) {
+/// A host served by `daemon`, a pool, and the client the pool attached to
+/// `w1` through it, as a pane that is hidden.
+async fn attached_window(
+    daemon: &ScriptedDaemon,
+    tag: &str,
+) -> (FakeHost, ConnectionPool, Arc<IpcClient>) {
     let host = FakeHost::served_by(tag, daemon).await;
-    let client = Arc::new(IpcClient::new_window());
-    client
-        .attach_window(&host, "w1", Some(ATTACH_SIZE))
+    let pool = ConnectionPool::new();
+    attach_pane(&pool, &host, "w1", Some(ATTACH_SIZE), false)
         .await
         .expect("attach");
-    (host, client)
+    let client = pool.get_window("w1").await.expect("w1 is tracked");
+    (host, pool, client)
+}
+
+/// The requests of the connection that began with the `nth` revision probe
+/// (counted from 0), up to the next connection's probe.
+fn connection(received: &[ClientMessage], nth: usize) -> &[ClientMessage] {
+    let probes: Vec<usize> = received
+        .iter()
+        .enumerate()
+        .filter(|(_, request)| matches!(request, ClientMessage::GetProtocolRevision))
+        .map(|(index, _)| index)
+        .collect();
+    let start = *probes.get(nth).expect("that connection was made");
+    let end = probes.get(nth + 1).copied().unwrap_or(received.len());
+    &received[start..end]
+}
+
+fn is_input(request: &ClientMessage) -> bool {
+    matches!(
+        request,
+        ClientMessage::Key(_)
+            | ClientMessage::Text { .. }
+            | ClientMessage::Paste { .. }
+            | ClientMessage::Pointer(_)
+            | ClientMessage::Wheel(_)
+            | ClientMessage::Focus { .. }
+    )
 }
 
 fn approval_request(request_id: &str) -> ApprovalRequest {
@@ -130,14 +161,22 @@ async fn connecting_reaches_the_daemon_it_started() {
 #[tokio::test]
 async fn a_connection_the_daemon_hangs_up_is_reported_as_disconnected_when_it_cannot_be_restored() {
     let daemon = attaching_daemon();
-    let (host, client) = attached_window(&daemon, "lost").await;
+    let (host, _pool, client) = attached_window(&daemon, "lost").await;
+    assert_eq!(host.next_link("w1").await.state, "attached");
     host.set_endpoint(None);
 
     daemon.hang_up();
 
+    let connecting = host.next_link("w1").await;
+    let lost = host.next_link("w1").await;
+    assert_eq!(connecting.state, "connecting");
     assert_eq!(
-        host.next_event(EVENT_DISCONNECTED).await,
-        json!({ "window_id": "w1", "reason": "reconnect_failed" })
+        (lost.state.as_str(), lost.reason.as_deref()),
+        ("lost", Some("reconnect_failed"))
+    );
+    assert!(
+        lost.epoch > connecting.epoch,
+        "{connecting:?} then {lost:?}"
     );
     assert!(!client.is_connected().await);
     assert_eq!(client.window_id().await, None);
@@ -146,15 +185,15 @@ async fn a_connection_the_daemon_hangs_up_is_reported_as_disconnected_when_it_ca
 #[tokio::test]
 async fn a_lost_connection_is_restored_and_the_window_attached_again_as_it_was() {
     let daemon = attaching_daemon();
-    let (host, client) = attached_window(&daemon, "restore").await;
-    client
-        .send_attached(&ClientMessage::SetVisible { visible: false })
-        .await
-        .expect("hide");
+    let (host, _pool, client) = attached_window(&daemon, "restore").await;
+    let first = host.next_link("w1").await;
+    assert_eq!(first.state, "attached");
     let first_connection = daemon.received_at_least(3).await;
     assert_eq!(first_connection.len(), 3);
 
     daemon.hang_up();
+    let connecting = host.next_link("w1").await;
+    let reattached = host.next_link("w1").await;
     let all = daemon.received_at_least(6).await;
 
     assert_eq!(
@@ -168,9 +207,17 @@ async fn a_lost_connection_is_restored_and_the_window_attached_again_as_it_was()
             ClientMessage::SetVisible { visible: false },
         ]
     );
+    assert_eq!(
+        (connecting.state.as_str(), reattached.state.as_str()),
+        ("connecting", "attached"),
+        "a reconnect that succeeds reports nothing else in between"
+    );
+    assert!(
+        first.epoch < connecting.epoch && connecting.epoch < reattached.epoch,
+        "{first:?}, {connecting:?}, {reattached:?}"
+    );
     assert!(client.is_connected().await);
     assert_eq!(client.window_id().await.as_deref(), Some("w1"));
-    assert!(host.take_events().is_empty());
 }
 
 #[tokio::test]
@@ -181,25 +228,59 @@ async fn reattaching_to_a_child_that_exited_without_a_code_reports_the_exit_as_m
         move |request| match request {
             ClientMessage::AttachView { .. } => {
                 let earlier = attaches.fetch_add(1, Ordering::SeqCst);
-                Reaction::reply(attached(earlier > 0, None))
+                Reaction::reply(attached(earlier > 0))
+            }
+            ClientMessage::CopySelection => {
+                Reaction::reply(DaemonMessage::SelectionText { text: None })
             }
             _ => None,
         }
     });
-    let (host, _client) = attached_window(&daemon, "exited").await;
+    let (host, pool, client) = attached_window(&daemon, "exited").await;
+    assert_eq!(host.next_link("w1").await.state, "attached");
+    pool.set_window_visible("w1", false).await.expect("hide");
+    pool.set_window_palette("w1", sample_palette())
+        .await
+        .expect("palette");
 
     daemon.hang_up();
 
+    let events = host.events_through(EVENT_EXIT).await;
     assert_eq!(
-        host.next_event(EVENT_EXIT).await,
-        json!({ "window_id": "w1", "exit_code": -1 })
+        events.last().map(|event| &event.payload),
+        Some(&json!({ "window_id": "w1", "exit_code": -1 }))
+    );
+    let links: Vec<Link> = events
+        .iter()
+        .filter(|event| event.name == EVENT_WINDOW_LINK)
+        .map(|event| Link::from_payload(&event.payload))
+        .collect();
+    assert!(
+        links.iter().all(|link| link.state != "attached"),
+        "a window whose child is gone is not attached: {links:?}"
+    );
+    // A round trip on the same connection: whatever was written before it
+    // has reached the daemon by the time it answers.
+    client
+        .copy_selection()
+        .await
+        .expect("the connection answers");
+    let received = daemon.received();
+    let second = connection(&received, 1);
+    assert!(
+        !second.iter().any(|request| matches!(
+            request,
+            ClientMessage::SetVisible { .. } | ClientMessage::SetPalette(_)
+        )),
+        "nothing is restored to an exited child: {second:?}"
     );
 }
 
 #[tokio::test]
 async fn a_stale_readers_disconnect_leaves_the_current_connection_alone() {
     let daemon = attaching_daemon();
-    let (host, client) = attached_window(&daemon, "stale").await;
+    let (host, _pool, client) = attached_window(&daemon, "stale").await;
+    assert_eq!(host.next_link("w1").await.state, "attached");
     let stale = client.generation.load(Ordering::SeqCst) - 1;
 
     client.on_disconnect(&host, false, stale).await;
@@ -212,20 +293,174 @@ async fn a_stale_readers_disconnect_leaves_the_current_connection_alone() {
 #[tokio::test]
 async fn a_superseded_window_is_reported_and_never_reconnects() {
     let daemon = attaching_daemon();
-    let (host, client) = attached_window(&daemon, "superseded").await;
+    let (host, _pool, client) = attached_window(&daemon, "superseded").await;
+    assert_eq!(host.next_link("w1").await.state, "attached");
     let generation = client.generation.load(Ordering::SeqCst);
 
     client.on_disconnect(&host, true, generation).await;
 
-    assert_eq!(
-        host.next_event(EVENT_SUPERSEDED).await,
-        json!({ "window_id": "w1", "reason": ERROR_CODE_SUPERSEDED })
-    );
+    assert_eq!(host.next_link("w1").await.state, "superseded");
     assert!(!client.is_connected().await);
     assert_eq!(
-        daemon.received().len(),
-        2,
+        daemon
+            .received()
+            .iter()
+            .filter(|request| matches!(request, ClientMessage::GetProtocolRevision))
+            .count(),
+        1,
         "a reconnect would have made a second connection ask again"
+    );
+}
+
+#[tokio::test]
+async fn input_typed_while_a_window_reconnects_reaches_it_after_what_was_asked_meanwhile_in_the_order_it_was_typed()
+ {
+    let attach_reached = Arc::new(Notify::new());
+    let attach_gate = Arc::new(Notify::new());
+    let flush_reached = Arc::new(Notify::new());
+    let daemon = ScriptedDaemon::new({
+        let attaches = AtomicUsize::new(0);
+        let shown = AtomicUsize::new(0);
+        let attach_reached = Arc::clone(&attach_reached);
+        let attach_gate = Arc::clone(&attach_gate);
+        let flush_reached = Arc::clone(&flush_reached);
+        move |request| match request {
+            // Both reconnects wait for the test to type into the gap first.
+            ClientMessage::AttachView { .. } => match attaches.fetch_add(1, Ordering::SeqCst) {
+                1 | 2 => Reaction::replies_after(
+                    Arc::clone(&attach_reached),
+                    Arc::clone(&attach_gate),
+                    vec![attached(false)],
+                ),
+                _ => Reaction::reply(attached(false)),
+            },
+            // The third connection stops reading once it is told the window
+            // is shown, so the input held behind that cannot all be written.
+            ClientMessage::SetVisible { visible: true }
+                if shown.fetch_add(1, Ordering::SeqCst) == 1 =>
+            {
+                Reaction::replies_after(
+                    Arc::clone(&flush_reached),
+                    Arc::new(Notify::new()),
+                    Vec::new(),
+                )
+            }
+            _ => None,
+        }
+    });
+    let (host, pool, _client) = attached_window(&daemon, "typed-meanwhile").await;
+    let first = host.next_link("w1").await;
+    assert_eq!(first.state, "attached");
+    assert_eq!(daemon.received_at_least(3).await.len(), 3);
+
+    daemon.hang_up();
+    let connecting = host.next_link("w1").await;
+    assert_eq!(connecting.state, "connecting");
+    reply_within("the second attach", attach_reached.notified()).await;
+    pool.send_window_input("w1", &text("a"))
+        .await
+        .expect("a is held");
+    pool.set_window_visible("w1", true)
+        .await
+        .expect("the visibility is recorded");
+    pool.send_window_input("w1", &ClientMessage::Focus { focused: true })
+        .await
+        .expect("the focus is held");
+    pool.send_window_input("w1", &text("b"))
+        .await
+        .expect("b is held");
+    attach_gate.notify_one();
+    let reattached = host.next_link("w1").await;
+    pool.send_window_input("w1", &text("c"))
+        .await
+        .expect("c goes out");
+    let second = daemon.received_at_least(10).await;
+
+    assert_eq!(reattached.state, "attached");
+    assert!(
+        first.epoch < connecting.epoch && connecting.epoch < reattached.epoch,
+        "{first:?}, {connecting:?}, {reattached:?}"
+    );
+    assert_eq!(
+        connection(&second, 1),
+        [
+            ClientMessage::GetProtocolRevision,
+            ClientMessage::AttachView {
+                window_id: "w1".to_owned(),
+                size: Some(ATTACH_SIZE),
+            },
+            ClientMessage::SetVisible { visible: true },
+            text("a"),
+            ClientMessage::Focus { focused: true },
+            text("b"),
+            text("c"),
+        ]
+    );
+
+    // A write that fails while the held input goes out leaves what it did
+    // not write for the next attach, which delivers it in order.
+    let typed = [
+        text("d"),
+        ClientMessage::Paste {
+            text: "p".repeat(MAX_PASTE_BYTES),
+        },
+        text("e"),
+    ];
+    daemon.hang_up();
+    assert_eq!(host.next_link("w1").await.state, "connecting");
+    reply_within("the third attach", attach_reached.notified()).await;
+    for input in &typed {
+        reply_within("the input held for w1", pool.send_window_input("w1", input))
+            .await
+            .expect("the input is held");
+    }
+    attach_gate.notify_one();
+    reply_within(
+        "the visibility on the third connection",
+        flush_reached.notified(),
+    )
+    .await;
+    daemon.hang_up();
+    let mut count = second.len() + 7;
+    let all = loop {
+        let all = daemon.received_at_least(count).await;
+        if all.last() == Some(&text("e")) {
+            break all;
+        }
+        count = all.len() + 1;
+    };
+    // Waits on the record lock, so the fourth attach has reported its link.
+    pool.set_window_visible("w1", true)
+        .await
+        .expect("the visibility is recorded");
+    let links_after_second_hang_up: Vec<String> = host
+        .take_events()
+        .into_iter()
+        .filter(|event| event.name == EVENT_WINDOW_LINK && event.payload["window_id"] == "w1")
+        .map(|event| Link::from_payload(&event.payload).state)
+        .collect();
+
+    let restored = [
+        ClientMessage::GetProtocolRevision,
+        ClientMessage::AttachView {
+            window_id: "w1".to_owned(),
+            size: Some(ATTACH_SIZE),
+        },
+        ClientMessage::SetVisible { visible: true },
+    ];
+    assert_eq!(connection(&all, 2), restored);
+    let fourth = connection(&all, 3);
+    assert_eq!(fourth[..restored.len()], restored);
+    let delivered = &fourth[restored.len()..];
+    assert!(
+        !delivered.is_empty() && delivered.iter().all(is_input) && typed.ends_with(delivered),
+        "the input left over arrives as the tail of what was typed: {:?}",
+        delivered.iter().map(brief).collect::<Vec<_>>()
+    );
+    assert_eq!(
+        links_after_second_hang_up,
+        ["connecting", "attached"],
+        "a connection that could not take all the held input does not attach the window"
     );
 }
 

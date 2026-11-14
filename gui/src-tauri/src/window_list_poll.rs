@@ -47,9 +47,9 @@ async fn poll_window_list(pool: &ConnectionPool, app: &impl GuiHost) {
         .ensure_approver_registered(app)
         .await;
     pool.control_connection().ensure_protocol_revision().await;
-    // A round that fails emits nothing, so the WebView keeps the list it
-    // has instead of seeing every window disappear.
-    let Ok(windows) = pool.control_connection().list_windows().await else {
+    // A failed round emits nothing, so no window disappears. The records follow
+    // this list, though a later list may reach the WebView before it.
+    let Ok(windows) = pool.listed_windows().await else {
         return;
     };
     app.emit_event(

@@ -6,6 +6,10 @@
 //! requests (`list_windows`, `list_detections`, `open_window`, `close_window`,
 //! `interrupt_window`, `rename_window`), and it is the only place that knows
 //! which connection a window id routes to.
+//!
+//! It also holds each window's [`WindowRecord`], which outlives the window's
+//! connections: what the WebView asks of a window is written there whether a
+//! connection is attached or not, and an attach restores it from there.
 
 use std::collections::BTreeMap;
 use std::future::Future;
@@ -13,7 +17,7 @@ use std::sync::Arc;
 
 use tokio::sync::Mutex;
 use yagura_protocol::{
-    ClientMessage, DefaultPalettes, LaunchOptionAlias, McpRegistrationAction, OnNameTaken,
+    ClientMessage, DefaultPalettes, LaunchOptionAlias, McpRegistrationAction, OnNameTaken, Palette,
     PlanInfo, PlanSummary, RoleEntry, TaskAssignment, TerminalSize, TicketInfo,
     TicketWorkspaceInfo, WindowInfo, WindowStatus,
 };
@@ -26,14 +30,14 @@ use crate::commands::{
     ProfileListReply, RestoreCandidateListReply, RoleListReply, TicketListReply,
     UpdateWindowLayoutReply,
 };
-use crate::events::AttachResponse;
 use crate::frame_mailbox::FrameMailbox;
 use crate::host::GuiHost;
-use crate::ipc_client::{IpcClient, IpcError};
+use crate::ipc_client::{ERROR_CODE_SUPERSEDED, IpcClient, IpcError};
 use crate::pool_outcomes::{
     ApprovalSyncOutcome, CloseOutcome, DecideApprovalOutcome, map_close_result,
     map_decide_approval_result, map_sync_approvals_result,
 };
+use crate::window_record::{LinkState, RecordState, SentSize, WindowRecord};
 
 /// How one request wants its control connection established.
 #[derive(Debug, Clone, Copy)]
@@ -50,6 +54,13 @@ pub(crate) enum ControlConnect {
 pub struct ConnectionPool {
     /// Per-window connections, indexed by window ID.
     windows: Mutex<BTreeMap<String, Arc<IpcClient>>>,
+    /// Per-window records, indexed by window ID. Only a live window of the
+    /// last daemon list the pool applied has one, so they are bounded by the
+    /// daemon's windows; nothing the WebView names creates one.
+    records: Mutex<BTreeMap<String, Arc<WindowRecord>>>,
+    /// Held across a list's round trip and its application to the records,
+    /// so lists are applied in the order the daemon answered them.
+    listing: Mutex<()>,
     /// One guard per window ID, held for the whole "already connected? ->
     /// establish -> record" sequence so that the poll loop and an explicit
     /// attach cannot both establish a connection for the same window.
@@ -79,6 +90,8 @@ impl ConnectionPool {
     pub fn new() -> Self {
         Self {
             windows: Mutex::new(BTreeMap::new()),
+            records: Mutex::new(BTreeMap::new()),
+            listing: Mutex::new(()),
             connect_guards: Mutex::new(BTreeMap::new()),
             control: Arc::new(IpcClient::new()),
             frames: Arc::new(FrameMailbox::new()),
@@ -90,10 +103,16 @@ impl ConnectionPool {
         &self.frames
     }
 
-    /// Establishes one connection per window id, strictly one at a time, and
-    /// returns the ids that failed in input order. An id that already has a
-    /// connection is skipped, so calling this twice does not open a second
-    /// connection to the same window.
+    /// Gives each window id a client of its record, strictly one at a time,
+    /// and has `connect` establish it; returns the ids that failed in input
+    /// order. The client is in the pool before `connect` runs, so a window
+    /// is never attached without its client being there; one that fails is
+    /// let go of, and its record kept. An id with no record (a list retired
+    /// it meanwhile) is skipped, and so is one that already has a
+    /// connection, so calling this twice does not open a second connection
+    /// to the same window, unless its link was lost: that connection gave
+    /// up, so it is replaced. A window another GUI took over is never
+    /// connected again.
     ///
     /// Sequential rather than concurrent: the daemon offers a single pending
     /// endpoint instance at a time, so simultaneous attempts
@@ -104,21 +123,31 @@ impl ConnectionPool {
     /// attached to one window.
     pub async fn connect_windows<F, Fut>(&self, window_ids: &[String], connect: F) -> Vec<String>
     where
-        F: Fn(String) -> Fut,
-        Fut: Future<Output = Result<Arc<IpcClient>, IpcError>>,
+        F: Fn(String, Arc<IpcClient>) -> Fut,
+        Fut: Future<Output = Result<(), IpcError>>,
     {
         let mut failed = Vec::new();
         for window_id in window_ids {
             let guard = self.connect_guard(window_id).await;
             let _establishing = guard.lock().await;
-            if self.get_window(window_id).await.is_some() {
+            let Ok(record) = self.record_or_error(window_id).await else {
                 continue;
+            };
+            let link = record.lock().await.link;
+            match (link, self.get_window(window_id).await) {
+                (LinkState::Superseded, _) => continue,
+                (_, None) => {}
+                (LinkState::Lost(_), Some(_)) => self.remove_client(window_id).await,
+                (_, Some(_)) => continue,
             }
-            match connect(window_id.clone()).await {
-                Ok(client) => {
-                    self.windows.lock().await.insert(window_id.clone(), client);
-                }
-                Err(_) => failed.push(window_id.clone()),
+            let client = Arc::new(IpcClient::new_window(record));
+            self.windows
+                .lock()
+                .await
+                .insert(window_id.clone(), Arc::clone(&client));
+            if connect(window_id.clone(), client).await.is_err() {
+                self.remove_client(window_id).await;
+                failed.push(window_id.clone());
             }
         }
         failed
@@ -140,16 +169,52 @@ impl ConnectionPool {
         windows.get(window_id).map(Arc::clone)
     }
 
-    /// Stops tracking a window and releases its connection. The connection is
-    /// closed deliberately, so it neither reconnects nor reports a disconnect
-    /// for a window that is gone on purpose.
+    /// Stops tracking a window the daemon no longer lists: releases its
+    /// connection and drops its record, with the input it held. The
+    /// connection is closed deliberately, so it neither reconnects nor
+    /// reports a disconnect for a window that is gone on purpose.
     pub async fn remove_window(&self, window_id: &str) {
+        self.remove_client(window_id).await;
+        self.records.lock().await.remove(window_id);
+        self.prune_connect_guard(window_id).await;
+        self.frames.discard_window(window_id);
+    }
+
+    /// Releases a window's connection, keeping its record for the next one.
+    async fn remove_client(&self, window_id: &str) {
         let removed = self.windows.lock().await.remove(window_id);
         if let Some(client) = removed {
             client.disconnect().await;
         }
-        self.prune_connect_guard(window_id).await;
-        self.frames.discard_window(window_id);
+    }
+
+    /// The window's record.
+    ///
+    /// # Errors
+    /// Returns [`IpcError::WindowNotAttached`] when the window has none.
+    async fn record_or_error(&self, window_id: &str) -> Result<Arc<WindowRecord>, IpcError> {
+        self.records
+            .lock()
+            .await
+            .get(window_id)
+            .map(Arc::clone)
+            .ok_or_else(|| IpcError::WindowNotAttached {
+                window_id: window_id.to_owned(),
+            })
+    }
+
+    /// The window's connection when its link is attached: the only time what
+    /// the record is told also goes to the daemon at once.
+    async fn attached_client(
+        &self,
+        window_id: &str,
+        state: &RecordState,
+    ) -> Option<Arc<IpcClient>> {
+        if state.link == LinkState::Attached {
+            self.get_window(window_id).await
+        } else {
+            None
+        }
     }
 
     /// Drops the window's guard entry once this map is its last holder, so
@@ -168,65 +233,131 @@ impl ConnectionPool {
         }
     }
 
-    /// Lists all tracked window IDs.
+    /// Lists the IDs of the windows that have a connection.
     pub async fn window_ids(&self) -> Vec<String> {
         let windows = self.windows.lock().await;
         windows.keys().cloned().collect()
     }
 
+    /// Every window the pool tracks: those with a connection and those with
+    /// a record only.
+    async fn tracked_ids(&self) -> Vec<String> {
+        let mut ids = self.window_ids().await;
+        for id in self.records.lock().await.keys() {
+            if !ids.contains(id) {
+                ids.push(id.clone());
+            }
+        }
+        ids
+    }
+
     /// Attaches to `window_id` on its own connection, establishing one on
-    /// first use.
+    /// first use, at `size`. The window's link reaches the WebView as events,
+    /// not as this result. A failed attach lets go of the connection and
+    /// keeps the record, which the next window-list poll attaches again.
     ///
     /// Runs under the window's guard: the window either already has a
     /// connection here (re-attaching on it kicks nobody) or it has none and no
     /// other task can be establishing one meanwhile.
     ///
     /// # Errors
-    /// Returns [`IpcError`] when the daemon cannot be reached or the window
-    /// does not exist.
+    /// Returns [`IpcError::WindowNotAttached`] when no daemon list the pool
+    /// applied names the window, and [`IpcError`] when the daemon cannot be
+    /// reached, the window does not exist, or another GUI took it over.
     pub async fn attach_window(
         &self,
         app: &impl GuiHost,
         window_id: &str,
         size: Option<TerminalSize>,
-    ) -> Result<AttachResponse, IpcError> {
+    ) -> Result<(), IpcError> {
+        let record = self.record_or_error(window_id).await?;
         let attached = {
             let guard = self.connect_guard(window_id).await;
             let _establishing = guard.lock().await;
+            {
+                let mut state = record.lock().await;
+                if state.link == LinkState::Superseded {
+                    // Reported again for a view that subscribed after the
+                    // first report; the window stays the other GUI's.
+                    state.report(app, window_id);
+                    return Err(IpcError::Rejected {
+                        code: ERROR_CODE_SUPERSEDED.to_owned(),
+                        message: "another client took the window over".to_owned(),
+                        rejected_argument: None,
+                    });
+                }
+                if state.link == LinkState::Attached {
+                    state.move_to(app, window_id, LinkState::Connecting);
+                }
+            }
             let client = {
                 let mut windows = self.windows.lock().await;
                 Arc::clone(
                     windows
                         .entry(window_id.to_owned())
-                        .or_insert_with(|| Arc::new(IpcClient::new_window())),
+                        .or_insert_with(|| Arc::new(IpcClient::new_window(Arc::clone(&record)))),
                 )
             };
             match client.attach_window(app, window_id, size).await {
-                Ok(response) => Ok(response),
+                Ok(_) => Ok(()),
                 Err(error) => {
-                    // A window whose connection could not be established must
-                    // not stay in the pool: input and resize route through it,
-                    // and the window-list poll retries on its next tick.
-                    self.remove_window(window_id).await;
+                    // The window-list poll attaches it again on its next tick,
+                    // restoring what the record kept.
+                    self.remove_client(window_id).await;
                     Err(error)
                 }
             }
         };
         // Outside the block, and so past the drop of this call's own clone of
-        // the guard, which is what stopped the removal above from reclaiming
-        // the entry.
+        // the guard, which is what stopped it from being reclaimed.
         if attached.is_err() {
             self.prune_connect_guard(window_id).await;
         }
         attached
     }
 
-    /// Lists the windows the daemon currently manages.
+    /// Lists the windows the daemon currently manages, after applying the
+    /// list to the records.
     ///
     /// # Errors
     /// Returns [`IpcError`] when the daemon cannot be reached.
     pub async fn list_windows(&self, app: &impl GuiHost) -> Result<Vec<WindowInfo>, IpcError> {
-        self.control(app).await?.list_windows().await
+        self.control(app).await?;
+        self.listed_windows().await
+    }
+
+    /// Asks the control connection, as it stands, for the daemon's window
+    /// list and applies it to the records before handing it out, so every
+    /// window the list names has a record by the time anyone sees the list.
+    /// The caller establishes the control connection first.
+    ///
+    /// # Errors
+    /// Returns [`IpcError`] when the round trip fails.
+    pub(crate) async fn listed_windows(&self) -> Result<Vec<WindowInfo>, IpcError> {
+        let _listing = self.listing.lock().await;
+        let windows = self.control.list_windows().await?;
+        self.track(&windows).await;
+        Ok(windows)
+    }
+
+    /// Applies `windows` to the records the way a list from the daemon is.
+    #[cfg(test)]
+    pub(crate) async fn track_window_list(&self, windows: &[WindowInfo]) {
+        let _listing = self.listing.lock().await;
+        self.track(windows).await;
+    }
+
+    /// Retires every tracked window `windows` does not name alive, and makes
+    /// a record for each live one that has none: the only place a record is
+    /// made. Called under `listing`.
+    async fn track(&self, windows: &[WindowInfo]) {
+        let live = live_window_ids(windows);
+        // Waits for each `disconnect` under `listing`: a later list finds this one applied.
+        self.retire_windows_except(&live).await;
+        let mut records = self.records.lock().await;
+        for window_id in live {
+            records.entry(window_id.to_owned()).or_default();
+        }
     }
 
     /// Lists the detection definition names the daemon can offer.
@@ -843,7 +974,9 @@ impl ConnectionPool {
             .await
     }
 
-    /// Closes a window, terminating its process tree, and stops tracking it.
+    /// Closes a window, terminating its process tree, and lets go of its
+    /// connection. Its record goes with the next daemon list that no longer
+    /// names the window, so a window the close did not end keeps it.
     ///
     /// GUI-originated closes bypass the daemon's human approval gate
     /// entirely once this connection has registered as an approver, so the
@@ -867,7 +1000,7 @@ impl ConnectionPool {
         force: Option<bool>,
     ) -> Result<CloseOutcome, IpcError> {
         let outcome = map_close_result(self.close_round_trip(app, window_id, force).await)?;
-        self.remove_window(window_id).await;
+        self.remove_client(window_id).await;
         Ok(outcome)
     }
 
@@ -986,7 +1119,8 @@ impl ConnectionPool {
     }
 
     /// Sends an already validated message to the connection attached to
-    /// `window_id`; the daemon applies it to that connection's window.
+    /// `window_id`; the daemon applies it to that connection's window. For a
+    /// message that is not worth keeping while the window is not attached.
     ///
     /// # Errors
     /// Returns [`IpcError::WindowNotAttached`] when no connection serves that
@@ -996,10 +1130,7 @@ impl ConnectionPool {
         window_id: &str,
         message: &ClientMessage,
     ) -> Result<(), IpcError> {
-        self.window_or_error(window_id)
-            .await?
-            .send_attached(message)
-            .await
+        self.window_or_error(window_id).await?.send(message).await
     }
 
     /// Reads the text selected in `window_id`; `None` when nothing is
@@ -1015,16 +1146,101 @@ impl ConnectionPool {
             .await
     }
 
-    /// Resizes the PTY of the connection attached to `window_id`.
+    /// Records the size `window_id` is drawn at, and resizes its PTY when the
+    /// window is attached and was not given this size on this connection
+    /// already. A window that is not attached is given it by its next attach.
     ///
     /// # Errors
-    /// Returns [`IpcError::WindowNotAttached`] when no connection serves that
-    /// window, and [`IpcError`] when the write fails.
+    /// Returns [`IpcError::WindowNotAttached`] when the pool has no record of
+    /// that window, and [`IpcError`] when the write fails.
     pub async fn resize(&self, window_id: &str, cols: u16, rows: u16) -> Result<(), IpcError> {
-        self.window_or_error(window_id)
-            .await?
-            .resize(cols, rows)
-            .await
+        let record = self.record_or_error(window_id).await?;
+        let mut state = record.lock().await;
+        let size = TerminalSize { cols, rows };
+        state.size = Some(size);
+        let Some(client) = self.attached_client(window_id, &state).await else {
+            return Ok(());
+        };
+        let sent = SentSize {
+            size: Some(size),
+            connection: client.connection_id(),
+        };
+        if state.sent == Some(sent) {
+            return Ok(());
+        }
+        client.resize(cols, rows).await?;
+        state.sent = Some(sent);
+        Ok(())
+    }
+
+    /// Records whether `window_id` is on screen, and tells the daemon at once
+    /// when the window is attached.
+    ///
+    /// # Errors
+    /// Returns [`IpcError::WindowNotAttached`] when the pool has no record of
+    /// that window, and [`IpcError`] when the write fails.
+    pub async fn set_window_visible(&self, window_id: &str, visible: bool) -> Result<(), IpcError> {
+        let record = self.record_or_error(window_id).await?;
+        let mut state = record.lock().await;
+        state.visible = Some(visible);
+        match self.attached_client(window_id, &state).await {
+            Some(client) => client.send(&ClientMessage::SetVisible { visible }).await,
+            None => Ok(()),
+        }
+    }
+
+    /// Records the colors `window_id` is drawn with, and gives them to the
+    /// daemon at once when the window is attached.
+    ///
+    /// # Errors
+    /// Returns [`IpcError::WindowNotAttached`] when the pool has no record of
+    /// that window, and [`IpcError`] when the write fails.
+    pub async fn set_window_palette(
+        &self,
+        window_id: &str,
+        palette: Palette,
+    ) -> Result<(), IpcError> {
+        let record = self.record_or_error(window_id).await?;
+        let mut state = record.lock().await;
+        state.palette = Some(palette.clone());
+        match self.attached_client(window_id, &state).await {
+            Some(client) => client.send(&ClientMessage::SetPalette(palette)).await,
+            None => Ok(()),
+        }
+    }
+
+    /// Sends one already validated input to `window_id`. While the window is
+    /// not attached the input is held, in the order it came, for its next
+    /// attach to deliver; a window that cannot be reached drops it. "Sent"
+    /// means written to the connection, not read by the daemon.
+    ///
+    /// # Errors
+    /// Returns [`IpcError::WindowNotAttached`] when the pool has no record of
+    /// that window, [`IpcError::InvalidArgument`] when the input held is past
+    /// its bound, and [`IpcError`] when the daemon refuses the write.
+    pub async fn send_window_input(
+        &self,
+        window_id: &str,
+        input: &ClientMessage,
+    ) -> Result<(), IpcError> {
+        let record = self.record_or_error(window_id).await?;
+        let mut state = record.lock().await;
+        match state.link {
+            LinkState::Lost(_) | LinkState::Superseded | LinkState::Exited => Ok(()),
+            LinkState::Connecting => state.hold(input),
+            // Held input goes first, so a later input does not overtake it.
+            LinkState::Attached if state.has_pending() => state.hold(input),
+            LinkState::Attached => {
+                let Some(client) = self.get_window(window_id).await else {
+                    return state.hold(input);
+                };
+                match client.send(input).await {
+                    // The connection just dropped: the reconnect delivers it.
+                    Err(IpcError::NotConnected | IpcError::Write) => state.hold(input),
+                    sent => sent,
+                }
+            }
+        }
     }
 
     /// The control connection, established the way `connect` asks for before
@@ -1097,33 +1313,36 @@ impl ConnectionPool {
             })
     }
 
-    /// Gives every live window the daemon reports a connection of its own and
-    /// tears down the connection of every window that is gone or has exited.
+    /// Gives every live window the daemon reports a connection of its own.
     /// Ids that fail to connect are left out and retried on the next poll.
-    ///
-    /// Tearing an exited window's connection down is what keeps the daemon
-    /// able to evict its entry: only entries that are exited *and* unattached
-    /// can be evicted.
+    /// Retiring the windows that are gone or have exited is the list's, done
+    /// when it was applied.
     pub(crate) async fn reconcile(&self, app: &impl GuiHost, windows: &[WindowInfo]) {
-        let live = live_window_ids(windows);
-        self.retire_windows_except(&live).await;
-
-        let ids: Vec<String> = live.iter().map(|id| (*id).to_owned()).collect();
+        let ids: Vec<String> = live_window_ids(windows)
+            .iter()
+            .map(|id| (*id).to_owned())
+            .collect();
         let _failed = self
-            .connect_windows(&ids, |window_id| {
+            .connect_windows(&ids, |window_id, client: Arc<IpcClient>| {
                 let app = app.clone();
                 async move {
-                    let client = Arc::new(IpcClient::new_window());
-                    client.attach_window(&app, &window_id, None).await?;
-                    Ok(client)
+                    client
+                        .attach_window(&app, &window_id, None)
+                        .await
+                        .map(|_| ())
                 }
             })
             .await;
     }
 
-    /// Tears down the connection of every tracked window not in `live`.
+    /// Tears down the connection and record of every tracked window not in
+    /// `live`.
+    ///
+    /// Tearing an exited window's connection down is what keeps the daemon
+    /// able to evict its entry: only entries that are exited *and* unattached
+    /// can be evicted.
     async fn retire_windows_except(&self, live: &[&str]) {
-        for tracked in self.window_ids().await {
+        for tracked in self.tracked_ids().await {
             if !live.contains(&tracked.as_str()) {
                 self.remove_window(&tracked).await;
             }
@@ -1168,15 +1387,17 @@ mod tests {
         let pool = ConnectionPool::new();
         let ids = vec!["a".to_string(), "b".to_string(), "c".to_string()];
 
+        listed(&pool, &ids).await;
+
         let log_for_connect = StdArc::clone(&log);
         let failed = pool
-            .connect_windows(&ids, move |id: String| {
+            .connect_windows(&ids, move |id: String, _client: StdArc<IpcClient>| {
                 let log = StdArc::clone(&log_for_connect);
                 async move {
                     log.lock().await.push(Event::Start(id.clone()));
                     tokio::task::yield_now().await;
                     log.lock().await.push(Event::End(id.clone()));
-                    Ok(StdArc::new(IpcClient::new()))
+                    Ok(())
                 }
             })
             .await;
@@ -1241,12 +1462,15 @@ mod tests {
     async fn connect_windows_returns_failed_ids_in_input_order() {
         let ids = vec!["a".to_string(), "b".to_string(), "c".to_string()];
 
-        let failed = ConnectionPool::new()
-            .connect_windows(&ids, |id: String| async move {
+        let pool = ConnectionPool::new();
+        listed(&pool, &ids).await;
+
+        let failed = pool
+            .connect_windows(&ids, |id: String, _client: StdArc<IpcClient>| async move {
                 if id == "b" {
                     Err(IpcError::ConnectTimeout)
                 } else {
-                    Ok(StdArc::new(IpcClient::new()))
+                    Ok(())
                 }
             })
             .await;
@@ -1258,12 +1482,15 @@ mod tests {
     async fn connect_windows_reports_multiple_failures_in_input_order() {
         let ids = vec!["a".to_string(), "b".to_string(), "c".to_string()];
 
-        let failed = ConnectionPool::new()
-            .connect_windows(&ids, |id: String| async move {
+        let pool = ConnectionPool::new();
+        listed(&pool, &ids).await;
+
+        let failed = pool
+            .connect_windows(&ids, |id: String, _client: StdArc<IpcClient>| async move {
                 if id == "a" || id == "c" {
                     Err(IpcError::ConnectTimeout)
                 } else {
-                    Ok(StdArc::new(IpcClient::new()))
+                    Ok(())
                 }
             })
             .await;
@@ -1282,9 +1509,10 @@ mod tests {
      {
         let pool = ConnectionPool::new();
         let ids = vec!["a".to_string(), "b".to_string()];
+        listed(&pool, &ids).await;
         let failed = pool
-            .connect_windows(&ids, |_id: String| async move {
-                Ok(StdArc::new(IpcClient::new()))
+            .connect_windows(&ids, |_id: String, _client: StdArc<IpcClient>| async move {
+                Ok(())
             })
             .await;
         assert!(failed.is_empty());
@@ -1292,9 +1520,10 @@ mod tests {
         // Re-connecting the same id must not duplicate the entry.
         let again = vec!["a".to_string()];
         let failed_again = pool
-            .connect_windows(&again, |_id: String| async move {
-                Ok(StdArc::new(IpcClient::new()))
-            })
+            .connect_windows(
+                &again,
+                |_id: String, _client: StdArc<IpcClient>| async move { Ok(()) },
+            )
             .await;
         assert!(failed_again.is_empty());
 
@@ -1311,12 +1540,22 @@ mod tests {
         assert!(pool.get_window("b").await.is_some());
     }
 
+    /// Applies a list that names `ids` as running windows, so each has a record.
+    async fn listed(pool: &ConnectionPool, ids: &[String]) {
+        let windows: Vec<WindowInfo> = ids
+            .iter()
+            .map(|id| window_info(id, WindowStatus::Running))
+            .collect();
+        pool.track_window_list(&windows).await;
+    }
+
     async fn pool_with_windows(ids: &[&str]) -> ConnectionPool {
         let pool = ConnectionPool::new();
         let ids: Vec<String> = ids.iter().map(|id| (*id).to_owned()).collect();
+        listed(&pool, &ids).await;
         let failed = pool
-            .connect_windows(&ids, |_id: String| async move {
-                Ok(StdArc::new(IpcClient::new()))
+            .connect_windows(&ids, |_id: String, _client: StdArc<IpcClient>| async move {
+                Ok(())
             })
             .await;
         assert!(failed.is_empty());
@@ -1328,13 +1567,14 @@ mod tests {
         let pool = ConnectionPool::new();
         let calls = StdArc::new(std::sync::atomic::AtomicUsize::new(0));
         let ids = vec!["a".to_owned()];
-        let connect = |_id: String| {
+        listed(&pool, &ids).await;
+        let connect = |_id: String, _client: StdArc<IpcClient>| {
             let calls = StdArc::clone(&calls);
             async move {
                 calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 // Suspends mid-establishment so the other connect runs meanwhile.
                 tokio::task::yield_now().await;
-                Ok::<_, IpcError>(StdArc::new(IpcClient::new()))
+                Ok::<_, IpcError>(())
             }
         };
 
@@ -1385,6 +1625,22 @@ mod tests {
         assert!(names_gone_as_not_attached(
             &resized.expect_err("resize must fail")
         ));
+
+        // Refusing a window nobody listed leaves no record behind for it, so
+        // asking again is refused the same way.
+        let input = ClientMessage::Text {
+            text: "x".to_owned(),
+        };
+        for _ in 0..2 {
+            let held = pool.send_window_input("gone", &input).await;
+            assert!(names_gone_as_not_attached(
+                &held.expect_err("input must fail")
+            ));
+            let shown = pool.set_window_visible("gone", false).await;
+            assert!(names_gone_as_not_attached(
+                &shown.expect_err("visibility must fail")
+            ));
+        }
     }
 
     fn names_gone_as_not_attached(error: &IpcError) -> bool {

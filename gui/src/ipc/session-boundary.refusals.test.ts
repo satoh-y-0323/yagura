@@ -16,7 +16,6 @@ import {
   narrowApprovalWithdrawnPayload,
   narrowApprovalResetPayload,
   narrowApprovalSyncOutcome,
-  narrowAttachResponse,
   narrowChatChanged,
   narrowChatMessages,
   narrowChatPosted,
@@ -158,8 +157,8 @@ describe('the field readers name the field they refuse', () => {
     ],
     [
       'a boolean',
-      () => narrowAttachResponse({ child_exited: 1 }),
-      /attach\.child_exited: expected a boolean/,
+      () => narrowChatPosted({ room_id: 'r', seq: 1, targets: [], user: 1 }),
+      /chat_posted\.user: expected a boolean/,
     ],
     [
       'a non-negative integer',
@@ -544,10 +543,6 @@ describe('the window list', () => {
     expect(
       messageOf(() => narrowWindowListPayload({ windows: [], protocol_revision: 'x' }))
     ).toMatch(/session:\/\/window-list\.protocol_revision: expected an integer/);
-  });
-
-  it('names the attach reply that is not an object', () => {
-    expect(messageOf(() => narrowAttachResponse(5))).toMatch(/^attach: expected an object/);
   });
 });
 

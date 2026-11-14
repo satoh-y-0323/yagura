@@ -29,6 +29,10 @@ function recordingSink(): { sink: TerminalSink; calls: string[] } {
     focus: () => {
       calls.push('focus');
     },
+    isVisible: () => {
+      calls.push('isVisible');
+      return true;
+    },
   };
   return { sink, calls };
 }

@@ -577,8 +577,7 @@ describe('subscribeSession routing', () => {
     return {
       onFrame: vi.fn(() => null),
       onExit: vi.fn(),
-      onDisconnected: vi.fn(),
-      onSuperseded: vi.fn(),
+      onLink: vi.fn(),
     };
   }
 
@@ -654,11 +653,18 @@ describe('subscribeSession routing', () => {
     await subscribeSession((id) => (id === 'w' ? mine : undefined), app);
 
     push(SESSION_EVENT.exit, { window_id: 'w', exit_code: 3 });
-    push(SESSION_EVENT.disconnected, { window_id: 'w', reason: 'gone' });
-    push(SESSION_EVENT.superseded, { window_id: 'w', reason: 'taken' });
+    push(SESSION_EVENT.windowLink, {
+      window_id: 'w',
+      state: 'lost',
+      reason: 'reconnect_failed',
+      epoch: 2,
+    });
+    push(SESSION_EVENT.windowLink, { window_id: 'w', state: 'superseded', epoch: 3 });
     expect(mine.onExit).toHaveBeenCalledWith({ window_id: 'w', exit_code: 3 });
-    expect(mine.onDisconnected).toHaveBeenCalledWith({ window_id: 'w', reason: 'gone' });
-    expect(mine.onSuperseded).toHaveBeenCalledWith({ window_id: 'w', reason: 'taken' });
+    expect(vi.mocked(mine.onLink).mock.calls).toEqual([
+      [{ window_id: 'w', state: 'lost', reason: 'reconnect_failed', epoch: 2 }],
+      [{ window_id: 'w', state: 'superseded', epoch: 3 }],
+    ]);
   });
 
   it('drops a window event for a window nobody holds, and reports a bad one', async () => {
@@ -667,8 +673,8 @@ describe('subscribeSession routing', () => {
     push(SESSION_EVENT.exit, { window_id: 'ghost', exit_code: 0 });
     expect(app.onBoundaryError).not.toHaveBeenCalled();
     push(SESSION_EVENT.exit, { exit_code: 0 });
-    push(SESSION_EVENT.disconnected, 5);
-    push(SESSION_EVENT.superseded, null);
+    push(SESSION_EVENT.windowLink, 5);
+    push(SESSION_EVENT.windowLink, null);
     expect(app.onBoundaryError).toHaveBeenCalledTimes(3);
   });
 

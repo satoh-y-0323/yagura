@@ -36,8 +36,7 @@ function entryOf(registry: WindowRegistry, windowId: string): WindowEntry {
 const HANDLERS: WindowEventHandlers = {
   onFrame: vi.fn(() => null),
   onExit: vi.fn(),
-  onDisconnected: vi.fn(),
-  onSuperseded: vi.fn(),
+  onLink: vi.fn(),
 };
 
 describe('window handlers follow the window', () => {

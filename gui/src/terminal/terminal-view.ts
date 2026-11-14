@@ -132,6 +132,7 @@ export class TerminalView {
       focus: () => {
         this.input.focus();
       },
+      isVisible: () => this.isVisible,
     });
     // The grid may already hold frames applied while no pane was mounted.
     this.renderer.invalidate('all');

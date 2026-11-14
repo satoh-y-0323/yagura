@@ -68,7 +68,16 @@ function sink() {
     invalidate: vi.fn<TerminalSink['invalidate']>(),
     measure: vi.fn<TerminalSink['measure']>(() => ({ cols: 80, rows: 24 })),
     focus: vi.fn<TerminalSink['focus']>(),
+    isVisible: vi.fn<TerminalSink['isVisible']>(() => true),
   };
+}
+
+/** A view that measures `size`, attached to `controller`. */
+function measuring(controller: SessionController, size: { cols: number; rows: number }) {
+  const view = sink();
+  view.measure.mockReturnValue(size);
+  controller.setSink(view);
+  return view;
 }
 
 function attachedController(): { controller: SessionController; store: SessionStore } {
@@ -84,7 +93,7 @@ async function settle(): Promise<void> {
 
 beforeEach(() => {
   vi.resetAllMocks();
-  vi.mocked(invokeAttachWindow).mockResolvedValue({ child_exited: false, exit_code: null });
+  vi.mocked(invokeAttachWindow).mockResolvedValue(undefined);
   vi.mocked(invokeSendWindowInput).mockResolvedValue(undefined);
   vi.mocked(invokeClearWindowSelection).mockResolvedValue(undefined);
   vi.mocked(invokeResize).mockResolvedValue(undefined);
@@ -108,95 +117,76 @@ describe('SessionController window events', () => {
   it('marks the session failed with the reason when the connection is lost', () => {
     const { controller, store } = attachedController();
 
-    controller.eventHandlers().onDisconnected({ window_id: WINDOW_ID, reason: 'pipe closed' });
+    controller.eventHandlers().onLink({
+      window_id: WINDOW_ID,
+      state: 'lost',
+      reason: 'reconnect_failed',
+      epoch: 1,
+    });
 
-    expect(get(store)).toMatchObject({ phase: 'failed', failureDetail: 'pipe closed' });
+    expect(get(store)).toMatchObject({ phase: 'failed', failureDetail: 'reconnect_failed' });
   });
 
   it('marks the session superseded when another client takes the window over', () => {
     const { controller, store } = attachedController();
 
-    controller.eventHandlers().onSuperseded({ window_id: WINDOW_ID, reason: 'taken over' });
+    controller.eventHandlers().onLink({ window_id: WINDOW_ID, state: 'superseded', epoch: 1 });
 
     expect(get(store).phase).toBe('superseded');
+  });
+
+  it("follows the core's link reports in epoch order and resends nothing", () => {
+    const { controller, store } = attachedController();
+    controller.setSink(sink());
+    controller.setPalette(PALETTE);
+    controller.setVisible(false);
+    vi.mocked(invokeResize).mockClear();
+    vi.mocked(invokeSetWindowVisible).mockClear();
+    vi.mocked(invokeSetWindowPalette).mockClear();
+    const handlers = controller.eventHandlers();
+
+    handlers.onLink({ window_id: WINDOW_ID, state: 'lost', reason: 'reconnect_failed', epoch: 5 });
+    expect(get(store).phase).toBe('failed');
+    handlers.onLink({ window_id: WINDOW_ID, state: 'attached', epoch: 5 });
+    handlers.onLink({ window_id: WINDOW_ID, state: 'attached', epoch: 4 });
+    expect(get(store).phase).toBe('failed');
+    handlers.onLink({ window_id: WINDOW_ID, state: 'attached', epoch: 6 });
+    expect(get(store).phase).toBe('attached');
+    expect(invokeResize).not.toHaveBeenCalled();
+    expect(invokeSetWindowVisible).not.toHaveBeenCalled();
+    expect(invokeSetWindowPalette).not.toHaveBeenCalled();
+
+    handlers.onLink({ window_id: WINDOW_ID, state: 'superseded', epoch: 7 });
+    handlers.onLink({ window_id: WINDOW_ID, state: 'attached', epoch: 8 });
+    expect(get(store).phase).toBe('superseded');
+
+    const exited = attachedController();
+    exited.controller.eventHandlers().onExit({ window_id: WINDOW_ID, exit_code: 0 });
+    exited.controller.eventHandlers().onLink({ window_id: WINDOW_ID, state: 'attached', epoch: 9 });
+    expect(get(exited.store).phase).toBe('exited');
   });
 });
 
 describe('SessionController.start', () => {
-  it('enters connecting before the attach answers', async () => {
-    const { controller, store } = attachedController();
-    let phaseDuringAttach: string | null = null;
-    vi.mocked(invokeAttachWindow).mockImplementation(() => {
-      phaseDuringAttach = get(store).phase;
-      return Promise.resolve({ child_exited: false, exit_code: null });
-    });
+  it.each<[string, unknown]>([
+    ['a string', 'no such window'],
+    ['an Error', new Error('boom')],
+    ['a plain object', { code: 5 }],
+    ['undefined', undefined],
+  ])(
+    'only warns when the attach is rejected with %s, leaving the phase as it was',
+    async (_label, thrown) => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+      const { controller, store } = attachedController();
+      vi.mocked(invokeAttachWindow).mockRejectedValue(thrown);
 
-    await controller.start();
+      await controller.start();
 
-    expect(phaseDuringAttach).toBe('connecting');
-    expect(get(store).phase).toBe('attached');
-  });
-
-  it.each<[string, unknown, string]>([
-    ['a string', 'no such window', 'no such window'],
-    ['an Error', new Error('boom'), 'boom'],
-    ['a plain object', { code: 5 }, '{"code":5}'],
-    ['undefined', undefined, 'unexpected error'],
-  ])('records the detail when the attach is rejected with %s', async (_label, thrown, detail) => {
-    const { controller, store } = attachedController();
-    vi.mocked(invokeAttachWindow).mockRejectedValue(thrown);
-
-    await controller.start();
-
-    expect(get(store)).toMatchObject({ phase: 'failed', failureDetail: detail });
-  });
-
-  it('gives the daemon the palette once attached', async () => {
-    const { controller } = attachedController();
-    controller.setPalette(PALETTE);
-    vi.mocked(invokeSetWindowPalette).mockClear();
-
-    await controller.start();
-
-    expect(invokeSetWindowPalette).toHaveBeenCalledWith(WINDOW_ID, PALETTE);
-  });
-
-  it('does not send a palette that was never set', async () => {
-    const { controller } = attachedController();
-
-    await controller.start();
-
-    expect(invokeSetWindowPalette).not.toHaveBeenCalled();
-  });
-
-  it('does not send the palette when the attach found the child already exited', async () => {
-    const { controller } = attachedController();
-    controller.setPalette(PALETTE);
-    vi.mocked(invokeSetWindowPalette).mockClear();
-    vi.mocked(invokeAttachWindow).mockResolvedValue({ child_exited: true, exit_code: 0 });
-
-    await controller.start();
-
-    expect(invokeSetWindowPalette).not.toHaveBeenCalled();
-  });
-
-  it('tells the daemon the window is hidden when it attaches while hidden', async () => {
-    const { controller } = attachedController();
-    controller.setVisible(false);
-    vi.mocked(invokeSetWindowVisible).mockClear();
-
-    await controller.start();
-
-    expect(invokeSetWindowVisible).toHaveBeenCalledExactlyOnceWith(WINDOW_ID, false);
-  });
-
-  it('says nothing about visibility when it attaches shown, which the daemon assumes', async () => {
-    const { controller } = attachedController();
-
-    await controller.start();
-
-    expect(invokeSetWindowVisible).not.toHaveBeenCalled();
-  });
+      expect(get(store)).toMatchObject({ phase: 'attached', failureDetail: null });
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(String(warn.mock.calls[0]?.[0])).toContain(WINDOW_ID);
+    }
+  );
 
   it('remembers the size of the latest attach, so the size of an earlier one is reported again', async () => {
     const { controller } = attachedController();
@@ -206,55 +196,38 @@ describe('SessionController.start', () => {
     vi.mocked(view.measure).mockReturnValue({ cols: 100, rows: 30 });
     await controller.start();
 
-    controller.notifyResize({ cols: 80, rows: 24 });
+    vi.mocked(view.measure).mockReturnValue({ cols: 80, rows: 24 });
+    controller.reportMeasuredSize();
 
     expect(invokeResize).toHaveBeenCalledExactlyOnceWith(WINDOW_ID, 80, 24);
   });
 });
 
-describe('SessionController.retry', () => {
-  it('attaches again', async () => {
-    const { controller, store } = attachedController();
-    vi.mocked(invokeAttachWindow).mockRejectedValueOnce('down');
-    await controller.start();
-    expect(get(store).phase).toBe('failed');
-
-    await controller.retry();
-
-    expect(get(store).phase).toBe('attached');
-    expect(invokeAttachWindow).toHaveBeenCalledTimes(2);
-  });
-
-  it('never reconnects a superseded session', async () => {
-    const { controller, store } = attachedController();
-    controller.eventHandlers().onSuperseded({ window_id: WINDOW_ID, reason: 'taken over' });
-
-    await controller.retry();
-
-    expect(invokeAttachWindow).not.toHaveBeenCalled();
-    expect(get(store).phase).toBe('superseded');
-  });
-});
-
 describe('SessionController commands', () => {
-  it('marks the session failed when a forwarded input is rejected', async () => {
+  it('only warns when a forwarded input is rejected, leaving the session as it was', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
     const { controller, store } = attachedController();
     vi.mocked(invokeSendWindowInput).mockRejectedValue(new Error('pipe broke'));
 
     controller.sendInput(ENTER);
     await settle();
 
-    expect(get(store)).toMatchObject({ phase: 'failed', failureDetail: 'pipe broke' });
+    expect(get(store).phase).toBe('attached');
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(String(warn.mock.calls[0]?.[0])).toContain(WINDOW_ID);
   });
 
-  it('marks the session failed when clearing the selection is rejected', async () => {
+  it('only warns when clearing the selection is rejected, leaving the session as it was', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
     const { controller, store } = attachedController();
     vi.mocked(invokeClearWindowSelection).mockRejectedValue('gone');
 
     controller.clearSelection();
     await settle();
 
-    expect(get(store)).toMatchObject({ phase: 'failed', failureDetail: 'gone' });
+    expect(get(store).phase).toBe('attached');
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(String(warn.mock.calls[0]?.[0])).toContain(WINDOW_ID);
   });
 
   it('returns the text the window has selected, or null when nothing is', async () => {
@@ -278,12 +251,12 @@ describe('SessionController.setPalette', () => {
     expect(invokeSetWindowPalette).toHaveBeenCalledExactlyOnceWith(WINDOW_ID, PALETTE);
   });
 
-  it('keeps the palette for the attach when the session is not interactive yet', async () => {
+  it('gives the palette to the core while the session is not interactive yet', async () => {
     const store = createWindowSessionStore();
     const controller = new SessionController(WINDOW_ID, store);
 
     controller.setPalette(PALETTE);
-    expect(invokeSetWindowPalette).not.toHaveBeenCalled();
+    expect(invokeSetWindowPalette).toHaveBeenCalledExactlyOnceWith(WINDOW_ID, PALETTE);
     await controller.start();
 
     expect(invokeSetWindowPalette).toHaveBeenCalledExactlyOnceWith(WINDOW_ID, PALETTE);
@@ -300,27 +273,6 @@ describe('SessionController.setPalette', () => {
     expect(get(store).phase).toBe('attached');
     expect(warn).toHaveBeenCalledTimes(1);
     expect(String(warn.mock.calls[0]?.[0])).toContain(WINDOW_ID);
-  });
-
-  it('gives the palette again with the first frame of a new view', () => {
-    const { controller } = attachedController();
-    controller.setPalette(PALETTE);
-    vi.mocked(invokeSetWindowPalette).mockClear();
-
-    controller.eventHandlers().onFrame(frame());
-
-    expect(invokeSetWindowPalette).toHaveBeenCalledExactlyOnceWith(WINDOW_ID, PALETTE);
-  });
-
-  it('does not give the palette again for a frame that continues the view', () => {
-    const { controller } = attachedController();
-    controller.eventHandlers().onFrame(frame());
-    controller.setPalette(PALETTE);
-    vi.mocked(invokeSetWindowPalette).mockClear();
-
-    controller.eventHandlers().onFrame(frame({ seq: 2, reset: false }));
-
-    expect(invokeSetWindowPalette).not.toHaveBeenCalled();
   });
 });
 
@@ -347,12 +299,12 @@ describe('SessionController.setVisible', () => {
     expect(invokeSetWindowVisible).toHaveBeenCalledTimes(1);
   });
 
-  it('keeps the visibility for the attach while the session is not interactive', () => {
+  it('tells the core the visibility while the session is not interactive', () => {
     const controller = new SessionController(WINDOW_ID, createWindowSessionStore());
 
     controller.setVisible(false);
 
-    expect(invokeSetWindowVisible).not.toHaveBeenCalled();
+    expect(invokeSetWindowVisible).toHaveBeenCalledExactlyOnceWith(WINDOW_ID, false);
   });
 
   it('only warns when the daemon refuses the visibility, leaving the session alone', async () => {
@@ -368,66 +320,54 @@ describe('SessionController.setVisible', () => {
   });
 });
 
-describe('SessionController.notifyResize', () => {
+describe('SessionController.reportMeasuredSize', () => {
   it('reports a new size to the PTY', () => {
     const { controller } = attachedController();
+    measuring(controller, { cols: 100, rows: 30 });
 
-    controller.notifyResize({ cols: 100, rows: 30 });
+    controller.reportMeasuredSize();
 
     expect(invokeResize).toHaveBeenCalledExactlyOnceWith(WINDOW_ID, 100, 30);
   });
 
-  it('does not report while the session is not interactive', () => {
+  it('reports the measured size while the session is not interactive', () => {
     const controller = new SessionController(WINDOW_ID, createWindowSessionStore());
+    measuring(controller, { cols: 100, rows: 30 });
 
-    controller.notifyResize({ cols: 100, rows: 30 });
+    controller.reportMeasuredSize();
 
-    expect(invokeResize).not.toHaveBeenCalled();
+    expect(invokeResize).toHaveBeenCalledExactlyOnceWith(WINDOW_ID, 100, 30);
   });
 
   it('does not report a size a window cannot take', () => {
     const { controller } = attachedController();
+    const view = measuring(controller, { cols: 1, rows: 30 });
 
-    controller.notifyResize({ cols: 1, rows: 30 });
-    controller.notifyResize({ cols: 100, rows: 0 });
-
-    expect(invokeResize).not.toHaveBeenCalled();
-  });
-
-  it('does not report the same size twice, but reports when either dimension changes', () => {
-    const { controller } = attachedController();
-
-    controller.notifyResize({ cols: 100, rows: 30 });
-    controller.notifyResize({ cols: 100, rows: 30 });
-    controller.notifyResize({ cols: 101, rows: 30 });
-    controller.notifyResize({ cols: 101, rows: 31 });
-
-    expect(vi.mocked(invokeResize).mock.calls).toEqual([
-      [WINDOW_ID, 100, 30],
-      [WINDOW_ID, 101, 30],
-      [WINDOW_ID, 101, 31],
-    ]);
-  });
-
-  it('does not report the size the attach was made at', async () => {
-    const store = createWindowSessionStore();
-    const controller = new SessionController(WINDOW_ID, store);
-    controller.setSink(sink());
-    await controller.start();
-
-    controller.notifyResize({ cols: 80, rows: 24 });
+    controller.reportMeasuredSize();
+    view.measure.mockReturnValue({ cols: 100, rows: 0 });
+    controller.reportMeasuredSize();
+    // Below the smallest size a pane reports, and a size measured while hidden.
+    view.measure.mockReturnValue({ cols: 9, rows: 3 });
+    controller.reportMeasuredSize();
+    view.measure.mockReturnValue({ cols: 100, rows: 30 });
+    view.isVisible.mockReturnValue(false);
+    controller.reportMeasuredSize();
 
     expect(invokeResize).not.toHaveBeenCalled();
   });
 
-  it('marks the session failed when the PTY refuses the size', async () => {
+  it('only warns when the PTY refuses the size, leaving the session as it was', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
     const { controller, store } = attachedController();
+    measuring(controller, { cols: 100, rows: 30 });
     vi.mocked(invokeResize).mockRejectedValue('refused');
 
-    controller.notifyResize({ cols: 100, rows: 30 });
+    controller.reportMeasuredSize();
     await settle();
 
-    expect(get(store)).toMatchObject({ phase: 'failed', failureDetail: 'refused' });
+    expect(get(store).phase).toBe('attached');
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(String(warn.mock.calls[0]?.[0])).toContain(WINDOW_ID);
   });
 });
 
@@ -540,7 +480,7 @@ describe('SessionController after a refused frame', () => {
     vi.mocked(invokeAttachWindow).mockReturnValue(
       new Promise((resolve) => {
         release = () => {
-          resolve({ child_exited: false, exit_code: null });
+          resolve(undefined);
         };
       })
     );
@@ -566,10 +506,11 @@ describe('SessionController after a refused frame', () => {
 
   it('does not reattach a superseded window', async () => {
     const { controller } = attachedController();
-    controller.eventHandlers().onSuperseded({ window_id: WINDOW_ID, reason: 'taken over' });
+    controller.eventHandlers().onLink({ window_id: WINDOW_ID, state: 'superseded', epoch: 1 });
 
     controller.eventHandlers().onFrame(REFUSED);
     await settle();
+    await controller.start();
 
     expect(invokeAttachWindow).not.toHaveBeenCalled();
   });

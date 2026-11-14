@@ -19,26 +19,27 @@ use yagura_protocol::{
 use crate::connection_pool::ConnectionPool;
 use crate::constants::{MAX_PTY_DIMENSION, MIN_PTY_COLS, MIN_PTY_ROWS};
 use crate::daemon_supervisor::RecoverySupervisorState;
-use crate::events::AttachResponse;
 use crate::instance::StartupContext;
 use crate::ipc_client::IpcError;
 use crate::pool_outcomes::{ApprovalSyncOutcome, CloseOutcome, DecideApprovalOutcome};
 use crate::recovery_state::RecoveryStatusReport;
 
 /// Connects to the daemon and attaches to a specific window, at the size the
-/// view will draw it at (`None` keeps the window's size).
+/// view will draw it at (`None` keeps the window's size). Where the window's
+/// link stands reaches the WebView as `session://window-link` and
+/// `session://exit`, not as this result.
 ///
 /// # Errors
 /// Returns a human-readable message when a dimension is outside the protocol
-/// range, the daemon cannot be reached, the window does not exist, or the
-/// attach times out.
+/// range, the daemon cannot be reached, the window does not exist, the
+/// attach times out, or another GUI took the window over.
 #[tauri::command(rename_all = "snake_case")]
 pub async fn attach_window(
     app: AppHandle,
     window_id: String,
     size: Option<TerminalSize>,
     pool: State<'_, Arc<ConnectionPool>>,
-) -> Result<AttachResponse, String> {
+) -> Result<(), String> {
     validate_window_id(&window_id).map_err(stringify)?;
     if let Some(size) = size {
         validate_dimension(size.cols, MIN_PTY_COLS, "cols").map_err(stringify)?;
@@ -1356,11 +1357,13 @@ pub async fn rename_window(
 
 /// Forwards one input event to a window: a `key`, `text`, `paste`,
 /// `pointer`, `wheel` or `focus` message, which the daemon turns into bytes
-/// with the window's terminal modes.
+/// with the window's terminal modes. Input typed while the window reconnects
+/// is held and delivered in order once it is attached again.
 ///
 /// # Errors
 /// Returns a human-readable message when `input` is another message type or
-/// is past its bounds, or the daemon connection is gone.
+/// is past its bounds, the window is not one the GUI knows, or the input held
+/// while it reconnects is past its bound.
 #[tauri::command(rename_all = "snake_case")]
 pub async fn send_window_input(
     window_id: String,
@@ -1369,7 +1372,7 @@ pub async fn send_window_input(
 ) -> Result<(), String> {
     validate_window_id(&window_id).map_err(stringify)?;
     validate_window_input(&input).map_err(stringify)?;
-    pool.send_to_window(&window_id, &input)
+    pool.send_window_input(&window_id, &input)
         .await
         .map_err(stringify)
 }
@@ -1412,11 +1415,12 @@ pub async fn next_frames(
 }
 
 /// Gives the daemon the colors a window is drawn with, which it answers the
-/// window's color queries with.
+/// window's color queries with. A window that is not attached is given them
+/// by its next attach.
 ///
 /// # Errors
 /// Returns a human-readable message when the palette does not hold 16 ANSI
-/// colors, or the daemon connection is gone.
+/// colors, the window is not one the GUI knows, or the write fails.
 #[tauri::command(rename_all = "snake_case")]
 pub async fn set_window_palette(
     window_id: String,
@@ -1425,16 +1429,17 @@ pub async fn set_window_palette(
 ) -> Result<(), String> {
     validate_window_id(&window_id).map_err(stringify)?;
     validate_palette(&palette).map_err(stringify)?;
-    pool.send_to_window(&window_id, &ClientMessage::SetPalette(palette))
+    pool.set_window_palette(&window_id, palette)
         .await
         .map_err(stringify)
 }
 
 /// Tells the daemon whether a window is on screen, so it builds no frames for
-/// one that is not.
+/// one that is not. A window that is not attached is told by its next attach.
 ///
 /// # Errors
-/// Returns a human-readable message when the daemon connection is gone.
+/// Returns a human-readable message when the window is not one the GUI knows
+/// or the write fails.
 #[tauri::command(rename_all = "snake_case")]
 pub async fn set_window_visible(
     window_id: String,
@@ -1442,7 +1447,7 @@ pub async fn set_window_visible(
     pool: State<'_, Arc<ConnectionPool>>,
 ) -> Result<(), String> {
     validate_window_id(&window_id).map_err(stringify)?;
-    pool.send_to_window(&window_id, &ClientMessage::SetVisible { visible })
+    pool.set_window_visible(&window_id, visible)
         .await
         .map_err(stringify)
 }
@@ -1477,11 +1482,12 @@ pub async fn clear_window_selection(
         .map_err(stringify)
 }
 
-/// Resizes a window's PTY.
+/// Resizes a window's PTY. A window that is not attached is given the size by
+/// its next attach.
 ///
 /// # Errors
 /// Returns a human-readable message when a dimension is outside the protocol
-/// range or the daemon connection is gone.
+/// range, the window is not one the GUI knows, or the write fails.
 #[tauri::command(rename_all = "snake_case")]
 pub async fn resize(
     window_id: String,
