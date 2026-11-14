@@ -492,7 +492,9 @@ impl<T: DaemonTransport + 'static> YaguraMcpServer<T> {
             waiting for ends: its wait_for_status as stop_requested, its requests awaiting \
             an approver as requester_interrupted. A profile that gives an AI no means is \
             refused (interrupt_unsupported); a window opened without a profile is written \
-            the daemon's configured interrupt bytes. The reply carries window_id and \
+            the daemon's configured interrupt bytes. A CLI that decides a batch of planned \
+            tool calls together does not refuse the rest of a batch already planned: a stop \
+            applies to the tool calls it makes after that. The reply carries window_id and \
             outcome. This is a destructive, gated operation: it succeeds immediately \
             when it targets this bridge's own window, and is otherwise held pending \
             a decision (by the active playbook or a human approver) unless the \

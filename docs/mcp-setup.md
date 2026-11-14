@@ -1021,11 +1021,13 @@ Interrupt the command running in a window, the way the profile the window was op
 | Profile | The user's interrupt | An AI's interrupt | An instruction sent after the stop arrives |
 | --- | --- | --- | --- |
 | `claude-code`, `wsl-claude-code` | Ctrl+C | stopped at its next `PreToolUse` or `PostToolUse`, which ends the turn | when Claude Code next waits for input: the wait it left registered takes it (see [How the daemon delivers text](#how-the-daemon-delivers-text)) |
-| `copilot-cli`, `wsl-copilot-cli` | Ctrl+C | every tool call of the turn is denied at `preToolUse` until the turn ends | at the end of the turn, as the block of `agentStop` |
+| `copilot-cli`, `wsl-copilot-cli` | Ctrl+C | denied at `preToolUse` for each tool call Copilot plans after the interrupt, until the turn ends; the calls of a batch it already planned are not stopped (see below) | at the end of the turn, as the block of `agentStop` |
 | `grok-build`, `wsl-grok-build` | Ctrl+C | stopped at its next `PreToolUse` or `PostToolUse`; the stop at `PostToolUse` ends the turn | only at your next turn: Grok Build has no hook or command that reaches a stopped session |
 | `muse-code`, `wsl-muse-code` | Escape | stopped at each tool result (`PostToolUse`, `PostToolUseFailure`) until the turn ends at `Stop` or `Interrupt`; a turn that calls no tool is not stopped | only at your next turn, as for Grok Build |
 | `codex-cli`, `wsl-codex-cli` | Escape | refused as `interrupt_unsupported` | -- |
 | `antigravity-cli`, `wsl-antigravity-cli` | Ctrl+C | refused as `interrupt_unsupported` | -- |
+
+**A batch of tool calls planned together is not stopped by an AI's interrupt (GitHub Copilot CLI).** Copilot CLI runs the hooks (`preToolUse`, `permissionRequest`) of a batch of tool calls planned together right after it plans them, all at once; the permission prompts and the executions come afterwards, one call at a time. An interrupt that arrives after the batch's hooks have run therefore does not refuse the batch's calls: with a setting that asks for permission, the remaining calls keep showing permission prompts (the user denies them, or stops Copilot with its Esc); with a setting that does not ask, the remaining calls run. The stop applies to the hooks of the tool calls Copilot makes after that. `stop_requested` means a stop was asked for, not when the CLI stops.
 
 A window opened without a profile, or from a profile with no `[interrupt]` table, is written `[limits].interrupt_bytes` (`0x03`, Ctrl+C, by default) for both, and an AI's interrupt ends what the window waits for as above. See [Interrupt Effectiveness](#interrupt-effectiveness) for what keys can and cannot do.
 

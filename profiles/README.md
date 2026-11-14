@@ -1839,6 +1839,7 @@ ends_turn = true
   stopped. A profile without `subagent_pointer` may not set it (it fails the
   table): a subagent's stop could not be told apart from the main session's,
   and would end the window's turn.
+- **A CLI that decides a batch of planned tool calls together** runs the hooks of the whole batch right after planning it, so an answer given at a stop event after that does not refuse the batch's remaining calls; it applies to the hooks of the calls the CLI makes later. An AI's interrupt of such a CLI is a request to stop, not a promise of when it stops (GitHub Copilot CLI is one; see [interrupt_window](../docs/mcp-setup.md#interrupt_window)).
 - **`ai = "none"`** gives an AI no means: its interrupt is refused as
   `interrupt_unsupported`, and nothing is written. The user's interrupt still
   writes `user_keys`.
