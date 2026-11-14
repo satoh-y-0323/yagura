@@ -665,7 +665,7 @@ fn the_per_connection_cap_refuses_further_submits_from_that_connection() {
 
     let result = broker.submit(draft(), 1, limits);
     assert!(
-        matches!(result, Err(SubmitError::TooManyPendingForConn)),
+        matches!(result, Err(SubmitError::TooManyPendingForCaller)),
         "a second pending request from the same connection must hit the \
          per-connection cap, distinctly from the daemon-wide one, got {result:?}"
     );

@@ -2334,7 +2334,7 @@ async fn send_handoff_from_a_profile_approved_by_a_registered_approver_starts_th
     );
 
     // No auto_approve: a human decision is required.
-    let config = handoff_profile_config(
+    let mut config = handoff_profile_config(
         Some(profiles_dir),
         empty_lookup(),
         &detection_dir,
@@ -2342,6 +2342,7 @@ async fn send_handoff_from_a_profile_approved_by_a_registered_approver_starts_th
         None,
         30,
     );
+    config.max_pending_approvals_per_caller = 1;
     let h = Harness::start("handoff-profile-approved", config).await;
     let mut approver = h.connect().await;
     register_approver(&mut approver).await;
@@ -2387,6 +2388,41 @@ async fn send_handoff_from_a_profile_approved_by_a_registered_approver_starts_th
         "an approved handoff must leave the profile-opened window running, got exit_code {:?}",
         info.exit_code
     );
+
+    // The approval cap counts a caller, and an MCP session is one caller across its calls
+    // (each carried on a connection of its own); another session is another caller.
+    let (mut session, _) = RelayClient::welcomed(&h.endpoint, hello(None, None)).await;
+    let seq = session.request(&initialize_line(0)).await;
+    session.answer(seq).await;
+    session.carry(&initialized_line().to_string()).await;
+    let handoff = || json!({"profile": "ready", "reference": "r", "note": "t"});
+    let _held = session
+        .request(&tool_call_line(1, "send_handoff", handoff(), false))
+        .await;
+    let _held_request = expect_approval_requested(&mut approver).await;
+    let second = session
+        .request(&tool_call_line(2, "send_handoff", handoff(), false))
+        .await;
+    tokio::select! {
+        answer = session.answer(second) => {
+            let (_, text) = tool_call_error(&answer);
+            // A daemon tool error reads as its `ToolError` text, not as a relay error word.
+            assert!(text.starts_with("resource exhausted:"), "{text}");
+            assert!(text.contains("awaiting approval"), "{text}");
+        }
+        request = expect_approval_requested(&mut approver) => panic!(
+            "a second handoff of the same MCP session was counted apart from its first: it \
+             awaits approval as {request:?}"
+        ),
+    }
+    let (mut other, _) = RelayClient::welcomed(&h.endpoint, hello(None, None)).await;
+    let seq = other.request(&initialize_line(0)).await;
+    other.answer(seq).await;
+    other.carry(&initialized_line().to_string()).await;
+    let _other = other
+        .request(&tool_call_line(1, "send_handoff", handoff(), false))
+        .await;
+    let _other_request = expect_approval_requested(&mut approver).await;
 
     h.registry.terminate_all().await;
 }

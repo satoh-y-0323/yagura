@@ -295,7 +295,7 @@ fn queue_for_approval<T: GatedTool>(
             GateOutcome::Pending(ticket)
         }
         Err(SubmitError::NoApprover) => GateOutcome::Refused(deny_no_approver(tool)),
-        Err(SubmitError::TooManyPending | SubmitError::TooManyPendingForConn) => {
+        Err(SubmitError::TooManyPending | SubmitError::TooManyPendingForCaller) => {
             GateOutcome::Refused(error_msg(
                 "resource_exhausted",
                 "too many requests are already awaiting approval",

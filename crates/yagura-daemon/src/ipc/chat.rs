@@ -1127,7 +1127,7 @@ async fn submit_for_approval(
             });
         }
         Err(SubmitError::NoApprover) => outbound.reply(&deny_no_approver(post.tool)),
-        Err(SubmitError::TooManyPending | SubmitError::TooManyPendingForConn) => {
+        Err(SubmitError::TooManyPending | SubmitError::TooManyPendingForCaller) => {
             outbound.reply(&error_msg(
                 "resource_exhausted",
                 "too many requests are already awaiting approval",

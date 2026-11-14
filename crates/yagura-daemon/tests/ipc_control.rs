@@ -26,9 +26,11 @@ use crate::common;
 use std::path::Path;
 use std::time::Duration;
 
+use serde_json::json;
 use tokio::io::AsyncReadExt;
 use tokio::sync::broadcast::error::TryRecvError;
 
+use common::relay::{RelayClient, hello, initialize_line, initialized_line, tool_call_line};
 use common::{
     CONTROL_DETECTION_NAME, Harness, READY_MARKER, VALID_TOKEN, approval_config,
     approver_base_config as base_config, decide, echo_child_path, env_probe_path,
@@ -42,6 +44,7 @@ use yagura_test_support::process::exit_with_code_command;
 use yagura_test_support::process::{
     first_grandchild_command, process_is_running, wait_processes_gone,
 };
+use yagura_test_support::relay_stdio::tool_call_error;
 
 use yagura_daemon::waiter::StatusAt;
 use yagura_daemon::{DaemonConfig, OpenWindowRequest};
@@ -3224,7 +3227,7 @@ async fn deciding_from_one_approver_notifies_the_other_of_the_resolution() {
 }
 
 #[tokio::test]
-async fn exceeding_the_per_connection_pending_cap_is_resource_exhausted() {
+async fn exceeding_the_per_caller_pending_cap_is_resource_exhausted() {
     let dir = unique_temp_dir("pending-cap-per-conn");
     let config = DaemonConfig {
         max_pending_approvals_per_caller: 1,
@@ -3237,6 +3240,8 @@ async fn exceeding_the_per_connection_pending_cap_is_resource_exhausted() {
     let mut requester = h.connect().await;
     let window_a = h.open_idle_window(&mut requester).await;
     let window_b = h.open_idle_window(&mut requester).await;
+    let window_c = h.open_idle_window(&mut requester).await;
+    let window_d = h.open_idle_window(&mut requester).await;
 
     send(
         &mut requester,
@@ -3258,6 +3263,42 @@ async fn exceeding_the_per_connection_pending_cap_is_resource_exhausted() {
     .await;
     let msg = read_response(&mut requester).await;
     expect_error(msg, "resource_exhausted");
+
+    // A caller is one MCP session across its calls, each carried on a connection of its own.
+    let close = |window_id: &str| json!({ "window_id": window_id });
+    let (mut session, _) = RelayClient::welcomed(&h.endpoint, hello(None, None)).await;
+    let seq = session.request(&initialize_line(0)).await;
+    session.answer(seq).await;
+    session.carry(&initialized_line().to_string()).await;
+    let _held = session
+        .request(&tool_call_line(1, "close_window", close(&window_c), false))
+        .await;
+    let _held_request = expect_approval_requested(&mut approver).await;
+    let second = session
+        .request(&tool_call_line(2, "close_window", close(&window_d), false))
+        .await;
+    tokio::select! {
+        answer = session.answer(second) => {
+            let (_, text) = tool_call_error(&answer);
+            // A daemon tool error reads as its `ToolError` text, not as a relay error word.
+            assert!(text.starts_with("resource exhausted:"), "{text}");
+            assert!(text.contains("awaiting approval"), "{text}");
+        }
+        request = expect_approval_requested(&mut approver) => panic!(
+            "a second call of the same MCP session was counted apart from its first: it awaits \
+             approval as {request:?}"
+        ),
+    }
+
+    // Another session is another caller: it is not refused by the first one's pending request.
+    let (mut other, _) = RelayClient::welcomed(&h.endpoint, hello(None, None)).await;
+    let seq = other.request(&initialize_line(0)).await;
+    other.answer(seq).await;
+    other.carry(&initialized_line().to_string()).await;
+    let _other = other
+        .request(&tool_call_line(1, "close_window", close(&window_d), false))
+        .await;
+    let _other_request = expect_approval_requested(&mut approver).await;
 }
 
 #[tokio::test]

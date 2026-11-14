@@ -89,7 +89,7 @@ pub enum SubmitError {
     /// The requester's own cap
     /// ([`ApprovalLimits::max_pending_per_caller`]) is already reached.
     #[error("too many pending approval requests for this caller")]
-    TooManyPendingForConn,
+    TooManyPendingForCaller,
 }
 
 /// Why [`ApprovalBroker::decide`] refused a decision.
@@ -277,7 +277,7 @@ impl ApprovalBroker {
     /// # Errors
     ///
     /// Returns [`SubmitError::TooManyPending`] /
-    /// [`SubmitError::TooManyPendingForConn`] when `limits` is already
+    /// [`SubmitError::TooManyPendingForCaller`] when `limits` is already
     /// reached, and [`SubmitError::NoApprover`] when no approver accepts the
     /// push (including the case where every registered approver refuses it).
     pub fn submit(
@@ -296,7 +296,7 @@ impl ApprovalBroker {
                 .filter(|entry| entry.requester_caller == requester_caller)
                 .count();
             if per_caller >= limits.max_pending_per_caller {
-                return Err(SubmitError::TooManyPendingForConn);
+                return Err(SubmitError::TooManyPendingForCaller);
             }
         }
 
