@@ -81,8 +81,34 @@ pub const TURN_REPORT_STALE: Duration = Duration::from_secs(120);
 /// so a window still without one this long after its screen first showed a
 /// running turn means the hooks are not firing. The wait is measured from
 /// that first confirmation, whether or not the screen is still running when
-/// it ends; a turn a report opened never starts it.
+/// it ends; a turn a report opened never starts it. A taken-back window's
+/// inherited turn does not start it either (see [`ReportsExpected`]).
 pub const REPORT_GAP_GRACE: Duration = Duration::from_secs(10);
+
+/// Where a window whose CLI reports its turns came from, which decides whether
+/// the turn it is in when the engine starts is one the engine saw begin.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReportsExpected {
+    /// A window the daemon launched: its first turn begins after the engine.
+    FromLaunch,
+    /// A window a restarted daemon took back. The previous daemon was told
+    /// when the turn in progress began, and the new engine has no fact that
+    /// says when it ends, so [`REPORT_GAP_GRACE`] is not measured until that
+    /// turn is presumed over (see [`DetectionEngine::expect_status_reports`]).
+    FromTakeBack,
+}
+
+/// The presumption that the turn a taken-back window was in is still running.
+/// Held only while it may be; the engine drops it once the turn can be taken
+/// as over.
+#[derive(Debug, Clone, Copy)]
+struct InheritedTurn {
+    /// Where the quiet time and [`TURN_REPORT_STALE`] are measured from: the
+    /// declaration, or the moment an approval dialog gave way.
+    since: Instant,
+    /// Whether the screen was last judged an approval dialog.
+    awaiting_approval: bool,
+}
 
 /// What the engine and its handle share about status reports: whether they
 /// are expected, and whether their absence is currently marked. Atomics so the
@@ -217,8 +243,12 @@ pub struct DetectionEngine {
     /// Whether any status report has reached this engine.
     reports_seen: bool,
     /// When a rule of the screen first confirmed `Running`; a turn a report
-    /// opened does not count.
+    /// opened does not count, nor does one confirmed while `inherited_turn` is
+    /// held.
     first_screen_running_at: Option<Instant>,
+    /// The turn a taken-back window was in, while it may still be running.
+    /// Never read by a judgement: it only holds back `first_screen_running_at`.
+    inherited_turn: Option<InheritedTurn>,
 }
 
 /// How long output must pause, with the cursor still hidden, before the
@@ -355,20 +385,34 @@ impl DetectionEngine {
             report_watch: Arc::new(ReportWatch::default()),
             reports_seen: false,
             first_screen_running_at: None,
+            inherited_turn: None,
         }
     }
 
-    /// Declares whether this window's CLI is expected to report its turns. A
-    /// window that is expected to, and whose screen shows a running turn for
-    /// [`REPORT_GAP_GRACE`] with no report, is marked (see
-    /// [`DetectionEngine::report_gap`]). Never changes the confirmed status.
-    pub fn expect_status_reports(&mut self, expected: bool) {
-        self.report_watch.expected.store(expected, Ordering::SeqCst);
+    /// Declares that this window's CLI is expected to report its turns. A
+    /// window whose screen shows a running turn for [`REPORT_GAP_GRACE`] with
+    /// no report is marked (see [`DetectionEngine::report_gap`]). For a
+    /// taken-back window the wait is measured from the first running turn after
+    /// the one it was in has closed: no output for [`TURN_ACTIVE_QUIET`], or
+    /// [`TURN_REPORT_STALE`], neither counting while an approval dialog is up.
+    /// Never changes the confirmed status.
+    pub fn expect_status_reports(&mut self, origin: ReportsExpected) {
+        self.report_watch.expected.store(true, Ordering::SeqCst);
+        if origin == ReportsExpected::FromTakeBack {
+            // A start recorded before this declaration belongs to nothing the
+            // window has shown since it was taken back.
+            self.first_screen_running_at = None;
+            self.inherited_turn = Some(InheritedTurn {
+                since: Instant::now(),
+                awaiting_approval: false,
+            });
+        }
     }
 
     /// Whether reports are expected, were never received, and the screen has
-    /// shown a running turn for [`REPORT_GAP_GRACE`]. A report clears the mark
-    /// for good.
+    /// shown a running turn for [`REPORT_GAP_GRACE`] (a taken-back window's
+    /// inherited turn excluded; see [`DetectionEngine::expect_status_reports`]).
+    /// A report clears the mark for good.
     #[must_use]
     pub fn report_gap(&self) -> bool {
         self.report_gap_at(Instant::now())
@@ -550,6 +594,7 @@ impl DetectionEngine {
     pub fn on_status_event(&mut self, status: WindowStatus) -> Option<DetectedStatus> {
         let now = Instant::now();
         self.reports_seen = true;
+        self.inherited_turn = None;
         self.turn = TurnReport::after_report(status);
         self.turn_report_at = now;
         self.approval_dialog_seen = false;
@@ -771,6 +816,7 @@ impl DetectionEngine {
             self.raw = raw;
             self.raw_since = now;
             self.raw_evidence_at = evidence_at;
+            self.close_inherited_turn(now);
         }
 
         if self.raw != self.confirmed
@@ -793,6 +839,35 @@ impl DetectionEngine {
             && now.saturating_duration_since(self.turn_report_at) >= TURN_REPORT_STALE;
         if quiet || stale {
             self.turn = TurnReport::Closed;
+        }
+        self.close_inherited_turn(now);
+    }
+
+    /// Drops the presumption that a taken-back window's turn is still running
+    /// once it can be taken as over, by the same quiet and stale limits as
+    /// [`DetectionEngine::close_quiet_turn`]. Neither runs while the screen is
+    /// judged an approval dialog, and an answered one restarts both at the
+    /// moment it gave way: the answering keystroke's echo is not counted as
+    /// output, so its redraw would otherwise look like a silence.
+    fn close_inherited_turn(&mut self, now: Instant) {
+        let awaiting_approval = self.raw == DetectedStatus::WaitingApproval;
+        let turn_output_at = self.turn_output_at;
+        let Some(inherited) = self.inherited_turn.as_mut() else {
+            return;
+        };
+        let was_awaiting = std::mem::replace(&mut inherited.awaiting_approval, awaiting_approval);
+        if awaiting_approval {
+            return;
+        }
+        if was_awaiting {
+            inherited.since = now;
+            return;
+        }
+        let quiet =
+            now.saturating_duration_since(inherited.since.max(turn_output_at)) >= TURN_ACTIVE_QUIET;
+        let stale = now.saturating_duration_since(inherited.since) >= TURN_REPORT_STALE;
+        if quiet || stale {
+            self.inherited_turn = None;
         }
     }
 
@@ -873,6 +948,7 @@ impl DetectionEngine {
         self.confirmed = status;
         if status == DetectedStatus::Running
             && self.first_screen_running_at.is_none()
+            && self.inherited_turn.is_none()
             && screen_rule == Some(WindowStatus::Running)
         {
             self.first_screen_running_at = Some(Instant::now());
@@ -1058,7 +1134,7 @@ enum DetectorCommand {
     Input(InputEcho),
     Exited,
     StatusEvent(WindowStatus),
-    ExpectStatusReports(bool),
+    ExpectStatusReports(ReportsExpected),
     Resized,
     ResizeStarted,
     /// Makes the step that takes it panic outside the screen's own guard,
@@ -1194,13 +1270,13 @@ impl DetectorHandle {
         self.send(DetectorCommand::StatusEvent(status));
     }
 
-    /// Declares whether the window's CLI is expected to report its turns (see
+    /// Declares that the window's CLI is expected to report its turns (see
     /// [`DetectionEngine::expect_status_reports`]). Readable at once through
     /// [`DetectorHandle::reports_expected`]; the driver task is woken so its
     /// deadlines follow.
-    pub fn expect_status_reports(&self, expected: bool) {
-        self.report_watch.expected.store(expected, Ordering::SeqCst);
-        self.send(DetectorCommand::ExpectStatusReports(expected));
+    pub fn expect_status_reports(&self, origin: ReportsExpected) {
+        self.report_watch.expected.store(true, Ordering::SeqCst);
+        self.send(DetectorCommand::ExpectStatusReports(origin));
     }
 
     /// Whether the window's CLI is expected to report its turns.

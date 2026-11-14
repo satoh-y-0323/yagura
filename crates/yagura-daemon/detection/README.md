@@ -835,6 +835,11 @@ what Codex hashes, stops the reports, and the window falls back to its screen.
 Only a window whose hooks never fire is caught this way; one that loses a
 single event (only `Stop`, say) is not.
 
+A window a restarted daemon took back is measured from the first running turn
+after the one it was in has closed (output stopped for 5 seconds, or 2
+minutes passed, either not counting while an approval dialog is up), because
+the new daemon cannot tell when that turn began.
+
 ### Limits
 
 - **Claude Code sends no hook when you press Esc to interrupt a turn, or deny

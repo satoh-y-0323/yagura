@@ -88,6 +88,7 @@ and versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- **Right after a restart, a running window no longer gets a false "status reports aren't arriving" mark and warning.** A window the daemon takes back is now measured from its first running turn after the one it was in has ended, not from a turn already under way.
 - **A message for a Claude Code window that waits for input no longer waits for its next turn when its wait is gone.** After a daemon that ended abnormally, or once the CLI's own time limit for the wait ran out, the daemon now asks the CLI to register its wait again (see Added).
 - **`close_window` now replies, once the daemon has observed the child's exit, only after the window reports `exited`**, instead of waiting a fixed budget for it, so the GUI no longer brings back the pane of a window it has just closed. A window whose detection had stopped now reports `exited` once its process ends, whether it was closed or ended by itself; before, it stayed `unknown`, kept a pane, and kept counting against the window limit. See [`docs/mcp-setup.md`](docs/mcp-setup.md#close_window).
 - **A CLI's hook that reports right after the window starts is no longer refused while the window is still opening.** Its status report, and its requests for the window's messages, now wait for the window to finish opening, as the CLI's own connection already did.

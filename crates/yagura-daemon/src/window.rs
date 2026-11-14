@@ -28,7 +28,9 @@ use yagura_protocol::{
 
 use crate::config::DaemonConfig;
 use crate::detector::definition::{Definition, DefinitionError, is_valid_detection_name};
-use crate::detector::engine::{ConfirmedStatus, DetectionEngine, DetectorHandle, InputEcho};
+use crate::detector::engine::{
+    ConfirmedStatus, DetectionEngine, DetectorHandle, InputEcho, ReportsExpected,
+};
 use crate::detector::layers::{DefinitionSource, DetectionLayers, LayerError, ResolvedDefinition};
 use crate::holder_host::HolderHost;
 use crate::inbox::{Inbox, Sender, is_session_id};
@@ -2109,7 +2111,7 @@ impl WindowRegistry {
             ..provenance
         };
         if provenance.hooks.reaches() {
-            detector_handle.expect_status_reports(true);
+            detector_handle.expect_status_reports(ReportsExpected::FromLaunch);
         }
         // Started before the remaining awaited steps of this open so the
         // detector keeps converging while they run.
@@ -3308,7 +3310,7 @@ impl WindowRegistry {
         let overlay_before_fact =
             values.facts.overlay.is_none() && provenance.facts.overlay.is_some();
         if provenance.hooks.reaches() {
-            detector_handle.expect_status_reports(true);
+            detector_handle.expect_status_reports(ReportsExpected::FromTakeBack);
         }
         spawn_output_pump(session, Arc::downgrade(&detector_handle));
         // A placeholder answers for no delivery, so its parcels wait in the
