@@ -43,7 +43,7 @@ use super::server::YaguraMcpServer;
 use super::{DaemonTransport, RequesterIdentity, TransportError};
 use crate::control::RequestOrigin;
 use crate::ipc::report::{ReportReceipt, TakenReports};
-use crate::ipc::{IpcServer, VerifiedPeer};
+use crate::ipc::{Caller, IpcServer, VerifiedPeer};
 
 /// How many sessions may be identified as one window at once.
 const SESSIONS_PER_WINDOW: usize = 4;
@@ -267,9 +267,12 @@ pub(crate) async fn serve<S>(
         return;
     }
 
+    // Every call of this session counts as this one caller, whichever
+    // connection it runs on.
+    let caller = server.new_caller();
     let identity = match (window_id, token) {
         (Some(window_id), Some(token)) => {
-            identify(&server, &verified, window_id, token, declaration).await
+            identify(&server, &caller, &verified, window_id, token, declaration).await
         }
         _ => Identity::none(),
     };
@@ -293,6 +296,7 @@ pub(crate) async fn serve<S>(
     let receipts = Arc::new(Receipts::default());
     let transport = SessionTransport {
         server,
+        caller,
         verified,
         origin: identity.origin,
         requester: identity.requester,
@@ -343,12 +347,14 @@ impl Identity {
 /// The relay's `declaration` goes into the claim as it came, judged only there.
 async fn identify(
     server: &Arc<IpcServer>,
+    caller: &Caller,
     verified: &VerifiedPeer,
     window_id: String,
     token: String,
     declaration: Option<Declaration>,
 ) -> Identity {
-    let mut connection = server.open_internal_connection(verified, RequestOrigin::External, None);
+    let mut connection =
+        server.open_internal_connection(caller, verified, RequestOrigin::External, None);
     let reply = exchange(
         &mut connection,
         &ClientMessage::Identify {
@@ -419,10 +425,12 @@ async fn exchange(
 }
 
 /// The transport of one session's tools: each round trip runs on a new
-/// connection of the session's own, acting as the window the session
-/// identified as, at most [`REQUESTS_AT_ONCE`] at a time.
+/// connection of the session's own, as the session's one caller and acting
+/// as the window the session identified as, at most [`REQUESTS_AT_ONCE`] at
+/// a time.
 pub(crate) struct SessionTransport {
     server: Arc<IpcServer>,
+    caller: Caller,
     verified: VerifiedPeer,
     origin: RequestOrigin,
     requester: RequesterIdentity,
@@ -463,9 +471,12 @@ impl DaemonTransport for SessionTransport {
             }
             None => (None, None),
         };
-        let mut connection =
-            self.server
-                .open_internal_connection(&self.verified, self.origin.clone(), receipt);
+        let mut connection = self.server.open_internal_connection(
+            &self.caller,
+            &self.verified,
+            self.origin.clone(),
+            receipt,
+        );
         let answer = tokio::select! {
             biased;
             () = &mut ended => Err(session_ended()),

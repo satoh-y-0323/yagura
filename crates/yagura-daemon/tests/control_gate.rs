@@ -1080,7 +1080,7 @@ fn daemon_config_defaults_to_the_documented_handoff_slot_limits() {
         "the daemon-wide cap on open-and-undelivered handoff windows must default to 32"
     );
     assert_eq!(
-        defaults.max_open_handoffs_per_conn, 4,
+        defaults.max_open_handoffs_per_caller, 4,
         "the per-connection cap on open-and-undelivered handoff windows must default to 4"
     );
 }

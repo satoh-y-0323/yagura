@@ -32,7 +32,7 @@ const NONCE: &str = "k3f9xa";
 /// Generous limits, so a test that is not about the caps never trips one.
 const ROOMY: ApprovalLimits = ApprovalLimits {
     max_pending: 32,
-    max_pending_per_conn: 4,
+    max_pending_per_caller: 4,
 };
 
 /// An approver that records everything pushed to it and can be told to start
@@ -416,7 +416,7 @@ fn registering_returns_pending_requests_in_submission_order() {
 
     let limits = ApprovalLimits {
         max_pending: 32,
-        max_pending_per_conn: 6,
+        max_pending_per_caller: 6,
     };
     let tickets: Vec<_> = (0..6)
         .map(|_| {
@@ -629,7 +629,7 @@ fn the_daemon_wide_cap_refuses_further_submits() {
     broker.register_approver(10, sink);
     let limits = ApprovalLimits {
         max_pending: 2,
-        max_pending_per_conn: 2,
+        max_pending_per_caller: 2,
     };
 
     let _held = [
@@ -656,7 +656,7 @@ fn the_per_connection_cap_refuses_further_submits_from_that_connection() {
     broker.register_approver(10, sink);
     let limits = ApprovalLimits {
         max_pending: 32,
-        max_pending_per_conn: 1,
+        max_pending_per_caller: 1,
     };
 
     let _held = broker
@@ -685,7 +685,7 @@ fn a_settled_request_frees_its_place_in_the_caps() {
     broker.register_approver(10, sink);
     let limits = ApprovalLimits {
         max_pending: 1,
-        max_pending_per_conn: 1,
+        max_pending_per_caller: 1,
     };
 
     let ticket = broker

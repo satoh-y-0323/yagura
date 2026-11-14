@@ -326,7 +326,8 @@ pub struct Parcel {
 pub enum Sender {
     /// The window of this id.
     Window(String),
-    /// A caller that is no window, on the daemon connection of this number.
+    /// A caller that is no window, of this number: one MCP session, or one
+    /// IPC connection.
     External(u64),
 }
 

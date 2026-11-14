@@ -205,9 +205,8 @@ struct Attachment {
 /// from unattached connections. The view itself lives in the attached
 /// window's holder, whose frames the window's link hands on.
 struct ConnectionState {
-    /// Names this connection in the approval ledger, which is what lets a
-    /// pending request be counted against the connection that asked for it
-    /// and decided only by a connection that registered as an approver.
+    /// Names this connection as an approver in the approval ledger: a
+    /// request is decided only by a connection that registered as one.
     conn_id: u64,
     attachment: Option<Attachment>,
     /// Woken by the attached window when a frame could not be queued, so
@@ -246,11 +245,9 @@ struct ConnectionState {
     /// no other way to learn that their requester is gone, since they are
     /// deliberately not tracked in `waiters` and never aborted.
     closed: ConnectionClosed,
-    /// How many windows this connection has opened for a handoff that has
-    /// neither been delivered nor torn down yet. Reference-counted because a
-    /// slot outlives the connection: the detached task holding it still has
-    /// to give it back once it has closed the window it opened.
-    open_handoffs: Arc<AtomicUsize>,
+    /// Who this connection's requests are counted as across connections: the
+    /// sender of what it puts in an inbox and the per-caller budgets.
+    caller: Caller,
     /// The read this connection was answered with, until its door says it
     /// printed it with `deliver_printed`; dropped with the connection, it puts
     /// the parcels back.
@@ -260,10 +257,44 @@ struct ConnectionState {
     report_receipt: Option<report::ReportReceipt>,
 }
 
+/// A caller that stays one across calls: one direct IPC connection, or one
+/// relay session, whose every call runs on a connection of its own.
+#[derive(Debug, Clone)]
+pub(crate) struct Caller {
+    /// Drawn from the same counter as connection numbers, so it never names
+    /// another caller.
+    id: u64,
+    /// How many windows this caller has opened for a handoff that has
+    /// neither been delivered nor torn down yet. Reference-counted because a
+    /// slot outlives the connection: the detached task holding it still has
+    /// to give it back once it has closed the window it opened.
+    open_handoffs: Arc<AtomicUsize>,
+}
+
+impl Caller {
+    fn new(id: u64) -> Self {
+        Self {
+            id,
+            open_handoffs: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+}
+
 impl ConnectionState {
+    /// The state of a direct IPC connection, which is a caller of its own.
     fn new(conn_id: u64, peer: &VerifiedPeer, peer_executable: Option<PathBuf>) -> Self {
+        Self::of_caller(conn_id, Caller::new(conn_id), peer, peer_executable)
+    }
+
+    fn of_caller(
+        conn_id: u64,
+        caller: Caller,
+        peer: &VerifiedPeer,
+        peer_executable: Option<PathBuf>,
+    ) -> Self {
         Self {
             conn_id,
+            caller,
             peer_process_id: peer.process_id,
             attachment: None,
             frames_failed: Arc::new(Notify::new()),
@@ -276,18 +307,18 @@ impl ConnectionState {
             peer_executable,
             approver_refusal_logged: false,
             closed: ConnectionClosed::new(),
-            open_handoffs: Arc::new(AtomicUsize::new(0)),
             held_read: inbox::HeldSlot::default(),
             report_receipt: None,
         }
     }
 
-    /// The state of a relay session's own connection, acting as `origin`: the
-    /// identity the session settled, with no window claim of its own and no
-    /// peer executable, so it never becomes an approver. Its peer is the relay
-    /// connection's.
+    /// The state of a relay session's own connection, acting as `origin` for
+    /// the session's `caller`: the identity the session settled, with no
+    /// window claim of its own and no peer executable, so it never becomes an
+    /// approver. Its peer is the relay connection's.
     fn internal(
         conn_id: u64,
+        caller: Caller,
         peer: &VerifiedPeer,
         origin: RequestOrigin,
         report_receipt: Option<report::ReportReceipt>,
@@ -295,7 +326,7 @@ impl ConnectionState {
         Self {
             origin,
             report_receipt,
-            ..Self::new(conn_id, peer, None)
+            ..Self::of_caller(conn_id, caller, peer, None)
         }
     }
 
@@ -538,7 +569,8 @@ struct GateContext<'a> {
     broker: &'a ApprovalBroker,
     registry: &'a WindowRegistry,
     origin: &'a RequestOrigin,
-    conn_id: u64,
+    /// The caller an approval it asks for is counted against.
+    caller_id: u64,
     policy: &'a PolicyCell,
 }
 
@@ -555,7 +587,7 @@ struct ProfileHandoffOpen {
     broker: Arc<ApprovalBroker>,
     config: DaemonConfig,
     origin: RequestOrigin,
-    conn_id: u64,
+    caller_id: u64,
     /// Raised when the requester leaves: its connection closes, or its
     /// window is interrupted.
     closed: LeftWatch,
@@ -597,7 +629,7 @@ struct DeliveryJob {
     permit: Permit<permit::SendHandoff>,
 }
 
-/// One outstanding-handoff slot: a handoff this connection has accepted and
+/// One outstanding-handoff slot: a handoff this caller has accepted and
 /// not yet answered -- the approval wait and the wait for an attempt to hand
 /// the envelope over included. A window opened from a profile always belongs
 /// to such a handoff, so at most N profile-opened windows await their start.
@@ -606,7 +638,7 @@ struct DeliveryJob {
 /// included, so a handoff awaiting a decision still counts against its
 /// budgets. They are given back when this is dropped.
 struct HandoffSlot {
-    _per_conn: CounterGuard,
+    _per_caller: CounterGuard,
     /// Held from acceptance for a handoff that opens a window: the budget
     /// also bounds the windows (child processes) waiting to start.
     _daemon: Option<CounterGuard>,
@@ -614,7 +646,7 @@ struct HandoffSlot {
 
 /// Which of the two budgets refused a slot.
 enum SlotExhausted {
-    PerConn,
+    PerCaller,
     Daemon,
 }
 
@@ -624,46 +656,46 @@ struct CounterGuard {
 }
 
 impl HandoffSlot {
-    /// Takes one slot from the per-connection budget and then one from the
+    /// Takes one slot from the per-caller budget and then one from the
     /// daemon-wide budget.
     ///
     /// # Errors
     ///
     /// Returns the [`SlotExhausted`] naming the budget that was already at
     /// its limit. Each step is a compare-and-swap that increments only
-    /// while the counter is below its limit, so two connections racing for
-    /// the last slot can never both take it. The first step is held as a
+    /// while the counter is below its limit, so two callers racing for the
+    /// last slot can never both take it. The first step is held as a
     /// guard, so a refusal from the second gives it back by dropping that
     /// guard: a slot exists only when both budgets granted one.
     fn try_acquire(
-        per_conn: &Arc<AtomicUsize>,
-        per_conn_max: usize,
+        per_caller: &Arc<AtomicUsize>,
+        per_caller_max: usize,
         daemon: &Arc<AtomicUsize>,
         daemon_max: usize,
     ) -> Result<Self, SlotExhausted> {
-        let per_conn =
-            CounterGuard::try_take(per_conn, per_conn_max).ok_or(SlotExhausted::PerConn)?;
+        let per_caller =
+            CounterGuard::try_take(per_caller, per_caller_max).ok_or(SlotExhausted::PerCaller)?;
         let daemon = CounterGuard::try_take(daemon, daemon_max).ok_or(SlotExhausted::Daemon)?;
         Ok(Self {
-            _per_conn: per_conn,
+            _per_caller: per_caller,
             _daemon: Some(daemon),
         })
     }
 
-    /// Takes the per-connection slot only: a handoff to an existing window
+    /// Takes the per-caller slot only: a handoff to an existing window
     /// starts no process.
     ///
     /// # Errors
     ///
-    /// [`SlotExhausted::PerConn`] when this connection is at its limit.
-    fn try_acquire_per_conn(
-        per_conn: &Arc<AtomicUsize>,
-        per_conn_max: usize,
+    /// [`SlotExhausted::PerCaller`] when this caller is at its limit.
+    fn try_acquire_per_caller(
+        per_caller: &Arc<AtomicUsize>,
+        per_caller_max: usize,
     ) -> Result<Self, SlotExhausted> {
-        let per_conn =
-            CounterGuard::try_take(per_conn, per_conn_max).ok_or(SlotExhausted::PerConn)?;
+        let per_caller =
+            CounterGuard::try_take(per_caller, per_caller_max).ok_or(SlotExhausted::PerCaller)?;
         Ok(Self {
-            _per_conn: per_conn,
+            _per_caller: per_caller,
             _daemon: None,
         })
     }
@@ -671,11 +703,11 @@ impl HandoffSlot {
 
 impl SlotExhausted {
     /// The refusal the caller is answered with, naming the budget that ran
-    /// out so an operator can tell one busy connection apart from a busy
+    /// out so an operator can tell one busy caller apart from a busy
     /// daemon.
     fn to_message(&self) -> DaemonMessage {
         let limit = match self {
-            Self::PerConn => "per-connection",
+            Self::PerCaller => "per-caller",
             Self::Daemon => "daemon-wide",
         };
         error_msg(
@@ -1310,12 +1342,20 @@ impl IpcServer {
         self.serve_connection(connection, state, read_buf).await;
     }
 
+    /// A new caller for a relay session, numbered apart from every connection
+    /// and every other caller.
+    pub(crate) fn new_caller(&self) -> Caller {
+        Caller::new(self.next_conn_id.fetch_add(1, Ordering::Relaxed))
+    }
+
     /// Opens a connection of a relay session's own into the connection body,
-    /// acting as `origin`, and returns its client end. Dropping that end is the
-    /// connection's end, as a client closing its IPC connection is. A
-    /// `report_receipt` is where its `wait_for_report` hands what it takes.
+    /// acting as `origin` for the session's `caller`, and returns its client
+    /// end. Dropping that end is the connection's end, as a client closing its
+    /// IPC connection is. A `report_receipt` is where its `wait_for_report`
+    /// hands what it takes.
     pub(crate) fn open_internal_connection(
         self: &Arc<Self>,
+        caller: &Caller,
         verified: &VerifiedPeer,
         origin: RequestOrigin,
         report_receipt: Option<report::ReportReceipt>,
@@ -1323,6 +1363,7 @@ impl IpcServer {
         let (client, body) = tokio::io::duplex(INTERNAL_CONNECTION_BUFFER);
         let state = ConnectionState::internal(
             self.next_conn_id.fetch_add(1, Ordering::Relaxed),
+            caller.clone(),
             verified,
             origin,
             report_receipt,
@@ -3324,10 +3365,11 @@ impl IpcServer {
             detection_warning: entry.detection_warning().map(str::to_string),
             mcp_connected: Some(entry.mcp_connected()),
             queued_count: Some(u64::try_from(entry.inbox().pending_count()).unwrap_or(u64::MAX)),
-            queued_ids: match sender_of(&self.registry, state) {
-                sender @ Sender::Window(_) => Some(entry.inbox().waiting_sent_by(&sender)),
-                Sender::External(_) => None,
-            },
+            queued_ids: Some(
+                entry
+                    .inbox()
+                    .waiting_sent_by(&sender_of(&self.registry, state)),
+            ),
         });
     }
 
@@ -3596,9 +3638,9 @@ impl IpcServer {
             (Some(window_id), None) => {
                 // The slot is taken for a window_id-addressed handoff too: it
                 // is a detached task that stays outstanding until answered.
-                let slot = match HandoffSlot::try_acquire_per_conn(
-                    &state.open_handoffs,
-                    self.config.max_open_handoffs_per_conn,
+                let slot = match HandoffSlot::try_acquire_per_caller(
+                    &state.caller.open_handoffs,
+                    self.config.max_open_handoffs_per_caller,
                 ) {
                     Ok(slot) => slot,
                     Err(exhausted) => {
@@ -3738,8 +3780,8 @@ impl IpcServer {
                 }
 
                 let slot = match HandoffSlot::try_acquire(
-                    &state.open_handoffs,
-                    self.config.max_open_handoffs_per_conn,
+                    &state.caller.open_handoffs,
+                    self.config.max_open_handoffs_per_caller,
                     &self.open_handoffs,
                     self.config.max_open_handoffs,
                 ) {
@@ -3765,7 +3807,7 @@ impl IpcServer {
                     broker: Arc::clone(&self.broker),
                     config: self.config.clone(),
                     origin: state.origin.clone(),
-                    conn_id: state.conn_id,
+                    caller_id: state.caller.id,
                     closed: RequestWatch::connection_only(&self.registry, outbound, state).left,
                     approval_text: format!("{}\n{}", description.text(), envelope.text),
                     envelope: envelope.text,
@@ -3953,7 +3995,7 @@ impl IpcServer {
             broker: &self.broker,
             registry: &self.registry,
             origin: &state.origin,
-            conn_id: state.conn_id,
+            caller_id: state.caller.id,
             policy: &self.policy,
         }
     }
@@ -5677,7 +5719,7 @@ async fn approve_profile_handoff(job: ProfileHandoffOpen) {
             broker: &job.broker,
             registry: &job.registry,
             origin: &job.origin,
-            conn_id: job.conn_id,
+            caller_id: job.caller_id,
             policy: &job.policy,
         };
         permit::gate_launched_handoff(&context, &job.approval_text)
@@ -6488,7 +6530,7 @@ fn spawn_pending(
 fn approval_limits(config: &DaemonConfig) -> ApprovalLimits {
     ApprovalLimits {
         max_pending: config.max_pending_approvals,
-        max_pending_per_conn: config.max_pending_approvals_per_conn,
+        max_pending_per_caller: config.max_pending_approvals_per_caller,
     }
 }
 
@@ -6966,13 +7008,13 @@ fn control_withdrawn_msg(left: Left) -> DaemonMessage {
 }
 
 /// Who a request on this connection sends as: the window it identified as,
-/// when the registry still holds it, or else a caller that is no window, on
-/// this connection. Read from the same record as [`envelope_from`], so an
+/// when the registry still holds it, or else the connection's caller, which
+/// is no window. Read from the same record as [`envelope_from`], so an
 /// envelope's sender and its `from` never disagree.
 fn sender_from(requester: Option<&WindowInfo>, state: &ConnectionState) -> Sender {
     match requester {
         Some(window) => Sender::Window(window.window_id.clone()),
-        None => Sender::External(state.conn_id),
+        None => Sender::External(state.caller.id),
     }
 }
 

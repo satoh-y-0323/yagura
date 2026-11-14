@@ -1775,6 +1775,8 @@ pub struct WindowRegistry {
     mcp_config_write: AsyncMutex<()>,
     /// The guest wake slots this daemon's windows hold.
     wake_slots: crate::wake_file::WakeSlots,
+    /// Bounds the wake I/O of the opens and of the delivery agents together.
+    wake_io: crate::wake_file::WakeIo,
     /// Windows whose id and token already exist but whose open has not yet
     /// registered them or failed. A child can identify as early as it is
     /// spawned, so an `identify` for one of these waits instead of answering
@@ -1822,6 +1824,8 @@ impl WindowRegistry {
 
         let workspace_walks = tokio::sync::Semaphore::new(config.max_windows);
         let holder_host = HolderHost::from_config(&config);
+        // The bound of the state base tool an open runs before it.
+        let wake_io = crate::wake_file::WakeIo::new(config.mcp_listing_timeout);
 
         Self {
             config,
@@ -1837,6 +1841,7 @@ impl WindowRegistry {
             workspace_walks,
             mcp_config_write: AsyncMutex::new(()),
             wake_slots: crate::wake_file::WakeSlots::default(),
+            wake_io,
             opening: Mutex::new(HashMap::new()),
             shutting_down: AtomicBool::new(false),
             participation: Arc::default(),
@@ -2364,13 +2369,26 @@ impl WindowRegistry {
         answers: crate::wake_file::HookAnswers,
     ) -> Option<crate::wake_file::WakeRecord> {
         let crate::wake_file::HookAnswers { texts, wake } = answers;
-        let record = wake.and_then(|place| self.wake_slots.record(&place, &folder.dir));
-        let record = record.map(|(record, slot)| {
-            if let Some(slot) = slot {
-                folder.wake.keep(slot);
-            }
-            record
-        });
+        let record = match wake.and_then(|place| self.wake_slots.record(&place, &folder.dir)) {
+            // A credentials folder is there already; a guest slot's folder
+            // must be before the CLI starts watching in it.
+            Some((record, Some(slot))) => match self.wake_io.make_slot_folder(&record).await {
+                Ok(()) => {
+                    folder.wake.keep(slot);
+                    Some(record)
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        error = %err,
+                        "the guest's wake folder could not be made; the window opens without a \
+                         wake file, so a message for it waits for its CLI's next event"
+                    );
+                    None
+                }
+            },
+            Some((record, None)) => Some(record),
+            None => None,
+        };
         if texts.is_empty() {
             return record;
         }
@@ -3350,6 +3368,12 @@ impl WindowRegistry {
     /// the same way a delivery does).
     pub(crate) fn config(&self) -> &DaemonConfig {
         &self.config
+    }
+
+    /// The bound on wake I/O the opens of this registry's windows count
+    /// against, for the writes that ask their CLIs to wait.
+    pub(crate) fn wake_io(&self) -> &crate::wake_file::WakeIo {
+        &self.wake_io
     }
 
     /// Installs the hook called at the end of every successful `open`

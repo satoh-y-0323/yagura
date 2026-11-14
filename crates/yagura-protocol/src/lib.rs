@@ -2894,8 +2894,9 @@ pub enum ClientMessage {
     /// Takes back an envelope the caller sent with `send_text` or
     /// `send_handoff`, while it still waits in its window's inbox. Only its
     /// sender may: the window that sent it, or, for a caller that is no
-    /// window, the connection that was answered with its id. Answered with
-    /// [`DaemonMessage::MessageWithdrawn`].
+    /// window, the same caller that was answered with its id (an MCP session
+    /// for as long as its connection to the daemon lasts, or an IPC
+    /// connection). Answered with [`DaemonMessage::MessageWithdrawn`].
     WithdrawMessage {
         /// The envelope's id, as the send's answer named it.
         id: String,
@@ -3839,10 +3840,10 @@ pub enum DaemonMessage {
         /// wire when `None`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         queued_count: Option<u64>,
-        /// The ids of the envelopes the caller's own window sent that wait in
-        /// this window's inbox. Shown to a caller identified as a window
-        /// only; `None` for every other caller, which is shown the count
-        /// alone. Omitted from the wire when `None`.
+        /// The ids of the envelopes the caller sent that wait in this
+        /// window's inbox: its own window's, or, for a caller that is no
+        /// window, its own (an MCP session, or an IPC connection). Omitted
+        /// from the wire when `None`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         queued_ids: Option<Vec<String>>,
     },

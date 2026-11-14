@@ -283,7 +283,7 @@ fn queue_for_approval<T: GatedTool>(
     let requester_kind = draft.requester.kind;
     match context
         .broker
-        .submit(draft, context.conn_id, approval_limits(context.config))
+        .submit(draft, context.caller_id, approval_limits(context.config))
     {
         Ok(ticket) => {
             tracing::info!(

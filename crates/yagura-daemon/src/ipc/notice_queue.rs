@@ -65,7 +65,7 @@ impl NoticeAgents {
             registry: Arc::clone(registry),
             reports,
             config: registry.config().clone(),
-            wake_writer: WakeWriter::new(),
+            wake_writer: WakeWriter::new(registry.wake_io().clone()),
         });
         let launcher_agents = Arc::downgrade(&agents);
         registry.set_notice_launcher(Box::new(move |entry: &Arc<WindowEntry>| {
@@ -243,7 +243,7 @@ async fn run_agent(agents: Arc<NoticeAgents>, entry: Arc<WindowEntry>) {
 /// register a wait again by writing the wake file its open named, when a
 /// parcel can be pushed and no wait is registered
 /// ([`crate::inbox::Inbox::ask_due`]). The ask stands until the CLI answers
-/// it; one that could not be written is taken back.
+/// it; one that could not be written, or not in time, is taken back.
 async fn ask_to_wait(agents: &NoticeAgents, entry: &WindowEntry, failed_before: &mut bool) {
     let Some(record) = entry.wake_record() else {
         return;

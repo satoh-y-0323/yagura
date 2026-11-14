@@ -1991,15 +1991,18 @@ window's [wake file](#delivery):
 
 - `state_base` (optional): an argv, naming no placeholder, that prints two
   lines -- the environment's state folder as that environment names it
-  (starting with `/`), then the same folder as the daemon reaches it (for
-  WSL, the UNC path `wslpath -w` prints, starting with `\\wsl.localhost\` or
-  `\\wsl$\`). It runs as a standalone command, like `convert`, each time a
-  window that is to have a wake file opens, within the daemon's listing time
-  limit (10 seconds). The wake file then goes in the instance's own folder
-  under it (see [docs/wsl.md](../docs/wsl.md)). Output of any other shape, a
-  failure, or a run past the limit opens the window without a wake file, and
-  the daemon logs one warning; so does a profile with `[host_paths]` but no
-  `state_base`. The bundled `wsl-claude-code` prints `$XDG_STATE_HOME`
+  (starting with `/`), then the same folder as the daemon reaches it, an
+  absolute path on this host (for WSL, the UNC path `wslpath -w` prints,
+  starting with `\\wsl.localhost\` or `\\wsl$\`; no path on macOS or Linux,
+  where a window with it opens without a wake file). It runs as a standalone
+  command, like `convert`, each time a window that is to have a wake file
+  opens, within the daemon's listing time limit (10 seconds). The wake file
+  then goes in the instance's own folder under it (see
+  [docs/wsl.md](../docs/wsl.md)), in a folder the daemon makes as the window
+  opens, before its CLI starts. Output of any other shape, a failure, a run
+  past the limit, or a folder that cannot be made opens the window without a
+  wake file, and the daemon logs one warning; so does a profile with
+  `[host_paths]` but no `state_base`. The bundled `wsl-claude-code` prints `$XDG_STATE_HOME`
   (`~/.local/state` when it is unset) and `wslpath -w` of it.
 
 ```toml

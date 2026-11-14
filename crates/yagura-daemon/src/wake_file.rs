@@ -12,12 +12,18 @@
 //! numbered per guest base: the lowest number no living or opening window of
 //! this daemon holds. A slot's folder and file are never removed, so a slot
 //! is used again rather than cleared.
+//!
+//! A slot's folder is made as the window opens, before its CLI starts: a CLI
+//! registers what it watches as it starts and sees nothing made in a folder
+//! that was not there then. Asking a CLI to wait writes the file only, never
+//! its folder.
 
 use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use tokio::sync::Semaphore;
@@ -328,64 +334,144 @@ impl WakeHold {
     }
 }
 
-/// The most wake files the daemon writes at once. A write is one small file,
-/// though one in a WSL guest may wait on the guest's file server.
+/// The most blocking wake I/O the daemon runs at once for one guest base,
+/// and for the wake files on this host. One small file or folder each, though
+/// one in a WSL guest may wait on the guest's file server.
 pub(crate) const WAKE_WRITES_MAX_CONCURRENT: usize = 4;
+
+/// Bounds the blocking I/O on wake files and slot folders. A guest base's
+/// I/O waits on that guest's file server, so each base has permits of its
+/// own and one stuck guest stalls neither another base nor the files on this
+/// host, which share permits apart from every guest's. Waiting for a permit
+/// and for the I/O together ends within one bound.
+#[derive(Debug, Clone)]
+pub(crate) struct WakeIo {
+    guests: Arc<Mutex<BTreeMap<String, Arc<Semaphore>>>>,
+    local: Arc<Semaphore>,
+    bound: Duration,
+}
+
+impl WakeIo {
+    /// Wake I/O whose every wait ends within `bound`.
+    pub(crate) fn new(bound: Duration) -> Self {
+        Self {
+            guests: Arc::default(),
+            local: Arc::new(Semaphore::new(WAKE_WRITES_MAX_CONCURRENT)),
+            bound,
+        }
+    }
+
+    /// The permits the I/O of a record in `slot` takes: its base's, or this
+    /// host's for a record in no slot.
+    fn permits(&self, slot: Option<&WakeSlotId>) -> Arc<Semaphore> {
+        let Some(slot) = slot else {
+            return Arc::clone(&self.local);
+        };
+        let mut guests = lock_recover(&self.guests);
+        // A base no I/O holds permits of keeps no entry.
+        guests.retain(|_, permits| Arc::strong_count(permits) > 1);
+        Arc::clone(
+            guests
+                .entry(slot.base.clone())
+                .or_insert_with(|| Arc::new(Semaphore::new(WAKE_WRITES_MAX_CONCURRENT))),
+        )
+    }
+
+    /// Runs `io` off the runtime's threads under the permits of `slot`. A
+    /// run past the bound keeps its permit until it ends, since blocking I/O
+    /// cannot be stopped.
+    async fn run<F>(&self, slot: Option<&WakeSlotId>, io: F) -> std::io::Result<()>
+    where
+        F: FnOnce() -> std::io::Result<()> + Send + 'static,
+    {
+        let permits = self.permits(slot);
+        let ran = tokio::time::timeout(self.bound, async move {
+            let permit = permits
+                .acquire_owned()
+                .await
+                .map_err(std::io::Error::other)?;
+            tokio::task::spawn_blocking(move || {
+                let _permit = permit;
+                io()
+            })
+            .await
+            .map_err(std::io::Error::other)?
+        })
+        .await;
+        ran.unwrap_or_else(|_| {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "the wake I/O did not end in time",
+            ))
+        })
+    }
+
+    /// Makes the folder of the wake file `record` names, in its guest slot.
+    ///
+    /// # Errors
+    ///
+    /// The path has no folder, making it fails, or it is not made within the
+    /// bound.
+    pub(crate) async fn make_slot_folder(&self, record: &WakeRecord) -> std::io::Result<()> {
+        let folder = Path::new(&record.write)
+            .parent()
+            .ok_or_else(|| std::io::Error::other("the wake file has no folder"))?
+            .to_path_buf();
+        self.run(record.slot.as_ref(), move || {
+            std::fs::create_dir_all(folder)
+        })
+        .await
+    }
+}
 
 /// Writes wake files: each write leaves the file holding text it never held
 /// before, also across daemon restarts, since a CLI's watcher may not see a
 /// write of the same text as a change.
 pub(crate) struct WakeWriter {
-    permits: Arc<Semaphore>,
+    io: WakeIo,
     /// Names this daemon's run in every text it writes.
     run: String,
     written: AtomicU64,
 }
 
 impl WakeWriter {
-    pub(crate) fn new() -> Self {
+    /// A writer whose I/O counts against `io`, shared with the opens that
+    /// make the slot folders.
+    pub(crate) fn new(io: WakeIo) -> Self {
         let since_epoch = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |since| since.as_nanos());
         Self {
-            permits: Arc::new(Semaphore::new(WAKE_WRITES_MAX_CONCURRENT)),
+            io,
             run: format!("{}-{since_epoch}", crate::handoff::new_envelope_id()),
             written: AtomicU64::new(0),
         }
     }
 
-    /// Writes the wake file `record` names, making its folder first, off the
-    /// runtime's threads.
+    /// Writes the wake file `record` names, off the runtime's threads. Its
+    /// folder is not made: one its window's open did not leave is one its CLI
+    /// does not watch.
     ///
     /// # Errors
     ///
-    /// The file is a link, or making its folder or writing it fails.
+    /// The file is a link, writing it fails (also when its folder is gone),
+    /// or it is not written within the bound.
     pub(crate) async fn write(&self, record: &WakeRecord) -> std::io::Result<()> {
-        let permit = Arc::clone(&self.permits)
-            .acquire_owned()
-            .await
-            .map_err(std::io::Error::other)?;
         let text = format!(
             "{}-{}\n",
             self.run,
             self.written.fetch_add(1, Ordering::Relaxed)
         );
         let path = PathBuf::from(&record.write);
-        tokio::task::spawn_blocking(move || {
-            let _permit = permit;
-            write_wake_file(&path, &text)
-        })
-        .await
-        .map_err(std::io::Error::other)?
+        self.io
+            .run(record.slot.as_ref(), move || write_wake_file(&path, &text))
+            .await
     }
 }
 
-/// Blocking: writes `text` over the wake file at `path`, making its folder
-/// first. A link is never written through: the file is the daemon's own.
+/// Blocking: writes `text` over the wake file at `path`. A link is never
+/// written through: the file is the daemon's own.
 fn write_wake_file(path: &Path, text: &str) -> std::io::Result<()> {
-    if let Some(folder) = path.parent() {
-        std::fs::create_dir_all(folder)?;
-    }
     if std::fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_symlink()) {
         return Err(std::io::Error::other("the wake file is a link"));
     }
@@ -481,7 +567,8 @@ async fn guest_base(config: &DaemonConfig, tool: StateBaseTool) -> Result<GuestB
 
 /// The instance's folder in the state base `stdout` names: its first line the
 /// base as the guest names it (absolute), its second the UNC path the host
-/// reaches it by, neither holding a control character. A guest whose state
+/// reaches it by (absolute on this host, so no path on a Unix one), neither
+/// holding a control character. A guest whose state
 /// lies on a host drive prints a host path there, which is no guest base.
 fn guest_base_printed(
     stdout: &[u8],
@@ -494,9 +581,216 @@ fn guest_base_printed(
     };
     let usable = linux.starts_with('/')
         && (unc.starts_with("\\\\wsl.localhost\\") || unc.starts_with("\\\\wsl$\\"))
+        && Path::new(unc).is_absolute()
         && !linux.chars().chain(unc.chars()).any(char::is_control);
     usable.then(|| GuestBase {
         cli: yagura_os::guest_instance_dir(linux.trim_end_matches('/'), '/', namespace),
         daemon: yagura_os::guest_instance_dir(unc.trim_end_matches('\\'), '\\', namespace),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn guest(cli: &str, daemon: &str) -> WakePlace {
+        WakePlace::Guest(GuestBase {
+            cli: cli.to_string(),
+            daemon: daemon.to_string(),
+        })
+    }
+
+    fn take(slots: &WakeSlots, place: &WakePlace) -> (WakeRecord, WakeSlot) {
+        let (record, slot) = slots.record(place, Path::new("unused")).unwrap();
+        (record, slot.unwrap())
+    }
+
+    fn number(slots: &WakeSlots, place: &WakePlace) -> (u32, WakeSlot) {
+        let (record, slot) = take(slots, place);
+        (record.slot.unwrap().number, slot)
+    }
+
+    #[test]
+    fn a_guest_record_takes_the_lowest_free_slot_counted_per_base() {
+        let slots = WakeSlots::default();
+        let one = guest("/home/a/yagura", r"\\wsl.localhost\U\home\a\yagura");
+        let other = guest("/home/b/yagura", r"\\wsl.localhost\U\home\b\yagura");
+
+        let (first, _first) = number(&slots, &one);
+        let (second, _second) = number(&slots, &one);
+        let (elsewhere, _elsewhere) = number(&slots, &other);
+
+        assert_eq!((first, second), (0, 1));
+        assert_eq!(elsewhere, 0, "another base counts its slots from 0");
+    }
+
+    #[test]
+    fn a_dropped_slot_is_given_back_and_taken_again_lowest_first() {
+        let slots = WakeSlots::default();
+        let place = guest("/home/a/yagura", r"\\wsl.localhost\U\home\a\yagura");
+        let (_, zero) = number(&slots, &place);
+        let (_, one) = number(&slots, &place);
+        let (_, _two) = number(&slots, &place);
+
+        drop(one);
+        let (middle, _middle) = number(&slots, &place);
+        assert_eq!(middle, 1, "the freed middle slot is the lowest free one");
+
+        drop(zero);
+        let (lowest, _lowest) = number(&slots, &place);
+        assert_eq!(lowest, 0);
+        let (next, _next) = number(&slots, &place);
+        assert_eq!(next, 3);
+    }
+
+    #[test]
+    fn a_held_slot_is_not_taken_and_frees_only_when_every_holder_drops() {
+        let slots = WakeSlots::default();
+        let base = "/home/a/yagura";
+        let place = guest(base, r"\\wsl.localhost\U\home\a\yagura");
+        let zero = WakeSlotId {
+            base: base.to_string(),
+            number: 0,
+        };
+
+        let held = slots.hold(&zero);
+        let (taken, _taken) = number(&slots, &place);
+        assert_eq!(taken, 1, "a slot held again is not taken by a new record");
+        drop(held);
+
+        let (recorded, by_record) = number(&slots, &place);
+        assert_eq!(recorded, 0);
+        let by_hold = slots.hold(&zero);
+        drop(by_record);
+        let (while_held, _while_held) = number(&slots, &place);
+        assert_eq!(
+            while_held, 2,
+            "slot 0 still has a holder after one of its two drops"
+        );
+
+        drop(by_hold);
+        let (freed, _freed) = number(&slots, &place);
+        assert_eq!(freed, 0, "slot 0 frees once its last holder drops");
+    }
+
+    #[test]
+    fn a_wake_hold_gives_its_slot_back_on_release_or_on_a_newer_keep() {
+        let slots = WakeSlots::default();
+        let place = guest("/home/a/yagura", r"\\wsl.localhost\U\home\a\yagura");
+
+        let hold = WakeHold::default();
+        let (_, zero) = number(&slots, &place);
+        hold.keep(zero);
+        let (_, one) = number(&slots, &place);
+        assert_eq!(number(&slots, &place).0, 2, "a kept slot stays taken");
+        hold.keep(one);
+        assert_eq!(
+            number(&slots, &place).0,
+            0,
+            "a newer keep gives the slot kept before back"
+        );
+
+        hold.release();
+        let (first, _first) = number(&slots, &place);
+        let (second, _second) = number(&slots, &place);
+        assert_eq!((first, second), (0, 1), "release gives the kept slot back");
+
+        let (late, slot) = number(&slots, &place);
+        hold.keep(slot);
+        assert_eq!(
+            number(&slots, &place).0,
+            late,
+            "a keep after release gives the slot back at once"
+        );
+    }
+
+    #[test]
+    fn a_guest_record_names_its_slot_paths_keeping_the_base_text_as_it_is() {
+        let slots = WakeSlots::default();
+        let cli = "/home/a \"b\\c {wake_paths}/yagura";
+        let daemon = r#"\\wsl.localhost\U\home\a "b\c {wake_paths}\yagura"#;
+        let place = guest(cli, daemon);
+        let (_, _zero) = number(&slots, &place);
+
+        let (record, _one) = take(&slots, &place);
+        assert_eq!(
+            record.write,
+            format!("{daemon}\\host-wake\\1\\{WAKE_FILE_NAME}")
+        );
+        assert_eq!(record.cli, format!("{cli}/host-wake/1/{WAKE_FILE_NAME}"));
+        assert_eq!(
+            record.slot,
+            Some(WakeSlotId {
+                base: cli.to_string(),
+                number: 1,
+            })
+        );
+
+        let texts = BTreeMap::from([(
+            "SessionStart".to_string(),
+            format!("{{\"paths\":{WAKE_PATHS_PLACEHOLDER}}}"),
+        )]);
+        let answers = rendered_answers(&texts, Some(&record));
+        let [(file_name, text)] = answers.as_slice() else {
+            panic!("one answer per text: {answers:?}");
+        };
+        assert_eq!(file_name, &answer_file_name("SessionStart"));
+        let read_back: serde_json::Value = serde_json::from_str(text).unwrap();
+        assert_eq!(read_back["paths"], serde_json::json!([record.cli]));
+
+        let folder = Path::new(if cfg!(windows) { r"C:\w\f" } else { "/w/f" });
+        let (native, native_slot) = slots.record(&WakePlace::Folder, folder).unwrap();
+        assert!(native.slot.is_none() && native_slot.is_none());
+        assert_eq!(
+            number(&slots, &place).0,
+            2,
+            "a folder record takes no guest slot"
+        );
+    }
+
+    fn namespace() -> yagura_os::InstanceNamespace {
+        yagura_os::resolve_instance_from(None).unwrap()
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn guest_base_printed_takes_both_wsl_unc_spellings() {
+        let namespace = namespace();
+        for unc in [
+            r"\\wsl.localhost\Ubuntu\home\a\.local\state\",
+            r"\\wsl$\Ubuntu\home\a\.local\state",
+        ] {
+            let stdout = format!("/home/a/.local/state/\n{unc}\n");
+            let base = guest_base_printed(stdout.as_bytes(), &namespace);
+            assert_eq!(
+                base,
+                Some(GuestBase {
+                    cli: yagura_os::guest_instance_dir("/home/a/.local/state", '/', &namespace),
+                    daemon: yagura_os::guest_instance_dir(
+                        unc.trim_end_matches('\\'),
+                        '\\',
+                        &namespace
+                    ),
+                }),
+                "{unc}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn guest_base_printed_refuses_a_wsl_unc_on_a_unix_host() {
+        let namespace = namespace();
+        for unc in [
+            r"\\wsl.localhost\Ubuntu\home\a\.local\state",
+            r"\\wsl$\Ubuntu\home\a\.local\state",
+        ] {
+            let stdout = format!("/home/a/.local/state\n{unc}\n");
+            assert_eq!(
+                guest_base_printed(stdout.as_bytes(), &namespace),
+                None,
+                "a WSL UNC path is no path on a Unix host: {unc}"
+            );
+        }
+    }
 }

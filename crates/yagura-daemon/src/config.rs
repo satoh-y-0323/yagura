@@ -140,16 +140,18 @@ pub struct DaemonConfig {
     /// answered. Defaults to 32.
     pub max_open_handoffs: usize,
 
-    /// Cap on handoffs a single connection has outstanding: accepted and not
-    /// yet answered. Defaults to 4.
-    pub max_open_handoffs_per_conn: usize,
+    /// Cap on handoffs a single caller has outstanding: accepted and not yet
+    /// answered. A caller is a non-window MCP caller's session, or a direct
+    /// IPC connection. Defaults to 4.
+    pub max_open_handoffs_per_caller: usize,
 
     /// Daemon-wide cap on pending approval requests. Defaults to 32.
     pub max_pending_approvals: usize,
 
-    /// Cap on pending approval requests held by a single requester
-    /// connection. Defaults to 4.
-    pub max_pending_approvals_per_conn: usize,
+    /// Cap on pending approval requests held by a single requester: a
+    /// non-window MCP caller's session, or a direct IPC connection. Defaults
+    /// to 4.
+    pub max_pending_approvals_per_caller: usize,
 
     /// Canonicalized path of the only executable whose connections may
     /// register as approvers, resolved from `--approver-exe`.
@@ -486,14 +488,14 @@ pub const APPROVAL_TIMEOUT_DEFAULT_SECS: u64 = 60;
 /// Default value of [`DaemonConfig::max_open_handoffs`].
 const DEFAULT_MAX_OPEN_HANDOFFS: usize = 32;
 
-/// Default value of [`DaemonConfig::max_open_handoffs_per_conn`].
-const DEFAULT_MAX_OPEN_HANDOFFS_PER_CONN: usize = 4;
+/// Default value of [`DaemonConfig::max_open_handoffs_per_caller`].
+const DEFAULT_MAX_OPEN_HANDOFFS_PER_CALLER: usize = 4;
 
 /// Default value of [`DaemonConfig::max_pending_approvals`].
 const DEFAULT_MAX_PENDING_APPROVALS: usize = 32;
 
-/// Default value of [`DaemonConfig::max_pending_approvals_per_conn`].
-const DEFAULT_MAX_PENDING_APPROVALS_PER_CONN: usize = 4;
+/// Default value of [`DaemonConfig::max_pending_approvals_per_caller`].
+const DEFAULT_MAX_PENDING_APPROVALS_PER_CALLER: usize = 4;
 
 /// Default value of [`DaemonConfig::chat_intro`].
 const DEFAULT_CHAT_INTRO: &str = "A chat room for this workspace is available. Use the \
@@ -656,9 +658,9 @@ impl Default for DaemonConfig {
             approval_policy: None,
             approval_timeout_secs: APPROVAL_TIMEOUT_DEFAULT_SECS,
             max_open_handoffs: DEFAULT_MAX_OPEN_HANDOFFS,
-            max_open_handoffs_per_conn: DEFAULT_MAX_OPEN_HANDOFFS_PER_CONN,
+            max_open_handoffs_per_caller: DEFAULT_MAX_OPEN_HANDOFFS_PER_CALLER,
             max_pending_approvals: DEFAULT_MAX_PENDING_APPROVALS,
-            max_pending_approvals_per_conn: DEFAULT_MAX_PENDING_APPROVALS_PER_CONN,
+            max_pending_approvals_per_caller: DEFAULT_MAX_PENDING_APPROVALS_PER_CALLER,
             approver_exe: None,
             status_token_override: None,
             store_db_path: None,

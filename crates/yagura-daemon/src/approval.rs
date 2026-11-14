@@ -71,8 +71,9 @@ pub struct ApprovalRoomRef {
 pub struct ApprovalLimits {
     /// Daemon-wide cap on pending requests.
     pub max_pending: usize,
-    /// Cap on pending requests held by a single requester connection.
-    pub max_pending_per_conn: usize,
+    /// Cap on pending requests held by a single requester: a non-window MCP
+    /// caller's session, or a direct IPC connection.
+    pub max_pending_per_caller: usize,
 }
 
 /// Why [`ApprovalBroker::submit`] refused a request.
@@ -85,9 +86,9 @@ pub enum SubmitError {
     /// already reached.
     #[error("too many pending approval requests")]
     TooManyPending,
-    /// The requester connection's own cap
-    /// ([`ApprovalLimits::max_pending_per_conn`]) is already reached.
-    #[error("too many pending approval requests for this connection")]
+    /// The requester's own cap
+    /// ([`ApprovalLimits::max_pending_per_caller`]) is already reached.
+    #[error("too many pending approval requests for this caller")]
     TooManyPendingForConn,
 }
 
@@ -105,9 +106,9 @@ pub enum DecideError {
 struct Entry {
     /// Kept so [`ApprovalBroker::register_approver`] can hand a reconnecting
     /// or late-joining approver the requests already pending, and so
-    /// per-connection caps can be counted without a separate index.
+    /// per-requester caps can be counted without a separate index.
     request: ApprovalRequest,
-    requester_conn: u64,
+    requester_caller: u64,
     /// Submission order, so the pending list can be handed back oldest
     /// first even though the ledger itself is keyed by id.
     sequence: u64,
@@ -266,7 +267,7 @@ impl ApprovalBroker {
         self.shared.push_to_every_approver(msg);
     }
 
-    /// Submits a new request from `requester_conn`.
+    /// Submits a new request from `requester_caller`.
     ///
     /// The pushed [`ApprovalRequest`] carries a freshly minted id even when
     /// the submit is ultimately refused for a reason other than the caps
@@ -282,7 +283,7 @@ impl ApprovalBroker {
     pub fn submit(
         &self,
         draft: ApprovalDraft,
-        requester_conn: u64,
+        requester_caller: u64,
         limits: ApprovalLimits,
     ) -> Result<Ticket, SubmitError> {
         {
@@ -290,11 +291,11 @@ impl ApprovalBroker {
             if pending.len() >= limits.max_pending {
                 return Err(SubmitError::TooManyPending);
             }
-            let per_conn = pending
+            let per_caller = pending
                 .values()
-                .filter(|entry| entry.requester_conn == requester_conn)
+                .filter(|entry| entry.requester_caller == requester_caller)
                 .count();
-            if per_conn >= limits.max_pending_per_conn {
+            if per_caller >= limits.max_pending_per_caller {
                 return Err(SubmitError::TooManyPendingForConn);
             }
         }
@@ -324,7 +325,7 @@ impl ApprovalBroker {
             request_id.clone(),
             Entry {
                 request,
-                requester_conn,
+                requester_caller,
                 sequence,
                 settle,
             },

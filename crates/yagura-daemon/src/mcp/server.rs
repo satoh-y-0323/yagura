@@ -209,8 +209,8 @@ impl<T: DaemonTransport + 'static> YaguraMcpServer<T> {
             mcp_connected is true while the window's yagura MCP bridge is identified with \
             the daemon and false while it is not; it is omitted when the daemon does not \
             report it. queued_count is how many envelopes and notices wait in the window's \
-            inbox; queued_ids lists the ids of those your own window sent that still wait \
-            there (a caller that is no window is shown the count alone). An id that no longer \
+            inbox; queued_ids lists the ids of those you sent that still wait there (your \
+            window's, or this MCP session's when it is no window). An id that no longer \
             waits was handed over or is being carried, or its window or the daemon ended.",
         input_schema = schema_object(json!({
             "type": "object",
@@ -289,7 +289,8 @@ impl<T: DaemonTransport + 'static> YaguraMcpServer<T> {
         description = "Take back an envelope you sent with send_message or send_handoff \
             while it still waits in its window's inbox: it then never reaches the window's \
             CLI. Only its sender may: the window that sent it, or, for a caller that is no \
-            window, the connection that was answered with its id. No approval is asked. The \
+            window, the same MCP session that was answered with its id, while its connection \
+            to the daemon lasts. No approval is asked. The \
             reply carries id and outcome: withdrawn when it was taken out, under_way when a \
             door or a push carries it now (it waits again if they end without handing it \
             over), and not_waiting when no window holds an envelope of that id that you sent \
@@ -344,7 +345,7 @@ impl<T: DaemonTransport + 'static> YaguraMcpServer<T> {
             not opened from a profile that declares how its CLI is handed text. The \
             call does not wait for the window's next turn: only a wait the CLI left \
             registered, or its wake command, is waited for; withdraw_message takes \
-            back one still waiting. At most 4 handoffs per connection and 32 \
+            back one still waiting. At most 4 handoffs per caller and 32 \
             daemon-wide may be outstanding at once; beyond that it is \
             resource_exhausted. What the receiving CLI gets is one line: the fixed \
             prefix \"[yagura handoff] \" followed by a single-line JSON object with \

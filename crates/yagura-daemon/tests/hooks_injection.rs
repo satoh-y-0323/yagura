@@ -803,6 +803,119 @@ pub(crate) fn wake_profile(
     toml::to_string(&document).expect("serialize the profile")
 }
 
+/// The `sh -c` script of a [`WslBase`]: makes `$HOME/yagura-build/<$1>/state` in the WSL
+/// guest and prints it, then what `wslpath -w` makes of it.
+#[cfg(windows)]
+const WSL_BASE_SCRIPT: &str = "d=\"$HOME/yagura-build/$1/state\"; mkdir -p \"$d\" && printf '%s\\n' \"$d\" && wslpath -w \"$d\"";
+
+/// `wsl.exe` by its full path: a daemon the tests start may run on a `Path` of its own.
+#[cfg(windows)]
+fn wsl_exe() -> String {
+    let root = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".to_string());
+    format!(r"{root}\System32\wsl.exe")
+}
+
+/// A state base in the default WSL distribution, under the guest's `~/yagura-build` in a
+/// folder named for its test and this run, so that nothing an earlier run left is there.
+#[cfg(windows)]
+pub(crate) struct WslBase {
+    /// The base as the guest names it (line 1 of the tool's print).
+    pub(crate) linux: String,
+    /// The base as this host names it (line 2: `\\wsl.localhost\<distro>\...`).
+    pub(crate) unc: String,
+    folder: String,
+}
+
+#[cfg(windows)]
+impl WslBase {
+    /// Blocking: makes the base for the test `label` and reads both of its names.
+    // The guest's own tool, run once by the test as a profile's `state_base` runs it.
+    #[allow(clippy::disallowed_methods)]
+    pub(crate) fn new(label: &str) -> Self {
+        let run = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("the clock is past the epoch")
+            .as_nanos();
+        let folder = format!("{label}-{}-{run}", std::process::id());
+        let output = std::process::Command::new(wsl_exe())
+            .args(["-e", "sh", "-c", WSL_BASE_SCRIPT, "sh", &folder])
+            .output()
+            .expect("run wsl: this test needs a WSL distribution");
+        let printed = String::from_utf8(output.stdout).expect("the base prints as UTF-8");
+        assert!(
+            output.status.success(),
+            "the WSL base could not be made: {printed:?} {:?}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let mut lines = printed.lines();
+        let (Some(linux), Some(unc)) = (lines.next(), lines.next()) else {
+            panic!("the WSL base prints two lines: {printed:?}");
+        };
+        assert!(unc.starts_with("\\\\wsl"), "{printed:?}");
+        Self {
+            linux: linux.to_string(),
+            unc: unc.to_string(),
+            folder,
+        }
+    }
+
+    /// The `[host_paths] state_base` of a profile reading this base: the real `wsl -e sh -c`,
+    /// which makes the base again and prints its two lines, ending with 1 when `fails`.
+    pub(crate) fn tool(&self, fails: bool) -> Vec<String> {
+        let script = if fails {
+            format!("{WSL_BASE_SCRIPT}; exit 1")
+        } else {
+            WSL_BASE_SCRIPT.to_string()
+        };
+        [
+            wsl_exe().as_str(),
+            "-e",
+            "sh",
+            "-c",
+            &script,
+            "sh",
+            &self.folder,
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect()
+    }
+
+    /// The folder of the slot `slot` under this base, for the instance namespace `namespace`,
+    /// as this host names it.
+    pub(crate) fn slot_folder(&self, namespace: &str, slot: u32) -> PathBuf {
+        PathBuf::from(format!("{}\\{namespace}\\host-wake\\{slot}", self.unc))
+    }
+
+    /// Blocking: leaves a plain file where the namespace's slot folders go, so that no slot
+    /// folder can be made under it.
+    pub(crate) fn block_slot_folders(&self, namespace: &str) {
+        let instance = PathBuf::from(format!("{}\\{namespace}", self.unc));
+        std::fs::create_dir_all(&instance).expect("make the instance folder in the guest");
+        std::fs::write(instance.join("host-wake"), b"").expect("leave a file as host-wake");
+    }
+}
+
+/// [`wake_profile`] of a guest CLI whose `state_base` is `tool` (a [`WslBase::tool`]).
+#[cfg(windows)]
+pub(crate) fn wsl_wake_profile(
+    id: &str,
+    cli: &[String],
+    answers: &[(&str, &str)],
+    tool: Vec<String>,
+) -> String {
+    let mut document: toml::Table =
+        toml::from_str(&wake_profile(id, cli, answers, Some(None))).expect("parse the profile");
+    document["host_paths"]
+        .as_table_mut()
+        .expect("a guest profile has [host_paths]")
+        .insert(
+            "state_base".into(),
+            toml::Value::Array(tool.into_iter().map(toml::Value::String).collect()),
+        );
+    toml::to_string(&document).expect("serialize the profile")
+}
+
 /// Blocking: the folder under `root` (at any depth) of the credentials file naming
 /// `window_id`, found by its shape (`window_credentials` in `yagura-protocol`) rather
 /// than its name.
@@ -866,6 +979,7 @@ pub(crate) fn wake_paths_of(root: &Path, window_id: &str) -> Option<Vec<String>>
 
 /// The CLI's path of the wake file in the slot `slot` under the guest state base `linux`,
 /// for the instance `instance` (`None`: the default one).
+#[cfg(windows)]
 pub(crate) fn guest_wake_path(linux: &str, instance: Option<&str>, slot: u32) -> String {
     let namespace = instance.map_or_else(|| "yagura".to_string(), |id| format!("yagura-{id}"));
     format!("{linux}/{namespace}/host-wake/{slot}/yagura_wake")
@@ -892,6 +1006,7 @@ fn wake_config(profiles_dir: PathBuf, config_dir: &Path) -> DaemonConfig {
     }
 }
 
+#[cfg(windows)]
 async fn close(client: &mut Connection, window_id: &str) {
     send(
         client,
@@ -959,54 +1074,76 @@ async fn a_launch_windows_answers_are_left_beside_its_credentials_with_its_wake_
 
 /// A window whose CLI runs in another environment has its wake file in a slot under the
 /// guest's state base its `[host_paths] state_base` prints (`<line 1>/yagura/host-wake/
-/// <slot>/yagura_wake` for the CLI): the lowest slot no living or opening window holds. A
-/// second window takes the next one; a window opened once the first has ended takes the
-/// first's again; an open that fails half-way gives its slot back. Characters a JSON string
-/// escapes stay as they are in the path the CLI is handed.
+/// <slot>/yagura_wake` for the CLI): the lowest slot no living or opening window holds, whose
+/// folder is there once the window has opened, before anything is asked of it (its CLI
+/// watches the file from its start, and a watch on a path with no folder sees nothing made
+/// later). A window refused a wake record takes no slot; a second window takes the next one;
+/// a window opened once the first has ended takes the first's again; an open that fails
+/// half-way gives its slot back. A window whose slot folder cannot be made opens with no
+/// wake record, with its other answers.
+#[cfg(windows)]
 #[tokio::test]
+#[ignore = "needs a WSL distribution; run with --include-ignored on a Windows host with one"]
 async fn a_guest_windows_wake_path_is_in_the_lowest_slot_no_living_window_holds() {
-    const LINUX_BASE: &str = "/home/u \"q\" \\b {wake_paths}/state";
+    let base = WslBase::new("hooks-wake-slots");
+    let blocked_base = WslBase::new("hooks-wake-blocked");
+    blocked_base.block_slot_folders("yagura");
     let tree = TempDir::new("yagura-cli-test", "wake-slots");
     let profiles_dir = tree.make_dir("profiles");
     let config_dir = tree.make_dir("mcp");
     let cli = crate::credentials_launch::quiet_cli(&tree.make_dir("logs"));
-    let printed = format!("{LINUX_BASE}\n{UNC_BASE}");
-    let answers = [("SessionStart", WAKE_ANSWER)];
-    write_profile(
-        &profiles_dir,
-        "wake-guest",
-        &wake_profile(
-            "wake-guest",
-            &cli,
-            &answers,
-            Some(Some(StateBase::lines(printed.clone()))),
-        ),
-    );
-    let broken = tree.make_dir("broken").join(if cfg!(windows) {
-        "broken.exe"
-    } else {
-        "broken"
-    });
+    let answers = [("SessionStart", WAKE_ANSWER), ("Plain", PLAIN_ANSWER)];
+    for (id, answers, tool) in [
+        ("wake-guest", &answers[..], base.tool(false)),
+        ("wake-unnamed", &answers[1..], base.tool(false)),
+        ("base-fails", &answers[..], base.tool(true)),
+        ("wake-blocked", &answers[..], blocked_base.tool(false)),
+    ] {
+        write_profile(
+            &profiles_dir,
+            id,
+            &wsl_wake_profile(id, &cli, answers, tool),
+        );
+    }
+    let broken = tree.make_dir("broken").join("broken.exe");
     std::fs::write(&broken, b"this is not an executable image\n").unwrap();
     write_profile(
         &profiles_dir,
         "wake-broken",
-        &wake_profile(
+        &wsl_wake_profile(
             "wake-broken",
             &[broken.display().to_string()],
             &answers,
-            Some(Some(StateBase::lines(printed))),
+            base.tool(false),
         ),
     );
     let h = Harness::start("wake-slots", wake_config(profiles_dir, &config_dir)).await;
     let mut client = h.connect().await;
-    let slot = |n| Some(vec![guest_wake_path(LINUX_BASE, None, n)]);
+    let slot = |n| Some(vec![guest_wake_path(&base.linux, None, n)]);
+
+    for id in ["wake-unnamed", "base-fails", "wake-blocked"] {
+        let window_id = open_from_profile(&mut client, id, None).await;
+        assert_eq!(
+            answer_of(&config_dir, &window_id, "Plain").as_deref(),
+            Some(PLAIN_ANSWER),
+            "{id}: the window opens with its other answers"
+        );
+        assert_eq!(
+            wake_paths_of(&config_dir, &window_id),
+            None,
+            "{id}: a window without a wake record is left no {{wake_paths}} answer"
+        );
+    }
 
     let first = open_from_profile(&mut client, "wake-guest", None).await;
     assert_eq!(
         wake_paths_of(&config_dir, &first),
         slot(0),
-        "the first window"
+        "the first window: no window refused a wake record took a slot"
+    );
+    assert!(
+        base.slot_folder("yagura", 0).is_dir(),
+        "the first window's slot folder is there once it has opened, before anything is asked"
     );
     let second = open_from_profile(&mut client, "wake-guest", None).await;
     assert_eq!(
@@ -1014,6 +1151,7 @@ async fn a_guest_windows_wake_path_is_in_the_lowest_slot_no_living_window_holds(
         slot(1),
         "a second window while the first lives"
     );
+    assert!(base.slot_folder("yagura", 1).is_dir(), "the second's");
 
     let first_folder = credentials_folder_of(&config_dir, &first).unwrap();
     close(&mut client, &first).await;
@@ -1056,7 +1194,9 @@ async fn a_guest_windows_wake_path_is_in_the_lowest_slot_no_living_window_holds(
 /// is no `\\wsl.localhost\` or `\\wsl$\` path, the first does not start with `/`, a line
 /// holds a control character, the tool fails or outlasts the open's bound, or the profile
 /// has no `state_base`; nor when no answer names `{wake_paths}`. Each window opens all the
-/// same, with its other answers. A `\\wsl$\` base is one.
+/// same, with its other answers. Each is refused before the base is touched, so none needs
+/// a guest; that a refused window takes no slot is measured with a real one
+/// (`a_guest_windows_wake_path_is_in_the_lowest_slot_no_living_window_holds`).
 #[tokio::test]
 async fn a_guest_window_whose_state_base_cannot_be_had_opens_with_no_wake_record() {
     let usable = format!("/home/u/state\n{UNC_BASE}");
@@ -1113,17 +1253,6 @@ async fn a_guest_window_whose_state_base_cannot_be_had_opens_with_no_wake_record
         );
         ids.push(id);
     }
-    let wsl_dollar = UNC_BASE.replace("wsl.localhost", "wsl$");
-    for (id, printed) in [
-        ("wake-dollar", format!("/home/u/dollar\n{wsl_dollar}")),
-        ("wake-usable", usable.clone()),
-    ] {
-        write_profile(
-            &profiles_dir,
-            id,
-            &wake_profile(id, &cli, &named, Some(Some(StateBase::lines(printed)))),
-        );
-    }
     let h = Harness::start(
         "wake-unusable",
         wake_config(profiles_dir.clone(), &config_dir),
@@ -1131,15 +1260,6 @@ async fn a_guest_window_whose_state_base_cannot_be_had_opens_with_no_wake_record
     .await;
     let mut client = h.connect().await;
 
-    let dollar = open_from_profile(&mut client, "wake-dollar", None).await;
-    assert_eq!(
-        wake_paths_of(&config_dir, &dollar),
-        Some(vec![guest_wake_path("/home/u/dollar", None, 0)]),
-        "a wsl$ base is one"
-    );
-    let dollar_folder = credentials_folder_of(&config_dir, &dollar).unwrap();
-    close(&mut client, &dollar).await;
-    until_gone(&dollar_folder).await;
     for id in &ids {
         let window_id = open_from_profile(&mut client, id, None).await;
         assert_eq!(
@@ -1153,12 +1273,6 @@ async fn a_guest_window_whose_state_base_cannot_be_had_opens_with_no_wake_record
             "{id}: a window without a wake record is left no {{wake_paths}} answer"
         );
     }
-    let usable_window = open_from_profile(&mut client, "wake-usable", None).await;
-    assert_eq!(
-        wake_paths_of(&config_dir, &usable_window),
-        Some(vec![guest_wake_path("/home/u/state", None, 0)]),
-        "no window above took a slot"
-    );
     h.registry.terminate_all().await;
 
     // A tool outlasting the open's bound, with a daemon whose bound is short. A delay rather

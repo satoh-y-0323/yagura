@@ -29,6 +29,9 @@ use crate::common;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use serde_json::json;
+
+use common::relay::{RelayClient, hello, initialize_line, initialized_line, tool_call_line};
 use common::{
     Harness, call_list_windows, call_send_handoff_from_profile,
     call_send_handoff_from_profile_with_options, decide, empty_lookup, expect_approval_requested,
@@ -52,6 +55,7 @@ use yagura_test_support::paths::strip_extended_length_prefix;
 use yagura_test_support::process::{
     argv_probe_profile_source, echo_child_command, echo_child_path,
 };
+use yagura_test_support::relay_stdio::tool_call_error;
 
 // --- fixtures: profiles are written ad hoc, not read from a shared directory ----
 
@@ -2056,7 +2060,7 @@ async fn send_handoff_to_a_profile_with_a_playbook_that_failed_to_load_is_approv
 
 // -----------------------------------------------------------------------
 // Handoff-slot accounting: handoffs this
-// build has accepted and not yet answered, bounded per-connection and
+// build has accepted and not yet answered, bounded per caller and
 // daemon-wide.
 // -----------------------------------------------------------------------
 
@@ -2071,8 +2075,10 @@ async fn hold_a_slot_pending_approval(
     expect_approval_requested(approver).await
 }
 
+/// A caller is one IPC connection, or one MCP session across its calls, each of which the
+/// daemon carries on a connection of its own.
 #[tokio::test]
-async fn a_second_profile_handoff_on_the_same_connection_while_the_first_awaits_approval_is_resource_exhausted_per_connection()
+async fn a_second_profile_handoff_from_the_same_caller_while_the_first_awaits_approval_is_resource_exhausted_per_caller()
  {
     let tree = TempDir::new("yagura-cli-test", "handoff-slot-per-conn");
     let profiles_dir = tree.make_dir("profiles");
@@ -2092,7 +2098,7 @@ async fn a_second_profile_handoff_on_the_same_connection_while_the_first_awaits_
         None,
         30,
     );
-    config.max_open_handoffs_per_conn = 1;
+    config.max_open_handoffs_per_caller = 1;
     let h = Harness::start("handoff-slot-per-conn", config).await;
     let mut approver = h.connect().await;
     register_approver(&mut approver).await;
@@ -2104,8 +2110,8 @@ async fn a_second_profile_handoff_on_the_same_connection_while_the_first_awaits_
     let msg = read_response(&mut client).await;
     let message = expect_error(msg, "resource_exhausted");
     assert!(
-        message.contains("per-connection"),
-        "message must name the per-connection limit: {message:?}"
+        message.contains("per-caller"),
+        "message must name the per-caller limit: {message:?}"
     );
     assert!(
         call_list_windows(&mut client).await.is_empty() && !was_started(&logs),
@@ -2114,6 +2120,44 @@ async fn a_second_profile_handoff_on_the_same_connection_while_the_first_awaits_
 
     decide(&mut approver, &first.request_id, false).await;
     expect_error(read_response(&mut client).await, "approval_denied");
+
+    let (mut session, _) = RelayClient::welcomed(&h.endpoint, hello(None, None)).await;
+    let seq = session.request(&initialize_line(0)).await;
+    session.answer(seq).await;
+    session.carry(&initialized_line().to_string()).await;
+    let handoff = || json!({"profile": "ready", "reference": "r", "note": "t"});
+    let held = session
+        .request(&tool_call_line(1, "send_handoff", handoff(), false))
+        .await;
+    let first = expect_approval_requested(&mut approver).await;
+    let second = session
+        .request(&tool_call_line(2, "send_handoff", handoff(), false))
+        .await;
+    tokio::select! {
+        answer = session.answer(second) => {
+            let (_, text) = tool_call_error(&answer);
+            // A daemon tool error reads as its `ToolError` text, not as a relay error word.
+            assert!(text.starts_with("resource exhausted:"), "{text}");
+            assert!(
+                text.contains("per-caller"),
+                "the error must name the per-caller limit: {text:?}"
+            );
+        }
+        request = expect_approval_requested(&mut approver) => panic!(
+            "a second call of the same MCP session was counted apart from its first: it awaits \
+             approval as {request:?}"
+        ),
+    }
+    assert!(
+        call_list_windows(&mut client).await.is_empty() && !was_started(&logs),
+        "no call of the session has started a window"
+    );
+    decide(&mut approver, &first.request_id, false).await;
+    let (_, denied) = tool_call_error(&session.answer(held).await);
+    assert!(
+        denied.starts_with("the approval request was denied:"),
+        "{denied}"
+    );
 }
 
 #[tokio::test]
@@ -2137,7 +2181,7 @@ async fn a_second_profile_handoff_on_a_different_connection_while_the_first_awai
         30,
     );
     config.max_open_handoffs = 1;
-    config.max_open_handoffs_per_conn = 10;
+    config.max_open_handoffs_per_caller = 10;
     let h = Harness::start("handoff-slot-daemon-wide", config).await;
     let mut approver = h.connect().await;
     register_approver(&mut approver).await;
@@ -2180,7 +2224,7 @@ async fn a_pending_profile_handoff_holds_its_slot_until_decided_and_releases_it_
         None,
         30,
     );
-    config.max_open_handoffs_per_conn = 1;
+    config.max_open_handoffs_per_caller = 1;
     let h = Harness::start("handoff-slot-pending", config).await;
     let mut approver = h.connect().await;
     register_approver(&mut approver).await;
@@ -2196,7 +2240,7 @@ async fn a_pending_profile_handoff_holds_its_slot_until_decided_and_releases_it_
     send_handoff_from_profile(&mut requester, "ready", None, None, "r", "t").await;
     let msg = read_response(&mut requester).await;
     let message = expect_error(msg, "resource_exhausted");
-    assert!(message.contains("per-connection"));
+    assert!(message.contains("per-caller"), "{message:?}");
 
     decide(&mut approver, &first_request.request_id, false).await;
     let msg = read_response(&mut requester).await;
@@ -2232,7 +2276,7 @@ async fn a_second_stage_slot_failure_rolls_back_the_first_stage_reservation() {
         30,
     );
     config.max_open_handoffs = 1;
-    config.max_open_handoffs_per_conn = 1;
+    config.max_open_handoffs_per_caller = 1;
     let h = Harness::start("handoff-slot-rollback", config).await;
     let mut approver = h.connect().await;
     register_approver(&mut approver).await;
@@ -2243,16 +2287,16 @@ async fn a_second_stage_slot_failure_rolls_back_the_first_stage_reservation() {
 
     // Connection Y's first attempt fails on the daemon-wide limit. If the
     // two-stage acquisition (`HandoffSlot::try_acquire`) failed to roll back
-    // Y's own per-connection reservation after the daemon-wide stage
+    // Y's own per-caller reservation after the daemon-wide stage
     // refused it, Y's *next* attempt below would wrongly fail with the
-    // per-connection wording instead of succeeding.
+    // per-caller wording instead of succeeding.
     let mut y = h.connect().await;
     send_handoff_from_profile(&mut y, "ready", None, None, "r", "t").await;
     let msg = read_response(&mut y).await;
     let message = expect_error(msg, "resource_exhausted");
     assert!(
         message.contains("daemon-wide"),
-        "Y's first attempt must fail on the daemon-wide limit, not the per-connection one: \
+        "Y's first attempt must fail on the daemon-wide limit, not the per-caller one: \
          {message:?}"
     );
 
@@ -2267,7 +2311,7 @@ async fn a_second_stage_slot_failure_rolls_back_the_first_stage_reservation() {
         DaemonMessage::HandoffSent { opened, .. } => assert!(opened),
         DaemonMessage::Error { code, message, .. } => panic!(
             "Y's retry must succeed once X's slot is freed, got error({code}): {message} -- a \
-             per-connection failure here means Y's own counter was never rolled back after its \
+             per-caller failure here means Y's own counter was never rolled back after its \
              first, daemon-wide-refused attempt"
         ),
         other => panic!("expected handoff_sent, got {other:?}"),
@@ -2350,7 +2394,7 @@ async fn send_handoff_from_a_profile_approved_by_a_registered_approver_starts_th
 /// `open_planned(..)` can fail *after* `HandoffSlot::try_acquire`
 /// already reserved a slot (here, because the daemon's separate
 /// `max_windows` limit is full), and that refusal must not leak the slot --
-/// it must be back in the per-connection budget by the time the caller
+/// it must be back in the per-caller budget by the time the caller
 /// receives *that* reply, not merely by the time some later reply arrives.
 #[tokio::test]
 async fn a_profile_handoff_refused_by_the_window_limit_after_acquiring_its_slot_releases_the_slot_before_the_response()
@@ -2373,12 +2417,12 @@ async fn a_profile_handoff_refused_by_the_window_limit_after_acquiring_its_slot_
         30,
     );
     config.max_windows = 1;
-    config.max_open_handoffs_per_conn = 1;
+    config.max_open_handoffs_per_caller = 1;
     let h = Harness::start("handoff-slot-open-planned-failure", config).await;
     let mut client = h.connect().await;
 
     // Fill the daemon's one-window budget with a plain window, so the
-    // handoff slot below is acquired (both the per-connection and
+    // handoff slot below is acquired (both the per-caller and
     // daemon-wide handoff budgets have room) before the window it would open
     // is refused by the separate `max_windows` limit inside `open_planned`.
     send(
@@ -2404,7 +2448,7 @@ async fn a_profile_handoff_refused_by_the_window_limit_after_acquiring_its_slot_
          open_with_extra_env enforces, not the handoff slot budget: {message:?}"
     );
     assert!(
-        !message.contains("per-connection") && !message.contains("daemon-wide"),
+        !message.contains("per-caller") && !message.contains("daemon-wide"),
         "this refusal comes from the window limit, not from HandoffSlot::try_acquire, so it \
          must not carry the handoff-slot wording: {message:?}"
     );
@@ -2426,8 +2470,8 @@ async fn a_profile_handoff_refused_by_the_window_limit_after_acquiring_its_slot_
     }
 
     // If the first attempt's handoff slot was never released, this
-    // connection's per-connection budget (max_open_handoffs_per_conn = 1) is
-    // still exhausted and this request fails with the per-connection
+    // connection's per-caller budget (max_open_handoffs_per_caller = 1) is
+    // still exhausted and this request fails with the per-caller
     // wording instead of succeeding.
     send_handoff_from_profile(&mut client, "ready", None, None, "r2", "t2").await;
     match read_response(&mut client).await {
@@ -2436,7 +2480,7 @@ async fn a_profile_handoff_refused_by_the_window_limit_after_acquiring_its_slot_
         }
         DaemonMessage::Error { code, message, .. } => panic!(
             "the second attempt must succeed once the window limit is freed, got \
-             error({code}): {message} -- a per-connection resource_exhausted here means the \
+             error({code}): {message} -- a per-caller resource_exhausted here means the \
              handoff slot acquired by the first, window-limit-refused attempt was never \
              released"
         ),

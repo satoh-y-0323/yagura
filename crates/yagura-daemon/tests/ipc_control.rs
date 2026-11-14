@@ -3227,7 +3227,7 @@ async fn deciding_from_one_approver_notifies_the_other_of_the_resolution() {
 async fn exceeding_the_per_connection_pending_cap_is_resource_exhausted() {
     let dir = unique_temp_dir("pending-cap-per-conn");
     let config = DaemonConfig {
-        max_pending_approvals_per_conn: 1,
+        max_pending_approvals_per_caller: 1,
         ..approval_config(&dir, 30)
     };
     let h = Harness::start("pending-cap-per-conn", config).await;
@@ -3266,7 +3266,7 @@ async fn exceeding_the_daemon_wide_pending_cap_is_resource_exhausted_even_from_a
     let dir = unique_temp_dir("pending-cap-daemon-wide");
     let config = DaemonConfig {
         max_pending_approvals: 1,
-        max_pending_approvals_per_conn: 10,
+        max_pending_approvals_per_caller: 10,
         ..approval_config(&dir, 30)
     };
     let h = Harness::start("pending-cap-daemon-wide", config).await;

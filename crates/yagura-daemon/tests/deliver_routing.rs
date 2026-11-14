@@ -165,7 +165,7 @@ impl Scene {
         config.default_shell = None;
         config.plan_approval_required = opts.plan_review;
         if let Some(bound) = opts.handoffs_per_conn {
-            config.max_open_handoffs_per_conn = bound;
+            config.max_open_handoffs_per_caller = bound;
         }
         write_hook_definition(&root);
 

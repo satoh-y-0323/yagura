@@ -16,8 +16,11 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use serde_json::Value;
+use serde_json::{Value, json};
 
+use common::relay::{
+    RelayClient, hello, initialize_line, initialized_line, tool_call_line, tool_json,
+};
 use common::{
     CONTROL_DETECTION_NAME, Harness, LEADING_KEYS_DETECTION_NAME, READY_MARKER, VALID_TOKEN,
     approver_base_config, detection_config, expect_delivery, identify, policy, read_response, send,
@@ -358,6 +361,25 @@ pub(crate) async fn close_own_window(client: &mut Connection, window_id: &str) {
     }
 }
 
+/// An MCP session of a caller that is no window, opened as a CLI that opens with
+/// `initialize` does. The daemon carries each of its calls on a connection of its own.
+async fn mcp_session(h: &Harness) -> RelayClient {
+    let (mut session, _) = RelayClient::welcomed(&h.endpoint, hello(None, None)).await;
+    let seq = session.request(&initialize_line(0)).await;
+    session.answer(seq).await;
+    session.carry(&initialized_line().to_string()).await;
+    session
+}
+
+/// Calls the tool `name` with `arguments` as the request `id` of `session`; returns the
+/// JSON of its successful answer.
+async fn mcp_call(session: &mut RelayClient, id: u64, name: &str, arguments: Value) -> Value {
+    let seq = session
+        .request(&tool_call_line(id, name, arguments, false))
+        .await;
+    tool_json(&session.answer(seq).await)
+}
+
 /// Sends `text` to `window_id` on `client` and returns the id of the envelope, which
 /// must be left waiting.
 pub(crate) async fn send_queued(client: &mut Connection, window_id: &str, text: &str) -> String {
@@ -411,10 +433,12 @@ async fn send_message_puts_its_envelope_in_the_inbox_and_writes_nothing_to_the_w
         Some(2),
         "list_windows says how many envelopes wait in the window"
     );
+    let mut sent = vec![first_id.clone(), second_id.clone()];
+    sent.sort();
     assert_eq!(
         queue_seen_by(&mut client, &window_id).await,
-        (Some(2), Vec::new()),
-        "a caller that is no window is shown how many wait, and no id"
+        (Some(2), sent),
+        "a caller that is no window is shown how many wait, and the ids of what it sent"
     );
 
     let taken = take_and_print(&h, &window_id).await;
@@ -556,8 +580,10 @@ async fn send_message_to_a_window_without_doors_is_undelivered_no_delivery_and_w
 // =====================================================================
 
 /// Only the caller that sent an envelope takes it back: another caller that is no
-/// window, and a window, leave it waiting. No playbook approves `withdraw_message`
-/// and no approver is there, so its answer also shows it asks no approval.
+/// window, and a window, leave it waiting. A caller that is no window is one IPC
+/// connection, or one MCP session across its calls, each of which the daemon carries on
+/// a connection of its own. No playbook approves `withdraw_message` and no approver is
+/// there, so its answer also shows it asks no approval.
 #[tokio::test]
 async fn withdraw_message_takes_a_waiting_envelope_out_for_its_sender_alone_and_asks_no_approval() {
     let dir = unique_temp_dir("withdraw-sender");
@@ -595,13 +621,57 @@ async fn withdraw_message_takes_a_waiting_envelope_out_for_its_sender_alone_and_
         outcome_of(&withdraw(&mut sender, "an-id-never-handed-out").await).as_deref(),
         Some("not_waiting")
     );
+
+    let mut session_a = mcp_session(&h).await;
+    let mut session_b = mcp_session(&h).await;
+    let sent = mcp_call(
+        &mut session_a,
+        1,
+        "send_message",
+        json!({"window_id": window_id, "text": "WITHDRAW-ME-BY-SESSION-6Q"}),
+    )
+    .await;
+    assert_eq!(sent["state"], "queued", "{sent}");
+    let session_id = sent["id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("the answer names its envelope: {sent}"))
+        .to_string();
+    let by_b = mcp_call(
+        &mut session_b,
+        1,
+        "withdraw_message",
+        json!({"id": session_id}),
+    )
+    .await;
+    assert_eq!(
+        by_b["outcome"], "not_waiting",
+        "another session did not send it: {by_b}"
+    );
+    assert_eq!(entry(&h, &window_id).inbox().pending_count(), 1);
+    let by_a = mcp_call(
+        &mut session_a,
+        2,
+        "withdraw_message",
+        json!({"id": session_id}),
+    )
+    .await;
+    assert_eq!(
+        by_a["outcome"], "withdrawn",
+        "the session that sent it takes it back on a later call: {by_a}"
+    );
+    assert_eq!(entry(&h, &window_id).inbox().pending_count(), 0);
+    assert_eq!(
+        listed_queued_count(&mut sender, &window_id)
+            .await
+            .unwrap_or(0),
+        0
+    );
 }
 
-/// A window caller is shown the ids of what it left waiting there and no other's,
-/// and withdraws only those; a caller that is no window is shown the count alone.
+/// Every caller, a window or not, is shown the ids of what it left waiting there and no
+/// other's, and withdraws only those.
 #[tokio::test]
-async fn a_window_sees_and_withdraws_only_what_it_sent_and_a_caller_that_is_no_window_sees_the_count()
- {
+async fn each_caller_window_or_not_sees_and_withdraws_only_what_it_sent() {
     let dir = unique_temp_dir("withdraw-windows");
     let h = Harness::start("withdraw-windows", sending_config(&dir)).await;
     let mut external = h.connect().await;
@@ -623,7 +693,14 @@ async fn a_window_sees_and_withdraws_only_what_it_sent_and_a_caller_that_is_no_w
     );
     assert_eq!(
         queue_seen_by(&mut external, &window_id).await,
-        (Some(3), Vec::new())
+        (Some(3), vec![external_id.clone()]),
+        "a caller that is no window is shown the id of what it sent"
+    );
+    let mut other = h.connect().await;
+    assert_eq!(
+        queue_seen_by(&mut other, &window_id).await,
+        (Some(3), Vec::new()),
+        "another caller that is no window sent nothing there"
     );
 
     for (who, client, id) in [

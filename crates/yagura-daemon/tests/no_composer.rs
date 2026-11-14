@@ -157,7 +157,7 @@ async fn send_handoff_to_a_window_that_declares_no_delivery_is_undelivered_and_f
     let h = start_with_base(
         "no-composer-entry-handoff",
         DaemonConfig {
-            max_open_handoffs_per_conn: 1,
+            max_open_handoffs_per_caller: 1,
             ..common::opening_config()
         },
     )

@@ -196,10 +196,12 @@ own state folder, under the instance's folder there:
 [Host paths](../profiles/README.md#host-paths)). The numbered folders are used again, lowest free
 number first, and never removed: there are never more of them than WSL Claude Code windows open at
 once. yagura never wakes a distribution that has stopped: it reaches the guest's files only when a
-window opens (the `state_base` run) and when it writes the file of a window that is running. A
-window whose `state_base` did not finish within the daemon's listing time limit (10 seconds; a
-distribution that is still starting can take that long) opens without a wake file, and what is sent
-to it while its CLI waits arrives at its next turn, as the reply's `note` says.
+window opens (the `state_base` run, and making the window's numbered folder before its CLI starts,
+since Claude Code does not see a file appear in a folder that was missing when it began watching)
+and when it writes the file of a window that is running. A window whose `state_base` or folder did
+not finish within the daemon's listing time limit (10 seconds; a distribution that is still starting
+can take that long) opens without a wake file, and what is sent to it while its CLI waits arrives at
+its next turn, as the reply's `note` says.
 
 `wsl-codex-cli` wakes a waiting Codex CLI with the profile's own launch form followed by
 `queue --thread <session> --message <text>`, the same way a model listing runs (see

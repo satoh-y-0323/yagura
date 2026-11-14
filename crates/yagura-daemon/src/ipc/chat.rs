@@ -1100,7 +1100,7 @@ async fn submit_for_approval(
             name: post.room_name.clone(),
         }),
     };
-    match broker.submit(draft, state.conn_id, approval_limits(config)) {
+    match broker.submit(draft, state.caller.id, approval_limits(config)) {
         Ok(mut ticket) => {
             let chat = Arc::clone(chat);
             let registry = Arc::clone(registry);
