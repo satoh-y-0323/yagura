@@ -122,7 +122,12 @@
   let press: { pointerId: number; onControl: boolean } | null = null;
 
   function raise(event: PointerEvent): void {
-    press = { pointerId: event.pointerId, onControl: isPressOnControl(event.target) };
+    // Only the primary button chooses the window for typing: a secondary press
+    // opens a context menu that must keep the focus it takes.
+    press =
+      event.button === 0
+        ? { pointerId: event.pointerId, onControl: isPressOnControl(event.target) }
+        : null;
     actions.focus(entry);
   }
 
