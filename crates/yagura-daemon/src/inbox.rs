@@ -20,7 +20,7 @@
 //! written, and the parcels show in the order they were deposited: one whose
 //! row could not be written never shows, and holds nothing back.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::VecDeque;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 
 use tokio::sync::{oneshot, watch};
@@ -862,6 +862,9 @@ struct Waiter {
 struct DoorHeld {
     id: u64,
     held: Vec<Held>,
+    /// Its door printed what it took: none of it waits again, though the
+    /// hold stays until its end is committed.
+    printed: bool,
     /// Never raised: it is dropped when the door ends the hold, which is what
     /// a withdrawal that found the parcels here waits for.
     ended: watch::Sender<bool>,
@@ -881,10 +884,6 @@ struct State {
     /// The place the next parcel deposited takes.
     next_seq: i64,
     next_id: u64,
-    /// The sender of each envelope taken in, by its id, for as long as the
-    /// window lives: a withdrawal tells one handed over from one never sent.
-    /// One withdrawn, and every one of a sender that ended, is dropped.
-    sent: HashMap<String, Sender>,
     /// The CLI was asked to register a wait again and has not answered yet:
     /// kept under the lock the wait is, so an ask is decided against it.
     asked: bool,
@@ -909,11 +908,7 @@ impl State {
             .parcels
             .iter()
             .position(|held| held.parcel.key == key)?;
-        let removed = self.parcels.remove(position)?;
-        if let Some(sent) = &removed.parcel.sent {
-            self.sent.remove(&sent.id);
-        }
-        Some(removed)
+        self.parcels.remove(position)
     }
 
     /// How many parcels the inbox holds, waiting or carried, that count
@@ -1177,6 +1172,7 @@ impl Shared {
         state.doors.push(DoorHeld {
             id,
             held: taken,
+            printed: false,
             ended: watch::channel(false).0,
         });
         DoorHold {
@@ -1216,6 +1212,7 @@ impl Shared {
             let Some(door) = state.doors.iter_mut().find(|door| door.id == id) else {
                 return;
             };
+            door.printed = true;
             let mut rows = Vec::new();
             if self.keeper.is_some() {
                 for held in door.held.iter_mut().filter(|held| held.parcel.saved) {
@@ -1664,9 +1661,6 @@ impl Inbox {
         {
             return refused(parcel, true);
         }
-        if let Some(sent) = &parcel.sent {
-            state.sent.insert(sent.id.clone(), sent.sender.clone());
-        }
         let (tx, rx) = oneshot::channel();
         let id = state.take_id();
         let mut held = Held {
@@ -2029,28 +2023,45 @@ impl Inbox {
         }
     }
 
-    /// Withdraws the envelope `id` for `asker`, if it still waits: answered
-    /// [`WithdrawOutcome::Withdrawn`] once it is out, under the same lock the
-    /// doors take it under, so nothing hands it to the CLI after that.
-    /// [`WithdrawOutcome::AlreadyDelivered`] when a door or a push carries it
-    /// or it was handed over; [`WithdrawOutcome::NotFound`] when `asker` sent
-    /// no envelope of that id that the inbox still knows, or the inbox ended.
+    /// Withdraws the envelope `id` for `asker`, answered from the envelopes
+    /// the inbox holds now: [`WithdrawOutcome::Withdrawn`] when it waited and
+    /// is out, under the same lock the doors take it under, so nothing hands
+    /// it to the CLI after that; [`WithdrawOutcome::UnderWay`] when a door or
+    /// a push carries it; [`WithdrawOutcome::NotWaiting`] when the inbox holds
+    /// no envelope `id` that `asker` sent, or the inbox ended.
     pub fn withdraw_sent(&self, id: &str, asker: &Sender) -> WithdrawOutcome {
         let mut state = self.shared.lock();
-        if state.closed.is_some() || state.sent.get(id) != Some(asker) {
-            return WithdrawOutcome::NotFound;
+        if state.closed.is_some() {
+            return WithdrawOutcome::NotWaiting;
         }
-        let waiting = state
-            .parcels
+        let is_it = |held: &Held| {
+            held.parcel
+                .sent
+                .as_ref()
+                .is_some_and(|sent| sent.id == id && sent.sender == *asker)
+        };
+        if let Some(position) = state.parcels.iter().position(is_it)
+            && let Some(removed) = state.parcels.remove(position)
+        {
+            self.shared.forget([&removed]);
+            return WithdrawOutcome::Withdrawn;
+        }
+        let carried = state
+            .carrying
             .iter()
-            .position(|held| held.parcel.sent.as_ref().is_some_and(|sent| sent.id == id));
-        match waiting.and_then(|position| state.parcels.remove(position)) {
-            Some(removed) => {
-                self.shared.forget([&removed]);
-                state.sent.remove(id);
-                WithdrawOutcome::Withdrawn
-            }
-            None => WithdrawOutcome::AlreadyDelivered,
+            .flat_map(|carried| carried.held.iter())
+            .chain(
+                state
+                    .doors
+                    .iter()
+                    .filter(|door| !door.printed)
+                    .flat_map(|door| door.held.iter()),
+            )
+            .any(is_it);
+        if carried {
+            WithdrawOutcome::UnderWay
+        } else {
+            WithdrawOutcome::NotWaiting
         }
     }
 
@@ -2065,7 +2076,6 @@ impl Inbox {
             .partition(|held| held.parcel.sent_by_sender(&sender));
         state.parcels = staying;
         self.shared.forget(&gone);
-        state.sent.retain(|_, sent| *sent != sender);
     }
 
     /// The ids of the envelopes `sender` sent that wait to be read, oldest
@@ -2120,7 +2130,6 @@ impl Inbox {
             return;
         }
         state.closed = Some(end);
-        state.sent.clear();
         for held in std::mem::take(&mut state.parcels) {
             held.settle(end);
         }

@@ -789,7 +789,7 @@ async fn withdraw_message_rejects_a_missing_or_empty_id_without_calling_the_tran
 async fn withdraw_message_sends_the_id_and_relays_what_became_of_the_envelope() {
     use yagura_daemon::mcp::tools::{WithdrawMessageArgs, withdraw_message};
 
-    for outcome in ["withdrawn", "already_delivered", "not_found"] {
+    for outcome in ["withdrawn", "under_way", "not_waiting"] {
         let transport = MockTransport::with_response(Ok(wire(serde_json::json!({
             "type": "message_withdrawn",
             "id": MESSAGE_ID,

@@ -2398,13 +2398,13 @@ pub enum InterruptOutcome {
 pub enum WithdrawOutcome {
     /// It was waiting and is out of the inbox: it never reaches the CLI.
     Withdrawn,
-    /// A door carries it, or the CLI was handed it already. One a door
-    /// carries waits again if the door ends without printing it.
-    AlreadyDelivered,
-    /// The caller sent no envelope of that id that its window still holds:
-    /// the id is not the caller's, it was withdrawn, or its window ended or
-    /// the daemon restarted.
-    NotFound,
+    /// A door or a push carries it now. It waits again if they end without
+    /// handing it over, and can then be withdrawn.
+    UnderWay,
+    /// No live window's inbox holds an envelope of that id that the caller
+    /// sent: the CLI was handed it, it was withdrawn, the id is not the
+    /// caller's, or its window or the daemon ended.
+    NotWaiting,
 }
 
 /// What became of an envelope a sender put in a window's inbox

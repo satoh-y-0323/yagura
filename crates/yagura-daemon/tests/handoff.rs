@@ -413,8 +413,8 @@ async fn a_handoff_whose_door_holds_it_past_the_door_bound_is_answered_queued_an
     );
     assert_eq!(
         outcome_of(&withdraw(&mut client, &id_of(&answer)).await).as_deref(),
-        Some("already_delivered"),
-        "an envelope a door carries is no longer the sender's to withdraw"
+        Some("under_way"),
+        "an envelope a door carries is under way: it can be withdrawn only if it comes back"
     );
     send(&mut door, &ClientMessage::DeliverPrinted).await;
     send(&mut client, &ClientMessage::Ping).await;

@@ -1716,8 +1716,8 @@
       "waiting_input"
     ],
     "WithdrawOutcome": [
-      "already_delivered",
-      "not_found",
+      "not_waiting",
+      "under_way",
       "withdrawn"
     ],
     "WithdrawReason": [

@@ -1225,21 +1225,20 @@ fn interrupt_outcome_wire_variants() -> BTreeSet<String> {
 }
 
 fn withdraw_outcome_wire_variants() -> BTreeSet<String> {
-    [
-        WithdrawOutcome::Withdrawn,
-        WithdrawOutcome::AlreadyDelivered,
-        WithdrawOutcome::NotFound,
-    ]
-    .into_iter()
-    .map(|outcome| {
-        let hand = match &outcome {
-            WithdrawOutcome::Withdrawn => "withdrawn",
-            WithdrawOutcome::AlreadyDelivered => "already_delivered",
-            WithdrawOutcome::NotFound => "not_found",
-        };
-        serde_spelling(&outcome, hand)
-    })
-    .collect()
+    ["withdrawn", "under_way", "not_waiting"]
+        .into_iter()
+        .map(|hand| {
+            let outcome: WithdrawOutcome = serde_json::from_value(Value::from(hand))
+                .unwrap_or_else(|err| panic!("WithdrawOutcome must read {hand:?}: {err}"));
+            // Exhaustive, so a new variant fails to compile until the table names it.
+            match outcome {
+                WithdrawOutcome::Withdrawn
+                | WithdrawOutcome::UnderWay
+                | WithdrawOutcome::NotWaiting => {}
+            }
+            serde_spelling(&outcome, hand)
+        })
+        .collect()
 }
 
 fn handoff_delivery_wire_variants() -> BTreeSet<String> {

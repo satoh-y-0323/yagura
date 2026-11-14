@@ -180,6 +180,13 @@ pub(crate) async fn take_and_print(h: &Harness, window_id: &str) -> String {
     send_door_read(&mut door, window_id, Door::Take).await;
     let (output, _, _) = expect_delivery(read_response(&mut door).await);
     send(&mut door, &ClientMessage::DeliverPrinted).await;
+    // A connection's frames are handled in order, so the answer to the next one
+    // means the daemon has taken the print in.
+    send(&mut door, &ClientMessage::GetProtocolRevision).await;
+    match read_response(&mut door).await {
+        DaemonMessage::ProtocolRevision { .. } => {}
+        other => panic!("expected the protocol revision after the print, got {other:?}"),
+    }
     output
 }
 
@@ -427,8 +434,8 @@ async fn send_message_puts_its_envelope_in_the_inbox_and_writes_nothing_to_the_w
     assert_eq!(entry(&h, &window_id).write_seq(), writes_before);
     assert_eq!(
         outcome_of(&withdraw(&mut client, &first_id).await).as_deref(),
-        Some("already_delivered"),
-        "an envelope a door printed is no longer the sender's to withdraw"
+        Some("not_waiting"),
+        "an envelope a door printed neither waits nor is carried: the inbox holds nothing of it"
     );
     assert_eq!(
         listed_queued_count(&mut client, &window_id)
@@ -586,7 +593,7 @@ async fn withdraw_message_takes_a_waiting_envelope_out_for_its_sender_alone_and_
     );
     assert_eq!(
         outcome_of(&withdraw(&mut sender, "an-id-never-handed-out").await).as_deref(),
-        Some("not_found")
+        Some("not_waiting")
     );
 }
 
@@ -653,7 +660,7 @@ async fn a_window_sees_and_withdraws_only_what_it_sent_and_a_caller_that_is_no_w
 }
 
 #[tokio::test]
-async fn withdrawing_an_envelope_whose_window_has_ended_is_not_found() {
+async fn withdrawing_an_envelope_whose_window_has_ended_is_not_waiting() {
     let dir = unique_temp_dir("withdraw-ended");
     let h = Harness::start("withdraw-ended", sending_config(&dir)).await;
     let mut sender = h.connect().await;
@@ -670,7 +677,7 @@ async fn withdrawing_an_envelope_whose_window_has_ended_is_not_found() {
 
     assert_eq!(
         outcome_of(&withdraw(&mut sender, &id).await).as_deref(),
-        Some("not_found")
+        Some("not_waiting")
     );
 }
 

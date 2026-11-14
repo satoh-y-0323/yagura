@@ -290,11 +290,12 @@ impl<T: DaemonTransport + 'static> YaguraMcpServer<T> {
             while it still waits in its window's inbox: it then never reaches the window's \
             CLI. Only its sender may: the window that sent it, or, for a caller that is no \
             window, the connection that was answered with its id. No approval is asked. The \
-            reply carries id and outcome: withdrawn when it was taken out, already_delivered \
-            when a door carries it or its CLI was handed it already, and not_found when you \
-            sent no envelope of that id that its window still holds (it was withdrawn, or \
-            its window or the daemon ended). An envelope a door carries waits again if the \
-            door ends without printing it. Chat messages are not envelopes.",
+            reply carries id and outcome: withdrawn when it was taken out, under_way when a \
+            door or a push carries it now (it waits again if they end without handing it \
+            over), and not_waiting when no window holds an envelope of that id that you sent \
+            (its CLI was handed it, it was withdrawn, or its window or the daemon ended). \
+            get_window_status's queued_ids lists the ids still waiting. Chat messages are \
+            not envelopes.",
         input_schema = schema_object(json!({
             "type": "object",
             "properties": {

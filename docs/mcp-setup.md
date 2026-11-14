@@ -851,10 +851,10 @@ Take back an envelope you sent with [`send_message`](#send_message) or [`send_ha
 `outcome` is one of:
 
 - `"withdrawn"` -- it was waiting and is out of the inbox.
-- `"already_delivered"` -- a door is carrying it, or its CLI was handed it already. One a door carries waits again if the door ends without printing it, and can then be withdrawn.
-- `"not_found"` -- you sent no envelope of that `id` that its window still holds: it was withdrawn already, its window ended, or the daemon restarted.
+- `"under_way"` -- a door or a push is carrying it now. It waits again if they end without handing it over, and can then be withdrawn.
+- `"not_waiting"` -- no window holds an envelope of that `id` that you sent: its CLI was handed it, it was withdrawn already, its window ended, or the daemon restarted. The answer does not tell these apart; [`get_window_status`](#get_window_status)'s `queued_ids` shows which of your envelopes still wait.
 
-Only the envelope's sender may withdraw it: the window that sent it, or, for a caller that is no window, the connection that was answered with its `id`; anyone else is answered `not_found`. No approval is asked. Chat posts are not envelopes and cannot be withdrawn.
+Only the envelope's sender may withdraw it: the window that sent it, or, for a caller that is no window, the connection that was answered with its `id`; anyone else is answered `not_waiting`. No approval is asked. Chat posts are not envelopes and cannot be withdrawn.
 
 ### send_handoff
 

@@ -2909,16 +2909,16 @@ impl WindowRegistry {
     }
 
     /// Withdraws the envelope `id` for `asker` from whichever live window's
-    /// inbox took it in ([`Inbox::withdraw_sent`]). An envelope whose window
-    /// ended, or that `asker` did not send, is not found.
+    /// inbox holds it ([`Inbox::withdraw_sent`]). An envelope no live window
+    /// holds, or that `asker` did not send, is not waiting.
     pub fn withdraw_sent(&self, id: &str, asker: &Sender) -> WithdrawOutcome {
         let entries: Vec<Arc<WindowEntry>> = lock_recover(&self.entries).clone();
         entries
             .iter()
             .filter(|entry| matches!(self.liveness(&entry.window_id), WindowLiveness::Alive(_)))
             .map(|entry| entry.inbox.withdraw_sent(id, asker))
-            .find(|outcome| *outcome != WithdrawOutcome::NotFound)
-            .unwrap_or(WithdrawOutcome::NotFound)
+            .find(|outcome| *outcome != WithdrawOutcome::NotWaiting)
+            .unwrap_or(WithdrawOutcome::NotWaiting)
     }
 
     /// Installs the window table every window opened from now on writes its
