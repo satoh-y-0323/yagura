@@ -44,7 +44,9 @@ allow it.
   stops itself on loops or runaway turns and waits for you.
 - Nothing is typed into a CLI's input line. Messages, handoffs, chat and notices wait in the
   window's inbox and reach the CLI through its own hooks and start-up request; the sender learns
-  whether one was delivered or is still queued, and can take a queued one back. See
+  whether one was delivered or is still queued, and can take a queued one back. The GUI marks a
+  window whose inbox holds waiting messages with an envelope and their number, in its tab and on
+  a floating window's title bar. See
   [how delivery works](docs/mcp-setup.md#how-the-daemon-delivers-text).
 - **Interrupting**: your own interrupt presses the CLI's key. An agent's stops the CLI at its next
   tool call through its hooks, without touching your draft; Codex CLI and Antigravity CLI refuse
