@@ -416,6 +416,31 @@ async fn a_handoff_whose_door_holds_it_past_the_door_bound_is_answered_queued_an
         Some("under_way"),
         "an envelope a door carries is under way: it can be withdrawn only if it comes back"
     );
+    let (_, mut stranger) = window_sender(&h).await;
+    let handoff_id = id_of(&answer);
+    assert_eq!(
+        outcome_of(&withdraw(&mut stranger, &handoff_id).await).as_deref(),
+        Some("not_waiting"),
+        "an envelope a door carries is no other sender's to ask about: only its sender hears          it is under way"
+    );
+    let pushed = send_queued(&mut client, &window_id, "HANDOFF-DOOR-BOUND-PUSH-4W").await;
+    let push = entry(&h, &window_id)
+        .inbox()
+        .begin_push()
+        .expect("the message left waiting is what a push picks up");
+    assert_eq!(
+        outcome_of(&withdraw(&mut client, &pushed).await).as_deref(),
+        Some("under_way"),
+        "an envelope a push carries is under way for its sender"
+    );
+    assert_eq!(
+        outcome_of(&withdraw(&mut stranger, &pushed).await).as_deref(),
+        Some("not_waiting"),
+        "an envelope a push carries is no other sender's to ask about"
+    );
+    entry(&h, &window_id)
+        .inbox()
+        .finish_push(push.id, yagura_daemon::inbox::PushEnd::Taken);
     send(&mut door, &ClientMessage::DeliverPrinted).await;
     send(&mut client, &ClientMessage::Ping).await;
     assert!(

@@ -24,7 +24,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 use std::time::Duration;
 
-use yagura_daemon::cli::{HOOK_DOOR_MARGIN, door_prints};
+use yagura_daemon::cli::{HOOK_DOOR_MARGIN, HOOK_STDIN_DRAIN_GRACE, door_drain_wait, door_prints};
 use yagura_daemon::inbox::Parcel;
 use yagura_daemon::mcp_registration::{EntryVars, RegistrationTarget};
 use yagura_daemon::profile::parse_profile;
@@ -1050,6 +1050,21 @@ async fn a_door_left_less_time_than_its_margin_prints_nothing_and_never_says_it_
             prints,
             "a door named 5 seconds, {elapsed:?} after it started: it prints only with its \
              margin left"
+        );
+    }
+    for (hook_timeout_sec, elapsed, waits) in [
+        (None, Duration::from_secs(60), HOOK_STDIN_DRAIN_GRACE),
+        (Some(60), Duration::ZERO, HOOK_STDIN_DRAIN_GRACE),
+        (Some(5), Duration::ZERO, HOOK_STDIN_DRAIN_GRACE),
+        (Some(5), Duration::from_secs(3), Duration::from_millis(1500)),
+        (Some(5), named - HOOK_DOOR_MARGIN, Duration::ZERO),
+        (Some(5), named, Duration::ZERO),
+        (Some(5), named + Duration::from_secs(1), Duration::ZERO),
+    ] {
+        assert_eq!(
+            door_drain_wait(hook_timeout_sec, elapsed),
+            waits,
+            "a door named {hook_timeout_sec:?} seconds, {elapsed:?} after it started: it waits              for stdin never into its margin and never past the drain bound"
         );
     }
 }
