@@ -12,6 +12,18 @@ export interface PointerDragOptions<S> {
   end?: (state: S) => void;
 }
 
+/**
+ * Whether a press landed on a control that handles the press and its focus
+ * itself (a button, a form field, an open menu), so neither a drag nor a
+ * focus move should take it over.
+ */
+export function isPressOnControl(target: EventTarget | null): boolean {
+  return (
+    target instanceof Element &&
+    target.closest('button, select, input, textarea, .popup-menu') !== null
+  );
+}
+
 interface ActiveDrag<S> {
   pointerId: number;
   originX: number;

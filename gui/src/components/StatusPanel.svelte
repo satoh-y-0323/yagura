@@ -28,6 +28,8 @@
   export let collapsed: ReadonlySet<string>;
   export let tabOrder: readonly string[];
   export let onGoToNextNeedingYou: () => void;
+  /** Brings the window of a row the user chose on screen and moves the keyboard into it. */
+  export let onSelectWindow: (entry: WindowEntry) => void;
 
   /** Toggles one room's collapsed state; shared by the click and keydown handlers. */
   function handleToggleRoom(roomId: string): void {
@@ -156,11 +158,11 @@
                     tabindex="0"
                     aria-label={entry.name}
                     title={hints.focusWindow}
-                    on:click={() => actions.focus(entry)}
+                    on:click={() => onSelectWindow(entry)}
                     on:keydown={(event) => {
                       if (event.key === 'Enter' || event.key === ' ') {
                         event.preventDefault();
-                        actions.focus(entry);
+                        onSelectWindow(entry);
                       }
                     }}
                   >

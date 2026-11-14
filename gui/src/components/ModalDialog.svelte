@@ -1,5 +1,8 @@
 <script lang="ts">
+  import { onDestroy } from 'svelte';
+
   import { isImeKey } from '../keymap/key-chord';
+  import { modalFocusPort, type ModalFocusToken } from '../session/modal-focus-port';
 
   export let isOpen: boolean = false;
   export let onCancel: () => void;
@@ -8,8 +11,26 @@
    * 400px default set in `.modal-dialog` below.
    */
   export let maxWidth: string | null = null;
+  /** The window the dialog is about, or null; decides where focus goes once it closes. */
+  export let subject: string | null = null;
 
   let dialogElement: HTMLDialogElement | null = null;
+
+  const focusPort = modalFocusPort();
+  let focusToken: ModalFocusToken | null = null;
+
+  // Reached from close() and from a teardown while open (a dialog shown under an
+  // `{#if}`), which neither restores focus nor fires `close`; the token keeps it
+  // to one report per opening.
+  function reportClosed(): void {
+    const token = focusToken;
+    focusToken = null;
+    if (token !== null) {
+      focusPort?.closed(token);
+    }
+  }
+
+  onDestroy(reportClosed);
 
   // showModal() rather than the `open` attribute: the browser then traps Tab
   // inside the dialog, makes the rest of the page inert and turns Escape into
@@ -17,9 +38,12 @@
   // on an already-open dialog throws InvalidStateError, hence the `open` guards.
   $: if (dialogElement !== null) {
     if (isOpen && !dialogElement.open) {
+      // Before showModal(), which moves focus into the dialog.
+      focusToken = focusPort?.opened(subject) ?? null;
       dialogElement.showModal();
     } else if (!isOpen && dialogElement.open) {
       dialogElement.close();
+      reportClosed();
     }
   }
 

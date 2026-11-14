@@ -39,7 +39,7 @@
   import McpMark from './McpMark.svelte';
   import QueuedMark from './QueuedMark.svelte';
   import StatusReportMark from './StatusReportMark.svelte';
-  import { pointerDrag, type PointerDragOptions } from './pointer-drag';
+  import { isPressOnControl, pointerDrag, type PointerDragOptions } from './pointer-drag';
   import TerminalPane from './TerminalPane.svelte';
   import WindowControls from './WindowControls.svelte';
 
@@ -64,6 +64,12 @@
   export let isCurrent = false;
   /** Callback to open the rename dialog for this window. */
   export let onRename: (() => void) | undefined = undefined;
+  /**
+   * Called once a press on the window has been released; `pressOnControl` says
+   * whether it landed on a control that owns its focus. Not called for a
+   * cancelled press.
+   */
+  export let onPressed: (pressOnControl: boolean) => void;
 
   const RESIZE_HANDLES: readonly ResizeHandle[] = [
     'top',
@@ -112,8 +118,30 @@
     });
   }
 
-  function raise(): void {
+  /** The press in progress on this window, recorded when it starts. */
+  let press: { pointerId: number; onControl: boolean } | null = null;
+
+  function raise(event: PointerEvent): void {
+    press = { pointerId: event.pointerId, onControl: isPressOnControl(event.target) };
     actions.focus(entry);
+  }
+
+  // Reported on release rather than on press: the browser's own focus handling
+  // of the press (the mousedown default) has finished by then and would
+  // otherwise undo a move asked for at pointerdown.
+  function reportPress(event: PointerEvent): void {
+    if (press?.pointerId !== event.pointerId) {
+      return;
+    }
+    const { onControl } = press;
+    press = null;
+    onPressed(onControl);
+  }
+
+  function forgetPress(event: PointerEvent): void {
+    if (press?.pointerId === event.pointerId) {
+      press = null;
+    }
   }
 
   /**
@@ -139,7 +167,7 @@
       // Capturing the pointer here would swallow the interaction with the
       // controls the bar contains: its buttons, and the menu they open, which
       // is mounted inside the bar as a descendant of WindowControls.
-      if (event.target instanceof Element && event.target.closest('button, .popup-menu') !== null) {
+      if (isPressOnControl(event.target)) {
         return null;
       }
       return gestureStartRect();
@@ -167,6 +195,8 @@
   style="left: {rect.position.x}px; top: {rect.position.y}px; width: {rect.size
     .width}px; height: {rect.size.height}px; z-index: {entry.display.zOrder};"
   on:pointerdown|capture={raise}
+  on:pointerup|capture={reportPress}
+  on:pointercancel|capture={forgetPress}
   on:focusin={raiseOnFocusIn}
 >
   <!-- The window palette is written here, not on the article: the frame keeps

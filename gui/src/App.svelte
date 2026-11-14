@@ -236,12 +236,20 @@
   import { createRoomActions } from './session/room-actions';
   import {
     createPendingFocus,
+    isInputTarget,
+    lostFocusMove,
+    modalReturnTarget,
     panelReturnTarget,
-    restoreFocusMove,
     sidebarToggleMove,
+    windowActivationMove,
+    type FocusFacts,
     type FocusMove,
+    type ModalOrigin,
     type PanelOrigin,
+    type PanelReturn,
   } from './session/focus-moves';
+  import { provideModalFocusPort, type ModalFocusToken } from './session/modal-focus-port';
+  import { revealWindow, type RevealDeps } from './session/room-navigation';
   import {
     applyLayoutSteps,
     applySelectionOverrides,
@@ -458,7 +466,13 @@
   let unsubscribeWindowList: (() => void) | null = null;
 
   // Confirmation dialog state
-  let confirmDialog = { isOpen: false, operation: 'close' as ConfirmOperation, roomName: '' };
+  // `windowId` is the window the operation is about, null for a room or a broadcast.
+  let confirmDialog = {
+    isOpen: false,
+    operation: 'close' as ConfirmOperation,
+    roomName: '',
+    windowId: null as string | null,
+  };
   let pendingConfirm: ((approved: boolean) => void) | null = null;
 
   // The chat rooms. `chatRooms` is the room list (`list_chat_rooms`,
@@ -818,15 +832,20 @@
    * The one confirmation port of the application: it opens the
    * dialog and answers the operation with what the user chose.
    */
-  const confirmPort: ConfirmPort = (operation) => requestConfirmation(operation);
+  const confirmPort: ConfirmPort = (operation, entry) =>
+    requestConfirmation(operation, '', entry.windowId);
 
-  function requestConfirmation(operation: ConfirmOperation, roomName = ''): Promise<boolean> {
+  function requestConfirmation(
+    operation: ConfirmOperation,
+    roomName = '',
+    windowId: string | null = null
+  ): Promise<boolean> {
     return new Promise<boolean>((resolve) => {
       // A request can only still be pending if its dialog is the one being
       // replaced here. Deny it instead of leaving its caller waiting forever.
       answerConfirm(false);
       pendingConfirm = resolve;
-      confirmDialog = { isOpen: true, operation, roomName };
+      confirmDialog = { isOpen: true, operation, roomName, windowId };
     });
   }
 
@@ -1969,7 +1988,7 @@
     registry,
     ipc: { invokeCloseWindow, invokeInterruptWindow, invokeRenameWindow },
     confirmPort,
-    removeWindow: closePane,
+    removeWindow: removeClosedWindow,
     isTabMode,
     switchToTab,
     resolveTabSuccessor,
@@ -1978,22 +1997,33 @@
   // The view starts these operations without awaiting them, so a refusal has
   // to become a banner here, where the banner is owned. Rename is awaited by
   // its dialog, which shows the refusal itself.
+  // Maximizing and minimizing are the user's own choice of front window, so the
+  // keyboard follows (activateWindow).
   const actions: WindowActions = {
     ...contractedActions,
     close: (entry) => reportFailures(errors.closeWindowFailed, contractedActions.close(entry)),
     interrupt: (entry) =>
       reportFailures(errors.interruptWindowFailed, contractedActions.interrupt(entry)),
+    minimize: (entry) => {
+      contractedActions.minimize(entry);
+      returnFocusIfLost();
+    },
+    maximize: (entry) => {
+      contractedActions.maximize(entry);
+      focusTerminalOf(entry.windowId);
+    },
   };
 
-  // The jump to the next window needing the user reads the rooms as the sidebar
-  // renders them, and expands through the store's idempotent `expand` so a room
-  // already open is never closed.
-  const attentionNavigation = createAttentionNavigation({
+  // Every jump to a window reads the rooms as the sidebar renders them, and
+  // expands through the store's idempotent `expand` so a room already open is
+  // never closed.
+  const revealDeps: RevealDeps<WindowEntry> = {
     groups: sidebarGroups,
     expandRoom: collapsedRooms.expand,
     focus: actions.focus,
     focusTerminal: focusTerminalOf,
-  });
+  };
+  const attentionNavigation = createAttentionNavigation(revealDeps);
 
   const FOCUSABLE =
     'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
@@ -2027,36 +2057,135 @@
       case 'sidebar-start':
         firstFocusable(sidebarElement)?.focus();
         return;
+      case 'current-if-lost':
+        runFocusMove(
+          lostFocusMove(focusFacts(document.activeElement), currentWindow(get(registry).windows))
+        );
+        return;
       case 'none':
+        return;
+    }
+  }
+
+  /** The one place the DOM is read for `isInputTarget` and `lostFocusMove`. */
+  function focusFacts(element: Element | null): FocusFacts {
+    if (element === null || element === document.body) {
+      return {
+        onBody: true,
+        connected: false,
+        rendered: false,
+        disabled: false,
+        onWindowControl: false,
+      };
+    }
+    return {
+      onBody: false,
+      connected: element.isConnected,
+      rendered: element.getClientRects().length > 0,
+      disabled: element.matches(':disabled'),
+      onWindowControl: element.closest('[data-window-control]') !== null,
+    };
+  }
+
+  type FocusReturn = PanelReturn<PanelId, HTMLElement>;
+
+  /** Performs one return: an element, the start of a panel, or a focus move. */
+  function runFocusReturn(target: FocusReturn): void {
+    switch (target.kind) {
+      case 'element':
+        target.element.focus();
+        return;
+      case 'panel':
+        void focusPanelStart(
+          PANEL_SELECTORS[target.panel],
+          target.panel === 'chat' ? '.chat-input' : FOCUSABLE
+        );
+        return;
+      case 'move':
+        runFocusMove(target.move);
         return;
     }
   }
 
   // Every focus move goes through one held request that runs once no modal
   // dialog is open, after the view has rendered (a hidden window cannot take focus).
-  const pendingFocus = createPendingFocus({
+  const pendingFocus = createPendingFocus<FocusReturn>({
     isModalOpen: hasOpenModal,
     settle: tick,
-    run: runFocusMove,
+    run: runFocusReturn,
   });
 
-  /** Asks for keyboard focus to move into a window's terminal. */
-  function focusTerminalOf(windowId: string): void {
-    pendingFocus.request({ kind: 'terminal', windowId });
+  function moveFocus(move: FocusMove): void {
+    pendingFocus.request({ kind: 'move', move });
   }
 
-  function moveFocus(move: FocusMove): void {
-    if (move.kind === 'terminal') {
-      focusTerminalOf(move.windowId);
-    } else {
-      pendingFocus.request(move);
+  /** Points the keyboard at a window brought to the front; see `windowActivationMove`. */
+  function activateWindow(input: Parameters<typeof windowActivationMove>[0]): void {
+    const move = windowActivationMove(input);
+    if (move.kind !== 'none') {
+      moveFocus(move);
     }
   }
 
-  /** Returns keyboard focus to the current window, or to the sidebar when there is none. */
-  function restoreFocus(): void {
-    moveFocus(restoreFocusMove(currentWindow(get(registry).windows)));
+  /** Asks for keyboard focus to move into the terminal of a window the user chose. */
+  function focusTerminalOf(windowId: string): void {
+    activateWindow({ byUser: true, target: windowId, pressOnControl: false });
   }
+
+  /** After the user changed the front window without one target: back only if focus was lost. */
+  function returnFocusIfLost(): void {
+    activateWindow({ byUser: true, target: null, pressOnControl: false });
+  }
+
+  /** Drops a window whose close the user confirmed, then returns focus if it went with it. */
+  function removeClosedWindow(windowId: string): void {
+    closePane(windowId);
+    returnFocusIfLost();
+  }
+
+  /** Where focus is now, remembered by a modal dialog that is opening. */
+  function modalOrigin(): ModalOrigin<PanelId, HTMLElement> {
+    const element = document.activeElement;
+    if (!(element instanceof HTMLElement) || element === document.body) {
+      return { element: null, panel: lastFocusedPanel };
+    }
+    return { element, panel: panelContaining(element) };
+  }
+
+  // The dialogs that have opened and not yet reported closing, by token.
+  // eslint-disable-next-line svelte/prefer-svelte-reactivity -- read only when a dialog closes, never rendered, so runes-based SvelteMap reactivity does not apply
+  const openModals = new Map<
+    ModalFocusToken,
+    { subject: string | null; origin: ModalOrigin<PanelId, HTMLElement> }
+  >();
+  let nextModalToken: ModalFocusToken = 0;
+
+  provideModalFocusPort({
+    opened: (subject) => {
+      const token = nextModalToken;
+      nextModalToken += 1;
+      openModals.set(token, { subject, origin: modalOrigin() });
+      return token;
+    },
+    closed: (token) => {
+      const opened = openModals.get(token);
+      if (opened === undefined) {
+        return;
+      }
+      openModals.delete(token);
+      // An offer: a move asked for while the dialog was open, or the return of
+      // a dialog that closed before it, wins.
+      pendingFocus.offer(
+        modalReturnTarget<PanelId, HTMLElement>({
+          subject: opened.subject,
+          origin: opened.origin,
+          current: currentWindow(get(registry).windows),
+          isUsable: (element: HTMLElement) => isInputTarget(focusFacts(element)),
+          isOpen: isPanelOpen,
+        })
+      );
+    },
+  });
 
   /** Moves focus between the sidebar and the current window; it depends only on where focus is now. */
   function toggleSidebarFocus(): void {
@@ -2083,7 +2212,6 @@
     actions,
     goToNextWindowNeedingYou: attentionNavigation.goToNextWindowNeedingYou,
     focusTerminal: focusTerminalOf,
-    restoreFocus,
     openWindowForm: openAddDialog,
     toggleChat,
     togglePlans,
@@ -2188,22 +2316,8 @@
     if (lastFocusedPanel === panel) {
       lastFocusedPanel = null;
     }
-    if (!shouldReturnFocus) {
-      return;
-    }
-    switch (target.kind) {
-      case 'element':
-        target.element.focus();
-        return;
-      case 'panel':
-        void focusPanelStart(
-          PANEL_SELECTORS[target.panel],
-          target.panel === 'chat' ? '.chat-input' : FOCUSABLE
-        );
-        return;
-      case 'move':
-        moveFocus(target.move);
-        return;
+    if (shouldReturnFocus) {
+      pendingFocus.request(target);
     }
   }
 
@@ -2778,6 +2892,7 @@
     }
     await refreshWindowList();
     applyLayoutSteps(buildLayoutTarget(), planLayoutApplication(targets, get(registry).tabOrder));
+    returnFocusIfLost();
     const disabledNotice = restoreNoticeForDisabled(disabledProfileNames);
     if (disabledNotice !== null) {
       operationError = disabledNotice;
@@ -3194,8 +3309,7 @@
 </script>
 
 <svelte:window on:keydown|capture={handleWindowKeydown} on:resize={handleWindowResize} />
-<!-- `close` does not bubble, so it is caught on the way down. -->
-<svelte:document on:close|capture={() => pendingFocus.flush()} on:focusin={notePanelFocus} />
+<svelte:document on:focusin={notePanelFocus} />
 
 <main class="app">
   {#if restoreLoadFailedNotice !== null}
@@ -3272,6 +3386,7 @@
         collapsed={$collapsedRooms}
         tabOrder={$registry.tabOrder}
         onGoToNextNeedingYou={attentionNavigation.goToNextWindowNeedingYou}
+        onSelectWindow={(entry: WindowEntry) => revealWindow(revealDeps, entry)}
       >
         <div slot="header-action" class="header-actions">
           <IconButton
@@ -3304,7 +3419,10 @@
           {actions}
           {themeStore}
           onRename={handleTabRename}
-          onSelectTab={switchToTab}
+          onSelectTab={(windowId: string) => {
+            switchToTab(windowId);
+            focusTerminalOf(windowId);
+          }}
           onReorderTab={registry.moveTab}
         />
       {/if}
@@ -3326,6 +3444,8 @@
             isVisible={isWindowVisible(rendered.entry, activeTabEntry)}
             isCurrent={rendered.entry.windowId === current?.windowId}
             onRename={() => handleRenameWindow(rendered.entry)}
+            onPressed={(pressOnControl: boolean) =>
+              activateWindow({ byUser: true, target: rendered.entry.windowId, pressOnControl })}
           />
         {/each}
       </div>
@@ -3468,6 +3588,7 @@
   message={confirmWording.message}
   confirmLabel={confirmWording.confirmLabel}
   operation={confirmDialog.operation}
+  subject={confirmDialog.windowId}
   onConfirm={() => answerConfirm(true)}
   onCancel={() => answerConfirm(false)}
 />
@@ -3488,6 +3609,7 @@
   title={dialogs.renameTitle}
   label={forms.windowNameLabel}
   initialValue={renameDialog.entry?.name ?? ''}
+  subject={renameDialog.entry?.windowId ?? null}
   onConfirm={async (name: string) => {
     const entry = renameDialog.entry;
     if (entry !== null) {

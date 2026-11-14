@@ -36,16 +36,11 @@ interface Setup {
   /** The sidebar order; defaults to `windows`. */
   order?: Win[];
   attentionTarget?: Win | null;
-  /** Whether a close removes the window (false models a refused confirmation). */
-  closeRemoves?: boolean;
-  /** Holds each close until the test releases it. */
-  holdClose?: boolean;
 }
 
 interface Harness {
   run: (action: ActionId) => Promise<void>;
   calls: string[];
-  releaseClose: () => void;
 }
 
 /** The sidebar's rooms over `order`, each room placed where its first window is. */
@@ -72,9 +67,8 @@ function groupsOf(order: readonly Win[]): RoomGroup<Win>[] {
 
 function harness(setup: Setup): Harness {
   const calls: string[] = [];
-  let live: Win[] = [...setup.windows];
+  const live: Win[] = [...setup.windows];
   const order = setup.order ?? setup.windows;
-  let releaseClose: () => void = () => {};
   const deps: ShortcutRunnerDeps<Win> = {
     windows: (): readonly Win[] => live,
     displayOrder: (): readonly Win[] => order.filter((entry) => live.includes(entry)),
@@ -86,14 +80,7 @@ function harness(setup: Setup): Harness {
     actions: {
       close: async (entry: Win): Promise<void> => {
         calls.push(`close:${entry.windowId}`);
-        if (setup.holdClose === true) {
-          await new Promise<void>((resolve) => {
-            releaseClose = resolve;
-          });
-        }
-        if (setup.closeRemoves !== false) {
-          live = live.filter((other) => other.windowId !== entry.windowId);
-        }
+        await Promise.resolve();
       },
       interrupt: async (entry: Win): Promise<void> => {
         calls.push(`interrupt:${entry.windowId}`);
@@ -116,9 +103,6 @@ function harness(setup: Setup): Harness {
     focusTerminal: (windowId: string): void => {
       calls.push(`terminal:${windowId}`);
     },
-    restoreFocus: (): void => {
-      calls.push('restore');
-    },
     openWindowForm: (): void => {
       calls.push('open-form');
     },
@@ -139,7 +123,7 @@ function harness(setup: Setup): Harness {
     },
   };
   const run = createShortcutRunner(deps);
-  return { run, calls, releaseClose: () => releaseClose() };
+  return { run, calls };
 }
 
 // B is the current window (highest zOrder) and sits between A and C in the sidebar.
@@ -152,9 +136,9 @@ const EXPECTED_CALLS: Readonly<Record<ActionId, readonly string[]>> = {
   'focus-previous-window': ['expand:room-a', `focus:${A.windowId}`, `terminal:${A.windowId}`],
   'focus-next-attention': ['attention'],
   'open-window-form': ['open-form'],
-  'close-window': [`close:${B.windowId}`, 'restore'],
+  'close-window': [`close:${B.windowId}`],
   'interrupt-window': [`interrupt:${B.windowId}`],
-  'minimize-window': [`minimize:${B.windowId}`, 'restore'],
+  'minimize-window': [`minimize:${B.windowId}`],
   'toggle-maximize-window': [`maximize:${B.windowId}`],
   'toggle-sidebar-focus': ['sidebar'],
   'toggle-chat': ['chat'],
@@ -255,23 +239,6 @@ describe('the window an operation acts on', () => {
 });
 
 describe('focus after an operation', () => {
-  it('returns focus after a close only when the window is gone', async () => {
-    const refused = harness({ windows: [A, B], closeRemoves: false });
-    await refused.run('close-window');
-    expect(refused.calls).toEqual([`close:${B.windowId}`]);
-  });
-
-  it('returns focus only after the close has finished', async () => {
-    const h = harness({ windows: [A, B], holdClose: true });
-    const running = h.run('close-window');
-    await Promise.resolve();
-    expect(h.calls).toEqual([`close:${B.windowId}`]);
-
-    h.releaseClose();
-    await running;
-    expect(h.calls).toEqual([`close:${B.windowId}`, 'restore']);
-  });
-
   it('leaves the terminal focus after the attention jump to the jump itself', async () => {
     const found = harness({ windows: [A, B, C], attentionTarget: C });
     await found.run('focus-next-attention');

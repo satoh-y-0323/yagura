@@ -34,8 +34,6 @@ export interface ShortcutRunnerDeps<T extends PlacedWindow> {
   goToNextWindowNeedingYou: () => T | null;
   /** Asks for keyboard focus to move into a window's terminal. */
   focusTerminal: (windowId: string) => void;
-  /** Returns keyboard focus to the current window, or to the sidebar when there is none. */
-  restoreFocus: () => void;
   openWindowForm: () => void;
   toggleChat: () => Promise<void>;
   togglePlans: () => Promise<void>;
@@ -69,18 +67,6 @@ export function createShortcutRunner<T extends PlacedWindow>(
     }
   }
 
-  async function closeCurrent(): Promise<void> {
-    const target = current();
-    if (target === null) {
-      return;
-    }
-    await deps.actions.close(target);
-    // A refused or cancelled close leaves the window, and focus, where they were.
-    if (!deps.windows().some((entry) => entry.windowId === target.windowId)) {
-      deps.restoreFocus();
-    }
-  }
-
   async function onCurrent(operate: (entry: T) => void | Promise<void>): Promise<void> {
     const target = current();
     if (target !== null) {
@@ -103,16 +89,13 @@ export function createShortcutRunner<T extends PlacedWindow>(
         deps.openWindowForm();
         return;
       case 'close-window':
-        await closeCurrent();
+        await onCurrent(deps.actions.close);
         return;
       case 'interrupt-window':
         await onCurrent(deps.actions.interrupt);
         return;
       case 'minimize-window':
-        await onCurrent((entry) => {
-          deps.actions.minimize(entry);
-          deps.restoreFocus();
-        });
+        await onCurrent(deps.actions.minimize);
         return;
       case 'toggle-maximize-window':
         await onCurrent(deps.actions.maximize);

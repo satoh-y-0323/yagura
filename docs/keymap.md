@@ -53,6 +53,24 @@ list in Chat), and an `Esc` typed inside a window still goes to the program runn
   focus to the open panel you used most recently, so closing the upper of two stacked panels lands
   in the lower one; with no other panel open, focus goes to the current window.
 
+### Where Typing Goes After You Pick a Window or Close a Dialog
+
+- When you pick a window yourself, what you type next goes to that window: its row in the sidebar
+  (click, `Enter` or `Space`), its tab, a press on its frame (the title, the status or a resize
+  edge), or its maximize button. Pressing a control in the frame, such as `⋯` or a button, leaves
+  focus to that control.
+- When you minimize or close a window, or restore windows from the banner, focus moves to the
+  current window (or the start of the sidebar when none is left) only if it has nowhere to type
+  into: it was on the window that went away, on a window's own buttons, or on nothing. A button in
+  the sidebar that is still there keeps focus.
+- When a dialog about a window closes (interrupt, close or rename), whether you confirmed or
+  cancelled it, focus goes to that window if it is the current window. Otherwise, and for any other
+  dialog such as an approval, focus returns to where you were when it opened; if that is gone, to
+  the panel you were in, and then to the current window.
+- A window that comes to the front without you choosing it, such as one an AI opened, or a window
+  whose program exits by itself, does not take focus: keys you are typing keep going where they
+  were going.
+
 ### How Keys Reach the Program
 
 Programs running in a window can ask the terminal for a richer key format than the traditional one,

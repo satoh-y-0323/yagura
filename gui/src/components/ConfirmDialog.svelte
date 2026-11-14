@@ -8,6 +8,8 @@
   export let operation: ConfirmOperation;
   export let confirmLabel: string;
   export let isOpen: boolean = false;
+  /** The window the operation is about, or null for a room or a broadcast. */
+  export let subject: string | null = null;
   export let onConfirm: () => void;
   export let onCancel: () => void;
 
@@ -22,7 +24,7 @@
   }
 </script>
 
-<ModalDialog {isOpen} onCancel={handleCancel}>
+<ModalDialog {isOpen} {subject} onCancel={handleCancel}>
   <div class="dialog-content">
     <h2 class="dialog-title">{title}</h2>
     <p class="dialog-message">{message}</p>

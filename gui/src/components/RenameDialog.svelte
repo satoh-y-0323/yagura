@@ -6,6 +6,8 @@
   export let label: string;
   export let initialValue: string = '';
   export let isOpen: boolean = false;
+  /** The window being renamed. */
+  export let subject: string | null = null;
   /** Renames to `value`; rejects with the daemon's reason when it refuses the name. */
   export let onConfirm: (value: string) => Promise<void>;
   export let onCancel: () => void;
@@ -53,7 +55,7 @@
   }
 </script>
 
-<ModalDialog {isOpen} onCancel={handleCancel}>
+<ModalDialog {isOpen} {subject} onCancel={handleCancel}>
   <form class="dialog-content" on:submit|preventDefault={handleConfirm}>
     <h2 class="dialog-title">{title}</h2>
     <!-- The field precedes the buttons, so the modal's initial focus lands

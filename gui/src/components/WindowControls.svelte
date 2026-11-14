@@ -4,6 +4,10 @@
    * interrupt / minimize / maximize / close row — with the menu they open
    * Both the float window title bar and the tab bar mount this, so
    * the menu has exactly one owner and no caller ever holds its anchor.
+   *
+   * Each button carries `data-window-control`: focus left on one is not an
+   * input target (`isInputTarget` in `focus-moves.ts`), because the window it
+   * acts on can change under it. The menu items do not carry it.
    */
   import { resolveConfirmTarget } from '../session/confirm-target';
   import type { WindowActions } from '../session/window-actions';
@@ -56,6 +60,7 @@
 
 <div class="window-controls">
   <IconButton
+    data-window-control
     class="window-controls__menu-anchor"
     label={nav.windowMenu}
     bind:element={menuAnchor}
@@ -66,6 +71,7 @@
     ⋯
   </IconButton>
   <IconButton
+    data-window-control
     class="window-controls__button"
     label={buttons.interrupt}
     hint={describeInterruptHint(interruptTarget)}
@@ -77,6 +83,7 @@
     ⏹
   </IconButton>
   <IconButton
+    data-window-control
     class="window-controls__button"
     label={buttons.minimize}
     hint={hints.minimizeWindow}
@@ -85,6 +92,7 @@
     −
   </IconButton>
   <IconButton
+    data-window-control
     class="window-controls__button"
     label={maximizeLabel}
     hint={maximizeHint}
@@ -93,6 +101,7 @@
     □
   </IconButton>
   <IconButton
+    data-window-control
     class="window-controls__button"
     label={buttons.close}
     hint={hints.closeWindow}
