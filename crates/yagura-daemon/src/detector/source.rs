@@ -42,7 +42,9 @@ impl TurnReport {
     }
 
     /// Whether silence alone may end this turn. An approval dialog stays up
-    /// without producing output, so only a later report or the screen ends it.
+    /// without producing output, so a turn awaiting one ends only by a later
+    /// report or the screen; a running turn's silence is not counted while
+    /// the screen shows one either.
     #[must_use]
     pub fn closes_on_silence(self) -> bool {
         self == Self::Running

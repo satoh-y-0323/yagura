@@ -66,13 +66,18 @@ pub enum InputEcho {
 /// carry a `Working` footer the rules classify directly. 5 s is about twice
 /// that peak, so a quiet stretch inside a turn does not close it while the
 /// return to the screen after an interrupt no report announces stays short.
+/// Time the screen waits on the user is not silence and is not counted (see
+/// [`TURN_REPORT_STALE`]).
 pub const TURN_ACTIVE_QUIET: Duration = Duration::from_secs(5);
 
 /// How long a `Running` turn may stay open with no report at all, however
 /// much output keeps arriving. Every CLI with hooks reports during a turn (at
 /// least a tool call, or the end), so a turn this old whose closing report
 /// never came is one a periodic redraw is holding open; an approval report is
-/// not subject to it because it waits for the user.
+/// not subject to it because it waits for the user. The time without a report
+/// counts only while the screen does not wait on the user: a screen the rules
+/// read as `waiting_approval`, or as an `unknown` the definition declares,
+/// stops this clock and [`TURN_ACTIVE_QUIET`]'s until it gives way.
 pub const TURN_REPORT_STALE: Duration = Duration::from_secs(120);
 
 /// How long after a screen rule first confirms `Running` a window whose CLI
@@ -104,10 +109,123 @@ pub enum ReportsExpected {
 #[derive(Debug, Clone, Copy)]
 struct InheritedTurn {
     /// Where the quiet time and [`TURN_REPORT_STALE`] are measured from: the
-    /// declaration, or the moment an approval dialog gave way.
+    /// declaration, on a clock stopped while the screen waits on the user.
     since: Instant,
-    /// Whether the screen was last judged an approval dialog.
-    awaiting_approval: bool,
+}
+
+/// The raw judgement, kept behind one writer so that every change of it,
+/// whichever path makes it, ends a wait on the user the same way.
+mod raw {
+    use tokio::time::Instant;
+    use yagura_protocol::{DetectedStatus, UnknownReason};
+
+    #[derive(Debug)]
+    pub(super) struct Raw {
+        status: DetectedStatus,
+        /// When `status` became the current judgement; the debounce runs from
+        /// here.
+        since: Instant,
+        /// When the evidence behind `status` appeared: `since`, except for a
+        /// judgement held back until its screen was finished, which dates from
+        /// when that screen started to be drawn. Right after a confirmation,
+        /// `status` is the confirmed status, so this is its evidence instant.
+        evidence_at: Instant,
+    }
+
+    /// Every clock a turn is measured on, so a change of the raw judgement
+    /// cannot be made without moving them past the wait it ends.
+    pub(super) struct TurnClocks<'a> {
+        pub(super) output_at: &'a mut Instant,
+        pub(super) report_at: &'a mut Instant,
+        pub(super) inherited_since: Option<&'a mut Instant>,
+    }
+
+    impl Raw {
+        pub(super) fn new(status: DetectedStatus, now: Instant) -> Self {
+            Self {
+                status,
+                since: now,
+                evidence_at: now,
+            }
+        }
+
+        pub(super) fn status(&self) -> DetectedStatus {
+            self.status
+        }
+
+        pub(super) fn since(&self) -> Instant {
+            self.since
+        }
+
+        pub(super) fn evidence_at(&self) -> Instant {
+            self.evidence_at
+        }
+
+        /// Whether the screen waits on the user: an approval, or a screen the
+        /// definition declares it cannot read (an approval it does not know,
+        /// for one). That time is the user's, not the CLI's silence. A lost
+        /// screen is not one: no turn is judged on it.
+        pub(super) fn waits_on_user(&self) -> bool {
+            matches!(
+                self.status,
+                DetectedStatus::WaitingApproval
+                    | DetectedStatus::Unknown(UnknownReason::DeclaredUnknown)
+            )
+        }
+
+        /// The only writer of the raw judgement. Leaving a wait on the user
+        /// stops `clocks` for its length: a clock set before the wait moves
+        /// later by the wait, and one set during it moves to its end, so each
+        /// counts only the time the screen did not wait.
+        pub(super) fn replace(
+            &mut self,
+            status: DetectedStatus,
+            now: Instant,
+            evidence_at: Instant,
+            clocks: TurnClocks<'_>,
+        ) {
+            if self.waits_on_user() {
+                let waited = now.saturating_duration_since(self.since);
+                let TurnClocks {
+                    output_at,
+                    report_at,
+                    inherited_since,
+                } = clocks;
+                for clock in [Some(output_at), Some(report_at), inherited_since]
+                    .into_iter()
+                    .flatten()
+                {
+                    *clock = if *clock < self.since {
+                        clock.checked_add(waited).unwrap_or(now)
+                    } else {
+                        now
+                    };
+                }
+            }
+            self.status = status;
+            self.since = now;
+            self.evidence_at = evidence_at;
+        }
+    }
+}
+
+/// When a presumed turn is over: `quiet_at` ([`TURN_ACTIVE_QUIET`] after its
+/// last output) or `stale_at` ([`TURN_REPORT_STALE`] after its last report),
+/// whichever the presumption is measured by. Both are absent while the screen
+/// waits on the user, whose time neither counts.
+#[derive(Debug, Clone, Copy, Default)]
+struct TurnLimits {
+    quiet_at: Option<Instant>,
+    stale_at: Option<Instant>,
+}
+
+impl TurnLimits {
+    fn reached(self, now: Instant) -> bool {
+        [self.quiet_at, self.stale_at]
+            .into_iter()
+            .flatten()
+            .any(|at| now >= at)
+    }
 }
 
 /// What the engine and its handle share about status reports: whether they
@@ -221,14 +339,8 @@ pub struct DetectionEngine {
     confirm: Duration,
     bottom_line_count: usize,
     confirmed: DetectedStatus,
-    raw: DetectedStatus,
-    /// When `raw` became the current judgement; the debounce runs from here.
-    raw_since: Instant,
-    /// When the evidence behind `raw` appeared: `raw_since`, except for a
-    /// judgement held back until its screen was finished, which dates from
-    /// when that screen started to be drawn. Right after a confirmation,
-    /// `raw` is the confirmed status, so this is its evidence instant.
-    raw_evidence_at: Instant,
+    /// Written only through [`DetectionEngine::set_raw`].
+    raw: raw::Raw,
     last_output_at: Instant,
     attribution_gate: Option<AttributionGate>,
     exited: bool,
@@ -374,9 +486,7 @@ impl DetectionEngine {
             confirm: Duration::from_millis(confirm_ms),
             bottom_line_count: usize::from(bottom_line_count),
             confirmed: initial,
-            raw: initial,
-            raw_since: now,
-            raw_evidence_at: now,
+            raw: raw::Raw::new(initial, now),
             last_output_at: now,
             attribution_gate,
             exited: false,
@@ -394,8 +504,8 @@ impl DetectionEngine {
     /// no report is marked (see [`DetectionEngine::report_gap`]). For a
     /// taken-back window the wait is measured from the first running turn after
     /// the one it was in has closed: no output for [`TURN_ACTIVE_QUIET`], or
-    /// [`TURN_REPORT_STALE`], neither counting while an approval dialog is up.
-    /// Never changes the confirmed status.
+    /// [`TURN_REPORT_STALE`], neither counting while the screen waits on the
+    /// user. Never changes the confirmed status.
     pub fn expect_status_reports(&mut self, origin: ReportsExpected) {
         self.report_watch.expected.store(true, Ordering::SeqCst);
         if origin == ReportsExpected::FromTakeBack {
@@ -404,7 +514,6 @@ impl DetectionEngine {
             self.first_screen_running_at = None;
             self.inherited_turn = Some(InheritedTurn {
                 since: Instant::now(),
-                awaiting_approval: false,
             });
         }
     }
@@ -568,9 +677,8 @@ impl DetectionEngine {
             return None;
         }
         let unknown = DetectedStatus::Unknown(UnknownReason::ScreenLost);
-        self.raw = unknown;
-        self.raw_since = Instant::now();
-        self.raw_evidence_at = self.raw_since;
+        let now = Instant::now();
+        self.set_raw(unknown, now, now);
         self.confirm_now(unknown, reading.rule)
     }
 
@@ -579,10 +687,25 @@ impl DetectionEngine {
     /// every later judgement for the rest of the engine's life.
     pub fn on_exit(&mut self) -> Option<DetectedStatus> {
         self.exited = true;
-        self.raw = DetectedStatus::Exited;
-        self.raw_since = Instant::now();
-        self.raw_evidence_at = self.raw_since;
+        let now = Instant::now();
+        self.set_raw(DetectedStatus::Exited, now, now);
         self.confirm_now(DetectedStatus::Exited, None)
+    }
+
+    /// Makes `status` the raw judgement. Every path that changes it comes
+    /// here, so a wait on the user it ends stops the turn clocks however it
+    /// ends (see [`raw::Raw::replace`]).
+    fn set_raw(&mut self, status: DetectedStatus, now: Instant, evidence_at: Instant) {
+        self.raw.replace(
+            status,
+            now,
+            evidence_at,
+            raw::TurnClocks {
+                output_at: &mut self.turn_output_at,
+                report_at: &mut self.turn_report_at,
+                inherited_since: self.inherited_turn.as_mut().map(|turn| &mut turn.since),
+            },
+        );
     }
 
     /// Records a structured-source report and re-evaluates.
@@ -720,8 +843,8 @@ impl DetectionEngine {
         let now = Instant::now();
         let mut earliest: Option<Instant> = None;
 
-        if self.raw != self.confirmed {
-            earliest = min_deadline(earliest, self.raw_since.checked_add(self.confirm));
+        if self.raw.status() != self.confirmed {
+            earliest = min_deadline(earliest, self.raw.since().checked_add(self.confirm));
         }
         if let Some(held_since) = self.held_since {
             earliest = min_deadline(
@@ -752,21 +875,11 @@ impl DetectionEngine {
                 );
             }
         }
-        if self.turn.closes_on_silence() {
-            earliest = min_deadline(
-                earliest,
-                self.turn_output_at
-                    .checked_add(TURN_ACTIVE_QUIET)
-                    .filter(|deadline| *deadline > now),
-            );
-        }
-        if self.turn == TurnReport::Running {
-            earliest = min_deadline(
-                earliest,
-                self.turn_report_at
-                    .checked_add(TURN_REPORT_STALE)
-                    .filter(|deadline| *deadline > now),
-            );
+        // The inherited turn schedules nothing: no judgement reads it, and the
+        // evaluation that could record a running screen closes it first.
+        let turn = self.report_turn_limits();
+        for limit in [turn.quiet_at, turn.stale_at] {
+            earliest = min_deadline(earliest, limit.filter(|deadline| *deadline > now));
         }
         if self.report_watch.expected.load(Ordering::SeqCst) && !self.reports_seen {
             earliest = min_deadline(
@@ -811,18 +924,15 @@ impl DetectionEngine {
                 .map(|status| (RawJudgement::Status(status), now))
         };
         if let Some((RawJudgement::Status(raw), evidence_at)) = judged
-            && raw != self.raw
+            && raw != self.raw.status()
         {
-            self.raw = raw;
-            self.raw_since = now;
-            self.raw_evidence_at = evidence_at;
-            self.close_inherited_turn(now);
+            self.set_raw(raw, now, evidence_at);
         }
 
-        if self.raw != self.confirmed
-            && now.saturating_duration_since(self.raw_since) >= self.confirm
+        if self.raw.status() != self.confirmed
+            && now.saturating_duration_since(self.raw.since()) >= self.confirm
         {
-            return self.confirm_now(self.raw, reading.rule);
+            return self.confirm_now(self.raw.status(), reading.rule);
         }
         None
     }
@@ -834,41 +944,48 @@ impl DetectionEngine {
     /// bring `Running` back. Ends a taken-back window's inherited turn by the
     /// same limits, so both are judged before new output moves the quiet time.
     fn close_quiet_turn(&mut self, now: Instant) {
-        let quiet = self.turn.closes_on_silence()
-            && now.saturating_duration_since(self.turn_output_at) >= TURN_ACTIVE_QUIET;
-        let stale = self.turn == TurnReport::Running
-            && now.saturating_duration_since(self.turn_report_at) >= TURN_REPORT_STALE;
-        if quiet || stale {
+        if self.report_turn_limits().reached(now) {
             self.turn = TurnReport::Closed;
         }
         self.close_inherited_turn(now);
     }
 
     /// Drops the presumption that a taken-back window's turn is still running
-    /// once it can be taken as over, by the same quiet and stale limits as
-    /// [`DetectionEngine::close_quiet_turn`]. Neither runs while the screen is
-    /// judged an approval dialog, and an answered one restarts both at the
-    /// moment it gave way: the answering keystroke's echo is not counted as
-    /// output, so its redraw would otherwise look like a silence.
+    /// once it can be taken as over, by the same limits as
+    /// [`DetectionEngine::close_quiet_turn`].
     fn close_inherited_turn(&mut self, now: Instant) {
-        let awaiting_approval = self.raw == DetectedStatus::WaitingApproval;
-        let turn_output_at = self.turn_output_at;
-        let Some(inherited) = self.inherited_turn.as_mut() else {
+        let Some(inherited) = self.inherited_turn else {
             return;
         };
-        let was_awaiting = std::mem::replace(&mut inherited.awaiting_approval, awaiting_approval);
-        if awaiting_approval {
-            return;
-        }
-        if was_awaiting {
-            inherited.since = now;
-            return;
-        }
-        let quiet =
-            now.saturating_duration_since(inherited.since.max(turn_output_at)) >= TURN_ACTIVE_QUIET;
-        let stale = now.saturating_duration_since(inherited.since) >= TURN_REPORT_STALE;
-        if quiet || stale {
+        let limits = self.turn_limits(
+            Some(inherited.since.max(self.turn_output_at)),
+            Some(inherited.since),
+        );
+        if limits.reached(now) {
             self.inherited_turn = None;
+        }
+    }
+
+    /// The limits of the turn a report opened: the quiet time for a turn that
+    /// closes on silence, the stale time for a `Running` one.
+    fn report_turn_limits(&self) -> TurnLimits {
+        self.turn_limits(
+            self.turn.closes_on_silence().then_some(self.turn_output_at),
+            (self.turn == TurnReport::Running).then_some(self.turn_report_at),
+        )
+    }
+
+    /// The one rule both presumed turns close by; each caller passes where its
+    /// quiet time and stale time run from, or `None` for a limit it is not
+    /// measured by. Nothing closes while the screen waits on the user, and the
+    /// clocks it stopped resume once it gives way (see [`raw::Raw::replace`]).
+    fn turn_limits(&self, quiet_from: Option<Instant>, stale_from: Option<Instant>) -> TurnLimits {
+        if self.raw.waits_on_user() {
+            return TurnLimits::default();
+        }
+        TurnLimits {
+            quiet_at: quiet_from.and_then(|from| from.checked_add(TURN_ACTIVE_QUIET)),
+            stale_at: stale_from.and_then(|from| from.checked_add(TURN_REPORT_STALE)),
         }
     }
 
@@ -1216,7 +1333,7 @@ impl DetectorHandle {
                         && status_tx
                             .send(ConfirmedStatus {
                                 status,
-                                evidence_since: engine.raw_evidence_at,
+                                evidence_since: engine.raw.evidence_at(),
                             })
                             .is_err()
                     {

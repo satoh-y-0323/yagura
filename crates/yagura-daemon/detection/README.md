@@ -677,6 +677,14 @@ How an open turn combines with the screen:
   an interrupt the CLI never reported. A CLI that uses tools reports each one,
   which keeps a working turn open; only an answer streamed for more than two
   minutes without any tool falls back to the screen.
+- **Neither counts while the screen waits on you.** While a rule reads the
+  screen as `waiting_approval`, or as an `unknown` the definition declares (a
+  dialog it does not know, for example), neither the 5 seconds of quiet nor
+  the 2 minutes without a report count: that time is yours, not the CLI's
+  silence. Both resume where they stopped once the screen gives way, so a
+  tool you allowed after a long look at its approval box still reads as
+  `running`, and a screen that keeps showing and hiding an approval cannot
+  hold a turn open beyond 2 minutes of the time in between.
 - **An approval report stands in for a dialog the screen cannot show.** After
   a `waiting_approval` report, a screen that no rule matches is
   `waiting_approval`. A screen a rule reads as `waiting_input` is
@@ -837,7 +845,7 @@ single event (only `Stop`, say) is not.
 
 A window a restarted daemon took back is measured from the first running turn
 after the one it was in has closed (output stopped for 5 seconds, or 2
-minutes passed, either not counting while an approval dialog is up), because
+minutes passed, either not counting while the screen waits on you), because
 the new daemon cannot tell when that turn began.
 
 ### Limits

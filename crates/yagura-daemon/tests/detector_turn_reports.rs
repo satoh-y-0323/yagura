@@ -917,3 +917,284 @@ async fn a_closing_report_waits_for_the_paint_to_finish() {
         "a closing report must not pin a status before the finished screen is read"
     );
 }
+
+// =====================================================================
+// A screen that waits on the user stops both turn clocks
+// =====================================================================
+
+/// Records one failure per window whose samples break `is_ok`, and one when the
+/// window holds no sample at all (a window nothing was measured in proves
+/// nothing).
+fn check_window(
+    failures: &mut Vec<String>,
+    driver: &Driver,
+    what: &str,
+    from_ms: u64,
+    to_ms: u64,
+    is_ok: impl Fn(DetectedStatus) -> bool,
+) {
+    let seen = driver
+        .samples
+        .iter()
+        .filter(|(ms, _)| (from_ms..=to_ms).contains(ms))
+        .count();
+    if seen == 0 {
+        failures.push(format!("{what}: no sample in {from_ms}..={to_ms} ms"));
+    } else if let Some((ms, status)) = driver.first_rejected(from_ms, to_ms, is_ok) {
+        failures.push(format!("{what}: {status:?} at {ms} ms"));
+    }
+}
+
+/// How one retreat from a screen that waits on the user is driven.
+struct Retreat {
+    stage: &'static str,
+    /// The screen that waits on the user, and what it is confirmed as.
+    hold_screen: Vec<u8>,
+    hold_status: DetectedStatus,
+    /// Milliseconds at which the screen retreats to a prompt.
+    retreat_ms: u64,
+    /// A keystroke echo just before the retreat output: the output is
+    /// attributed to it and does not move the turn's output time.
+    echo: bool,
+    /// A `Running` report while the screen waits (a post-tool report during an
+    /// approval).
+    mid_report: bool,
+    /// Also check the engine's wake-up instants (stage 3).
+    deadlines: bool,
+}
+
+impl Retreat {
+    /// A report opened the turn; a screen that waits on the user sits over it for
+    /// longer than either clock allows; then the screen retreats. The turn is
+    /// the one the report opened, so it is still running.
+    async fn run(self, failures: &mut Vec<String>) {
+        let stage = self.stage;
+        let t = self.retreat_ms;
+        let mut driver = Driver::synthetic(SCREEN_DEF);
+        driver.feed_at(0, &idle()).await;
+        driver.report_at(200, WindowStatus::Running).await;
+        driver.feed_at(1_000, &self.hold_screen).await;
+        if self.mid_report {
+            driver.report_at(1_100, WindowStatus::Running).await;
+        }
+        if self.deadlines {
+            driver.advance_to(1_200).await;
+            let during = driver.engine.next_deadline();
+            if during.is_some() {
+                failures.push(format!(
+                    "stage 3 (during the hold): deadline {during:?} while the screen waits on the user"
+                ));
+            }
+        }
+        if self.echo {
+            driver.advance_to(t - 50).await;
+            driver.engine.on_input(InputEcho::EchoOnly);
+        }
+        driver.feed_at(t, &idle()).await;
+        if self.deadlines {
+            driver.advance_to(t + 100).await;
+            let expected = Some(driver.start + Duration::from_millis(t + TURN_QUIET_MS));
+            let after = driver.engine.next_deadline();
+            if after != expected {
+                failures.push(format!(
+                    "stage 3 (after the hold): next deadline {after:?}, expected {expected:?}"
+                ));
+            }
+        }
+        driver.advance_to(t + TURN_QUIET_MS - 500).await;
+
+        let hold = self.hold_status;
+        if self.mid_report {
+            check_window(
+                failures,
+                &driver,
+                &format!("{stage} (i) during the hold"),
+                1_100,
+                t - 1,
+                |d| d == hold,
+            );
+        }
+        check_window(
+            failures,
+            &driver,
+            &format!("{stage} (ii) wide window after the retreat"),
+            t,
+            t + TURN_QUIET_MS - 500,
+            |d| d == hold || d == DetectedStatus::Running,
+        );
+        check_window(
+            failures,
+            &driver,
+            &format!("{stage} (iii) narrow window after the retreat"),
+            t + 100,
+            t + TURN_QUIET_MS - 500,
+            |d| d == DetectedStatus::Running,
+        );
+        let later = driver.detected_at(t + TURN_QUIET_MS + 600).await;
+        if later != DetectedStatus::WaitingInput {
+            failures.push(format!(
+                "{stage} (iv) after the quiet time: {later:?}, expected WaitingInput"
+            ));
+        }
+    }
+}
+
+/// Time a screen spends waiting on the user (an approval box, or a screen the
+/// definition declares unreadable) is the user's, not the CLI's silence: neither
+/// the quiet time nor the stale time counts it, whichever way raw got there or
+/// left, and the clocks resume where they stopped.
+#[tokio::test(start_paused = true)]
+async fn a_screen_waiting_on_the_user_is_not_counted_as_the_turns_silence() {
+    let mut failures: Vec<String> = Vec::new();
+    let past_the_quiet_time = 1_000 + TURN_QUIET_MS + 700;
+    let approval_status = DetectedStatus::WaitingApproval;
+    let declared = DetectedStatus::Unknown(UnknownReason::DeclaredUnknown);
+
+    // Stages 1 and 3: the shape of a real approval, with a report in the middle.
+    Retreat {
+        stage: "stage 1",
+        hold_screen: approval(),
+        hold_status: approval_status,
+        retreat_ms: past_the_quiet_time,
+        echo: false,
+        mid_report: true,
+        deadlines: true,
+    }
+    .run(&mut failures)
+    .await;
+    // Stage 1b: the answering keystroke's echo is not output.
+    Retreat {
+        stage: "stage 1b",
+        hold_screen: approval(),
+        hold_status: approval_status,
+        retreat_ms: past_the_quiet_time,
+        echo: true,
+        mid_report: true,
+        deadlines: false,
+    }
+    .run(&mut failures)
+    .await;
+    // Stage 2: the report-age clock stops too.
+    Retreat {
+        stage: "stage 2",
+        hold_screen: approval(),
+        hold_status: approval_status,
+        retreat_ms: TURN_STALE_MS + 2_000,
+        echo: false,
+        mid_report: false,
+        deadlines: false,
+    }
+    .run(&mut failures)
+    .await;
+    // Stage 6: a screen the definition declares unreadable waits just the same.
+    Retreat {
+        stage: "stage 6",
+        hold_screen: declared_unknown(),
+        hold_status: declared,
+        retreat_ms: past_the_quiet_time,
+        echo: false,
+        mid_report: true,
+        deadlines: false,
+    }
+    .run(&mut failures)
+    .await;
+
+    stage_4_holds_do_not_reset_the_stale_clock(&mut failures).await;
+    stage_5_a_lost_screen_inside_the_hold(&mut failures).await;
+
+    assert!(
+        failures.is_empty(),
+        "the screen waiting on the user was counted as silence:\n{}",
+        failures.join("\n")
+    );
+}
+
+/// Stage 4: time not spent waiting piles up toward the stale time across a hold
+/// instead of restarting after it.
+async fn stage_4_holds_do_not_reset_the_stale_clock(failures: &mut Vec<String>) {
+    let mut driver = Driver::synthetic(SCREEN_DEF);
+    driver.feed_at(0, &idle()).await;
+    driver.report_at(200, WindowStatus::Running).await;
+    let approval_at = 200 + TURN_STALE_MS - 10_000;
+    let mut at = 200;
+    while at + 4_000 < approval_at {
+        at += 4_000;
+        driver.feed_at(at, CHUNK).await;
+    }
+    driver.feed_at(approval_at, &approval()).await;
+    let left = approval_at + 20_000;
+    driver.feed_at(left, &idle()).await;
+    let mut at = left;
+    while at < left + 8_000 {
+        at += 4_000;
+        driver.feed_at(at, CHUNK).await;
+    }
+    driver.advance_to(left + 9_000).await;
+    check_window(
+        failures,
+        &driver,
+        "stage 4 narrow window after the retreat",
+        left + 100,
+        left + 9_000,
+        |d| d == DetectedStatus::Running,
+    );
+    let later = driver.detected_at(left + 10_700).await;
+    if later != DetectedStatus::WaitingInput {
+        failures.push(format!(
+            "stage 4: {later:?} once the time not spent waiting reached the stale time, expected WaitingInput"
+        ));
+    }
+}
+
+/// Stage 5: the screen is lost while it waits on the user. The end of the wait
+/// is the same fact whichever way raw changes, so the turn is not closed by the
+/// time spent waiting, and it still closes later.
+async fn stage_5_a_lost_screen_inside_the_hold(failures: &mut Vec<String>) {
+    let mut driver = Driver::synthetic(SCREEN_DEF);
+    driver.feed_at(0, &idle()).await;
+    driver.report_at(200, WindowStatus::Running).await;
+    driver.feed_at(1_000, &approval()).await;
+    let lost_at = 1_000 + TURN_QUIET_MS + 700;
+    driver.advance_to(lost_at).await;
+    driver.engine.lose_screen();
+    driver.sample();
+    if driver.engine.detected() != DetectedStatus::Unknown(UnknownReason::ScreenLost) {
+        failures.push("stage 5 precondition: the screen was not lost at once".to_string());
+    }
+    let back_at = lost_at + 1_000;
+    driver.advance_to(back_at - 1).await;
+    driver.feed_at(back_at, &idle()).await;
+    // The prompt's repaint restores trust through its confirmation.
+    let restored = driver.detected_at(back_at + 50).await;
+    if restored != DetectedStatus::WaitingInput {
+        failures.push(format!(
+            "stage 5 precondition: the repaint did not restore trust, {restored:?} at +50 ms"
+        ));
+    }
+    // One more event after that confirmation judges the turn again.
+    let event_at = back_at + 100;
+    driver.feed_at(event_at, CHUNK).await;
+    driver.advance_to(back_at + TURN_QUIET_MS - 500).await;
+    check_window(
+        failures,
+        &driver,
+        "stage 5 (i) while the screen is lost",
+        lost_at + 1,
+        back_at - 1,
+        |d| d == DetectedStatus::Unknown(UnknownReason::ScreenLost),
+    );
+    check_window(
+        failures,
+        &driver,
+        "stage 5 (ii) after the screen came back",
+        event_at + 100,
+        back_at + TURN_QUIET_MS - 500,
+        |d| d == DetectedStatus::Running,
+    );
+    let later = driver.detected_at(event_at + TURN_QUIET_MS + 600).await;
+    if later != DetectedStatus::WaitingInput {
+        failures.push(format!(
+            "stage 5 (iii) after the quiet time: {later:?}, expected WaitingInput"
+        ));
+    }
+}
