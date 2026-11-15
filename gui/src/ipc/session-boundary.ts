@@ -2336,19 +2336,32 @@ function readOptionalGeneration(
   onNegative: FieldMismatchPolicy
 ): number | null {
   const value = readOptionalInteger(record, key, context);
-  if (value === null || value >= 0) {
+  return value === null ? null : nonNegativeGeneration(value, `${context}.${key}`, onNegative);
+}
+
+/**
+ * `value` when it is not negative; otherwise refused or dropped by `onNegative`.
+ *
+ * @throws {BoundaryError} when the value is negative and the policy is `'refuse'`.
+ */
+function nonNegativeGeneration(
+  value: number,
+  path: string,
+  onNegative: FieldMismatchPolicy
+): number | null {
+  if (value >= 0) {
     return value;
   }
   if (onNegative === 'refuse') {
-    throw new BoundaryError(`${context}.${key}: expected a non-negative generation`);
+    throw new BoundaryError(`${path}: expected a non-negative generation`);
   }
-  console.warn(`${context}.${key}: dropped a negative generation (${value})`);
+  console.warn(`${path}: dropped a negative generation (${value})`);
   return null;
 }
 
 /**
  * Reads the optional `status_boot` a generation was counted in. Its `origin`
- * and `seq` are both required and read under {@link readOptionalGeneration}'s
+ * and `seq` are both required and read under {@link nonNegativeGeneration}'s
  * rules, so a negative part refuses the record or drops the boot alone by
  * `onNegative`, and any other malformed shape is refused on every route.
  *
@@ -2366,9 +2379,9 @@ function readOptionalStatusBoot(
   }
   const bootContext = `${context}.status_boot`;
   const boot = requireRecord(value, bootContext);
-  requireInteger(boot, 'origin', bootContext);
-  requireInteger(boot, 'seq', bootContext);
-  const origin = readOptionalGeneration(boot, 'origin', bootContext, onNegative);
-  const seq = readOptionalGeneration(boot, 'seq', bootContext, onNegative);
+  const rawOrigin = requireInteger(boot, 'origin', bootContext);
+  const rawSeq = requireInteger(boot, 'seq', bootContext);
+  const origin = nonNegativeGeneration(rawOrigin, `${bootContext}.origin`, onNegative);
+  const seq = nonNegativeGeneration(rawSeq, `${bootContext}.seq`, onNegative);
   return origin === null || seq === null ? null : { origin, seq };
 }

@@ -3,9 +3,9 @@
 //! daemons that take the window back.
 //!
 //! The count is a file in the instance's state directory, beside the holders'
-//! records the take-back reads, so it lasts exactly as long as the windows it
-//! orders.
+//! records the take-back reads.
 
+use std::io::Read;
 use std::path::Path;
 
 use yagura_protocol::StatusBoot;
@@ -17,11 +17,16 @@ pub const STATUS_BOOT_FILE: &str = "status-boot.json";
 /// exactly.
 const MAX_BOOT_VALUE: u64 = (1 << 53) - 1;
 
+/// The most bytes read from the boot count's file: a recorded boot is far
+/// shorter, so a longer file is not one.
+const MAX_BOOT_FILE_BYTES: usize = 128;
+
 /// Takes this daemon start's boot and records it in `instance_dir`.
 ///
 /// The recorded boot's `seq` plus one, in the same `origin`, when the file
 /// reads as a boot and that `seq` stays within 2^53 − 1. Otherwise (no file,
-/// unreadable, another shape, a value out of range) a new series: a random
+/// unreadable, a directory that cannot be narrowed to its owner, another
+/// shape, a value out of range) a new series: a random
 /// `origin` and `seq` 1. When the boot cannot be recorded, the start takes a
 /// random `origin` of its own, never recorded, so no later start repeats its
 /// boot.
@@ -34,7 +39,11 @@ const MAX_BOOT_VALUE: u64 = (1 << 53) - 1;
 /// `None` only when the OS gives no randomness for a new `origin`; a warning
 /// is logged once for that, and once for a boot that could not be recorded.
 pub fn advance(state_base: &Path, instance_dir: &Path) -> Option<StatusBoot> {
-    let next = match read_recorded(&instance_dir.join(STATUS_BOOT_FILE)).and_then(following) {
+    // Read only once the directory is narrowed to its owner, as it is for the write.
+    let previous = yagura_os::secure_owned_dir(state_base, instance_dir)
+        .ok()
+        .and_then(|()| read_recorded(&instance_dir.join(STATUS_BOOT_FILE)));
+    let next = match previous.and_then(following) {
         Some(next) => next,
         None => new_series()?,
     };
@@ -56,8 +65,22 @@ pub fn advance(state_base: &Path, instance_dir: &Path) -> Option<StatusBoot> {
     }
 }
 
+/// The boot recorded at `path`, when it is a regular file of a boot: one that
+/// is not (a FIFO would block the start) or that runs past
+/// [`MAX_BOOT_FILE_BYTES`] reads as none.
 fn read_recorded(path: &Path) -> Option<StatusBoot> {
-    let content = std::fs::read(path).ok()?;
+    if !std::fs::metadata(path).ok()?.is_file() {
+        return None;
+    }
+    let mut content = Vec::new();
+    std::fs::File::open(path)
+        .ok()?
+        .take(MAX_BOOT_FILE_BYTES as u64 + 1)
+        .read_to_end(&mut content)
+        .ok()?;
+    if content.len() > MAX_BOOT_FILE_BYTES {
+        return None;
+    }
     serde_json::from_slice(&content).ok()
 }
 

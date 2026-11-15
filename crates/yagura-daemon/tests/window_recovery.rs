@@ -30,7 +30,9 @@ use yagura_os::{Liveness, PeerAuth, PlatformIpc, ProcessHandle, ProcessStart};
 use yagura_protocol::holder::{
     HOLDER_PROTOCOL, HolderRecord, encode_holder_record, holder_record_path, read_holder_record,
 };
-use yagura_protocol::{ClientMessage, DaemonMessage, DeliveryState, WindowInfo, WindowStatus};
+use yagura_protocol::{
+    ClientMessage, DaemonMessage, DeliveryState, StatusBoot, WindowInfo, WindowStatus,
+};
 use yagura_test_support::HANG_GUARD;
 use yagura_test_support::ipc::{Connection, connect_with_retry};
 use yagura_test_support::process::{
@@ -228,6 +230,32 @@ fn boot_of(info: &WindowInfo, who: &str) -> (u64, u64) {
     (boot.origin, boot.seq)
 }
 
+/// The largest boot `origin` or `seq` a JavaScript number holds exactly: 2^53 − 1.
+const MAX_BOOT_VALUE: u64 = (1 << 53) - 1;
+
+/// Records `(origin, seq)` as the instance's last boot, before a daemon starts.
+fn write_boot_file(sandbox: &Sandbox, origin: u64, seq: u64) {
+    let root = sandbox.state_root();
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(
+        root.join(yagura_daemon::status_boot::STATUS_BOOT_FILE),
+        serde_json::to_vec(&StatusBoot { origin, seq }).unwrap(),
+    )
+    .unwrap();
+}
+
+/// The first boot of a new series: `seq` 1, with an origin a JavaScript number holds.
+fn assert_new_series(boot: (u64, u64), why: &str) {
+    assert_eq!(
+        boot.1, 1,
+        "{why}: a new series starts at seq 1, got {boot:?}"
+    );
+    assert!(
+        boot.0 <= MAX_BOOT_VALUE,
+        "{why}: a new series' origin must stay within 2^53 - 1, got {boot:?}"
+    );
+}
+
 /// A boot after `earlier` in the same series: the same origin and a larger seq.
 fn assert_later_boot_of_the_same_series(earlier: (u64, u64), later: (u64, u64)) {
     assert_eq!(
@@ -252,6 +280,7 @@ async fn a_window_outlives_its_daemon_and_the_next_one_takes_it_back_whole() {
     let gate = sandbox.tree.path().join("gate");
     let absent_output = [DA1, ABSENT_MARK.as_bytes(), b"\r\n"].concat();
     write_script_profile(&sandbox, "script", &log, Some((&gate, &absent_output)));
+    write_boot_file(&sandbox, 11, MAX_BOOT_VALUE);
 
     let mut first = sandbox
         .start_from(&[("YAGURA_STATUS_TOKEN_OVERRIDE", TOKEN)])
@@ -296,6 +325,11 @@ async fn a_window_outlives_its_daemon_and_the_next_one_takes_it_back_whole() {
     let first_boot = boot_of(
         &listed(&mut first, &sandbox, &window_id).await,
         "the first daemon",
+    );
+    assert_new_series(first_boot, "a recorded seq at 2^53 - 1 has no seq after it");
+    assert_ne!(
+        first_boot.0, 11,
+        "a recorded seq at 2^53 - 1 must not be followed in its own series"
     );
 
     first.kill_keeping_windows();
@@ -705,6 +739,7 @@ async fn a_window_being_taken_back_is_listed_closable_and_holds_no_other_window_
     let sandbox = Sandbox::new("recover-mute");
     let log = sandbox.tree.path().join("input.log");
     write_script_profile(&sandbox, "script", &log, None);
+    write_boot_file(&sandbox, u64::MAX, 1);
 
     let mut first = sandbox
         .start_from(&[("YAGURA_STATUS_TOKEN_OVERRIDE", TOKEN)])
@@ -717,6 +752,10 @@ async fn a_window_being_taken_back_is_listed_closable_and_holds_no_other_window_
     let first_boot = boot_of(
         &listed(&mut first, &sandbox, &live).await,
         "the first daemon",
+    );
+    assert_new_series(
+        first_boot,
+        "a recorded origin past 2^53 - 1 is out of range",
     );
     first.kill_keeping_windows();
     std::fs::remove_file(
@@ -741,6 +780,7 @@ async fn a_window_being_taken_back_is_listed_closable_and_holds_no_other_window_
         );
     }
     let next_boot = boot_of(&listed(&mut next, &sandbox, &live).await, "the next daemon");
+    assert_new_series(next_boot, "a boot file that is gone");
     assert_ne!(
         next_boot.0, first_boot.0,
         "a boot file that is gone must start a new series, so no reader orders the next \
@@ -856,6 +896,8 @@ async fn a_window_whose_take_back_fails_is_kept_with_its_holder_and_child_alive(
     );
     let next_boot = boot_of(&info, "the next daemon that cannot write its boot file");
     assert!(boot_file.is_dir(), "the fixture's directory must stay");
+    assert_new_series(first_boot, "a daemon that cannot write its boot file");
+    assert_new_series(next_boot, "the next daemon that cannot write its boot file");
     assert_ne!(
         next_boot.0, first_boot.0,
         "two daemons in a row that cannot write their boot file must each start their own \
@@ -1370,6 +1412,7 @@ async fn a_window_without_a_row_is_taken_back_from_its_holders_launch_record() {
     let sandbox = Sandbox::new("recover-rowless");
     let log = sandbox.tree.path().join("input.log");
     let detections = write_hooked_profile(&sandbox, &log);
+    write_boot_file(&sandbox, MAX_BOOT_VALUE, MAX_BOOT_VALUE - 2);
 
     let mut first = start_hooked(&sandbox, &detections).await;
     // Opened before the hooks entry is there, so its hooks are left out.
@@ -1387,6 +1430,11 @@ async fn a_window_without_a_row_is_taken_back_from_its_holders_launch_record() {
     .await;
     let first_listed = listed(&mut first, &sandbox, &window_id).await;
     let first_boot = boot_of(&first_listed, "the first daemon");
+    assert_eq!(
+        first_boot,
+        (MAX_BOOT_VALUE, MAX_BOOT_VALUE - 1),
+        "a recorded boot within 2^53 - 1 must be followed in its own series"
+    );
     let name = first_listed.name;
     let registered_name = listed(&mut first, &sandbox, &registered).await.name;
     let record = record_of(&sandbox, &window_id);
@@ -1415,7 +1463,13 @@ async fn a_window_without_a_row_is_taken_back_from_its_holders_launch_record() {
         "a window taken back starts Unknown"
     );
     // The database went with the row: the boot must not go with it.
-    assert_later_boot_of_the_same_series(first_boot, boot_of(&info, "the next daemon"));
+    let next_boot = boot_of(&info, "the next daemon");
+    assert_later_boot_of_the_same_series(first_boot, next_boot);
+    assert_eq!(
+        next_boot,
+        (MAX_BOOT_VALUE, MAX_BOOT_VALUE),
+        "the series must be followed up to its last seq, 2^53 - 1"
+    );
     until_named(&mut next, &sandbox, &window_id, &name).await;
     until_named(&mut next, &sandbox, &registered, &registered_name).await;
     listed(&mut next, &sandbox, &older).await;

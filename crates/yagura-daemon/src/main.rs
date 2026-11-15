@@ -528,11 +528,12 @@ async fn async_main(
     config.holder_exe = resolve_holder_exe();
     // One spelling of the holders directory for every launch: a holder's
     // endpoint name is derived from it.
-    config.holder_place = match yagura_os::default_state_base_dir() {
+    let state_base = yagura_os::default_state_base_dir();
+    config.holder_place = match &state_base {
         Some(base) => Some(HolderPlace {
             daemon_endpoint: endpoint.clone(),
-            holders_dir: yagura_os::instance_dir(&base, &namespace).join(HOLDERS_DIR_NAME),
-            log_file: Some(log_dir(&base, &namespace).join(LOG_FILE_NAME)),
+            holders_dir: yagura_os::instance_dir(base, &namespace).join(HOLDERS_DIR_NAME),
+            log_file: Some(log_dir(base, &namespace).join(LOG_FILE_NAME)),
         }),
         None => {
             tracing::warn!(
@@ -542,18 +543,22 @@ async fn async_main(
             None
         }
     };
-    // Kept beside the holders' records, so the boot count lasts as long as
-    // the windows it orders; without a holder place no window outlives this
-    // daemon. The endpoint is already bound, so this is the only writer.
-    if config.holder_place.is_some()
-        && let Some(base) = yagura_os::default_state_base_dir()
-    {
+    // Beside the holders' records: without them no window outlives this daemon.
+    // The endpoint is already bound, so this is the boot count's only writer.
+    if let Some(base) = state_base {
         let dir = yagura_os::instance_dir(&base, &namespace);
-        config.status_boot =
-            tokio::task::spawn_blocking(move || yagura_daemon::status_boot::advance(&base, &dir))
-                .await
-                .ok()
-                .flatten();
+        let advanced =
+            tokio::task::spawn_blocking(move || yagura_daemon::status_boot::advance(&base, &dir));
+        config.status_boot = match advanced.await {
+            Ok(boot) => boot,
+            Err(err) => {
+                tracing::warn!(
+                    "the daemon boot count could not be taken ({err}); this daemon names no \
+                     boot, so readers do not order its status generations"
+                );
+                None
+            }
+        };
     }
     config.mcp_config_dir = yagura_os::default_state_base_dir()
         .map(|base| yagura_os::instance_dir(&base, &namespace).join(MCP_CONFIG_DIR_NAME));

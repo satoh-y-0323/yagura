@@ -396,17 +396,8 @@ function withName(state: WindowRegistryState, windowId: string, name: string): W
 }
 
 /**
- * Applies an observation of a window's status pair, unless its key
- * `(statusBoot, statusRev)` is older than the one the entry holds.
- *
- * Two boots of one origin order by `seq`, then by generation within one
- * `seq`. An observation the entry's key cannot be ordered against (another
- * origin, or a boot on one side only) is applied and its key taken whole:
- * the next poll or event corrects a stale one, while refusing could pin the
- * window to a pair from a daemon that is gone. Only when neither side names
- * a boot is the recorded generation a high-water mark, kept by an
- * observation that names none, so a stale numbered one arriving afterwards
- * is still refused.
+ * Applies an observation unless its key `(statusBoot, statusRev)` is older than the entry's.
+ * A key it cannot be ordered against is taken whole: refusing could pin a gone daemon's pair.
  */
 function withObservedPair(
   entry: WindowEntry,

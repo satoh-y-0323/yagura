@@ -527,12 +527,13 @@ pub async fn list_windows<T: DaemonTransport>(transport: &T) -> Result<Value, To
         .map_err(map_transport_error)?;
     match response {
         DaemonMessage::WindowList { mut windows } => {
-            // The layout and the missing-reports mark are the GUI's own
-            // presentation state and mean nothing to an agent; clearing them
-            // drops the keys from the response.
+            // The layout, the missing-reports mark and the boot the GUI orders
+            // status by are the GUI's own state and mean nothing to an agent;
+            // clearing them drops the keys from the response.
             for window in &mut windows {
                 window.layout_json = None;
                 window.status_reports_missing = None;
+                window.status_boot = None;
             }
             let windows_json = serde_json::to_value(&windows)
                 .map_err(|err| ToolError::Internal(err.to_string()))?;

@@ -471,6 +471,16 @@ describe('createWindowRegistry: only an observation at least as new moves the pa
     expect(earlier?.detected).toEqual({ status: 'running' });
     expect(earlier?.statusRev).toBe(1);
     expect(earlier?.statusBoot).toEqual({ origin: 7, seq: 2 });
+
+    // Within one boot, an older generation is older.
+    registry.openWindow(
+      makeWindowInfo({ window_id: 'w-c', status_rev: 5, status_boot: { origin: 7, seq: 2 } })
+    );
+    registry.setStatus('w-c', unknownPair('screen_lost'), 3, { origin: 7, seq: 2 });
+
+    const sameBoot = entryOf(registry, 'w-c');
+    expect(sameBoot?.detected).toEqual({ status: 'running' });
+    expect(sameBoot?.statusRev).toBe(5);
   });
 
   it('applies a status change taken at the same generation', () => {
@@ -480,6 +490,14 @@ describe('createWindowRegistry: only an observation at least as new moves the pa
     registry.setStatus('w-a', { status: 'idle' }, 4, null);
 
     expect(entryOf(registry, 'w-a')?.detected).toEqual({ status: 'idle' });
+
+    // The same generation within the same boot is applied too.
+    registry.openWindow(
+      makeWindowInfo({ window_id: 'w-b', status_rev: 5, status_boot: { origin: 7, seq: 2 } })
+    );
+    registry.setStatus('w-b', { status: 'idle' }, 5, { origin: 7, seq: 2 });
+
+    expect(entryOf(registry, 'w-b')?.detected).toEqual({ status: 'idle' });
   });
 
   it('applies a status change that names no generation at all', () => {
@@ -512,6 +530,22 @@ describe('createWindowRegistry: only an observation at least as new moves the pa
     const entry = entryOf(registry, 'w-a');
     expect(entry?.statusRev).toBe(4);
     expect(entry?.detected).toEqual({ status: 'idle' });
+
+    // Within one boot the generation is kept the same way; a later boot does not inherit it.
+    registry.openWindow(
+      makeWindowInfo({ window_id: 'w-b', status_rev: 5, status_boot: { origin: 7, seq: 2 } })
+    );
+    registry.setStatus('w-b', { status: 'idle' }, null, { origin: 7, seq: 2 });
+    expect(entryOf(registry, 'w-b')?.statusRev).toBe(5);
+    registry.setStatus('w-b', { status: 'interrupted' }, 3, { origin: 7, seq: 2 });
+    expect(entryOf(registry, 'w-b')?.detected).toEqual({ status: 'idle' });
+
+    registry.setStatus('w-b', { status: 'waiting_input' }, null, { origin: 7, seq: 3 });
+
+    const nextBoot = entryOf(registry, 'w-b');
+    expect(nextBoot?.detected).toEqual({ status: 'waiting_input' });
+    expect(nextBoot?.statusRev).toBeNull();
+    expect(nextBoot?.statusBoot).toEqual({ origin: 7, seq: 3 });
   });
 
   it('applies every observation of a window whose generation was never reported', () => {
@@ -622,6 +656,28 @@ describe('createWindowRegistry: the window-list route compares generations too',
     expect(earlier?.detected).toEqual({ status: 'waiting_input' });
     expect(earlier?.statusRev).toBe(7);
     expect(earlier?.statusBoot).toEqual({ origin: 7, seq: 2 });
+
+    // Within one boot, an older generation is older.
+    registry.openWindow(
+      makeWindowInfo({
+        window_id: 'w-c',
+        detected: { status: 'waiting_input' },
+        status_rev: 7,
+        status_boot: { origin: 7, seq: 2 },
+      })
+    );
+    registry.openWindow(
+      makeWindowInfo({
+        window_id: 'w-c',
+        detected: unknownPair('screen_lost'),
+        status_rev: 6,
+        status_boot: { origin: 7, seq: 2 },
+      })
+    );
+
+    const sameBoot = entryOf(registry, 'w-c');
+    expect(sameBoot?.detected).toEqual({ status: 'waiting_input' });
+    expect(sameBoot?.statusRev).toBe(7);
   });
 
   it('applies a snapshot taken at the same generation', () => {
@@ -634,6 +690,21 @@ describe('createWindowRegistry: the window-list route compares generations too',
     );
 
     expect(entryOf(registry, 'w-a')?.detected).toEqual({ status: 'idle' });
+
+    // The same generation within the same boot is applied too.
+    registry.openWindow(
+      makeWindowInfo({ window_id: 'w-b', status_rev: 7, status_boot: { origin: 7, seq: 2 } })
+    );
+    registry.openWindow(
+      makeWindowInfo({
+        window_id: 'w-b',
+        detected: { status: 'idle' },
+        status_rev: 7,
+        status_boot: { origin: 7, seq: 2 },
+      })
+    );
+
+    expect(entryOf(registry, 'w-b')?.detected).toEqual({ status: 'idle' });
   });
 
   it('applies a snapshot that names no generation at all', () => {
