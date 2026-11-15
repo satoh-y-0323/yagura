@@ -63,7 +63,7 @@ describe('startLayoutSync', () => {
     startLayoutSync(registry, send);
 
     // A store emission that touches no layout-relevant field.
-    registry.setStatus('w1', { status: 'idle' }, null);
+    registry.setStatus('w1', { status: 'idle' }, null, null);
     vi.advanceTimersByTime(10_000);
 
     expect(send).not.toHaveBeenCalled();

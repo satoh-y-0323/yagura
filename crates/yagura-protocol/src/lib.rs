@@ -1905,6 +1905,23 @@ pub fn validate_message_text(value: &str) -> Result<(), SendTextError> {
 /// rejected with [`FrameError::TooLarge`].
 pub const MAX_FRAME_BODY_LEN: usize = 16 * 1024 * 1024;
 
+/// The daemon boot a [`WindowInfo::status_rev`] (or a
+/// [`DaemonMessage::StatusChanged`] generation) was counted in.
+///
+/// Within one `origin`, `seq` grows by one with each daemon start of the
+/// instance and never goes down, so a reader orders two observations of a
+/// window by the pair `(status_boot, status_rev)` compared lexicographically.
+/// Two different origins carry no order between them. Both values are at most
+/// 2^53 − 1, so a JavaScript number holds them exactly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StatusBoot {
+    /// Names the series of boots `seq` counts in: drawn at random when the
+    /// series starts, kept for as long as the instance keeps its count.
+    pub origin: u64,
+    /// The daemon start this boot is within its `origin`, starting at 1.
+    pub seq: u64,
+}
+
 /// Window metadata shared across wire protocol responses (multi-window v2).
 ///
 /// The single source of truth for window information transmitted in responses
@@ -1955,12 +1972,19 @@ pub struct WindowInfo {
     /// The generation of the status pair this record reports: a counter the
     /// daemon increases once per confirmed transition of this window, so a
     /// reader whose registry this record updates can discard an observation
-    /// older than one it already applied. Per window, never reused, and never
-    /// compared across windows. `None` when the daemon predates this field,
-    /// which a reader treats as "always apply". Omitted from the wire when
-    /// `None`.
+    /// older than one it already applied. Never reused within one
+    /// [`Self::status_boot`] and never compared across windows: a reader
+    /// compares the pair `(status_boot, status_rev)` lexicographically. `None`
+    /// when the daemon predates this field, which a reader treats as "always
+    /// apply". Omitted from the wire when `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status_rev: Option<u64>,
+    /// The daemon boot [`Self::status_rev`] was counted in (see
+    /// [`StatusBoot`]). `None` when the daemon could not hold a boot count or
+    /// predates this field; a reader then does not order by the pair. Omitted
+    /// from the wire when `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status_boot: Option<StatusBoot>,
     /// Whether an MCP bridge has identified itself as this window over a
     /// connection that is still open. `None` when the daemon does not report
     /// this fact, which a reader must not read as "not connected". Omitted
@@ -3783,6 +3807,11 @@ pub enum DaemonMessage {
         /// the wire when `None`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         status_rev: Option<u64>,
+        /// The daemon boot `status_rev` was counted in, carrying the same
+        /// meaning as [`WindowInfo::status_boot`]. Omitted from the wire when
+        /// `None`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        status_boot: Option<StatusBoot>,
     },
     /// Response to [`ClientMessage::OpenWindow`]: the window was opened successfully.
     WindowOpened {

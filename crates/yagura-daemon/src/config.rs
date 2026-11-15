@@ -410,6 +410,13 @@ pub struct DaemonConfig {
     /// of its own on its first open (see [`crate::HolderHost`]).
     pub holder_place: Option<crate::holder_host::HolderPlace>,
 
+    /// The boot every window's status generations are counted in, which
+    /// each [`yagura_protocol::WindowInfo`] and status push names. The daemon
+    /// binary sets the one [`crate::status_boot::advance`] took when it has
+    /// a [`DaemonConfig::holder_place`]; `None` (the default) names no boot,
+    /// so a reader does not order observations across daemons.
+    pub status_boot: Option<yagura_protocol::StatusBoot>,
+
     /// A fault every window's holder is asked to act out; only the
     /// fault-injecting holder (`holder_fault`, set as
     /// [`DaemonConfig::holder_exe`]) does, and the shipped one refuses such a
@@ -701,6 +708,7 @@ impl Default for DaemonConfig {
             mcp_listing_timeout: Duration::from_secs(DEFAULT_MCP_LISTING_TIMEOUT_SECS),
             holder_exe: default_holder_exe(),
             holder_place: None,
+            status_boot: None,
             #[cfg(feature = "fault-injection")]
             holder_fault: None,
             #[cfg(feature = "fault-injection")]

@@ -40,6 +40,7 @@ fn window(window_id: &str, status_reports_missing: Option<bool>) -> WindowInfo {
         unknown_reason: None,
         detection_warning: None,
         status_rev: Some(1),
+        status_boot: None,
         mcp_connected: Some(true),
         status_reports_missing,
         queued_count: None,

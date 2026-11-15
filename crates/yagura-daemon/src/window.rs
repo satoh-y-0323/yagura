@@ -21,9 +21,10 @@ use tokio::sync::{Mutex as AsyncMutex, Notify, broadcast, mpsc, oneshot, watch};
 use yagura_os::ancestry::ImagePattern;
 use yagura_os::program;
 use yagura_protocol::{
-    DefaultPalettes, DetectedStatus, INSTANCE_ENV, MCP_BRIDGE_ENV, OnNameTaken, Palette, RoomRef,
-    STATUS_TOKEN_ENV, UnknownReason, WINDOW_ID_ENV, WINDOW_NAME_MAX_BYTES, WindowInfo,
-    WindowNameError, WindowStatus, WithdrawOutcome, validate_window_name, validate_window_vendor,
+    DaemonMessage, DefaultPalettes, DetectedStatus, INSTANCE_ENV, MCP_BRIDGE_ENV, OnNameTaken,
+    Palette, RoomRef, STATUS_TOKEN_ENV, StatusBoot, UnknownReason, WINDOW_ID_ENV,
+    WINDOW_NAME_MAX_BYTES, WindowInfo, WindowNameError, WindowStatus, WithdrawOutcome,
+    validate_window_name, validate_window_vendor,
 };
 
 use crate::config::DaemonConfig;
@@ -875,6 +876,9 @@ pub struct WindowEntry {
     /// through [`WindowEntry::publish_confirmed`],
     /// [`WindowEntry::confirm_exited`] and the detector-loss backstop.
     status_gate: StatusGate,
+    /// The daemon boot this window's status generations are counted in
+    /// ([`DaemonConfig::status_boot`]).
+    status_boot: Option<StatusBoot>,
     /// This window's own `StatusEvent` auth token, scoped to it. Held behind
     /// an [`Arc`] because
     /// [`DaemonConfig::status_token_override`] makes every window share one
@@ -1597,9 +1601,25 @@ impl WindowEntry {
             unknown_reason: at.status.unknown_reason(),
             detection_warning: self.detection_warning.clone(),
             status_rev: Some(at.generation),
+            status_boot: self.status_boot,
             mcp_connected: Some(self.mcp_connected()),
             status_reports_missing: Some(self.report_gap()),
             queued_count: Some(u64::try_from(self.inbox.pending_count()).unwrap_or(u64::MAX)),
+        }
+    }
+
+    /// The [`DaemonMessage::StatusChanged`] reporting `at`, a pair this
+    /// window published.
+    ///
+    /// Built from `at` alone (never from the entry's current pair), so a push
+    /// is never stamped with a generation newer than the change it reports.
+    pub(crate) fn status_changed(&self, at: &StatusAt) -> DaemonMessage {
+        DaemonMessage::StatusChanged {
+            window_id: self.window_id.clone(),
+            status: at.status.status(),
+            unknown_reason: at.status.unknown_reason(),
+            status_rev: Some(at.generation),
+            status_boot: self.status_boot,
         }
     }
 
@@ -2777,6 +2797,7 @@ impl WindowRegistry {
             detector: Mutex::new(Some(detector_handle)),
             detector_weak,
             status_gate,
+            status_boot: self.config().status_boot,
             status_token,
             abandons_calls_at_turn_end,
             agent_running: Mutex::new(false),

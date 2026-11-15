@@ -52,6 +52,7 @@ function makeEntry(windowId: string): WindowEntry {
     cwd: '/home/user/project',
     detected: { status: 'running' },
     statusRev: null,
+    statusBoot: null,
     exitCode: null,
     room: null,
     detectionWarning: null,

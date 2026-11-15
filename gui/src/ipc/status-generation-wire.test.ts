@@ -20,29 +20,73 @@ const WINDOW_ID = 'w1-k3f9xa';
 /** The key this boundary reads the status generation under. */
 const GENERATION_KEY = 'status_rev';
 
+/** The key this boundary reads the boot the generation was counted in under. */
+const BOOT_KEY = 'status_boot';
+
 /**
- * The name of the `Option<u64>` field a Rust item declares under
- * {@link GENERATION_KEY}. A record may carry other `Option<u64>` fields (a
- * window record also counts its waiting messages), so the field is found by
+ * The name of the `Option<rustType>` field a Rust item declares under `key`.
+ * A record may carry other fields of the same type (a window record also
+ * counts its waiting messages in an `Option<u64>`), so the field is found by
  * its name and its shape together.
  */
-function generationFieldName(source: string, header: string): string {
+function generationFieldName(
+  source: string,
+  header: string,
+  key: string,
+  rustType: string
+): string {
   const body = itemBody(source, header);
-  const matches = [
-    ...body.matchAll(/^[ \t]*(?:pub +)?([A-Za-z_][A-Za-z0-9_]*) *: *Option<u64> *,/gm),
-  ];
-  const names = matches.map((match) => match[1] ?? '').filter((name) => name === GENERATION_KEY);
+  const shape = new RegExp(
+    `^[ \\t]*(?:pub +)?([A-Za-z_][A-Za-z0-9_]*) *: *Option<${rustType}> *,`,
+    'gm'
+  );
+  const names = [...body.matchAll(shape)]
+    .map((match) => match[1] ?? '')
+    .filter((name) => name === key);
   if (names.length !== 1) {
     throw new Error(
-      `expected exactly one Option<u64> field named ${GENERATION_KEY} under ${header}, found ${names.length}`
+      `expected exactly one Option<${rustType}> field named ${key} under ${header}, found ${names.length}`
     );
   }
   return names[0] ?? '';
 }
 
-const WINDOW_RECORD_KEY = generationFieldName(protocolSource, 'pub struct WindowInfo {');
-const STATUS_PUSH_KEY = generationFieldName(protocolSource, '    StatusChanged {');
-const DESKTOP_EVENT_KEY = generationFieldName(desktopEventsSource, 'pub struct StatusPayload {');
+const WINDOW_RECORD_KEY = generationFieldName(
+  protocolSource,
+  'pub struct WindowInfo {',
+  GENERATION_KEY,
+  'u64'
+);
+const STATUS_PUSH_KEY = generationFieldName(
+  protocolSource,
+  '    StatusChanged {',
+  GENERATION_KEY,
+  'u64'
+);
+const DESKTOP_EVENT_KEY = generationFieldName(
+  desktopEventsSource,
+  'pub struct StatusPayload {',
+  GENERATION_KEY,
+  'u64'
+);
+const WINDOW_RECORD_BOOT_KEY = generationFieldName(
+  protocolSource,
+  'pub struct WindowInfo {',
+  BOOT_KEY,
+  'StatusBoot'
+);
+const STATUS_PUSH_BOOT_KEY = generationFieldName(
+  protocolSource,
+  '    StatusChanged {',
+  BOOT_KEY,
+  'StatusBoot'
+);
+const DESKTOP_EVENT_BOOT_KEY = generationFieldName(
+  desktopEventsSource,
+  'pub struct StatusPayload {',
+  BOOT_KEY,
+  'StatusBoot'
+);
 
 describe('the three wire shapes name the status generation identically', () => {
   it('reads a non-empty source for each side (sanity check against a vacuous pass)', () => {
@@ -54,10 +98,16 @@ describe('the three wire shapes name the status generation identically', () => {
     expect(WINDOW_RECORD_KEY.length).toBeGreaterThan(0);
     expect(STATUS_PUSH_KEY.length).toBeGreaterThan(0);
     expect(DESKTOP_EVENT_KEY.length).toBeGreaterThan(0);
+    expect(WINDOW_RECORD_BOOT_KEY.length).toBeGreaterThan(0);
+    expect(STATUS_PUSH_BOOT_KEY.length).toBeGreaterThan(0);
+    expect(DESKTOP_EVENT_BOOT_KEY.length).toBeGreaterThan(0);
   });
 
   it('spells the generation key the same way in all three', () => {
     expect(new Set([WINDOW_RECORD_KEY, STATUS_PUSH_KEY, DESKTOP_EVENT_KEY]).size).toBe(1);
+    expect(
+      new Set([WINDOW_RECORD_BOOT_KEY, STATUS_PUSH_BOOT_KEY, DESKTOP_EVENT_BOOT_KEY]).size
+    ).toBe(1);
   });
 });
 
@@ -67,8 +117,10 @@ describe('this boundary reads the generation under the key the Rust sources use'
       status: 'running',
       window_id: WINDOW_ID,
       [DESKTOP_EVENT_KEY]: 9,
+      [DESKTOP_EVENT_BOOT_KEY]: { origin: 7, seq: 3 },
     });
     expect(payload.status_rev).toBe(9);
+    expect(payload.status_boot).toEqual({ origin: 7, seq: 3 });
   });
 
   it('carries the generation of a window record sent under the daemon record key', () => {
@@ -80,8 +132,10 @@ describe('this boundary reads the generation under the key the Rust sources use'
       status: 'running',
       exit_code: null,
       [WINDOW_RECORD_KEY]: 4,
+      [WINDOW_RECORD_BOOT_KEY]: { origin: 7, seq: 3 },
     });
     expect(info.status_rev).toBe(4);
+    expect(info.status_boot).toEqual({ origin: 7, seq: 3 });
   });
 
   it('carries the generation of a status event sent under the daemon push key', () => {
@@ -89,17 +143,22 @@ describe('this boundary reads the generation under the key the Rust sources use'
       status: 'running',
       window_id: WINDOW_ID,
       [STATUS_PUSH_KEY]: 5,
+      [STATUS_PUSH_BOOT_KEY]: { origin: 7, seq: 3 },
     });
     expect(payload.status_rev).toBe(5);
+    expect(payload.status_boot).toEqual({ origin: 7, seq: 3 });
   });
 
   it('drops a generation sent under a key none of the Rust shapes uses', () => {
     const misspelled = `${WINDOW_RECORD_KEY}ision`;
+    const misspelledBoot = `${WINDOW_RECORD_BOOT_KEY}ision`;
     const payload = narrowStatusPayload({
       status: 'running',
       window_id: WINDOW_ID,
       [misspelled]: 9,
+      [misspelledBoot]: { origin: 7, seq: 3 },
     });
     expect(Object.prototype.hasOwnProperty.call(payload, 'status_rev')).toBe(false);
+    expect(Object.prototype.hasOwnProperty.call(payload, 'status_boot')).toBe(false);
   });
 });

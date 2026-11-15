@@ -55,7 +55,7 @@ describe('createWindowRegistry: subscription model', () => {
     registry.openWindow(makeWindowInfo({ window_id: 'w-a', detected: { status: 'running' } }));
     registry.openWindow(makeWindowInfo({ window_id: 'w-b', detected: { status: 'idle' } }));
 
-    registry.setStatus('w-a', { status: 'waiting_input' }, null);
+    registry.setStatus('w-a', { status: 'waiting_input' }, null, null);
 
     const state = get(registry);
     const a = state.windows.find((w) => w.windowId === 'w-a');
@@ -70,7 +70,7 @@ describe('createWindowRegistry: lifecycle', () => {
     const registry = createWindowRegistry();
     registry.openWindow(makeWindowInfo({ window_id: 'w-a' }));
 
-    registry.setStatus('w-a', { status: 'exited' }, null);
+    registry.setStatus('w-a', { status: 'exited' }, null, null);
 
     const state = get(registry);
     expect(state.windows.some((w) => w.windowId === 'w-a')).toBe(false);
@@ -90,7 +90,9 @@ describe('createWindowRegistry: lifecycle', () => {
     const registry = createWindowRegistry();
     registry.openWindow(makeWindowInfo({ window_id: 'w-a' }));
 
-    expect(() => registry.setStatus('unknown-window', { status: 'running' }, null)).not.toThrow();
+    expect(() =>
+      registry.setStatus('unknown-window', { status: 'running' }, null, null)
+    ).not.toThrow();
     expect(registry.resolveWindowHandlers('unknown-window')).toBeUndefined();
     expect(get(registry).windows).toHaveLength(1);
   });
@@ -178,6 +180,7 @@ function openedEntry(
     cwd: 'C:\\Users\\dev\\project',
     detected: { status: 'running' },
     statusRev: null,
+    statusBoot: null,
     exitCode: null,
     room,
     detectionWarning: null,
@@ -391,7 +394,7 @@ describe('createWindowRegistry: the status and its reason are one value on the e
     const registry = createWindowRegistry();
     registry.openWindow(makeWindowInfo({ window_id: 'w-a' }));
 
-    registry.setStatus('w-a', unknownPair('detector_stopped'), null);
+    registry.setStatus('w-a', unknownPair('detector_stopped'), null, null);
 
     expect(entryOf(registry, 'w-a')?.detected).toEqual({
       status: 'unknown',
@@ -402,9 +405,9 @@ describe('createWindowRegistry: the status and its reason are one value on the e
   it('leaves no reason on the entry once the status is no longer unknown', () => {
     const registry = createWindowRegistry();
     registry.openWindow(makeWindowInfo({ window_id: 'w-a' }));
-    registry.setStatus('w-a', unknownPair('detector_stopped'), null);
+    registry.setStatus('w-a', unknownPair('detector_stopped'), null, null);
 
-    registry.setStatus('w-a', { status: 'running' }, null);
+    registry.setStatus('w-a', { status: 'running' }, null, null);
 
     expect(entryOf(registry, 'w-a')?.detected).toEqual({ status: 'running' });
   });
@@ -419,7 +422,7 @@ describe('createWindowRegistry: the status and its reason are one value on the e
       })
     );
 
-    registry.setStatus('w-a', unknownPair('screen_lost'), null);
+    registry.setStatus('w-a', unknownPair('screen_lost'), null, null);
 
     expect(entryOf(registry, 'w-a')?.detectionWarning).toBe('kept across status changes');
   });
@@ -430,29 +433,51 @@ describe('createWindowRegistry: only an observation at least as new moves the pa
     const registry = createWindowRegistry();
     registry.openWindow(makeWindowInfo({ window_id: 'w-a', status_rev: 4 }));
 
-    registry.setStatus('w-a', unknownPair('screen_lost'), 5);
+    registry.setStatus('w-a', unknownPair('screen_lost'), 5, null);
 
     const entry = entryOf(registry, 'w-a');
     expect(entry?.detected).toEqual({ status: 'unknown', reason: 'screen_lost' });
     expect(entry?.statusRev).toBe(5);
+
+    // A later boot of the same series is newer whatever its generation.
+    registry.openWindow(
+      makeWindowInfo({ window_id: 'w-b', status_rev: 4, status_boot: { origin: 7, seq: 1 } })
+    );
+    registry.setStatus('w-b', unknownPair('screen_lost'), 1, { origin: 7, seq: 2 });
+
+    const later = entryOf(registry, 'w-b');
+    expect(later?.detected).toEqual({ status: 'unknown', reason: 'screen_lost' });
+    expect(later?.statusRev).toBe(1);
+    expect(later?.statusBoot).toEqual({ origin: 7, seq: 2 });
   });
 
   it('leaves the pair where it is for a status change taken at an older generation', () => {
     const registry = createWindowRegistry();
     registry.openWindow(makeWindowInfo({ window_id: 'w-a', status_rev: 4 }));
 
-    registry.setStatus('w-a', unknownPair('screen_lost'), 3);
+    registry.setStatus('w-a', unknownPair('screen_lost'), 3, null);
 
     const entry = entryOf(registry, 'w-a');
     expect(entry?.detected).toEqual({ status: 'running' });
     expect(entry?.statusRev).toBe(4);
+
+    // An earlier boot of the same series is older whatever its generation.
+    registry.openWindow(
+      makeWindowInfo({ window_id: 'w-b', status_rev: 1, status_boot: { origin: 7, seq: 2 } })
+    );
+    registry.setStatus('w-b', unknownPair('screen_lost'), 9, { origin: 7, seq: 1 });
+
+    const earlier = entryOf(registry, 'w-b');
+    expect(earlier?.detected).toEqual({ status: 'running' });
+    expect(earlier?.statusRev).toBe(1);
+    expect(earlier?.statusBoot).toEqual({ origin: 7, seq: 2 });
   });
 
   it('applies a status change taken at the same generation', () => {
     const registry = createWindowRegistry();
     registry.openWindow(makeWindowInfo({ window_id: 'w-a', status_rev: 4 }));
 
-    registry.setStatus('w-a', { status: 'idle' }, 4);
+    registry.setStatus('w-a', { status: 'idle' }, 4, null);
 
     expect(entryOf(registry, 'w-a')?.detected).toEqual({ status: 'idle' });
   });
@@ -461,17 +486,28 @@ describe('createWindowRegistry: only an observation at least as new moves the pa
     const registry = createWindowRegistry();
     registry.openWindow(makeWindowInfo({ window_id: 'w-a', status_rev: 4 }));
 
-    registry.setStatus('w-a', { status: 'idle' }, null);
+    registry.setStatus('w-a', { status: 'idle' }, null, null);
 
     expect(entryOf(registry, 'w-a')?.detected).toEqual({ status: 'idle' });
+
+    // Against a window that names a boot, an observation naming none cannot be ordered.
+    registry.openWindow(
+      makeWindowInfo({ window_id: 'w-b', status_rev: 5, status_boot: { origin: 7, seq: 2 } })
+    );
+    registry.setStatus('w-b', { status: 'idle' }, null, null);
+
+    const unordered = entryOf(registry, 'w-b');
+    expect(unordered?.detected).toEqual({ status: 'idle' });
+    expect(unordered?.statusRev).toBeNull();
+    expect(unordered?.statusBoot).toBeNull();
   });
 
   it('keeps the recorded generation when it applies an observation that names none, so a later stale one is still refused', () => {
     const registry = createWindowRegistry();
     registry.openWindow(makeWindowInfo({ window_id: 'w-a', status_rev: 4 }));
 
-    registry.setStatus('w-a', { status: 'idle' }, null);
-    registry.setStatus('w-a', { status: 'interrupted' }, 3);
+    registry.setStatus('w-a', { status: 'idle' }, null, null);
+    registry.setStatus('w-a', { status: 'interrupted' }, 3, null);
 
     const entry = entryOf(registry, 'w-a');
     expect(entry?.statusRev).toBe(4);
@@ -482,10 +518,10 @@ describe('createWindowRegistry: only an observation at least as new moves the pa
     const registry = createWindowRegistry();
     registry.openWindow(makeWindowInfo({ window_id: 'w-a' }));
 
-    registry.setStatus('w-a', { status: 'idle' }, null);
+    registry.setStatus('w-a', { status: 'idle' }, null, null);
     expect(entryOf(registry, 'w-a')?.detected).toEqual({ status: 'idle' });
 
-    registry.setStatus('w-a', { status: 'interrupted' }, 2);
+    registry.setStatus('w-a', { status: 'interrupted' }, 2, null);
     expect(entryOf(registry, 'w-a')?.detected).toEqual({ status: 'interrupted' });
   });
 
@@ -494,7 +530,7 @@ describe('createWindowRegistry: only an observation at least as new moves the pa
     registry.openWindow(makeWindowInfo({ window_id: 'w-a', status_rev: 9 }));
     registry.openWindow(makeWindowInfo({ window_id: 'w-b', status_rev: 1 }));
 
-    registry.setStatus('w-b', { status: 'idle' }, 2);
+    registry.setStatus('w-b', { status: 'idle' }, 2, null);
 
     expect(entryOf(registry, 'w-b')?.detected).toEqual({ status: 'idle' });
     expect(entryOf(registry, 'w-a')?.detected).toEqual({ status: 'running' });
@@ -513,12 +549,48 @@ describe('createWindowRegistry: the window-list route compares generations too',
     const entry = entryOf(registry, 'w-a');
     expect(entry?.detected).toEqual({ status: 'unknown', reason: 'screen_lost' });
     expect(entry?.statusRev).toBe(5);
+
+    // A later boot of the same series is newer whatever its generation.
+    registry.openWindow(
+      makeWindowInfo({ window_id: 'w-b', status_rev: 5, status_boot: { origin: 7, seq: 1 } })
+    );
+    registry.openWindow(
+      makeWindowInfo({
+        window_id: 'w-b',
+        detected: unknownPair('screen_lost'),
+        status_rev: 1,
+        status_boot: { origin: 7, seq: 2 },
+      })
+    );
+
+    const later = entryOf(registry, 'w-b');
+    expect(later?.detected).toEqual({ status: 'unknown', reason: 'screen_lost' });
+    expect(later?.statusRev).toBe(1);
+    expect(later?.statusBoot).toEqual({ origin: 7, seq: 2 });
+
+    // Another series has no order against this one, so its observation is taken.
+    registry.openWindow(
+      makeWindowInfo({ window_id: 'w-c', status_rev: 5, status_boot: { origin: 7, seq: 3 } })
+    );
+    registry.openWindow(
+      makeWindowInfo({
+        window_id: 'w-c',
+        detected: unknownPair('screen_lost'),
+        status_rev: 1,
+        status_boot: { origin: 9, seq: 1 },
+      })
+    );
+
+    const other = entryOf(registry, 'w-c');
+    expect(other?.detected).toEqual({ status: 'unknown', reason: 'screen_lost' });
+    expect(other?.statusRev).toBe(1);
+    expect(other?.statusBoot).toEqual({ origin: 9, seq: 1 });
   });
 
   it('leaves the pair where it is for a snapshot taken at an older generation', () => {
     const registry = createWindowRegistry();
     registry.openWindow(makeWindowInfo({ window_id: 'w-a' }));
-    registry.setStatus('w-a', { status: 'waiting_input' }, 7);
+    registry.setStatus('w-a', { status: 'waiting_input' }, 7, null);
 
     registry.openWindow(
       makeWindowInfo({ window_id: 'w-a', detected: unknownPair('screen_lost'), status_rev: 6 })
@@ -527,12 +599,35 @@ describe('createWindowRegistry: the window-list route compares generations too',
     const entry = entryOf(registry, 'w-a');
     expect(entry?.detected).toEqual({ status: 'waiting_input' });
     expect(entry?.statusRev).toBe(7);
+
+    // An earlier boot of the same series is older whatever its generation.
+    registry.openWindow(
+      makeWindowInfo({
+        window_id: 'w-b',
+        detected: { status: 'waiting_input' },
+        status_rev: 7,
+        status_boot: { origin: 7, seq: 2 },
+      })
+    );
+    registry.openWindow(
+      makeWindowInfo({
+        window_id: 'w-b',
+        detected: unknownPair('screen_lost'),
+        status_rev: 8,
+        status_boot: { origin: 7, seq: 1 },
+      })
+    );
+
+    const earlier = entryOf(registry, 'w-b');
+    expect(earlier?.detected).toEqual({ status: 'waiting_input' });
+    expect(earlier?.statusRev).toBe(7);
+    expect(earlier?.statusBoot).toEqual({ origin: 7, seq: 2 });
   });
 
   it('applies a snapshot taken at the same generation', () => {
     const registry = createWindowRegistry();
     registry.openWindow(makeWindowInfo({ window_id: 'w-a' }));
-    registry.setStatus('w-a', { status: 'waiting_input' }, 7);
+    registry.setStatus('w-a', { status: 'waiting_input' }, 7, null);
 
     registry.openWindow(
       makeWindowInfo({ window_id: 'w-a', detected: { status: 'idle' }, status_rev: 7 })
@@ -544,7 +639,7 @@ describe('createWindowRegistry: the window-list route compares generations too',
   it('applies a snapshot that names no generation at all', () => {
     const registry = createWindowRegistry();
     registry.openWindow(makeWindowInfo({ window_id: 'w-a' }));
-    registry.setStatus('w-a', { status: 'waiting_input' }, 7);
+    registry.setStatus('w-a', { status: 'waiting_input' }, 7, null);
 
     registry.openWindow(makeWindowInfo({ window_id: 'w-a', detected: { status: 'idle' } }));
 
@@ -571,7 +666,7 @@ describe('createWindowRegistry: an older generation costs the pair alone', () =>
         detection_warning: 'first warning',
       })
     );
-    registry.setStatus('w-a', { status: 'waiting_input' }, 7);
+    registry.setStatus('w-a', { status: 'waiting_input' }, 7, null);
 
     registry.openWindow(
       makeWindowInfo({
@@ -600,7 +695,7 @@ describe('createWindowRegistry: an older generation costs the pair alone', () =>
         detection_warning: 'first warning',
       })
     );
-    registry.setStatus('w-a', { status: 'waiting_input' }, 7);
+    registry.setStatus('w-a', { status: 'waiting_input' }, 7, null);
 
     registry.openWindow(makeWindowInfo({ window_id: 'w-a', status_rev: 1 }));
 
@@ -638,7 +733,7 @@ describe('createWindowRegistry: only the status-change route closes a window', (
     const registry = createWindowRegistry();
     registry.openWindow(makeWindowInfo({ window_id: 'w-a' }));
 
-    registry.setStatus('w-a', { status: 'exited' }, null);
+    registry.setStatus('w-a', { status: 'exited' }, null, null);
 
     expect(entryOf(registry, 'w-a')).toBeUndefined();
   });
@@ -659,7 +754,7 @@ describe('createWindowRegistry: an entry never holds a reason without the unknow
     const registry = createWindowRegistry();
     registry.openWindow(makeWindowInfo({ window_id: 'w-a', detected: unknownPair('screen_lost') }));
 
-    registry.setStatus('w-a', { status: 'running' }, 2);
+    registry.setStatus('w-a', { status: 'running' }, 2, null);
     expect(pairHoldsTogether(entryOf(registry, 'w-a')?.detected)).toBe(true);
 
     registry.openWindow(
@@ -677,7 +772,7 @@ describe('createWindowRegistry: an entry never holds a reason without the unknow
     );
     expect(pairHoldsTogether(entryOf(registry, 'w-a')?.detected)).toBe(true);
 
-    registry.setStatus('w-a', { status: 'idle' }, 3);
+    registry.setStatus('w-a', { status: 'idle' }, 3, null);
     const entry = entryOf(registry, 'w-a');
     expect(pairHoldsTogether(entry?.detected)).toBe(true);
     expect(entry?.detected).toEqual({ status: 'idle' });
@@ -686,9 +781,9 @@ describe('createWindowRegistry: an entry never holds a reason without the unknow
   it('holds together when a discarded older observation carried a reason', () => {
     const registry = createWindowRegistry();
     registry.openWindow(makeWindowInfo({ window_id: 'w-a' }));
-    registry.setStatus('w-a', { status: 'running' }, 5);
+    registry.setStatus('w-a', { status: 'running' }, 5, null);
 
-    registry.setStatus('w-a', unknownPair('screen_lost'), 1);
+    registry.setStatus('w-a', unknownPair('screen_lost'), 1, null);
 
     const entry = entryOf(registry, 'w-a');
     expect(pairHoldsTogether(entry?.detected)).toBe(true);

@@ -542,6 +542,19 @@ async fn async_main(
             None
         }
     };
+    // Kept beside the holders' records, so the boot count lasts as long as
+    // the windows it orders; without a holder place no window outlives this
+    // daemon. The endpoint is already bound, so this is the only writer.
+    if config.holder_place.is_some()
+        && let Some(base) = yagura_os::default_state_base_dir()
+    {
+        let dir = yagura_os::instance_dir(&base, &namespace);
+        config.status_boot =
+            tokio::task::spawn_blocking(move || yagura_daemon::status_boot::advance(&base, &dir))
+                .await
+                .ok()
+                .flatten();
+    }
     config.mcp_config_dir = yagura_os::default_state_base_dir()
         .map(|base| yagura_os::instance_dir(&base, &namespace).join(MCP_CONFIG_DIR_NAME));
     config.report_dir = tokio::task::spawn_blocking({

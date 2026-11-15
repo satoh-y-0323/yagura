@@ -1344,6 +1344,10 @@
       },
       "status_changed": {
         "status": "string",
+        "status_boot": {
+          "origin": "number",
+          "seq": "number"
+        },
         "status_rev": "number",
         "type": "string",
         "unknown_reason": "string",
@@ -1490,6 +1494,10 @@
               "room_id": "string"
             },
             "status": "string",
+            "status_boot": {
+              "origin": "number",
+              "seq": "number"
+            },
             "status_reports_missing": "boolean",
             "status_rev": "number",
             "unknown_reason": "string",

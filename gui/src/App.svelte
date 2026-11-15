@@ -2389,7 +2389,12 @@
     try {
       unsubscribeSession = await subscribeSession(registry.resolveWindowHandlers, {
         onStatus: (payload) => {
-          registry.setStatus(payload.window_id, payload.detected, payload.status_rev ?? null);
+          registry.setStatus(
+            payload.window_id,
+            payload.detected,
+            payload.status_rev ?? null,
+            payload.status_boot ?? null
+          );
         },
         onDaemonSpawnWarning: (payload) => {
           daemonSpawnNotice = foldExternalText(payload.message);

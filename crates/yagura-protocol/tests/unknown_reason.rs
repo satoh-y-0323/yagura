@@ -189,6 +189,7 @@ fn sample_window_info(
         unknown_reason,
         detection_warning,
         status_rev: None,
+        status_boot: None,
         mcp_connected: None,
         status_reports_missing: None,
         queued_count: None,
@@ -280,6 +281,7 @@ fn sample_status_changed(unknown_reason: Option<UnknownReason>) -> DaemonMessage
         status: WindowStatus::Unknown,
         unknown_reason,
         status_rev: None,
+        status_boot: None,
     }
 }
 

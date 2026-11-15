@@ -61,10 +61,16 @@ const NEGATIVE_GENERATIONS: readonly number[] = [-1, -42, Number.MIN_SAFE_INTEGE
 
 describe('a negative status generation on the status-change route', () => {
   for (const generation of NEGATIVE_GENERATIONS) {
-    it(`refuses the whole payload for status_rev=${generation}`, () => {
+    it(`refuses the whole payload for a status_rev or a status_boot part of ${generation}`, () => {
       expect(() => narrowStatusPayload(statusPayloadWire({ status_rev: generation }))).toThrow(
         BoundaryError
       );
+      for (const part of ['origin', 'seq'] as const) {
+        const status_boot = { origin: 7, seq: 3, [part]: generation };
+        expect(() => narrowStatusPayload(statusPayloadWire({ status_boot }))).toThrow(
+          BoundaryError
+        );
+      }
     });
   }
 
@@ -75,11 +81,18 @@ describe('a negative status generation on the status-change route', () => {
 
 describe('a negative status generation on the list route', () => {
   for (const generation of NEGATIVE_GENERATIONS) {
-    it(`keeps the window and drops the field for status_rev=${generation}`, () => {
+    it(`keeps the window and drops the field for a status_rev or a status_boot part of ${generation}`, () => {
       const info = narrowWindowInfo(windowInfoWire({ status_rev: generation }));
       expect(info.window_id).toBe(WINDOW_ID);
       expect(info.detected).toEqual({ status: 'running' });
       expect(Object.prototype.hasOwnProperty.call(info, 'status_rev')).toBe(false);
+      for (const part of ['origin', 'seq'] as const) {
+        const status_boot = { origin: 7, seq: 3, [part]: generation };
+        const booted = narrowWindowInfo(windowInfoWire({ status_rev: 5, status_boot }));
+        expect(booted.window_id).toBe(WINDOW_ID);
+        expect(booted.status_rev).toBe(5);
+        expect(Object.prototype.hasOwnProperty.call(booted, 'status_boot')).toBe(false);
+      }
     });
   }
 

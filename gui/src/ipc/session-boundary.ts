@@ -254,6 +254,19 @@ export type DetectedStatusView =
   | { status: Exclude<WindowStatus, 'unknown'> }
   | { status: 'unknown'; reason: UnknownReason | null };
 
+/**
+ * The daemon boot a status generation was counted in (mirrors the Rust
+ * `StatusBoot`). Within one `origin`, `seq` grows with each daemon start, so
+ * two observations of a window are ordered by `(boot, generation)`; two
+ * different origins carry no order between them.
+ */
+export interface StatusBoot {
+  /** The series of boots `seq` counts in. */
+  origin: number;
+  /** The daemon start this boot is within its `origin`. */
+  seq: number;
+}
+
 /** Payload of `session://status`. */
 export interface StatusPayload {
   /** The window whose status changed (protocol v2). */
@@ -267,6 +280,11 @@ export interface StatusPayload {
    * (`exactOptionalPropertyTypes`).
    */
   status_rev?: number;
+  /**
+   * The daemon boot `status_rev` was counted in. Omitted from this object --
+   * and from the wire -- when the core names none.
+   */
+  status_boot?: StatusBoot;
 }
 
 const WINDOW_STATUS_VALUES: ReadonlySet<string> = new Set<WindowStatus>([
@@ -625,6 +643,8 @@ export interface WindowInfo {
    * {@link StatusPayload.status_rev} follows.
    */
   status_rev?: number;
+  /** The daemon boot `status_rev` was counted in, as {@link StatusPayload.status_boot}. */
+  status_boot?: StatusBoot;
   /**
    * Whether the window's child is currently connected to the daemon over
    * MCP. Omitted from the wire -- and from this object as an own property --
@@ -1073,7 +1093,9 @@ export function narrowStatusPayload(value: unknown): StatusPayload {
     detected: readDetectedStatus(record, context, 'refuse'),
   };
   const status_rev = readOptionalGeneration(record, 'status_rev', context, 'refuse');
-  return status_rev === null ? base : { ...base, status_rev };
+  const withRev = status_rev === null ? base : { ...base, status_rev };
+  const status_boot = readOptionalStatusBoot(record, context, 'refuse');
+  return status_boot === null ? withRev : { ...withRev, status_boot };
 }
 
 /**
@@ -1558,11 +1580,13 @@ export function narrowWindowInfo(value: unknown, context = 'window_info'): Windo
   const withWarning = detection_warning === null ? withRoom : { ...withRoom, detection_warning };
   const status_rev = readOptionalGeneration(record, 'status_rev', context, 'drop');
   const withRev = status_rev === null ? withWarning : { ...withWarning, status_rev };
+  const status_boot = readOptionalStatusBoot(record, context, 'drop');
+  const withBoot = status_boot === null ? withRev : { ...withRev, status_boot };
   const rawMcpConnected = readOwnField(record, 'mcp_connected');
   const withMcp =
     rawMcpConnected === null || rawMcpConnected === undefined
-      ? withRev
-      : { ...withRev, mcp_connected: requireBoolean(record, 'mcp_connected', context) };
+      ? withBoot
+      : { ...withBoot, mcp_connected: requireBoolean(record, 'mcp_connected', context) };
   const rawReportsMissing = readOwnField(record, 'status_reports_missing');
   const withReports =
     rawReportsMissing === null || rawReportsMissing === undefined
@@ -2320,4 +2344,31 @@ function readOptionalGeneration(
   }
   console.warn(`${context}.${key}: dropped a negative generation (${value})`);
   return null;
+}
+
+/**
+ * Reads the optional `status_boot` a generation was counted in. Its `origin`
+ * and `seq` are both required and read under {@link readOptionalGeneration}'s
+ * rules, so a negative part refuses the record or drops the boot alone by
+ * `onNegative`, and any other malformed shape is refused on every route.
+ *
+ * @throws {BoundaryError} when the boot is not a record, a part is missing or
+ * not an integer, or a part is negative and the policy is `'refuse'`.
+ */
+function readOptionalStatusBoot(
+  record: UntrustedRecord,
+  context: string,
+  onNegative: FieldMismatchPolicy
+): StatusBoot | null {
+  const value = readOwnField(record, 'status_boot');
+  if (value === null || value === undefined) {
+    return null;
+  }
+  const bootContext = `${context}.status_boot`;
+  const boot = requireRecord(value, bootContext);
+  requireInteger(boot, 'origin', bootContext);
+  requireInteger(boot, 'seq', bootContext);
+  const origin = readOptionalGeneration(boot, 'origin', bootContext, onNegative);
+  const seq = readOptionalGeneration(boot, 'seq', bootContext, onNegative);
+  return origin === null || seq === null ? null : { origin, seq };
 }

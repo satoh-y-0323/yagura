@@ -43,6 +43,7 @@ pub mod recovery;
 pub mod roles;
 pub mod room;
 mod sql;
+pub mod status_boot;
 pub mod store;
 pub mod terminal_identity;
 pub mod ticket;

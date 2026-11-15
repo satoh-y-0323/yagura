@@ -201,6 +201,7 @@ fn status_changed_decodes_from_its_snake_case_tagged_json() {
             status: WindowStatus::WaitingInput,
             unknown_reason: None,
             status_rev: None,
+            status_boot: None,
         }
     );
 }
@@ -212,6 +213,7 @@ fn status_changed_encodes_with_the_snake_case_type_tag_and_field_names() {
         status: WindowStatus::Unknown,
         unknown_reason: None,
         status_rev: None,
+        status_boot: None,
     };
     let body = encode_daemon_message(&msg);
     let value: serde_json::Value = serde_json::from_slice(&body).expect("valid json");
@@ -228,6 +230,7 @@ fn status_changed_round_trips_for_every_status_value() {
             status: *status,
             unknown_reason: None,
             status_rev: None,
+            status_boot: None,
         };
         let body = encode_daemon_message(&msg);
         let decoded = decode_daemon_message(&body).expect("round trip decode must succeed");

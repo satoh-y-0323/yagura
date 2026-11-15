@@ -23,7 +23,7 @@ use std::time::Duration;
 
 use common::real_daemon::{RunningDaemon, Sandbox};
 use common::store_fixtures::{insert_window_row_with_layout_value, set_meta};
-use common::{read_response, send};
+use common::{read_frame, read_response, send};
 use rusqlite::types::Value as SqlValue;
 use yagura_daemon::store;
 use yagura_os::{Liveness, PeerAuth, PlatformIpc, ProcessHandle, ProcessStart};
@@ -219,6 +219,27 @@ fn start_of(pid: u32) -> String {
         .to_string()
 }
 
+/// The `(origin, seq)` of the boot `info` names, which `who` must name.
+fn boot_of(info: &WindowInfo, who: &str) -> (u64, u64) {
+    let boot = info
+        .status_boot
+        .as_ref()
+        .unwrap_or_else(|| panic!("{who} must name its boot on window {}", info.window_id));
+    (boot.origin, boot.seq)
+}
+
+/// A boot after `earlier` in the same series: the same origin and a larger seq.
+fn assert_later_boot_of_the_same_series(earlier: (u64, u64), later: (u64, u64)) {
+    assert_eq!(
+        later.0, earlier.0,
+        "the next daemon must keep the series of the boot file the window's holder lives beside"
+    );
+    assert!(
+        later.1 > earlier.1,
+        "the next daemon's boot must come after the one before it: {earlier:?} then {later:?}"
+    );
+}
+
 /// A window, killed and taken back, keeps its id, its screen with what the child wrote
 /// while no daemon was there, its input modes and its token, and starts `Unknown`. The
 /// query the child made meanwhile was answered once, by the holder, before and after the
@@ -272,6 +293,10 @@ async fn a_window_outlives_its_daemon_and_the_next_one_takes_it_back_whole() {
     );
     let record = record_of(&sandbox, &window_id);
     let holder = handle_of(record.holder_pid, record.holder_start.as_deref());
+    let first_boot = boot_of(
+        &listed(&mut first, &sandbox, &window_id).await,
+        "the first daemon",
+    );
 
     first.kill_keeping_windows();
     std::fs::write(&gate, b"").unwrap();
@@ -285,6 +310,8 @@ async fn a_window_outlives_its_daemon_and_the_next_one_takes_it_back_whole() {
         WindowStatus::Unknown,
         "a window taken back starts Unknown"
     );
+    let next_boot = boot_of(&info, "the next daemon");
+    assert_later_boot_of_the_same_series(first_boot, next_boot);
     let after = rows(
         &next
             .output_until(&window_id, "the output of the absence", |text| {
@@ -301,6 +328,23 @@ async fn a_window_outlives_its_daemon_and_the_next_one_takes_it_back_whole() {
     );
 
     attach(&mut next, &window_id).await;
+    // Read before any helper below that skips status pushes.
+    let snapshot_boot = loop {
+        match read_frame(&mut next.client).await {
+            DaemonMessage::Frame(_) | DaemonMessage::ChatParticipantsChanged => {}
+            DaemonMessage::StatusChanged {
+                window_id: changed,
+                status_boot,
+                ..
+            } if changed == window_id => break status_boot.map(|boot| (boot.origin, boot.seq)),
+            other => panic!("expected the attach's status snapshot, got {other:?}"),
+        }
+    };
+    assert_eq!(
+        snapshot_boot,
+        Some(next_boot),
+        "the status snapshot after an attach must name the boot the window is listed with"
+    );
     send(
         &mut next.client,
         &ClientMessage::Paste {
@@ -670,7 +714,17 @@ async fn a_window_being_taken_back_is_listed_closable_and_holds_no_other_window_
     let shut = first.open_profile_window(&sandbox, "script").await;
     let closed_record = record_of(&sandbox, &closed);
     let shut_record = record_of(&sandbox, &shut);
+    let first_boot = boot_of(
+        &listed(&mut first, &sandbox, &live).await,
+        "the first daemon",
+    );
     first.kill_keeping_windows();
+    std::fs::remove_file(
+        sandbox
+            .state_root()
+            .join(yagura_daemon::status_boot::STATUS_BOOT_FILE),
+    )
+    .expect("the first daemon must leave its boot file in the instance's state root");
 
     let logs = sandbox.tree.make_dir("fake");
     let mut closed_fake =
@@ -686,6 +740,12 @@ async fn a_window_being_taken_back_is_listed_closable_and_holds_no_other_window_
             "a window being taken back is listed Unknown"
         );
     }
+    let next_boot = boot_of(&listed(&mut next, &sandbox, &live).await, "the next daemon");
+    assert_ne!(
+        next_boot.0, first_boot.0,
+        "a boot file that is gone must start a new series, so no reader orders the next \
+         daemon's observations after the first one's"
+    );
     closed_fake
         .wait_logged("the next daemon's Hello", hello_logged)
         .await;
@@ -746,9 +806,18 @@ async fn a_window_whose_take_back_fails_is_kept_with_its_holder_and_child_alive(
     let sandbox = Sandbox::new("recover-refused");
     let log = sandbox.tree.path().join("input.log");
     write_script_profile(&sandbox, "script", &log, None);
+    // Neither daemon can write its boot file: a directory stands where it goes.
+    let boot_file = sandbox
+        .state_root()
+        .join(yagura_daemon::status_boot::STATUS_BOOT_FILE);
+    std::fs::create_dir_all(boot_file.join("taken")).unwrap();
 
     let mut first = sandbox.start().await;
     let window_id = first.open_profile_window(&sandbox, "script").await;
+    let first_boot = boot_of(
+        &listed(&mut first, &sandbox, &window_id).await,
+        "a daemon that cannot write its boot file",
+    );
     let record = record_of(&sandbox, &window_id);
     first.kill_keeping_windows();
     let mut fake = replace_holder(
@@ -784,6 +853,13 @@ async fn a_window_whose_take_back_fails_is_kept_with_its_holder_and_child_alive(
         info.status,
         WindowStatus::Unknown,
         "a window whose take-back failed stays listed Unknown"
+    );
+    let next_boot = boot_of(&info, "the next daemon that cannot write its boot file");
+    assert!(boot_file.is_dir(), "the fixture's directory must stay");
+    assert_ne!(
+        next_boot.0, first_boot.0,
+        "two daemons in a row that cannot write their boot file must each start their own \
+         series, so a reader does not order one's observations by the other's"
     );
     let candidates = candidate_names(&mut next).await;
     assert!(
@@ -1309,7 +1385,9 @@ async fn a_window_without_a_row_is_taken_back_from_its_holders_launch_record() {
         "the fixture, as opened",
     )
     .await;
-    let name = listed(&mut first, &sandbox, &window_id).await.name;
+    let first_listed = listed(&mut first, &sandbox, &window_id).await;
+    let first_boot = boot_of(&first_listed, "the first daemon");
+    let name = first_listed.name;
     let registered_name = listed(&mut first, &sandbox, &registered).await.name;
     let record = record_of(&sandbox, &window_id);
     let older_record = record_of(&sandbox, &older);
@@ -1336,6 +1414,8 @@ async fn a_window_without_a_row_is_taken_back_from_its_holders_launch_record() {
         WindowStatus::Unknown,
         "a window taken back starts Unknown"
     );
+    // The database went with the row: the boot must not go with it.
+    assert_later_boot_of_the_same_series(first_boot, boot_of(&info, "the next daemon"));
     until_named(&mut next, &sandbox, &window_id, &name).await;
     until_named(&mut next, &sandbox, &registered, &registered_name).await;
     listed(&mut next, &sandbox, &older).await;

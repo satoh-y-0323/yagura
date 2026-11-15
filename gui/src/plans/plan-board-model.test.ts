@@ -498,7 +498,7 @@ describe('the window registry feeds the board directly', () => {
       { windowId: 'w-helper', name: 'helper' },
     ]);
 
-    registry.setStatus('w-owner', { status: 'exited' }, null);
+    registry.setStatus('w-owner', { status: 'exited' }, null, null);
     const afterExit: WindowEntry[] = get(registry).windows;
     expect(planOwner(detail, afterExit)).toEqual({ kind: 'none' });
     expect(ownerCandidates(detail, afterExit)).toEqual([{ windowId: 'w-helper', name: 'helper' }]);

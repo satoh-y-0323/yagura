@@ -119,7 +119,7 @@ describe('window registry tab order: removing a window', () => {
   it('drops a window from the tab order once its status becomes exited', () => {
     const registry = openRegistry('w-a', 'w-b', 'w-c');
 
-    registry.setStatus('w-b', { status: 'exited' }, null);
+    registry.setStatus('w-b', { status: 'exited' }, null, null);
 
     expect(tabOrderOf(registry)).toEqual(['w-a', 'w-c']);
   });
@@ -225,7 +225,7 @@ describe('window registry tab order: the multiset invariant holds on every path'
   it('holds after a window exits', () => {
     const registry = openRegistry('w-a', 'w-b', 'w-c');
 
-    registry.setStatus('w-b', { status: 'exited' }, null);
+    registry.setStatus('w-b', { status: 'exited' }, null, null);
 
     expectTabOrderCoversWindows(registry);
   });

@@ -602,6 +602,7 @@ async fn dispatch(
             status,
             unknown_reason,
             status_rev,
+            status_boot,
         } => {
             app.emit_event(
                 EVENT_STATUS,
@@ -610,6 +611,7 @@ async fn dispatch(
                     status,
                     unknown_reason,
                     status_rev,
+                    status_boot,
                 },
             );
             false

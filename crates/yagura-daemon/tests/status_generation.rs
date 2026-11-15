@@ -18,7 +18,9 @@ use tokio::io::AsyncReadExt;
 
 use yagura_daemon::waiter::StatusAt;
 use yagura_daemon::{DaemonConfig, WindowEntry};
-use yagura_protocol::{ClientMessage, DaemonMessage, DetectedStatus, UnknownReason, WindowStatus};
+use yagura_protocol::{
+    ClientMessage, DaemonMessage, DetectedStatus, StatusBoot, UnknownReason, WindowStatus,
+};
 use yagura_test_support::ipc::{Connection, read_daemon_frame};
 use yagura_test_support::paths::{unique_detection_dir, write_definition};
 
@@ -266,7 +268,11 @@ async fn window_list_reports_the_status_rev_matching_the_entrys_generation() {
 
 #[tokio::test]
 async fn status_changed_frames_carry_a_strictly_increasing_status_rev() {
-    let harness = common::Harness::start("status-rev-changed", two_rule_config("changed")).await;
+    let config = DaemonConfig {
+        status_boot: Some(StatusBoot { origin: 7, seq: 3 }),
+        ..two_rule_config("changed")
+    };
+    let harness = common::Harness::start("status-rev-changed", config).await;
     let opened = common::open_echo_window(&harness.registry, Some("status-rev-test")).await;
     let entry = opened.entry;
     let window_id = entry.window_id().to_string();
@@ -300,8 +306,18 @@ async fn status_changed_frames_carry_a_strictly_increasing_status_rev() {
             .expect_message("a StatusChanged push up to the idle transition")
         {
             DaemonMessage::StatusChanged {
-                status, status_rev, ..
+                status,
+                status_rev,
+                status_boot,
+                ..
             } => {
+                // The idle frame is a push: that transition starts after the attach.
+                assert_eq!(
+                    status_boot.map(|boot| (boot.origin, boot.seq)),
+                    Some((7, 3)),
+                    "every StatusChanged must name the boot the daemon was started with \
+                     (this one reports {status:?})"
+                );
                 if let Some(rev) = status_rev {
                     seen_revs.push(rev);
                 }

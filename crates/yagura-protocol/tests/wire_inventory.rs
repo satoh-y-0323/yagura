@@ -89,8 +89,8 @@ use yagura_protocol::{
     PlanTaskSpec, PlaybookState, PointerButton, PointerInput, PointerKind, ProfileCapability,
     ProfileCommandDetail, ProfileDetailEntry, ProfileGuidance, ProfileInfo, ProfileLimit,
     ProfileUnavailableKind, ReceivedReport, ReportOutcome, ReportTaskRef, ResolvedAssignment,
-    RestoreCandidate, ReviewMark, RoleEntry, RoomRef, TaskAssignment, TaskReport, TerminalSize,
-    TicketConfigInfo, TicketFieldInfo, TicketInfo, TicketResultInfo, TicketStateInfo,
+    RestoreCandidate, ReviewMark, RoleEntry, RoomRef, StatusBoot, TaskAssignment, TaskReport,
+    TerminalSize, TicketConfigInfo, TicketFieldInfo, TicketInfo, TicketResultInfo, TicketStateInfo,
     TicketSummary, TicketWorkspaceInfo, ToolAutoApprove, UnknownReason, ViewState, WheelInput,
     WindowInfo, WindowStatus as WireWindowStatus, WithdrawOutcome, WithdrawReason,
 };
@@ -306,6 +306,7 @@ impl Sample for ModelChoiceSource {
     }
 }
 
+wire_sample!(struct StatusBoot { origin, seq });
 wire_sample!(struct WindowInfo {
     window_id,
     name,
@@ -318,6 +319,7 @@ wire_sample!(struct WindowInfo {
     unknown_reason,
     detection_warning,
     status_rev,
+    status_boot,
     mcp_connected,
     status_reports_missing,
     queued_count,
@@ -891,6 +893,7 @@ fn daemon_message_corpus() -> Vec<DaemonMessage> {
             status,
             unknown_reason,
             status_rev,
+            status_boot,
         }),
         wire_sample!(DaemonMessage::WindowOpened {
             window_id,

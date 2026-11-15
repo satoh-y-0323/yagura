@@ -13,7 +13,7 @@ import { writable, type Readable } from 'svelte/store';
 import { bringToFront, MIN_WINDOW_SIZE, type Rect, type Size } from '../layout/float-layout';
 import { tileRects } from '../layout/tile-layout';
 import { reorderTabs } from '../layout/tab-order';
-import type { DetectedStatusView } from '../ipc/session-boundary';
+import type { DetectedStatusView, StatusBoot } from '../ipc/session-boundary';
 import type { WindowEventHandlers, WindowInfo } from '../ipc/session-client';
 
 /** Screen position of a window pane. */
@@ -57,6 +57,8 @@ export interface WindowEntry {
    * this window has named one.
    */
   statusRev: number | null;
+  /** The daemon boot `statusRev` was counted in, `null` when none was named. */
+  statusBoot: StatusBoot | null;
   /** Exit code once the child has exited, `null` otherwise. */
   exitCode: number | null;
   /** The room the window belongs to, `null` when the daemon reported none. */
@@ -110,10 +112,16 @@ export interface WindowRegistry extends Readable<WindowRegistryState> {
   closeWindow: (windowId: string) => void;
   /**
    * Records a status change; `exited` removes the window. The pair replaces
-   * the entry's whole `detected`, and is discarded when `statusRev` names a
-   * generation older than the one the entry already holds.
+   * the entry's whole `detected`, and is discarded when `(statusBoot,
+   * statusRev)` names an observation older than the one the entry already
+   * holds.
    */
-  setStatus: (windowId: string, detected: DetectedStatusView, statusRev: number | null) => void;
+  setStatus: (
+    windowId: string,
+    detected: DetectedStatusView,
+    statusRev: number | null,
+    statusBoot: StatusBoot | null
+  ) => void;
   /** Routes this window's events to `handlers`. */
   registerWindowHandlers: (windowId: string, handlers: WindowEventHandlers) => void;
   /** Returns the handlers of a window, or `undefined` when it is not open. */
@@ -238,7 +246,7 @@ export function createWindowRegistry(): WindowRegistry {
       update((state) => withName(state, windowId, name));
     },
     closeWindow: removeWindow,
-    setStatus: (windowId, detected, statusRev) => {
+    setStatus: (windowId, detected, statusRev, statusBoot) => {
       if (detected.status === 'exited') {
         removeWindow(windowId);
         return;
@@ -246,7 +254,9 @@ export function createWindowRegistry(): WindowRegistry {
       update((state) => ({
         ...state,
         windows: state.windows.map((entry) =>
-          entry.windowId === windowId ? withObservedPair(entry, detected, statusRev) : entry
+          entry.windowId === windowId
+            ? withObservedPair(entry, detected, statusRev, statusBoot)
+            : entry
         ),
       }));
     },
@@ -358,6 +368,7 @@ function toEntry(info: WindowInfo, zOrder: number): WindowEntry {
     cwd: info.cwd,
     detected: info.detected,
     statusRev: info.status_rev ?? null,
+    statusBoot: info.status_boot ?? null,
     exitCode: info.exit_code,
     room: roomOf(info),
     detectionWarning: info.detection_warning ?? null,
@@ -385,22 +396,42 @@ function withName(state: WindowRegistryState, windowId: string, name: string): W
 }
 
 /**
- * Applies an observation of a window's status pair, unless it was taken at a
- * generation older than the one the entry holds.
+ * Applies an observation of a window's status pair, unless its key
+ * `(statusBoot, statusRev)` is older than the one the entry holds.
  *
- * An observation naming no generation is applied without moving the recorded
- * one: the recorded generation is a high-water mark, so a stale numbered
- * observation arriving afterwards is still refused.
+ * Two boots of one origin order by `seq`, then by generation within one
+ * `seq`. An observation the entry's key cannot be ordered against (another
+ * origin, or a boot on one side only) is applied and its key taken whole:
+ * the next poll or event corrects a stale one, while refusing could pin the
+ * window to a pair from a daemon that is gone. Only when neither side names
+ * a boot is the recorded generation a high-water mark, kept by an
+ * observation that names none, so a stale numbered one arriving afterwards
+ * is still refused.
  */
 function withObservedPair(
   entry: WindowEntry,
   detected: DetectedStatusView,
-  statusRev: number | null
+  statusRev: number | null,
+  statusBoot: StatusBoot | null
 ): WindowEntry {
-  if (statusRev !== null && entry.statusRev !== null && statusRev < entry.statusRev) {
+  const held = entry.statusBoot;
+  const olderRev = statusRev !== null && entry.statusRev !== null && statusRev < entry.statusRev;
+  if (statusBoot === null && held === null) {
+    return olderRev ? entry : { ...entry, detected, statusRev: statusRev ?? entry.statusRev };
+  }
+  if (statusBoot === null || held === null || statusBoot.origin !== held.origin) {
+    return { ...entry, detected, statusRev, statusBoot };
+  }
+  const sameSeq = statusBoot.seq === held.seq;
+  if (statusBoot.seq < held.seq || (sameSeq && olderRev)) {
     return entry;
   }
-  return { ...entry, detected, statusRev: statusRev ?? entry.statusRev };
+  return {
+    ...entry,
+    detected,
+    statusRev: statusRev ?? (sameSeq ? entry.statusRev : null),
+    statusBoot,
+  };
 }
 
 /**
@@ -419,7 +450,12 @@ function withSnapshot(state: WindowRegistryState, info: WindowInfo): WindowRegis
       entry.windowId === info.window_id
         ? withQueuedCount(
             {
-              ...withObservedPair(entry, info.detected, info.status_rev ?? null),
+              ...withObservedPair(
+                entry,
+                info.detected,
+                info.status_rev ?? null,
+                info.status_boot ?? null
+              ),
               name: info.name,
               room: roomOf(info),
               detectionWarning: info.detection_warning ?? null,

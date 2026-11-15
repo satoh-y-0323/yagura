@@ -2520,6 +2520,7 @@ mod tests {
             unknown_reason: None,
             detection_warning: None,
             status_rev: None,
+            status_boot: None,
             mcp_connected: None,
             status_reports_missing: None,
             queued_count: None,

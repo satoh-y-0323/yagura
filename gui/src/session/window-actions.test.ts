@@ -35,6 +35,7 @@ function makeEntry(overrides: Partial<WindowEntry> & { status?: WindowStatus } =
     cwd: 'C:\\Users\\dev\\project',
     detected: status === 'unknown' ? { status, reason: null } : { status },
     statusRev: null,
+    statusBoot: null,
     exitCode: null,
     room: null,
     detectionWarning: null,

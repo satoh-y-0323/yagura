@@ -1467,15 +1467,7 @@ impl IpcServer {
                             let Some(entry) = state.attached_entry() else {
                                 continue;
                             };
-                            // Built from the delivered value alone: reading the
-                            // entry back here would stamp this push with a
-                            // generation newer than the change it reports.
-                            let msg = DaemonMessage::StatusChanged {
-                                window_id: entry.window_id().to_string(),
-                                status: at.status.status(),
-                                unknown_reason: at.status.unknown_reason(),
-                                status_rev: Some(at.generation),
-                            };
+                            let msg = entry.status_changed(&at);
                             // A status change dropped by back pressure is
                             // handled like a skipped one below: the next change
                             // republishes the current status.
@@ -2661,12 +2653,7 @@ impl IpcServer {
         // One read of the published pair, so this snapshot's status, reason and
         // generation all describe the same transition.
         let at = entry.status_snapshot();
-        outbound.reply(&DaemonMessage::StatusChanged {
-            window_id: entry.window_id().to_string(),
-            status: at.status.status(),
-            unknown_reason: at.status.unknown_reason(),
-            status_rev: Some(at.generation),
-        });
+        outbound.reply(&entry.status_changed(&at));
     }
 
     /// Opens a new window through the registry, once the approval gate lets

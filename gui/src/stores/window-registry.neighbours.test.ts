@@ -53,7 +53,7 @@ describe('window handlers follow the window', () => {
     const registry = openRegistry('w1');
     registry.registerWindowHandlers('w1', HANDLERS);
 
-    registry.setStatus('w1', { status: 'exited' }, null);
+    registry.setStatus('w1', { status: 'exited' }, null, null);
 
     expect(registry.resolveWindowHandlers('w1')).toBeUndefined();
   });
@@ -178,26 +178,26 @@ describe('status generations', () => {
   it('applies a numbered observation to a window that has recorded no generation, whatever the number', () => {
     const registry = openRegistry('w1');
 
-    registry.setStatus('w1', { status: 'idle' }, -1);
+    registry.setStatus('w1', { status: 'idle' }, -1, null);
 
     expect(entryOf(registry, 'w1')).toMatchObject({ detected: { status: 'idle' }, statusRev: -1 });
   });
 
   it('refuses an observation older than the recorded generation and accepts an equal one', () => {
     const registry = openRegistry('w1');
-    registry.setStatus('w1', { status: 'idle' }, 5);
+    registry.setStatus('w1', { status: 'idle' }, 5, null);
 
-    registry.setStatus('w1', { status: 'running' }, 4);
+    registry.setStatus('w1', { status: 'running' }, 4, null);
     expect(entryOf(registry, 'w1').detected).toEqual({ status: 'idle' });
 
-    registry.setStatus('w1', { status: 'running' }, 5);
+    registry.setStatus('w1', { status: 'running' }, 5, null);
     expect(entryOf(registry, 'w1').detected).toEqual({ status: 'running' });
   });
 
   it('leaves the other windows alone when one window is observed', () => {
     const registry = openRegistry('w1', 'w2');
 
-    registry.setStatus('w1', { status: 'idle' }, 1);
+    registry.setStatus('w1', { status: 'idle' }, 1, null);
 
     expect(entryOf(registry, 'w2').detected).toEqual({ status: 'running' });
   });

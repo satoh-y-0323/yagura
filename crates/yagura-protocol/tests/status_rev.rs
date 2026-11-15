@@ -37,6 +37,7 @@ fn sample_window_info(status_rev: Option<u64>) -> WindowInfo {
         unknown_reason: None,
         detection_warning: None,
         status_rev,
+        status_boot: None,
         mcp_connected: None,
         status_reports_missing: None,
         queued_count: None,
@@ -70,6 +71,7 @@ fn status_changed(status_rev: Option<u64>) -> DaemonMessage {
         status: WindowStatus::WaitingInput,
         unknown_reason: None,
         status_rev,
+        status_boot: None,
     }
 }
 
