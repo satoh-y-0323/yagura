@@ -1215,12 +1215,12 @@ fn a_run_of_presses_is_written_press_by_press_in_the_windows_form() {
     for (form, modes) in [("records", win32(0)), ("legacy", kitty(0))] {
         let press = ClientWrite::from_presses(std::slice::from_ref(&ctrl_c), modes).press();
         if press != Some(NamedPress::CtrlC) {
-            failures.push(format!("w6 Ctrl+C written as {form}: {press:?}"));
+            failures.push(format!("Ctrl+C written as {form}: {press:?}"));
         }
     }
     let press = ClientWrite::from_presses(&[esc, up], win32(0)).press();
     if press.is_some() {
-        failures.push(format!("w7 Esc then Up: {press:?}"));
+        failures.push(format!("Esc then Up: {press:?}"));
     }
     assert!(
         failures.is_empty(),
@@ -1265,7 +1265,7 @@ fn text_from_the_gui_is_written_unchanged() {
     for (what, message) in messages {
         let press = ClientWrite::from_message(&message, input_state()).and_then(|w| w.press());
         if press.is_some() {
-            failures.push(format!("w5 a {what} holding 0x03: {press:?}"));
+            failures.push(format!("a {what} holding 0x03: {press:?}"));
         }
     }
     assert!(
@@ -1289,17 +1289,17 @@ fn a_key_press_from_the_gui_is_encoded_for_the_window() {
     // key and modifiers both.
     let mut failures: Vec<String> = Vec::new();
     let cases: [(&str, Key, Modifiers, Option<NamedPress>); 6] = [
-        ("w1 Ctrl+C", Key::Char('c'), CTRL, Some(NamedPress::CtrlC)),
-        ("w2 Ctrl+D", Key::Char('d'), CTRL, None),
+        ("Ctrl+C", Key::Char('c'), CTRL, Some(NamedPress::CtrlC)),
+        ("Ctrl+D", Key::Char('d'), CTRL, None),
         (
-            "w3 Esc",
+            "Esc",
             Key::Named(NamedKey::Escape),
             NONE,
             Some(NamedPress::Escape),
         ),
-        ("w4 c", Key::Char('c'), NONE, None),
-        ("w4 Ctrl+Shift+C", Key::Char('c'), CTRL_SHIFT, None),
-        ("w4 Alt+C", Key::Char('c'), ALT, None),
+        ("c", Key::Char('c'), NONE, None),
+        ("Ctrl+Shift+C", Key::Char('c'), CTRL_SHIFT, None),
+        ("Alt+C", Key::Char('c'), ALT, None),
     ];
     for (name, key, mods, expected) in cases {
         let message = ClientMessage::Key(KeyInput { key, mods });

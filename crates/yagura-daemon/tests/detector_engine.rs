@@ -938,6 +938,48 @@ async fn detector_handle_suppresses_echo_before_publishing_activity() {
         "notify_input(EchoOnly) sent before the output must suppress the echo, so no \
          activity may publish before the quiescence that follows it"
     );
+    drop(handle);
+
+    let mut failures: Vec<String> = Vec::new();
+
+    // A definition without a turn-end key has no hold to end, so the daemon
+    // moving the CLI on reaches nothing and the echo stays attributed.
+    let engine = new_engine(TIME_BOTH_DEF, &config);
+    let screen = engine.screen().clone();
+    let (handle, mut statuses) = DetectorHandle::spawn(engine.into_engine());
+    handle.notify_input(InputEcho::EchoOnly);
+    handle.notify_cli_moved_on();
+    feed_handle(&screen, &handle, b"x");
+    let first = next_status(&mut statuses).await.status;
+    if first != DetectedStatus::Idle {
+        failures.push(format!(
+            "the daemon moving the CLI on reached a definition without a turn-end key: \
+             {first:?} published first"
+        ));
+    }
+    drop(handle);
+
+    // An interrupt's write disarms the echo the way a submission does, so the
+    // output after it counts as activity.
+    let engine = new_engine(TIME_BOTH_DEF, &config);
+    let screen = engine.screen().clone();
+    let (handle, mut statuses) = DetectorHandle::spawn(engine.into_engine());
+    handle.notify_input(InputEcho::EchoOnly);
+    handle.notify_interrupt_input(InputEcho::MayStartWork);
+    feed_handle(&screen, &handle, b"x");
+    let first = next_status(&mut statuses).await.status;
+    if first != DetectedStatus::Running {
+        failures.push(format!(
+            "the output after an interrupt's write was not counted as activity: \
+             {first:?} published first"
+        ));
+    }
+
+    assert!(
+        failures.is_empty(),
+        "an input notification attributed the output after it wrongly:\n{}",
+        failures.join("\n")
+    );
 }
 
 #[tokio::test]

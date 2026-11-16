@@ -32,7 +32,7 @@ use tracing::Instrument;
 use yagura_protocol::{DetectedStatus, UnknownReason, WindowStatus};
 
 use crate::DaemonConfig;
-use crate::detector::definition::{Definition, Region};
+use crate::detector::definition::{Definition, Region, TurnEndKey};
 use crate::detector::reading::{self, CopyCounts, SharedCopy};
 use crate::detector::source::TurnReport;
 use crate::handoff;
@@ -533,21 +533,17 @@ impl DetectionEngine {
     pub fn on_input(&mut self, echo: InputEcho) {
         self.attribute_input(echo);
         if echo == InputEcho::MayStartWork {
-            self.release_press_hold("submission");
             self.note_submission();
         }
     }
 
     /// Records that an interrupt was written to the PTY, before the write
-    /// itself: attributed as [`DetectionEngine::on_input`] does and ending a
-    /// press's hold, but submitting nothing, so it neither counts as the
-    /// start of a turn nor clears what the screen has shown of the turn-end
-    /// key. Never changes the confirmed status, so it returns nothing.
+    /// itself: attributed as [`DetectionEngine::on_input`] does, but it starts
+    /// no turn, so it neither releases a press's hold, counts as a submission
+    /// nor clears what the screen has shown of the turn-end key. Never changes
+    /// the confirmed status, so it returns nothing.
     pub fn on_interrupt_input(&mut self, echo: InputEcho) {
         self.attribute_input(echo);
-        if echo == InputEcho::MayStartWork {
-            self.release_press_hold("interrupt_write");
-        }
     }
 
     /// Records that the definition's turn-end key was pressed, after the
@@ -562,11 +558,7 @@ impl DetectionEngine {
     /// reopen it. A press is not a report. Evaluates at once when it closed
     /// something; returns `None` otherwise.
     pub fn on_press(&mut self, press: NamedPress) -> Option<DetectedStatus> {
-        let declared = self
-            .definition
-            .as_ref()
-            .and_then(|definition| definition.turn_end_key.as_ref())
-            .map(|turn_end_key| turn_end_key.key);
+        let declared = self.turn_end_key().map(|turn_end_key| turn_end_key.key);
         if declared != Some(press) || !self.turn_end_key_seen {
             return None;
         }
@@ -609,9 +601,10 @@ impl DetectionEngine {
         }
     }
 
-    /// The one place a submission is recorded, so the turn-end key's sighting
-    /// is cleared exactly where a turn may start.
+    /// The one place a turn may start: records the submission, clears the
+    /// turn-end key's sighting and ends a press's hold.
     fn note_submission(&mut self) {
+        self.release_press_hold("submission");
         self.submitted = true;
         if self.turn_end_key_seen {
             self.turn_end_key_seen = false;
@@ -849,10 +842,15 @@ impl DetectionEngine {
 
     /// Whether `bottom` shows the definition's `turn_end_key.shown`.
     fn shows_turn_end_key(&self, bottom: &[String]) -> bool {
+        self.turn_end_key()
+            .is_some_and(|turn_end_key| bottom.iter().any(|line| turn_end_key.shown.is_match(line)))
+    }
+
+    /// The definition's `[turn_end_key]`, if it declares one.
+    fn turn_end_key(&self) -> Option<&TurnEndKey> {
         self.definition
             .as_ref()
             .and_then(|definition| definition.turn_end_key.as_ref())
-            .is_some_and(|turn_end_key| bottom.iter().any(|line| turn_end_key.shown.is_match(line)))
     }
 
     /// Reads the model once and evaluates that screen, or degrades when the
@@ -977,8 +975,9 @@ impl DetectionEngine {
     /// closed -- later output does not reopen it -- until the next opening
     /// report (or, after a press closed it, until the hold ends: see
     /// [`DetectionEngine::on_press`]), so a redraw long after an interrupt no
-    /// report announced cannot bring `Running` back. Ends a taken-back window's inherited turn by the
-    /// same limits, so both are judged before new output moves the quiet time.
+    /// report announced cannot bring `Running` back. Ends a taken-back
+    /// window's inherited turn by the same limits, so both are judged before
+    /// new output moves the quiet time.
     fn close_quiet_turn(&mut self, now: Instant) {
         if self.report_turn_limits().reached(now) {
             self.turn = TurnReport::Closed;
@@ -1364,10 +1363,7 @@ impl DetectorHandle {
         let (status_tx, status_rx) = mpsc::unbounded_channel();
         let report_watch = Arc::clone(&engine.report_watch);
         let output_pending = Arc::new(AtomicBool::new(false));
-        let has_turn_end_key = engine
-            .definition
-            .as_ref()
-            .is_some_and(|definition| definition.turn_end_key.is_some());
+        let has_turn_end_key = engine.turn_end_key().is_some();
 
         let mut engine = engine;
         let pending = Arc::clone(&output_pending);

@@ -259,7 +259,7 @@ async fn the_grace_runs_from_the_first_running_the_screen_confirmed() {
         "the estimate closes the stale time after its declaration plus the wait, not after the answer"
     );
 
-    // Stage g: the declared key's press ends the estimate a taken-back engine
+    // The declared key's press ends the estimate a taken-back engine
     // was born into, so the next running screen starts a turn of its own and
     // is marked once its grace elapses.
     let mut failures: Vec<String> = Vec::new();
@@ -273,12 +273,12 @@ async fn the_grace_runs_from_the_first_running_the_screen_confirmed() {
         g.feed_at(at, &running()).await;
     }
     if g.gap_at(5_000 + GRACE_MS - 500).await {
-        failures.push("G1 marked inside the grace of the turn after the press".to_string());
+        failures.push("marked inside the grace of the turn after the press".to_string());
     }
     g.feed_at(5_000 + GRACE_MS, &running()).await;
     if !g.gap_at(5_000 + GRACE_MS + 600).await {
         failures.push(
-            "G1 the press did not end the taken-back estimate, so the turn after it was never marked"
+            "the press did not end the taken-back estimate, so the turn after it was never marked"
                 .to_string(),
         );
     }
