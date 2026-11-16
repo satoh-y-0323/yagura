@@ -1370,9 +1370,24 @@ pub async fn open_echo_window(
     registry: &WindowRegistry,
     detection: Option<&str>,
 ) -> yagura_daemon::window::OpenedWindow {
+    open_registry_window(
+        registry,
+        yagura_test_support::process::echo_child_command(),
+        detection,
+    )
+    .await
+}
+
+/// Opens a window running `command` under `registry`, optionally selecting `detection`
+/// as its per-window detection definition.
+pub async fn open_registry_window(
+    registry: &WindowRegistry,
+    command: Vec<String>,
+    detection: Option<&str>,
+) -> yagura_daemon::window::OpenedWindow {
     registry
         .open(OpenWindowRequest {
-            command: yagura_test_support::process::echo_child_command(),
+            command,
             cwd: None,
             name: None,
             vendor: None,
@@ -1380,7 +1395,7 @@ pub async fn open_echo_window(
             on_name_taken: Default::default(),
         })
         .await
-        .expect("registry.open should spawn echo_child (a detection warning must not fail it)")
+        .expect("registry.open should spawn the child (a detection warning must not fail it)")
 }
 
 /// Writes `bytes` directly to a window's PTY input, bypassing the IPC `input`
@@ -2957,7 +2972,9 @@ pub const TURN_END_KEY_MARK: &[u8] = b"\r\nAllow? (y/n)";
 
 /// Writes, under `dir`, a definition that confirms at once and reads only the last line,
 /// declaring `escape` as the key whose press ends the turn once the footer named it.
+/// `term_script`'s ready line reads as idle, so a test can see the child take commands.
 pub fn write_turn_end_key_definition(dir: &Path) {
+    let script_ready = String::from_utf8_lossy(views::SCRIPT_READY);
     let definition = format!(
         r#"schema_version = 1
 name = "{TURN_END_KEY_DETECTION}"
@@ -2965,6 +2982,12 @@ bottom_line_count = 1
 
 [debounce]
 confirm_ms = 0
+
+[[rules]]
+status = "idle"
+pattern = '{script_ready}'
+priority = 5
+region = "bottom"
 
 [[rules]]
 status = "waiting_approval"
@@ -3032,20 +3055,20 @@ pub async fn published_until(
     }
 }
 
-/// Brings `entry`, a window running `echo_child` under [`TURN_END_KEY_DETECTION`], to a
-/// reported turn in flight over a ready screen, after the footer named the key.
+/// Brings `entry`, a window running `term_script` ([`views::script_argv`]) under
+/// [`TURN_END_KEY_DETECTION`], to a reported turn in flight over a ready screen, after the
+/// footer named the key.
+///
+/// The child draws only what [`views::entry_script_write`] asks of it and echoes nothing,
+/// so the screen is the same on every platform: a cooked Unix pty echoes input at once,
+/// and an echoing child repeats a line only after the next one began, which would leave
+/// the footer on the later bottom line.
 pub async fn open_turn_after_the_key_was_named(entry: &yagura_daemon::WindowEntry) {
-    entry
-        .session()
-        .write_input(TURN_END_KEY_FOOTER)
-        .await
-        .expect("write the footer");
+    // A command written before the child leaves cooked input would be echoed as text.
+    wait_for_entry_status(entry, WindowStatus::Idle).await;
+    views::entry_script_write(entry, TURN_END_KEY_FOOTER).await;
     wait_for_entry_status(entry, WindowStatus::Running).await;
-    entry
-        .session()
-        .write_input(TURN_END_KEY_READY)
-        .await
-        .expect("write the ready line");
+    views::entry_script_write(entry, TURN_END_KEY_READY).await;
     wait_for_entry_status(entry, WindowStatus::WaitingInput).await;
     assert!(
         entry.record_status_event(WindowStatus::Running),
@@ -3071,11 +3094,7 @@ pub async fn interrupt_with_the_turn_end_key(entry: &yagura_daemon::WindowEntry)
         entry.record_status_event(WindowStatus::Running),
         "a living window takes a report"
     );
-    entry
-        .session()
-        .write_input(TURN_END_KEY_MARK)
-        .await
-        .expect("write the mark");
+    views::entry_script_write(entry, TURN_END_KEY_MARK).await;
     let before_the_mark = published_until(&mut published, WindowStatus::WaitingApproval).await;
     assert_eq!(
         before_the_mark,
@@ -3083,10 +3102,6 @@ pub async fn interrupt_with_the_turn_end_key(entry: &yagura_daemon::WindowEntry)
         "an interrupt pressing the turn-end key must close the turn at once and keep the \
          running report after it from opening it again"
     );
-    entry
-        .session()
-        .write_input(TURN_END_KEY_READY)
-        .await
-        .expect("write the ready line");
+    views::entry_script_write(entry, TURN_END_KEY_READY).await;
     wait_for_entry_status(entry, WindowStatus::WaitingInput).await;
 }

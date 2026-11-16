@@ -1532,7 +1532,7 @@ async fn a_stops_status_is_decided_where_its_door_ends() {
     let pressed = setup
         .h
         .open_delivering(
-            yagura_test_support::process::echo_child_command(),
+            common::views::script_argv(),
             Some(common::TURN_END_KEY_DETECTION),
         )
         .await;
@@ -1549,11 +1549,7 @@ async fn a_stops_status_is_decided_where_its_door_ends() {
     );
     // On the relay's connection, so the daemon has taken the door's notice before the mark.
     query_status(&mut relayed.upstream, &pressed).await;
-    entry
-        .session()
-        .write_input(common::TURN_END_KEY_MARK)
-        .await
-        .expect("write the mark");
+    common::views::entry_script_write(&entry, common::TURN_END_KEY_MARK).await;
     let before_the_mark =
         common::published_until(&mut published, WindowStatus::WaitingApproval).await;
     assert!(

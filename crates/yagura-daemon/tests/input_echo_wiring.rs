@@ -105,7 +105,12 @@ async fn control_origin_is_always_may_start_work() {
         RESIZE_IRRELEVANT_MS,
     );
     let registry = Arc::new(WindowRegistry::new(config));
-    let entry = open_echo_entry(&registry).await;
+    let window_id = common::open_registry_window(&registry, common::views::script_argv(), None)
+        .await
+        .window_id;
+    let entry = registry
+        .get(&window_id)
+        .expect("the window this call just opened must exist in the registry");
     common::open_turn_after_the_key_was_named(&entry).await;
     common::interrupt_with_the_turn_end_key(&entry).await;
 }

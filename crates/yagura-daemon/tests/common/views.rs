@@ -43,6 +43,15 @@ pub async fn script_write(h: &Harness, window_id: &str, bytes: &[u8]) {
     h.write_input(window_id, &script_command(bytes)).await;
 }
 
+/// Makes `entry`'s child write `bytes` to its terminal.
+pub async fn entry_script_write(entry: &yagura_daemon::WindowEntry, bytes: &[u8]) {
+    entry
+        .session()
+        .write_input(&script_command(bytes))
+        .await
+        .expect("write a term_script command");
+}
+
 /// Makes the child write `bytes`, then waits until the window's model shows
 /// `marker`, which `bytes` must end with.
 pub async fn script_write_and_wait(h: &Harness, window_id: &str, bytes: &[u8], marker: &str) {

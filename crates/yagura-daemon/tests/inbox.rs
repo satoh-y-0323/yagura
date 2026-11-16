@@ -678,7 +678,7 @@ async fn a_wait_registered_with_a_pushable_parcel_returns_at_once() {
     // turn-end key left, so the next running report opens the turn again.
     let pressed = h
         .open(
-            yagura_test_support::process::echo_child_command(),
+            common::views::script_argv(),
             Some(common::TURN_END_KEY_DETECTION),
         )
         .await;
@@ -693,11 +693,7 @@ async fn a_wait_registered_with_a_pushable_parcel_returns_at_once() {
     common::send(&mut door, &printed()).await;
     // On the door's own connection, so the daemon takes it after the notice.
     common::report_status(&mut door, &pressed, WindowStatus::Running).await;
-    entry
-        .session()
-        .write_input(common::TURN_END_KEY_MARK)
-        .await
-        .expect("write the mark");
+    common::views::entry_script_write(&entry, common::TURN_END_KEY_MARK).await;
     let before_the_mark =
         common::published_until(&mut published, WindowStatus::WaitingApproval).await;
     assert!(
