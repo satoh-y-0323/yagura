@@ -1101,6 +1101,7 @@ async fn a_screen_waiting_on_the_user_is_not_counted_as_the_turns_silence() {
 
     stage_4_holds_do_not_reset_the_stale_clock(&mut failures).await;
     stage_5_a_lost_screen_inside_the_hold(&mut failures).await;
+    stage_5b_a_screen_lost_for_longer_than_the_quiet_time(&mut failures).await;
 
     assert!(
         failures.is_empty(),
@@ -1197,4 +1198,49 @@ async fn stage_5_a_lost_screen_inside_the_hold(failures: &mut Vec<String>) {
             "stage 5 (iii) after the quiet time: {later:?}, expected WaitingInput"
         ));
     }
+}
+
+/// Stage 5b: a lost screen is not a wait on the user, so the silence it spans
+/// is counted. Lost for longer than the quiet time, the turn is over by the
+/// time the screen is back, and later output does not bring `Running` back.
+async fn stage_5b_a_screen_lost_for_longer_than_the_quiet_time(failures: &mut Vec<String>) {
+    let mut driver = Driver::synthetic(SCREEN_DEF);
+    driver.feed_at(0, &idle()).await;
+    driver.report_at(200, WindowStatus::Running).await;
+    driver.feed_at(1_000, &approval()).await;
+    let lost_at = 1_000 + TURN_QUIET_MS + 700;
+    driver.advance_to(lost_at).await;
+    driver.engine.lose_screen();
+    driver.sample();
+    if driver.engine.detected() != DetectedStatus::Unknown(UnknownReason::ScreenLost) {
+        failures.push("stage 5b precondition: the screen was not lost at once".to_string());
+    }
+    let back_at = lost_at + TURN_QUIET_MS + 700;
+    driver.advance_to(back_at - 1).await;
+    driver.feed_at(back_at, &idle()).await;
+    let restored = driver.detected_at(back_at + 50).await;
+    if restored != DetectedStatus::WaitingInput {
+        failures.push(format!(
+            "stage 5b precondition: the repaint did not restore trust, {restored:?} at +50 ms"
+        ));
+    }
+    let event_at = back_at + 100;
+    driver.feed_at(event_at, CHUNK).await;
+    driver.advance_to(back_at + TURN_QUIET_MS - 500).await;
+    check_window(
+        failures,
+        &driver,
+        "stage 5b (i) while the screen is lost",
+        lost_at + 1,
+        back_at - 1,
+        |d| d == DetectedStatus::Unknown(UnknownReason::ScreenLost),
+    );
+    check_window(
+        failures,
+        &driver,
+        "stage 5b (ii) the silence while lost closed the turn",
+        event_at + 100,
+        back_at + TURN_QUIET_MS - 500,
+        |d| d == DetectedStatus::WaitingInput,
+    );
 }

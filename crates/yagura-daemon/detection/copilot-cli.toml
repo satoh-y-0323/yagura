@@ -34,7 +34,7 @@ region = "bottom"
 # `esc esc interrupt`, after a single Esc `esc again to interrupt`, and right
 # after a prompt is sent `esc esc edit prompt` on 1.0.101. The glyph before
 # `Working` changes from frame to frame, so the rule does not depend on it.
-# Only a key name may precede `interrupt`, so prose never reads as running.
+# A bare word before `interrupt` (`do not interrupt`) does not read as running.
 [[rules]]
 status = "running"
 pattern = '(?:^|\s)(?:esc|(?:ctrl|alt|shift|cmd|meta|option)\+\S+) (?:again to )?interrupt\b|\besc esc edit prompt\b'

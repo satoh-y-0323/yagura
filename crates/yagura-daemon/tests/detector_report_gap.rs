@@ -47,6 +47,9 @@ priority = 30
 region = "bottom"
 "#;
 
+/// Output that changes no cell: it keeps a presumed turn from going quiet.
+const CHUNK: &[u8] = b"[?25h";
+
 const GRACE_MS: u64 = REPORT_GAP_GRACE.as_secs() * 1_000;
 const QUIET_MS: u64 = TURN_ACTIVE_QUIET.as_secs() * 1_000;
 const STALE_MS: u64 = TURN_REPORT_STALE.as_secs() * 1_000;
@@ -216,7 +219,34 @@ async fn the_grace_runs_from_the_first_running_the_screen_confirmed() {
     }
     assert!(
         !d.gap_at(at + GRACE_MS + 600).await,
-        "an answered approval re-anchors the estimate at the answer"
+        "an answered approval keeps the estimate open: its start moves back by the wait, not to the answer"
+    );
+
+    // Stage e: the approval starts after the estimate was declared. Its
+    // wait moves the estimate's start back by the wait only, so the estimate
+    // still closes the stale time after the declaration plus the wait; a
+    // start moved to the answer would keep it open for the time already spent.
+    let hold_at = STALE_MS / 2;
+    let hold = 30_000;
+    let mut e = Driver::new(Some(ReportsExpected::FromTakeBack));
+    e.feed_at(0, &idle()).await;
+    for at in (4_000..hold_at).step_by(4_000) {
+        e.feed_at(at, CHUNK).await;
+    }
+    e.feed_at(hold_at, &approval()).await;
+    e.feed_at(hold_at + hold, &idle()).await;
+    for at in (hold_at + hold..=STALE_MS + hold + 8_000).step_by(2_000) {
+        e.feed_at(at, CHUNK).await;
+    }
+    let running_at = STALE_MS + hold + 10_000;
+    assert!(running_at < hold_at + hold + STALE_MS);
+    e.feed_at(running_at, &running()).await;
+    for offset in (1_000..=GRACE_MS).step_by(1_000) {
+        e.feed_at(running_at + offset, &running()).await;
+    }
+    assert!(
+        e.gap_at(running_at + GRACE_MS + 600).await,
+        "the estimate closes the stale time after its declaration plus the wait, not after the answer"
     );
 }
 
