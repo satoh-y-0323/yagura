@@ -1476,7 +1476,14 @@ async fn write_json_frame<S: tokio::io::AsyncWrite + Unpin>(
 /// waiting for input.
 #[tokio::test]
 async fn a_stops_status_is_decided_where_its_door_ends() {
-    let setup = Setup::start_with_shipped_profiles().await;
+    let setup = Setup::start_with_config(Screen::Ready, true, |config| {
+        let dir = config
+            .detection_dir
+            .as_deref()
+            .expect("the configuration names a detection directory");
+        common::write_turn_end_key_definition(dir);
+    })
+    .await;
     let args = ["--hook", "grok-build", "Stop"];
     let mut client = setup.h.connect().await;
     let pending = || setup.entry().inbox().pending_count();
@@ -1519,6 +1526,41 @@ async fn a_stops_status_is_decided_where_its_door_ends() {
     drop(relayed.upstream);
     wait_until_status(&mut client, &setup.window_id, WindowStatus::WaitingInput).await;
     until_pending(&setup, 1).await;
+
+    // Printed after a press of the turn-end key: the CLI goes on with the block, which ends
+    // the press's hold before the block's own running is recorded.
+    let pressed = setup
+        .h
+        .open_delivering(
+            yagura_test_support::process::echo_child_command(),
+            Some(common::TURN_END_KEY_DETECTION),
+        )
+        .await;
+    let entry = setup.h.registry.get(&pressed).expect("window exists");
+    common::open_turn_after_the_key_was_named(&entry).await;
+    common::interrupt_with_the_turn_end_key(&entry).await;
+    entry.inbox().deposit(Parcel::new("a", "PARCEL-PRESSED"));
+    let mut published = entry.subscribe_status();
+    let mut relayed = relay_door(&setup.h, &pressed, &args, first_stop(), Printed::Forward).await;
+    assert!(
+        String::from_utf8_lossy(&relayed.output.stdout).contains("PARCEL-PRESSED"),
+        "{}",
+        describe(&relayed.output)
+    );
+    // On the relay's connection, so the daemon has taken the door's notice before the mark.
+    query_status(&mut relayed.upstream, &pressed).await;
+    entry
+        .session()
+        .write_input(common::TURN_END_KEY_MARK)
+        .await
+        .expect("write the mark");
+    let before_the_mark =
+        common::published_until(&mut published, WindowStatus::WaitingApproval).await;
+    assert!(
+        before_the_mark.contains(&WindowStatus::Running),
+        "a stop's block printed after a press of the turn-end key must end the press's \
+         hold, so the block continues the turn; published {before_the_mark:?}"
+    );
 }
 
 /// A stop's block publishes no status before its door ends: the first status published
@@ -1550,7 +1592,7 @@ async fn a_stops_door_publishes_no_status_before_its_end_nor_over_a_newer_one() 
         "{}",
         describe(&relayed.output)
     );
-    let before_running = published_until(&mut published, WindowStatus::Running).await;
+    let before_running = common::published_until(&mut published, WindowStatus::Running).await;
     assert!(
         before_running.is_empty(),
         "a block publishes no status before its door says it printed; published {before_running:?} first"
@@ -1577,29 +1619,11 @@ async fn a_stops_door_publishes_no_status_before_its_end_nor_over_a_newer_one() 
     drop(relayed.upstream);
     until_pending(&setup, 1).await;
     common::report_status(&mut client, &setup.window_id, WindowStatus::Running).await;
-    let before_the_mark = published_until(&mut published, WindowStatus::Running).await;
+    let before_the_mark = common::published_until(&mut published, WindowStatus::Running).await;
     assert!(
         before_the_mark.is_empty(),
         "the end of a door that began before the newer status must not overwrite it; published {before_the_mark:?} before the later report"
     );
-}
-
-/// The statuses `published` carries before the first `mark`.
-async fn published_until(
-    published: &mut tokio::sync::broadcast::Receiver<yagura_daemon::waiter::StatusAt>,
-    mark: WindowStatus,
-) -> Vec<WindowStatus> {
-    let mut before = Vec::new();
-    loop {
-        let at = tokio::time::timeout(yagura_test_support::HANG_GUARD, published.recv())
-            .await
-            .unwrap_or_else(|_| panic!("{mark:?} is published"))
-            .expect("the window's statuses are published");
-        if at.status.status() == mark {
-            return before;
-        }
-        before.push(at.status.status());
-    }
 }
 
 /// Polls the window's inbox until `count` parcels wait in it; the deadline only detects a

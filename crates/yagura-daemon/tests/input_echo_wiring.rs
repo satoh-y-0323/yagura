@@ -85,14 +85,29 @@ fn message_write_containing_carriage_return_is_may_start_work() {
     );
 }
 
-#[test]
-fn control_origin_is_always_may_start_work() {
+#[tokio::test]
+async fn control_origin_is_always_may_start_work() {
     assert_eq!(
         classify_input_echo(&[0x03], InputOrigin::Control),
         InputEcho::MayStartWork,
         "an interrupt byte sequence delivered by interrupt_window is never line editing, \
          regardless of its payload"
     );
+
+    // Through a real window: the window tells the detector of an interrupt's write as an
+    // interrupt, not as a submission, so the turn-end key it presses still closes the turn.
+    let dir = detection_dir("control-press");
+    common::write_turn_end_key_definition(&dir);
+    let config = detection_config(
+        &dir,
+        common::TURN_END_KEY_DETECTION,
+        ECHO_SUPPRESS_MS,
+        RESIZE_IRRELEVANT_MS,
+    );
+    let registry = Arc::new(WindowRegistry::new(config));
+    let entry = open_echo_entry(&registry).await;
+    common::open_turn_after_the_key_was_named(&entry).await;
+    common::interrupt_with_the_turn_end_key(&entry).await;
 }
 
 #[test]
@@ -262,24 +277,6 @@ async fn open_echo_entry(registry: &Arc<WindowRegistry>) -> Arc<WindowEntry> {
         .expect("the window this call just opened must exist in the registry")
 }
 
-/// Waits for `entry`'s confirmed status to be `expected`, failing at
-/// [`common::HANG_GUARD`].
-async fn wait_for_status(entry: &WindowEntry, expected: WindowStatus) {
-    let mut status = entry.watch_status();
-    let reached = tokio::time::timeout(
-        common::HANG_GUARD,
-        status.wait_for(|at| at.status.status() == expected),
-    )
-    .await
-    .is_ok_and(|seen| seen.is_ok());
-    assert!(
-        reached,
-        "window {} never reached {expected:?} (last seen {:?})",
-        entry.window_id(),
-        entry.current_status()
-    );
-}
-
 /// Collects every confirmed-status change broadcast on `rx` over `duration`. An empty
 /// result is a legitimate outcome, so each caller pairs it with a direct
 /// `current_status()` assertion and a vacuous pass cannot look like success.
@@ -323,7 +320,7 @@ async fn suppressed_interactive_echo_keeps_confirmed_idle() {
         .write_input(PROMPT_TEXT)
         .await
         .expect("write prompt line");
-    wait_for_status(&entry, WindowStatus::Idle).await;
+    common::wait_for_entry_status(&entry, WindowStatus::Idle).await;
 
     let mut statuses = entry.subscribe_status();
 
@@ -365,14 +362,14 @@ async fn disarmed_interactive_echo_reaches_running() {
         .write_input(PROMPT_TEXT)
         .await
         .expect("write prompt line");
-    wait_for_status(&entry, WindowStatus::Idle).await;
+    common::wait_for_entry_status(&entry, WindowStatus::Idle).await;
 
     entry
         .write_pty_input(b"abc", InputOrigin::Interactive)
         .await
         .expect("write_pty_input");
 
-    wait_for_status(&entry, WindowStatus::Running).await;
+    common::wait_for_entry_status(&entry, WindowStatus::Running).await;
 }
 
 // The same measurement for a write the daemon itself makes on behalf of an agent. Both
@@ -396,7 +393,7 @@ async fn suppressed_message_body_without_a_terminator_keeps_confirmed_idle() {
         .write_input(PROMPT_TEXT)
         .await
         .expect("write prompt line");
-    wait_for_status(&entry, WindowStatus::Idle).await;
+    common::wait_for_entry_status(&entry, WindowStatus::Idle).await;
 
     let mut statuses = entry.subscribe_status();
 
@@ -438,14 +435,14 @@ async fn message_write_containing_carriage_return_reaches_running() {
         .write_input(PROMPT_TEXT)
         .await
         .expect("write prompt line");
-    wait_for_status(&entry, WindowStatus::Idle).await;
+    common::wait_for_entry_status(&entry, WindowStatus::Idle).await;
 
     entry
         .write_pty_input(b"abc\r", InputOrigin::Message)
         .await
         .expect("write_pty_input");
 
-    wait_for_status(&entry, WindowStatus::Running).await;
+    common::wait_for_entry_status(&entry, WindowStatus::Running).await;
 }
 
 #[tokio::test]
@@ -464,7 +461,7 @@ async fn running_survives_suppressed_interactive_keystrokes_past_after_ms() {
         .write_input(b"hello")
         .await
         .expect("write hello");
-    wait_for_status(&entry, WindowStatus::Running).await;
+    common::wait_for_entry_status(&entry, WindowStatus::Running).await;
 
     let mut statuses = entry.subscribe_status();
 
@@ -516,7 +513,7 @@ async fn resize_w1_suppressed_redraw_output_keeps_confirmed_idle() {
         .write_input(PROMPT_TEXT)
         .await
         .expect("write prompt line");
-    wait_for_status(&entry, WindowStatus::Idle).await;
+    common::wait_for_entry_status(&entry, WindowStatus::Idle).await;
 
     // Arming a resize never closes an already-open activity band, so arming while the band
     // opened by `PROMPT_TEXT` is still inside `ACTIVITY_WINDOW_MS` would legitimately
@@ -567,7 +564,7 @@ async fn resize_w2_disarmed_redraw_output_reaches_running() {
         .write_input(PROMPT_TEXT)
         .await
         .expect("write prompt line");
-    wait_for_status(&entry, WindowStatus::Idle).await;
+    common::wait_for_entry_status(&entry, WindowStatus::Idle).await;
 
     // The band `PROMPT_TEXT` opened reports `Running` whether the resize window is
     // armed or not, so it is let close first, as on the suppression side.
@@ -583,5 +580,5 @@ async fn resize_w2_disarmed_redraw_output_reaches_running() {
         .await
         .expect("write redraw-like output");
 
-    wait_for_status(&entry, WindowStatus::Running).await;
+    common::wait_for_entry_status(&entry, WindowStatus::Running).await;
 }

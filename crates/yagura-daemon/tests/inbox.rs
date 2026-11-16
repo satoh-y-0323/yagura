@@ -659,13 +659,52 @@ async fn the_default_wake_is_a_stderr_text_with_exit_code_two() {
 
 #[tokio::test]
 async fn a_wait_registered_with_a_pushable_parcel_returns_at_once() {
-    let (h, mut client) = start("inbox-i6-now", |_| {}).await;
+    let (h, mut client) = start("inbox-i6-now", |config| {
+        let dir = config
+            .detection_dir
+            .as_deref()
+            .expect("the configuration names a detection directory");
+        common::write_turn_end_key_definition(dir);
+    })
+    .await;
     let id = h.open_idle_window(&mut client).await;
     deposit(&h, &id, "a", "PARCEL-ALPHA");
     let (output, _, code) = expect_delivery(read(&h, &wait_msg(&id)).await);
     assert!(output.contains("PARCEL-ALPHA"));
     assert_eq!(code, 2);
     assert!(!has_waiter(&h, &id));
+
+    // The parcel wakes the CLI once the door prints it, which ends the hold a press of the
+    // turn-end key left, so the next running report opens the turn again.
+    let pressed = h
+        .open(
+            yagura_test_support::process::echo_child_command(),
+            Some(common::TURN_END_KEY_DETECTION),
+        )
+        .await;
+    let entry = h.registry.get(&pressed).expect("window exists");
+    common::open_turn_after_the_key_was_named(&entry).await;
+    common::interrupt_with_the_turn_end_key(&entry).await;
+    deposit(&h, &pressed, "a", "PARCEL-BETA");
+    let mut published = entry.subscribe_status();
+    let mut door = h.connect().await;
+    let (output, _, _) = expect_delivery(call_door(&mut door, &wait_msg(&pressed)).await);
+    assert!(output.contains("PARCEL-BETA"));
+    common::send(&mut door, &printed()).await;
+    // On the door's own connection, so the daemon takes it after the notice.
+    common::report_status(&mut door, &pressed, WindowStatus::Running).await;
+    entry
+        .session()
+        .write_input(common::TURN_END_KEY_MARK)
+        .await
+        .expect("write the mark");
+    let before_the_mark =
+        common::published_until(&mut published, WindowStatus::WaitingApproval).await;
+    assert!(
+        before_the_mark.contains(&WindowStatus::Running),
+        "a wait's door that printed what woke the CLI must end the press's hold, so the \
+         running report after it opens the turn; published {before_the_mark:?}"
+    );
 }
 
 #[tokio::test]

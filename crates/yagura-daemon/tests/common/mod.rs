@@ -2939,3 +2939,154 @@ pub fn expect_delivery(msg: DaemonMessage) -> (String, yagura_protocol::Delivery
         other => panic!("expected delivery, got {other:?}"),
     }
 }
+
+// --- a declared turn-end key, pressed in a real window ------------------------------------
+
+/// The name of [`write_turn_end_key_definition`]'s definition.
+pub const TURN_END_KEY_DETECTION: &str = "turn-end-key-press";
+
+/// The running footer naming the definition's turn-end key.
+pub const TURN_END_KEY_FOOTER: &[u8] = b"esc to interrupt";
+
+/// A new bottom line the definition reads as waiting for input.
+pub const TURN_END_KEY_READY: &[u8] = b"\r\nPRESS-READY";
+
+/// A new bottom line the definition reads as waiting for approval, whatever turn is open:
+/// a status every confirmed change before it is published ahead of.
+pub const TURN_END_KEY_MARK: &[u8] = b"\r\nAllow? (y/n)";
+
+/// Writes, under `dir`, a definition that confirms at once and reads only the last line,
+/// declaring `escape` as the key whose press ends the turn once the footer named it.
+pub fn write_turn_end_key_definition(dir: &Path) {
+    let definition = format!(
+        r#"schema_version = 1
+name = "{TURN_END_KEY_DETECTION}"
+bottom_line_count = 1
+
+[debounce]
+confirm_ms = 0
+
+[[rules]]
+status = "waiting_approval"
+pattern = 'Allow\?'
+priority = 30
+region = "bottom"
+
+[[rules]]
+status = "running"
+pattern = 'esc to interrupt'
+priority = 20
+region = "bottom"
+
+[[rules]]
+status = "waiting_input"
+pattern = 'PRESS-READY'
+priority = 10
+region = "bottom"
+
+[turn_end_key]
+key = "escape"
+shown = 'esc to interrupt'
+"#
+    );
+    std::fs::create_dir_all(dir).expect("create the detection directory");
+    std::fs::write(
+        dir.join(format!("{TURN_END_KEY_DETECTION}.toml")),
+        definition,
+    )
+    .expect("write the turn-end key definition");
+}
+
+/// Waits for `entry`'s confirmed status to be `expected`, failing at [`HANG_GUARD`].
+pub async fn wait_for_entry_status(entry: &yagura_daemon::WindowEntry, expected: WindowStatus) {
+    let mut status = entry.watch_status();
+    let reached = tokio::time::timeout(
+        HANG_GUARD,
+        status.wait_for(|at| at.status.status() == expected),
+    )
+    .await
+    .is_ok_and(|seen| seen.is_ok());
+    assert!(
+        reached,
+        "window {} never reached {expected:?} (last seen {:?})",
+        entry.window_id(),
+        entry.current_status()
+    );
+}
+
+/// The statuses `published` carries before the first `mark`.
+pub async fn published_until(
+    published: &mut tokio::sync::broadcast::Receiver<yagura_daemon::waiter::StatusAt>,
+    mark: WindowStatus,
+) -> Vec<WindowStatus> {
+    let mut before = Vec::new();
+    loop {
+        let at = tokio::time::timeout(HANG_GUARD, published.recv())
+            .await
+            .unwrap_or_else(|_| panic!("{mark:?} is published"))
+            .expect("the window's statuses are published");
+        if at.status.status() == mark {
+            return before;
+        }
+        before.push(at.status.status());
+    }
+}
+
+/// Brings `entry`, a window running `echo_child` under [`TURN_END_KEY_DETECTION`], to a
+/// reported turn in flight over a ready screen, after the footer named the key.
+pub async fn open_turn_after_the_key_was_named(entry: &yagura_daemon::WindowEntry) {
+    entry
+        .session()
+        .write_input(TURN_END_KEY_FOOTER)
+        .await
+        .expect("write the footer");
+    wait_for_entry_status(entry, WindowStatus::Running).await;
+    entry
+        .session()
+        .write_input(TURN_END_KEY_READY)
+        .await
+        .expect("write the ready line");
+    wait_for_entry_status(entry, WindowStatus::WaitingInput).await;
+    assert!(
+        entry.record_status_event(WindowStatus::Running),
+        "a living window takes a report"
+    );
+    wait_for_entry_status(entry, WindowStatus::Running).await;
+}
+
+/// Interrupts `entry`, whose turn [`open_turn_after_the_key_was_named`] opened, with a
+/// press of its turn-end key, the way `interrupt_window` does, and checks the press both
+/// closed the turn and holds it closed against the next running report. Leaves the
+/// window on the ready screen, waiting for input.
+pub async fn interrupt_with_the_turn_end_key(entry: &yagura_daemon::WindowEntry) {
+    let mut published = entry.subscribe_status();
+    yagura_daemon::control::interrupt_window(
+        entry,
+        b" ",
+        Some(yagura_daemon::input_encode::NamedPress::Escape),
+    )
+    .await
+    .expect("the interrupt is written");
+    assert!(
+        entry.record_status_event(WindowStatus::Running),
+        "a living window takes a report"
+    );
+    entry
+        .session()
+        .write_input(TURN_END_KEY_MARK)
+        .await
+        .expect("write the mark");
+    let before_the_mark = published_until(&mut published, WindowStatus::WaitingApproval).await;
+    assert_eq!(
+        before_the_mark,
+        vec![WindowStatus::WaitingInput],
+        "an interrupt pressing the turn-end key must close the turn at once and keep the \
+         running report after it from opening it again"
+    );
+    entry
+        .session()
+        .write_input(TURN_END_KEY_READY)
+        .await
+        .expect("write the ready line");
+    wait_for_entry_status(entry, WindowStatus::WaitingInput).await;
+}
