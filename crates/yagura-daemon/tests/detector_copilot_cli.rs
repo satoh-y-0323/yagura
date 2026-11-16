@@ -8,6 +8,8 @@ use crate::common;
 
 use common::detection_rules::judge;
 use common::repo_definition_text;
+use yagura_daemon::detector::definition::parse_definition;
+use yagura_daemon::input_encode::NamedPress;
 use yagura_protocol::{DetectedStatus, UnknownReason, WindowStatus};
 
 const FIXTURE_100X30_IDLE_STARTUP: &str =
@@ -473,6 +475,36 @@ async fn copilot_cli_definition_classifies_captured_screens() {
         let status = judge(&source, *cols, *rows, &lines).await;
         if status != *expected {
             mismatches.push(format!("{name}: expected {expected:?}, got {status:?}"));
+        }
+    }
+
+    // The bundled key whose press ends a turn is named on every 1.0.112 running
+    // screen and on no 1.0.101 screen, so a 1.0.101 window is never ended by it.
+    let definition = parse_definition(&source).expect("the bundled definition loads");
+    match definition.turn_end_key.as_ref() {
+        None => mismatches.push("turn_end_key: the bundled definition declares none".to_string()),
+        Some(declared) => {
+            if declared.key != NamedPress::CtrlC {
+                mismatches.push(format!(
+                    "turn_end_key: expected the key CtrlC, got {:?}",
+                    declared.key
+                ));
+            }
+            for (name, fixture, _, _, expected) in CASES {
+                let v112_running = (name.starts_with("88x30-v112-running-")
+                    || name.starts_with("122x30-v112-running-"))
+                    && *expected == WindowStatus::Running;
+                let v101 = name.starts_with("100x30-");
+                let named = fixture.lines().any(|line| declared.shown.is_match(line));
+                if v112_running && !named {
+                    mismatches.push(format!("turn_end_key: {name} never names the key"));
+                }
+                if v101 && named {
+                    mismatches.push(format!(
+                        "turn_end_key: the 1.0.101 screen {name} names the key"
+                    ));
+                }
+            }
         }
     }
 

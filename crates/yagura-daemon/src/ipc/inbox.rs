@@ -90,6 +90,8 @@ impl StopEnd {
     fn printed(mut self) {
         self.printed = true;
         if let Some(entry) = self.entry.upgrade() {
+            // Before `Running`, so the report finds a press's hold ended.
+            entry.note_cli_moved_on();
             entry.record_status_event(WindowStatus::Running);
         }
     }
@@ -117,6 +119,9 @@ struct WakeTurn {
 impl WakeTurn {
     fn printed(mut self) {
         self.printed = true;
+        if let Some(entry) = self.entry.upgrade() {
+            entry.note_cli_moved_on();
+        }
     }
 }
 

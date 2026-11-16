@@ -14,8 +14,9 @@ use crate::common;
 
 use common::detection_rules::rule_for_status;
 use yagura_daemon::detector::definition::{
-    ComposerSection, Region, is_valid_detection_name, parse_definition,
+    ComposerSection, Region, TurnEndKey, is_valid_detection_name, parse_definition,
 };
+use yagura_daemon::input_encode::NamedPress;
 use yagura_protocol::WindowStatus;
 
 /// A minimal valid definition: no `bottom_line_count`, no `quiescence`, no
@@ -983,6 +984,14 @@ fn abandons_calls_at_turn_end(source: &str) -> bool {
 #[test]
 fn abandoned_at_turn_end_is_false_when_the_requests_table_is_omitted() {
     assert!(!abandons_calls_at_turn_end(&minimal_valid_toml()));
+
+    // A definition without the `[turn_end_key]` table declares no key whose
+    // press ends a turn.
+    let definition = parse_definition(&minimal_valid_toml()).expect("the minimal definition loads");
+    assert!(
+        definition.turn_end_key.is_none(),
+        "a definition without the turn_end_key table declared a key"
+    );
 }
 
 #[test]
@@ -1003,6 +1012,30 @@ fn abandoned_at_turn_end_is_kept_as_written() {
         "requests-false",
         "[requests]\nabandoned_at_turn_end = false"
     )));
+
+    // The `[turn_end_key]` table is kept as written: the key by its word and
+    // the screen text that names it as a pattern.
+    let source = definition_with_input(
+        "turn-end-key",
+        "[turn_end_key]\nkey = \"ctrl_c\"\nshown = 'ctrl\\+c interrupt'",
+    );
+    let definition = parse_definition(&source).expect("a valid turn_end_key table loads");
+    let declared: &TurnEndKey = definition
+        .turn_end_key
+        .as_ref()
+        .expect("the turn_end_key table is kept");
+    let mut failures: Vec<String> = Vec::new();
+    if declared.key != NamedPress::CtrlC {
+        failures.push(format!("key: expected CtrlC, got {:?}", declared.key));
+    }
+    if !declared.shown.is_match("ctrl+c interrupt") {
+        failures.push("shown does not match the screen text it names".to_string());
+    }
+    assert!(
+        failures.is_empty(),
+        "the turn_end_key table was not kept as written:\n{}",
+        failures.join("\n")
+    );
 }
 
 #[test]
@@ -1016,6 +1049,34 @@ fn rejects_an_unknown_key_in_the_requests_table() {
         "[requests]\nabandoned_at_turn_end = true\nabandons_everything = true",
     );
     assert!(parse_definition(&source).is_err());
+
+    // A `[turn_end_key]` table the daemon cannot act on fails the load.
+    let mut failures: Vec<String> = Vec::new();
+    let tables = [
+        (
+            "a key outside the press vocabulary",
+            "[turn_end_key]\nkey = \"f1\"\nshown = 'f1 interrupt'",
+        ),
+        ("no shown", "[turn_end_key]\nkey = \"ctrl_c\""),
+        (
+            "a shown that is not a pattern",
+            "[turn_end_key]\nkey = \"ctrl_c\"\nshown = '('",
+        ),
+        (
+            "an unknown key in the table",
+            "[turn_end_key]\nkey = \"ctrl_c\"\nshown = 'ctrl\\+c interrupt'\nkeys = [\"escape\"]",
+        ),
+    ];
+    for (what, table) in tables {
+        if parse_definition(&definition_with_input("turn-end-key-bad", table)).is_ok() {
+            failures.push(format!("{what} loaded"));
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "a turn_end_key table the daemon cannot act on loaded:\n{}",
+        failures.join("\n")
+    );
 }
 
 #[test]

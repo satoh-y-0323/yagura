@@ -211,6 +211,12 @@ left_panel = '^[^│]*│'         # optional, no default; regex matching a
 abandoned_at_turn_end = false  # this CLI drops a tool call still out when
                                # it ends its turn, without cancelling it.
                                # Default: false
+
+[turn_end_key]                 # optional; both keys required when present
+key = "ctrl_c"                 # "ctrl_c" or "escape": the key whose press
+                               # ends the CLI's turn
+shown = 'ctrl\+c interrupt'    # regex the bottom rows show while that key
+                               # stops a turn
 ```
 
 Statuses: `running`, `waiting_input`, `waiting_approval`, `interrupted`,
@@ -218,7 +224,7 @@ Statuses: `running`, `waiting_input`, `waiting_approval`, `interrupted`,
 
 Rejection is always loud: unknown keys -- at the top level and inside
 `[debounce]`, `[quiescence]`, `[activity]`, `[composer]`,
-`[requests]` and each `[[rules]]` entry alike -- unknown status/region values, missing required keys, an
+`[requests]`, `[turn_end_key]` and each `[[rules]]` entry alike -- unknown status/region values, missing required keys, an
 unsupported `schema_version`, an uncompilable `pattern`, more than 200 rules, or a source
 file larger than 256 KiB all fail the load instead of being ignored.
 
@@ -298,6 +304,45 @@ The bundled `codex-cli` definition sets it to `true`; `claude-code` and
 `antigravity-cli` set it to `false`. `copilot-cli` leaves it out (so
 `false`): Copilot CLI sends the server a cancellation for a call it drops,
 whether the turn is interrupted or the call times out (checked with 1.0.101).
+
+### `[turn_end_key]`
+
+`[turn_end_key]` names the key whose press ends this CLI's turn, for a CLI
+that runs no hook when a turn is interrupted. The daemon sees the press
+itself: a key from an attached client (the window in the GUI), or the keys
+`interrupt_window` writes for the profile's `[interrupt]`, when either is that
+one key and nothing else.
+
+| Key | Meaning |
+| --- | --- |
+| `key` | The key, by the word a profile's `[interrupt]` names it with: `ctrl_c` or `escape`. One key only. |
+| `shown` | A regex matched against the `region = "bottom"` rows of every reading (the composer's body taken out): what the CLI shows while that key stops its turn. Compiled with the same limits as a rule's `pattern`. |
+
+A press closes the window's turn only once the screen has shown `shown` at
+least once since the last submission (a line sent with Enter, or a door that
+moved the CLI on). The key that stops a turn changes between versions of a
+CLI, and some CLIs change their version from inside the window (GitHub Copilot
+CLI's `/update` and `/restart`, for example); every such command is a
+submission, so the screen has to name the key again on the version now
+running. A window whose screen has not shown it since the last submission is
+not closed by the press, and its turn ends by reports and quiet as before.
+
+After a press closed the turn, reports that would open a turn are dropped
+until the next turn starts (see
+[What a report means](#what-a-report-means)). A press of another key, the key
+typed inside text or a paste, or several keys written together close nothing,
+and a definition without the table is not affected by any press.
+
+A daemon older than this table cannot load a definition that has it, so a
+copy of such a definition placed in the `detection/` folder of the config
+root leaves the windows that use it `unknown` under that daemon. The other
+way round, an older copy placed there takes the place of the bundled
+definition, table and all: a window that loads it does not end its turn on
+the press. If you keep a copy of `copilot-cli.toml` there, add the bundled
+`[turn_end_key]` table to it.
+
+The bundled `copilot-cli` definition declares `ctrl_c`, shown as
+`ctrl+c interrupt`. No other bundled definition has the table.
 
 ### What patterns are matched against
 
@@ -694,6 +739,17 @@ How an open turn combines with the screen:
   tool's end), so once a rule has read the dialog, a screen a rule reads as
   `running` in its place turns the approval into a running turn, and one it
   reads as `waiting_input`, `idle` or `interrupted` closes it.
+- **A press of the turn-end key closes the turn and holds it closed.** For a
+  definition with a [`[turn_end_key]`](#turn_end_key), a press of its key
+  after the screen has shown it since the last submission closes the open
+  turn at once, and also a turn a submission may have started that no
+  report has opened yet. Until the next turn starts -- a submission, a door
+  that moved the CLI on, a rule confirming `running` on the screen, or a
+  report that closes the turn -- a `running` or `waiting_approval` report
+  does not open a turn again. When a rule confirms `running`, the turn opens
+  again for a window whose CLI has reported before; one that never reported
+  stays judged by its screen. A press is not a report: it does not count for
+  [When reports are missing](#when-reports-are-missing).
 - **A closed turn leaves the screen to decide**, the same as no report at all.
 - **A lost screen is not rescued.** While the screen model is untrusted (see
   [Why a window is `unknown`](#why-a-window-is-unknown)), the window stays at
@@ -852,8 +908,9 @@ the new daemon cannot tell when that turn began.
 
 - **Claude Code sends no hook when you press Esc to interrupt a turn, or deny
   a permission.** The turn closes on 5 seconds of quiet instead, so the window
-  returns to what its screen shows (`interrupted`, for example) about 5
-  seconds plus `confirm_ms` later.
+  returns to what its screen shows (`waiting_input` once its input line is
+  back; the bundled definition has no `interrupted` rule) about 5 seconds
+  plus `confirm_ms` later.
 - **A window whose input line has grown taller than the screen** shows
   nothing a rule can match. While a turn is open it reads as `running`; once
   the turn closes it cannot be told apart from a selection list that shows no
@@ -867,9 +924,20 @@ the new daemon cannot tell when that turn began.
   The hook Copilot runs for a permission request fires before its own rules
   decide whether to ask, so it would report prompts that never appear; the
   approval box is read from the screen alone. An interrupted turn runs no
-  hook and leaves the input line under the cancellation message, so the
-  window stays `running` until 5 seconds of quiet close the turn, then
-  reads as `waiting_input`, not `interrupted`.
+  hook, so the bundled definition's `[turn_end_key]` closes the turn on the
+  Ctrl+C press itself, typed in the window or written by its interrupt
+  button, on a version whose footer shows `ctrl+c interrupt` (1.0.112). The
+  window then reads as `waiting_input`, not `interrupted`, since the input
+  line stays under the cancellation message. A turn cancelled with Esc twice
+  is not closed by the press: the footer names Ctrl+C as the key that stops a
+  turn (after a first Esc, 1.0.112 shows `esc again to interrupt` for about
+  half a second and then `ctrl+c interrupt` again), and what Esc twice does
+  depends on Copilot's state (its `/help` lists clearing the input,
+  interrupting, stopping agents and rewinding). After Esc twice the window
+  stays `running` until 5 seconds of quiet close the turn, and longer while
+  Copilot keeps redrawing its screen. Version 1.0.101 shows
+  `esc esc interrupt` and never `ctrl+c interrupt`, so there no press closes
+  the turn, Esc twice included, and it closes on quiet in the same way.
 - **GitHub Copilot CLI's session sidebar can take the keys.** While the
   sidebar holds the focus, and on the tabs other than Current, keys act on a
   list rather than reaching the input line, so the window reads as `unknown`

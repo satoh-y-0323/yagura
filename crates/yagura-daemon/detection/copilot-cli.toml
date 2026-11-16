@@ -82,3 +82,9 @@ marker = '^(?:╻▄+$|❯ ?)'
 separator = ""
 continuation_prefix = "┃ "
 left_panel = '^[^│]*│'
+
+# Copilot reports no interrupt; a Ctrl+C press ends the turn only after the
+# footer named it since the last submit, which 1.0.101 never does.
+[turn_end_key]
+key = "ctrl_c"
+shown = '(?:^|\s)ctrl\+c interrupt\b'

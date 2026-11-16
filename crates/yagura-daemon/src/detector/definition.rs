@@ -19,6 +19,8 @@ use serde::Deserialize;
 use thiserror::Error;
 use yagura_protocol::WindowStatus;
 
+use crate::input_encode::NamedPress;
+
 /// Schema version this loader accepts. Any other value is rejected so that a
 /// future incompatible schema change fails loudly instead of being
 /// misinterpreted.
@@ -262,6 +264,42 @@ pub struct Definition {
     /// How this CLI treats a tool call it made; every field at its default
     /// when the `[requests]` table is omitted. See [`RequestsSection`].
     pub requests: RequestsSection,
+    /// The key whose press ends this CLI's turn, if the definition's
+    /// `[turn_end_key]` table is present. See [`TurnEndKey`].
+    pub turn_end_key: Option<TurnEndKey>,
+}
+
+/// The optional `[turn_end_key]` table: a key whose press ends the CLI's turn
+/// on the versions whose screen names it as the interrupt. A press closes a
+/// turn only once the screen has shown `shown` since the last submission.
+#[derive(Debug, Clone)]
+pub struct TurnEndKey {
+    /// The key, by the word a profile's `[interrupt]` names it with.
+    pub key: NamedPress,
+    /// Matched against the `region = "bottom"` rows of every reading.
+    pub shown: Regex,
+}
+
+/// Raw `[turn_end_key]`; `shown` is compiled separately, like a rule's
+/// pattern.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawTurnEndKey {
+    #[serde(deserialize_with = "named_press")]
+    key: NamedPress,
+    shown: String,
+}
+
+/// A key word, refused at load time when [`NamedPress::from_word`] does not
+/// know it.
+fn named_press<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<NamedPress, D::Error> {
+    let word = String::deserialize(deserializer)?;
+    NamedPress::from_word(&word).ok_or_else(|| {
+        serde::de::Error::invalid_value(
+            serde::de::Unexpected::Str(&word),
+            &"a key word such as ctrl_c or escape",
+        )
+    })
 }
 
 /// The optional `[requests]` table: how a CLI treats a tool call of its own
@@ -374,11 +412,13 @@ struct RawDefinition {
     input: Option<RawInputSection>,
     #[serde(default)]
     requests: RequestsSection,
+    #[serde(default)]
+    turn_end_key: Option<RawTurnEndKey>,
 }
 
 fn compile_composer_section(raw: ComposerRawSection) -> Result<ComposerSection, DefinitionError> {
-    let marker = compile_composer_pattern(raw.marker)?;
-    let left_panel = raw.left_panel.map(compile_composer_pattern).transpose()?;
+    let marker = compile_pattern(raw.marker)?;
+    let left_panel = raw.left_panel.map(compile_pattern).transpose()?;
 
     Ok(ComposerSection {
         marker,
@@ -389,7 +429,9 @@ fn compile_composer_section(raw: ComposerRawSection) -> Result<ComposerSection, 
     })
 }
 
-fn compile_composer_pattern(pattern: String) -> Result<Regex, DefinitionError> {
+/// Compiles a definition's pattern under the limits every pattern of an
+/// externally editable file is held to.
+fn compile_pattern(pattern: String) -> Result<Regex, DefinitionError> {
     RegexBuilder::new(&pattern)
         .size_limit(REGEX_SIZE_LIMIT_BYTES)
         .dfa_size_limit(REGEX_DFA_SIZE_LIMIT_BYTES)
@@ -398,20 +440,18 @@ fn compile_composer_pattern(pattern: String) -> Result<Regex, DefinitionError> {
 }
 
 fn compile_rule(raw: RawRule) -> Result<Rule, DefinitionError> {
-    let pattern = RegexBuilder::new(&raw.pattern)
-        .size_limit(REGEX_SIZE_LIMIT_BYTES)
-        .dfa_size_limit(REGEX_DFA_SIZE_LIMIT_BYTES)
-        .build()
-        .map_err(|source| DefinitionError::InvalidPattern {
-            pattern: raw.pattern,
-            source,
-        })?;
-
     Ok(Rule {
         status: raw.status,
-        pattern,
+        pattern: compile_pattern(raw.pattern)?,
         priority: raw.priority,
         region: raw.region,
+    })
+}
+
+fn compile_turn_end_key(raw: RawTurnEndKey) -> Result<TurnEndKey, DefinitionError> {
+    Ok(TurnEndKey {
+        key: raw.key,
+        shown: compile_pattern(raw.shown)?,
     })
 }
 
@@ -427,7 +467,10 @@ fn compile_rule(raw: RawRule) -> Result<Rule, DefinitionError> {
 ///
 /// Returns [`DefinitionError`] for oversized input, malformed TOML, unknown
 /// enum values, missing required keys, an unsupported `schema_version`, more
-/// than [`MAX_RULES`] rules, or a rule pattern that fails to compile.
+/// than [`MAX_RULES`] rules, or a pattern that fails to compile (a rule's,
+/// the composer's, or `[turn_end_key] shown`). A `[turn_end_key]` table whose
+/// `key` is not a known key word, or that lacks `key` or `shown`, is a
+/// [`DefinitionError::Toml`].
 pub fn parse_definition(source: &str) -> Result<Definition, DefinitionError> {
     if source.len() > MAX_SOURCE_BYTES {
         return Err(DefinitionError::SourceTooLarge {
@@ -496,6 +539,7 @@ pub fn parse_definition(source: &str) -> Result<Definition, DefinitionError> {
     } else {
         None
     };
+    let turn_end_key = raw.turn_end_key.map(compile_turn_end_key).transpose()?;
 
     Ok(Definition {
         schema_version: raw.schema_version,
@@ -507,6 +551,7 @@ pub fn parse_definition(source: &str) -> Result<Definition, DefinitionError> {
         activity: raw.activity,
         composer,
         requests: raw.requests,
+        turn_end_key,
     })
 }
 

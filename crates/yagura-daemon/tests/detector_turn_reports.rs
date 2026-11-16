@@ -23,6 +23,7 @@ use yagura_daemon::DaemonConfig;
 use yagura_daemon::detector::engine::{
     DetectorHandle, InputEcho, TURN_ACTIVE_QUIET, TURN_REPORT_STALE,
 };
+use yagura_daemon::input_encode::NamedPress;
 use yagura_protocol::{DetectedStatus, UnknownReason, WindowStatus};
 
 /// Silence after which an open turn counts as closed, in whole milliseconds.
@@ -78,6 +79,12 @@ fn tabled_def() -> String {
     format!(
         "{SCREEN_DEF}\n[activity]\nstatus = \"running\"\nwindow_ms = 500\n\n[quiescence]\nstatus = \"idle\"\nafter_ms = 2000\n"
     )
+}
+
+/// The same rules plus a key whose press ends the turn once the running
+/// footer has named it since the last submit.
+fn press_def() -> String {
+    format!("{SCREEN_DEF}\n[turn_end_key]\nkey = \"escape\"\nshown = 'esc to interrupt'\n")
 }
 
 /// Repaints the whole screen with `text` and shows the cursor again.
@@ -173,6 +180,18 @@ impl Driver {
     async fn report_at(&mut self, ms: u64, status: WindowStatus) {
         self.advance_to(ms).await;
         self.engine.on_status_event(status);
+        self.sample();
+    }
+
+    async fn input_at(&mut self, ms: u64, echo: InputEcho) {
+        self.advance_to(ms).await;
+        self.engine.on_input(echo);
+        self.sample();
+    }
+
+    async fn press_at(&mut self, ms: u64, press: NamedPress) {
+        self.advance_to(ms).await;
+        let _ = self.engine.on_press(press);
         self.sample();
     }
 
@@ -303,6 +322,49 @@ async fn without_any_report_the_screen_alone_decides() {
         driver.detected_at(12_300).await,
         DetectedStatus::WaitingApproval
     );
+
+    // E11: with no press there is no hold, so a confirmed running screen opens
+    // no turn and an unreadable screen after it stays unknown.
+    let mut failures: Vec<String> = Vec::new();
+    driver.feed_at(13_000, &running_footer()).await;
+    driver.feed_at(13_500, &unmatched()).await;
+    for ms in [14_000, 15_000, 16_000] {
+        driver.feed_at(ms, CHUNK).await;
+    }
+    check_window(
+        &mut failures,
+        &driver,
+        "E11 without a hold a confirmed running screen opens no turn",
+        13_605,
+        16_000,
+        |d| d == NO_RULE,
+    );
+
+    // E11b: in a window that has had reports, with no press there is still no
+    // hold, so a confirmed running screen after a closing report opens no turn.
+    let mut driver = Driver::synthetic(&press_def());
+    driver.feed_at(0, &running_footer()).await;
+    driver.report_at(100, WindowStatus::Running).await;
+    driver.report_at(500, WindowStatus::WaitingInput).await;
+    driver.feed_at(600, &idle()).await;
+    driver.feed_at(1_000, &running_footer()).await;
+    driver.feed_at(1_100, &unmatched()).await;
+    for ms in [1_500, 2_000] {
+        driver.feed_at(ms, CHUNK).await;
+    }
+    check_window(
+        &mut failures,
+        &driver,
+        "E11b without a hold a confirmed running screen after a closing report opens no turn",
+        1_205,
+        2_000,
+        |d| d == NO_RULE,
+    );
+    assert!(
+        failures.is_empty(),
+        "without a press's hold a confirmed running screen opened a turn:\n{}",
+        failures.join("\n")
+    );
 }
 
 // =====================================================================
@@ -326,6 +388,74 @@ async fn an_open_turn_is_running_for_as_long_as_output_keeps_coming() {
             case.name
         );
     }
+
+    // A press that ends nothing leaves the open turn running.
+    let mut failures: Vec<String> = Vec::new();
+
+    // E13: a definition without the table ends no turn on any key.
+    let mut driver = Driver::synthetic(SCREEN_DEF);
+    driver.feed_at(0, &running_footer()).await;
+    driver.report_at(100, WindowStatus::Running).await;
+    driver.feed_at(1_000, &idle()).await;
+    driver.press_at(1_500, NamedPress::Escape).await;
+    driver.press_at(2_000, NamedPress::CtrlC).await;
+    for ms in (2_500..=5_000).step_by(1_000) {
+        driver.feed_at(ms, CHUNK).await;
+    }
+    driver.advance_to(5_000).await;
+    check_window(
+        &mut failures,
+        &driver,
+        "E13 a definition without the table ends no turn on a press",
+        1_600,
+        5_000,
+        |d| d == DetectedStatus::Running,
+    );
+
+    // E14: a screen that never named the key since the last submit is not
+    // ended by its press.
+    let mut driver = Driver::synthetic(&press_def());
+    driver.feed_at(0, &idle()).await;
+    driver.report_at(100, WindowStatus::Running).await;
+    driver.feed_at(200, &unmatched()).await;
+    driver.feed_at(600, CHUNK).await;
+    driver.press_at(1_000, NamedPress::Escape).await;
+    for ms in (2_000..=4_000).step_by(1_000) {
+        driver.feed_at(ms, CHUNK).await;
+    }
+    check_window(
+        &mut failures,
+        &driver,
+        "E14 a screen that never showed the key is not ended by its press",
+        1_100,
+        4_000,
+        |d| d == DetectedStatus::Running,
+    );
+
+    // E15: a key other than the declared one ends nothing.
+    let mut driver = Driver::synthetic(&press_def());
+    driver.feed_at(0, &running_footer()).await;
+    driver.report_at(100, WindowStatus::Running).await;
+    driver.feed_at(1_000, &idle()).await;
+    driver.press_at(1_500, NamedPress::CtrlC).await;
+    for ms in (2_500..=5_000).step_by(1_000) {
+        driver.feed_at(ms, CHUNK).await;
+    }
+    driver.advance_to(5_000).await;
+    check_window(
+        &mut failures,
+        &driver,
+        "E15 a key other than the declared one ends no turn",
+        1_600,
+        5_000,
+        |d| d == DetectedStatus::Running,
+    );
+
+    assert!(
+        failures.is_empty(),
+        "a press that must end nothing ended the turn:\n{}",
+        failures.join("\n")
+    );
 }
 
 // =====================================================================
@@ -521,6 +651,164 @@ async fn the_next_running_report_opens_a_turn_that_went_quiet() {
         DetectedStatus::WaitingInput,
         "the reopened turn goes quiet like any other"
     );
+
+    // After a press, which later facts open the next turn and which do not.
+    let mut failures: Vec<String> = Vec::new();
+
+    // E6: with the turn closed by a report and nothing submitted since, a
+    // press holds nothing back, so the next opening report opens a turn.
+    let mut driver = Driver::synthetic(&press_def());
+    driver.input_at(0, InputEcho::MayStartWork).await;
+    driver.feed_at(50, &running_footer()).await;
+    driver.report_at(100, WindowStatus::Running).await;
+    driver.report_at(500, WindowStatus::WaitingInput).await;
+    driver.feed_at(600, &idle()).await;
+    driver.press_at(1_000, NamedPress::Escape).await;
+    driver.report_at(1_500, WindowStatus::Running).await;
+    driver.feed_at(1_600, &unmatched()).await;
+    let seen = driver.detected_at(1_705).await;
+    if seen != DetectedStatus::Running {
+        failures.push(format!(
+            "E6 a press after a closed turn with nothing submitted held back the next report: {seen:?} at 1705 ms"
+        ));
+    }
+
+    // E6b: a press just after a submit, before the opening report arrives,
+    // ends the turn the submit began, and the late report does not reopen it.
+    let mut driver = Driver::synthetic(&press_def());
+    driver.feed_at(0, &running_footer()).await;
+    driver.feed_at(100, &idle()).await;
+    driver.input_at(1_000, InputEcho::MayStartWork).await;
+    driver.feed_at(1_100, &running_footer()).await;
+    driver.press_at(2_000, NamedPress::Escape).await;
+    driver.feed_at(2_100, &idle()).await;
+    driver.report_at(2_700, WindowStatus::Running).await;
+    for ms in (3_000..=8_000).step_by(1_000) {
+        driver.feed_at(ms, CHUNK).await;
+    }
+    check_window(
+        &mut failures,
+        &driver,
+        "E6b a press just after a submit ends the turn before its report",
+        2_805,
+        8_000,
+        |d| d == DetectedStatus::WaitingInput,
+    );
+
+    // E6c: a press after the turn went quiet still ends what the submit
+    // began, so the late report does not reopen it.
+    let mut driver = Driver::synthetic(&press_def());
+    driver.input_at(0, InputEcho::MayStartWork).await;
+    driver.feed_at(50, &running_footer()).await;
+    driver.report_at(100, WindowStatus::Running).await;
+    driver.feed_at(200, &unmatched()).await;
+    driver.press_at(6_000, NamedPress::Escape).await;
+    driver.report_at(6_500, WindowStatus::Running).await;
+    for ms in (7_000..=10_000).step_by(1_000) {
+        driver.feed_at(ms, CHUNK).await;
+    }
+    check_window(
+        &mut failures,
+        &driver,
+        "E6c a press after the turn went quiet still holds back the late report",
+        6_605,
+        10_000,
+        |d| d == NO_RULE,
+    );
+
+    // E9: while the press holds the turn back, the screen confirming running
+    // opens it again.
+    let mut driver = Driver::synthetic(&press_def());
+    driver.feed_at(0, &running_footer()).await;
+    driver.report_at(100, WindowStatus::Running).await;
+    driver.feed_at(1_000, &idle()).await;
+    driver.press_at(1_500, NamedPress::Escape).await;
+    driver.feed_at(2_000, &running_footer()).await;
+    driver.feed_at(2_100, &unmatched()).await;
+    for ms in [2_500, 3_000] {
+        driver.feed_at(ms, CHUNK).await;
+    }
+    check_window(
+        &mut failures,
+        &driver,
+        "E9 a confirmed running screen during the hold opens the turn",
+        2_205,
+        3_000,
+        |d| d == DetectedStatus::Running,
+    );
+
+    // E9b: in a window that never had a report, the confirmed running screen
+    // releases the hold but opens no turn, so an unreadable screen stays unknown.
+    let mut driver = Driver::synthetic(&press_def());
+    driver.input_at(0, InputEcho::MayStartWork).await;
+    driver.feed_at(50, &running_footer()).await;
+    driver.feed_at(1_000, &idle()).await;
+    driver.press_at(1_500, NamedPress::Escape).await;
+    driver.feed_at(2_000, &running_footer()).await;
+    driver.feed_at(2_100, &unmatched()).await;
+    for ms in [2_500, 3_000] {
+        driver.feed_at(ms, CHUNK).await;
+    }
+    check_window(
+        &mut failures,
+        &driver,
+        "E9b a window with no report opens no turn when the hold is released",
+        2_205,
+        3_000,
+        |d| d == NO_RULE,
+    );
+
+    // E10: a running screen gone before its confirmation does not open the
+    // turn, so the report during the hold is still held back.
+    let mut driver = Driver::synthetic(&press_def());
+    driver.feed_at(0, &running_footer()).await;
+    driver.report_at(100, WindowStatus::Running).await;
+    driver.feed_at(1_000, &idle()).await;
+    driver.press_at(1_500, NamedPress::Escape).await;
+    driver.feed_at(2_000, &running_footer()).await;
+    driver.feed_at(2_002, &idle()).await;
+    driver.report_at(2_100, WindowStatus::Running).await;
+    driver.feed_at(2_200, &unmatched()).await;
+    for ms in (2_500..=4_000).step_by(500) {
+        driver.feed_at(ms, CHUNK).await;
+    }
+    check_window(
+        &mut failures,
+        &driver,
+        "E10 an unconfirmed running screen does not open the held turn",
+        2_305,
+        4_000,
+        |d| d == NO_RULE,
+    );
+
+    // E16: a submit since the screen last named the key withdraws that
+    // evidence, so the press ends nothing until the screen names it again.
+    let mut driver = Driver::synthetic(&press_def());
+    driver.feed_at(0, &running_footer()).await;
+    driver.report_at(100, WindowStatus::Running).await;
+    driver.report_at(500, WindowStatus::WaitingInput).await;
+    driver.feed_at(600, &unmatched()).await;
+    driver.input_at(1_000, InputEcho::MayStartWork).await;
+    driver.report_at(1_100, WindowStatus::Running).await;
+    driver.feed_at(1_500, CHUNK).await;
+    driver.press_at(2_000, NamedPress::Escape).await;
+    for ms in (3_000..=5_000).step_by(1_000) {
+        driver.feed_at(ms, CHUNK).await;
+    }
+    check_window(
+        &mut failures,
+        &driver,
+        "E16 a press after a submit with no footer since ends no turn",
+        2_100,
+        5_000,
+        |d| d == DetectedStatus::Running,
+    );
+
+    assert!(
+        failures.is_empty(),
+        "the turn after a press opened or stayed closed against the facts:\n{}",
+        failures.join("\n")
+    );
 }
 
 /// A `WaitingApproval` report also opens a turn that went quiet: with no
@@ -577,6 +865,95 @@ async fn a_closing_report_ends_the_turn_while_output_keeps_arriving() {
             "{closing:?}: after the closing report an unreadable screen stays Unknown"
         );
     }
+
+    // The declared key's press ends the turn the way a closing report does.
+    let mut failures: Vec<String> = Vec::new();
+
+    // E1 to E3 run on one window.
+    let mut driver = Driver::synthetic(&press_def());
+    driver.feed_at(0, &running_footer()).await;
+    driver.report_at(100, WindowStatus::Running).await;
+    driver.feed_at(1_000, &unmatched()).await;
+    driver.feed_at(2_000, CHUNK).await;
+    driver.feed_at(2_500, &idle()).await;
+    driver.press_at(3_000, NamedPress::Escape).await;
+    for ms in (4_000..=10_000).step_by(1_000) {
+        driver.feed_at(ms, CHUNK).await;
+    }
+    check_window(
+        &mut failures,
+        &driver,
+        "E1 the press ends the turn while output keeps arriving",
+        3_105,
+        10_000,
+        |d| d == DetectedStatus::WaitingInput,
+    );
+    driver.report_at(11_000, WindowStatus::Running).await;
+    for ms in (12_000..=15_000).step_by(1_000) {
+        driver.feed_at(ms, CHUNK).await;
+    }
+    check_window(
+        &mut failures,
+        &driver,
+        "E2 an opening report after the press does not reopen the turn",
+        11_105,
+        15_000,
+        |d| d == DetectedStatus::WaitingInput,
+    );
+    driver.input_at(16_000, InputEcho::MayStartWork).await;
+    driver.report_at(16_500, WindowStatus::Running).await;
+    driver.feed_at(17_000, &idle()).await;
+    driver.feed_at(18_000, CHUNK).await;
+    driver.advance_to(18_500).await;
+    check_window(
+        &mut failures,
+        &driver,
+        "E3 a submit releases the hold and the next report opens the turn",
+        16_605,
+        18_500,
+        |d| d == DetectedStatus::Running,
+    );
+
+    // E8: the press is judged at once, with no output after it.
+    let mut driver = Driver::synthetic(&press_def());
+    driver.feed_at(0, &running_footer()).await;
+    driver.report_at(100, WindowStatus::Running).await;
+    driver.feed_at(1_000, &idle()).await;
+    driver.press_at(2_000, NamedPress::Escape).await;
+    let seen = driver.detected_at(2_105).await;
+    if seen != DetectedStatus::WaitingInput {
+        failures.push(format!(
+            "E8 the press was not judged at once: {seen:?} at 2105 ms"
+        ));
+    }
+
+    // E12: a closing report after the press releases the hold, so the next
+    // opening report opens a turn.
+    let mut driver = Driver::synthetic(&press_def());
+    driver.feed_at(0, &running_footer()).await;
+    driver.report_at(100, WindowStatus::Running).await;
+    driver.feed_at(1_000, &idle()).await;
+    driver.press_at(1_500, NamedPress::Escape).await;
+    driver.report_at(2_000, WindowStatus::WaitingInput).await;
+    driver.report_at(3_000, WindowStatus::Running).await;
+    driver.feed_at(3_100, &unmatched()).await;
+    for ms in [3_500, 4_000] {
+        driver.feed_at(ms, CHUNK).await;
+    }
+    check_window(
+        &mut failures,
+        &driver,
+        "E12 a closing report releases the hold",
+        3_205,
+        4_000,
+        |d| d == DetectedStatus::Running,
+    );
+
+    assert!(
+        failures.is_empty(),
+        "the declared key's press did not end the turn as a closing report does:\n{}",
+        failures.join("\n")
+    );
 }
 
 /// A closed turn on a screen no rule matches is `Unknown`, not
@@ -792,6 +1169,25 @@ async fn an_approval_the_screen_shows_refused_ends_the_turn() {
     );
     driver.feed_at(2_500, &unmatched()).await;
     assert_eq!(driver.detected_at(3_000).await, NO_RULE);
+
+    // E5: the declared key's press ends a turn that waits on an approval too.
+    let mut failures: Vec<String> = Vec::new();
+    let mut driver = Driver::synthetic(&press_def());
+    driver.feed_at(0, &running_footer()).await;
+    driver.report_at(100, WindowStatus::WaitingApproval).await;
+    driver.feed_at(200, &unmatched()).await;
+    driver.press_at(1_000, NamedPress::Escape).await;
+    let seen = driver.detected_at(1_105).await;
+    if seen != NO_RULE {
+        failures.push(format!(
+            "E5 the press did not end the approval's turn: {seen:?} at 1105 ms"
+        ));
+    }
+    assert!(
+        failures.is_empty(),
+        "an approval's turn outlived the press:\n{}",
+        failures.join("\n")
+    );
 }
 
 // =====================================================================
@@ -825,6 +1221,33 @@ async fn a_keystroke_and_its_echo_neither_close_the_turn_nor_extend_it() {
             "an echo must not count as recent output"
         );
     }
+
+    // E4: typing after the press is not the next turn's start, so a late
+    // opening report stays held back.
+    let mut failures: Vec<String> = Vec::new();
+    let mut driver = Driver::synthetic(&press_def());
+    driver.feed_at(0, &running_footer()).await;
+    driver.report_at(100, WindowStatus::Running).await;
+    driver.feed_at(1_000, &idle()).await;
+    driver.press_at(1_500, NamedPress::Escape).await;
+    driver.input_at(2_000, InputEcho::EchoOnly).await;
+    driver.report_at(2_100, WindowStatus::Running).await;
+    for ms in [3_000, 4_000] {
+        driver.feed_at(ms, CHUNK).await;
+    }
+    check_window(
+        &mut failures,
+        &driver,
+        "E4 typing after the press does not release the hold",
+        2_205,
+        4_000,
+        |d| d == DetectedStatus::WaitingInput,
+    );
+    assert!(
+        failures.is_empty(),
+        "a keystroke released the press's hold:\n{}",
+        failures.join("\n")
+    );
 }
 
 /// The redraw that follows a resize is not output that keeps a turn open.
@@ -878,6 +1301,35 @@ async fn a_report_does_not_restore_a_lost_screen() {
             "{report:?}: after another report"
         );
     }
+
+    // E7: the press ends the turn while the screen is lost too, so the screen
+    // that comes back is judged with the turn closed.
+    let mut failures: Vec<String> = Vec::new();
+    let mut driver = Driver::synthetic(&press_def());
+    driver.feed_at(0, &running_footer()).await;
+    driver.report_at(100, WindowStatus::Running).await;
+    driver.advance_to(1_000).await;
+    driver.engine.lose_screen();
+    driver.sample();
+    driver.press_at(1_500, NamedPress::Escape).await;
+    driver.feed_at(2_000, &idle()).await;
+    for ms in (2_500..=14_500).step_by(1_000) {
+        driver.feed_at(ms, CHUNK).await;
+    }
+    driver.advance_to(15_000).await;
+    check_window(
+        &mut failures,
+        &driver,
+        "E7 the press ends the turn while the screen is lost",
+        2_105,
+        15_000,
+        |d| d == DetectedStatus::WaitingInput,
+    );
+    assert!(
+        failures.is_empty(),
+        "a lost screen kept the press from ending the turn:\n{}",
+        failures.join("\n")
+    );
 }
 
 // =====================================================================

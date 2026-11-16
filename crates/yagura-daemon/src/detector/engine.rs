@@ -36,6 +36,7 @@ use crate::detector::definition::{Definition, Region};
 use crate::detector::reading::{self, CopyCounts, SharedCopy};
 use crate::detector::source::TurnReport;
 use crate::handoff;
+use crate::input_encode::NamedPress;
 
 /// The outcome of one raw-judgement evaluation.
 enum RawJudgement {
@@ -55,8 +56,8 @@ pub enum InputEcho {
     /// The write is interactive line editing: it is expected to produce
     /// nothing but its own echo.
     EchoOnly,
-    /// The write may start work (a submitted line, an injected message, an
-    /// interrupt): its output stays activity evidence.
+    /// The write may start work (a submitted line, the daemon moving the CLI
+    /// on, an interrupt): its output stays activity evidence.
     MayStartWork,
 }
 
@@ -206,6 +207,8 @@ struct ScreenReading {
     cursor_hidden: bool,
     /// What the definition's rules say about this screen.
     rule: Option<WindowStatus>,
+    /// The bottom rows show the definition's `turn_end_key.shown`.
+    shows_turn_end_key: bool,
 }
 
 /// The rows a reading's rules are matched against, composer body taken out.
@@ -269,6 +272,17 @@ pub struct DetectionEngine {
     /// The turn a taken-back window was in, while it may still be running.
     /// Never read by a judgement: it only holds back `first_screen_running_at`.
     inherited_turn: Option<InheritedTurn>,
+    /// Whether the screen has shown `turn_end_key.shown` since the last
+    /// submission. Every command that changes the CLI's version is submitted,
+    /// so a submission clears it.
+    turn_end_key_seen: bool,
+    /// Whether something was submitted since the latest closing report: a
+    /// turn may be starting that no report has opened yet.
+    submitted: bool,
+    /// Set when a press of the turn-end key closed the turn: until the next
+    /// turn starts, a report does not reopen it (see
+    /// [`DetectionEngine::on_press`]).
+    press_hold: bool,
 }
 
 /// How long output must pause, with the cursor still hidden, before the
@@ -404,6 +418,9 @@ impl DetectionEngine {
             reports_seen: false,
             first_screen_running_at: None,
             inherited_turn: None,
+            turn_end_key_seen: false,
+            submitted: false,
+            press_hold: false,
         }
     }
 
@@ -508,9 +525,70 @@ impl DetectionEngine {
     ///
     /// Only a definition that opted into *both* time-based judgements has an
     /// activity band to close; every window still attributes the echo. Typing
-    /// never closes an open turn: nothing a keystroke does says the turn ended.
-    /// Never changes the confirmed status, so it returns nothing.
+    /// never closes an open turn; a press of the definition's turn-end key is
+    /// [`DetectionEngine::on_press`]'s. A [`InputEcho::MayStartWork`] here is
+    /// a submission (or the daemon moving the CLI on): it ends a press's hold
+    /// and counts as the start of a turn. Never changes the confirmed status,
+    /// so it returns nothing.
     pub fn on_input(&mut self, echo: InputEcho) {
+        self.attribute_input(echo);
+        if echo == InputEcho::MayStartWork {
+            self.release_press_hold("submission");
+            self.note_submission();
+        }
+    }
+
+    /// Records that an interrupt was written to the PTY, before the write
+    /// itself: attributed as [`DetectionEngine::on_input`] does and ending a
+    /// press's hold, but submitting nothing, so it neither counts as the
+    /// start of a turn nor clears what the screen has shown of the turn-end
+    /// key. Never changes the confirmed status, so it returns nothing.
+    pub fn on_interrupt_input(&mut self, echo: InputEcho) {
+        self.attribute_input(echo);
+        if echo == InputEcho::MayStartWork {
+            self.release_press_hold("interrupt_write");
+        }
+    }
+
+    /// Records that the definition's turn-end key was pressed, after the
+    /// write's input notification and before the write itself.
+    ///
+    /// Closes the open turn -- one a report opened, a taken-back window's
+    /// inherited one, or one a submission since the latest closing report may
+    /// have started -- when `press` is the definition's `[turn_end_key]` and
+    /// the screen has shown its `shown` since the last submission, and then
+    /// holds it closed: until a submission, the daemon moving the CLI on, the
+    /// screen confirming `Running` or a closing report, a report does not
+    /// reopen it. A press is not a report. Evaluates at once when it closed
+    /// something; returns `None` otherwise.
+    pub fn on_press(&mut self, press: NamedPress) -> Option<DetectedStatus> {
+        let declared = self
+            .definition
+            .as_ref()
+            .and_then(|definition| definition.turn_end_key.as_ref())
+            .map(|turn_end_key| turn_end_key.key);
+        if declared != Some(press) || !self.turn_end_key_seen {
+            return None;
+        }
+        let open = matches!(
+            self.turn,
+            TurnReport::Running | TurnReport::AwaitingApproval
+        ) || self.inherited_turn.is_some()
+            || self.submitted;
+        if !open {
+            return None;
+        }
+        self.turn = TurnReport::Closed;
+        self.approval_dialog_seen = false;
+        self.inherited_turn = None;
+        self.submitted = false;
+        self.press_hold = true;
+        tracing::debug!(key = ?press, "detector press hold set");
+        self.read_and_evaluate(Instant::now())
+    }
+
+    /// The attribution an input write arms or disarms.
+    fn attribute_input(&mut self, echo: InputEcho) {
         match echo {
             // A human editing a line is direct evidence the window is not
             // working, so the band closes at once rather than waiting out a
@@ -528,6 +606,24 @@ impl DetectionEngine {
                 self.attribution.last_input_at = None;
                 self.attribution.last_resize_at = None;
             }
+        }
+    }
+
+    /// The one place a submission is recorded, so the turn-end key's sighting
+    /// is cleared exactly where a turn may start.
+    fn note_submission(&mut self) {
+        self.submitted = true;
+        if self.turn_end_key_seen {
+            self.turn_end_key_seen = false;
+            tracing::debug!("detector turn-end key cleared by a submission");
+        }
+    }
+
+    /// Ends a press's hold; `fact` names what ended it, for the log.
+    fn release_press_hold(&mut self, fact: &'static str) {
+        if self.press_hold {
+            self.press_hold = false;
+            tracing::debug!(fact, "detector press hold released");
         }
     }
 
@@ -621,12 +717,27 @@ impl DetectionEngine {
     /// A report says where a turn began or ended (see [`TurnReport`]) and has
     /// no expiry; it does not override the screen, only fills in what the
     /// screen cannot show. The transition it causes is debounced like any
-    /// other.
+    /// other. While a press holds the turn closed (see
+    /// [`DetectionEngine::on_press`]), a report that would open one leaves it
+    /// closed; a closing report ends the hold.
     pub fn on_status_event(&mut self, status: WindowStatus) -> Option<DetectedStatus> {
         let now = Instant::now();
         self.reports_seen = true;
         self.inherited_turn = None;
-        self.turn = TurnReport::after_report(status);
+        let reported = TurnReport::after_report(status);
+        if reported == TurnReport::Closed {
+            self.submitted = false;
+            self.release_press_hold("closing_report");
+        }
+        if self.press_hold && matches!(reported, TurnReport::Running | TurnReport::AwaitingApproval)
+        {
+            tracing::debug!(
+                report = ?status,
+                "detector report dropped while a press holds the turn closed"
+            );
+        } else {
+            self.turn = reported;
+        }
         self.turn_report_at = now;
         self.approval_dialog_seen = false;
         // A turn opened after a silence longer than the quiet time would be
@@ -710,7 +821,11 @@ impl DetectionEngine {
             refused: read.refused,
         };
         let (cursor_hidden, lines) = read.value.unwrap_or_default();
+        let shows_turn_end_key = lines
+            .as_ref()
+            .is_some_and(|lines| self.shows_turn_end_key(&lines.bottom));
         ScreenReading {
+            shows_turn_end_key,
             rebuilt: counts != self.counts,
             counts,
             cursor_hidden,
@@ -725,7 +840,19 @@ impl DetectionEngine {
     fn read_screen(&mut self) -> ScreenReading {
         let reading = self.take_reading();
         self.counts = reading.counts;
+        if reading.shows_turn_end_key && !self.turn_end_key_seen {
+            self.turn_end_key_seen = true;
+            tracing::debug!("detector turn-end key shown since the last submission");
+        }
         reading
+    }
+
+    /// Whether `bottom` shows the definition's `turn_end_key.shown`.
+    fn shows_turn_end_key(&self, bottom: &[String]) -> bool {
+        self.definition
+            .as_ref()
+            .and_then(|definition| definition.turn_end_key.as_ref())
+            .is_some_and(|turn_end_key| bottom.iter().any(|line| turn_end_key.shown.is_match(line)))
     }
 
     /// Reads the model once and evaluates that screen, or degrades when the
@@ -848,8 +975,9 @@ impl DetectionEngine {
     /// Ends a turn a `Running` report opened once no output has come for
     /// [`TURN_ACTIVE_QUIET`], or no report for [`TURN_REPORT_STALE`]. It stays
     /// closed -- later output does not reopen it -- until the next opening
-    /// report, so a redraw long after an interrupt no report announced cannot
-    /// bring `Running` back. Ends a taken-back window's inherited turn by the
+    /// report (or, after a press closed it, until the hold ends: see
+    /// [`DetectionEngine::on_press`]), so a redraw long after an interrupt no
+    /// report announced cannot bring `Running` back. Ends a taken-back window's inherited turn by the
     /// same limits, so both are judged before new output moves the quiet time.
     fn close_quiet_turn(&mut self, now: Instant) {
         if self.report_turn_limits().reached(now) {
@@ -970,6 +1098,22 @@ impl DetectionEngine {
     ) -> Option<DetectedStatus> {
         if self.confirmed == status {
             return None;
+        }
+        // The screen confirming a running turn while a press holds the turn
+        // closed means the CLI went on: the hold ends, and for a window whose
+        // CLI reports, the turn is open again. A window that never reported
+        // stays judged by its screen alone.
+        if self.press_hold
+            && status == DetectedStatus::Running
+            && screen_rule == Some(WindowStatus::Running)
+        {
+            self.release_press_hold("screen_running");
+            if self.reports_seen {
+                let now = Instant::now();
+                self.turn = TurnReport::Running;
+                self.turn_output_at = now;
+                self.turn_report_at = now;
+            }
         }
         self.confirmed = status;
         if status == DetectedStatus::Running
@@ -1104,6 +1248,11 @@ impl DetectionEngine {
                 self.on_input(echo);
                 None
             }
+            DetectorCommand::InterruptInput(echo) => {
+                self.on_interrupt_input(echo);
+                None
+            }
+            DetectorCommand::Press(press) => self.on_press(press),
             DetectorCommand::Exited => self.on_exit(),
             DetectorCommand::StatusEvent(status) => self.on_status_event(status),
             DetectorCommand::ExpectStatusReports(expected) => {
@@ -1158,6 +1307,8 @@ enum DetectorCommand {
     /// pending command (see [`DetectorHandle::notify_output`]).
     Output,
     Input(InputEcho),
+    InterruptInput(InputEcho),
+    Press(NamedPress),
     Exited,
     StatusEvent(WindowStatus),
     ExpectStatusReports(ReportsExpected),
@@ -1192,6 +1343,8 @@ pub struct DetectorHandle {
     /// An output arrival is queued and not yet taken up by the driver task.
     output_pending: Arc<AtomicBool>,
     report_watch: Arc<ReportWatch>,
+    /// The engine's definition has a `[turn_end_key]`.
+    has_turn_end_key: bool,
 }
 
 impl DetectorHandle {
@@ -1211,6 +1364,10 @@ impl DetectorHandle {
         let (status_tx, status_rx) = mpsc::unbounded_channel();
         let report_watch = Arc::clone(&engine.report_watch);
         let output_pending = Arc::new(AtomicBool::new(false));
+        let has_turn_end_key = engine
+            .definition
+            .as_ref()
+            .is_some_and(|definition| definition.turn_end_key.is_some());
 
         let mut engine = engine;
         let pending = Arc::clone(&output_pending);
@@ -1257,6 +1414,7 @@ impl DetectorHandle {
                 commands: command_tx,
                 output_pending,
                 report_watch,
+                has_turn_end_key,
             },
             status_rx,
         )
@@ -1274,6 +1432,28 @@ impl DetectorHandle {
     /// Reports an input write to the engine (see [`DetectionEngine::on_input`]).
     pub fn notify_input(&self, echo: InputEcho) {
         self.send(DetectorCommand::Input(echo));
+    }
+
+    /// Reports an interrupt's write to the engine (see
+    /// [`DetectionEngine::on_interrupt_input`]).
+    pub fn notify_interrupt_input(&self, echo: InputEcho) {
+        self.send(DetectorCommand::InterruptInput(echo));
+    }
+
+    /// Reports a press of a named key, after the write's input notification
+    /// and before the write (see [`DetectionEngine::on_press`]).
+    pub fn notify_press(&self, press: NamedPress) {
+        self.send(DetectorCommand::Press(press));
+    }
+
+    /// Reports that the daemon moved the CLI on without writing to it, which
+    /// ends a press's hold as a submission does. Sent only when the
+    /// definition has a `[turn_end_key]`, the only one a hold exists for, so
+    /// every other window is left as it was.
+    pub fn notify_cli_moved_on(&self) {
+        if self.has_turn_end_key {
+            self.send(DetectorCommand::Input(InputEcho::MayStartWork));
+        }
     }
 
     /// Reports that a PTY resize was requested (see

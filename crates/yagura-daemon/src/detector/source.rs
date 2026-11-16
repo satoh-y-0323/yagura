@@ -19,8 +19,9 @@ pub enum TurnReport {
     /// A turn is in flight and waits for the user's approval (a
     /// `WaitingApproval` report).
     AwaitingApproval,
-    /// The turn ended (`WaitingInput`, `Idle` or `Interrupted`), or output
-    /// stopped for so long that an open turn is presumed over.
+    /// The turn ended (`WaitingInput`, `Idle` or `Interrupted`), output
+    /// stopped for so long that an open turn is presumed over, or the user
+    /// pressed the key the definition's `[turn_end_key]` declares.
     Closed,
 }
 

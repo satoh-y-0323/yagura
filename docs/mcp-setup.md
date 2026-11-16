@@ -489,9 +489,14 @@ registration by hand needs the flag above.
    again.
 4. **The start-up context arrives with the first prompt.** Copilot runs its session-start hook when
    the first prompt is sent, not when the window opens.
-5. **After an interrupt the window stays `running` for about 5 seconds.** Copilot runs no hook when
-   a turn is interrupted, so the window reads as `waiting_input` once its output has been quiet that
-   long.
+5. **After Esc twice the window stays `running` for a while.** Copilot runs no hook when a turn is
+   interrupted. A Ctrl+C typed in the window, or the window's interrupt button, ends the turn at
+   once, as the screen shows, on a version whose footer shows `ctrl+c interrupt` while a turn runs
+   (1.0.112). A turn cancelled with Esc twice is not ended by the key: the window reads as
+   `waiting_input` once its output has been quiet for 5 seconds, and later while Copilot keeps
+   redrawing its screen. On a version that never shows `ctrl+c interrupt` (1.0.101), this is so for
+   Ctrl+C as well. See the
+   [detection limits](../crates/yagura-daemon/detection/README.md#limits).
 6. **Copilot reads a project's Claude Code settings too.** It takes the working folder's `.mcp.json`
    and `.claude/settings.json` as its own configuration, so the MCP servers and hooks set up there
    for Claude Code also apply to a Copilot window opened in that folder.

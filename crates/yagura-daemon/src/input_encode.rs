@@ -114,6 +114,15 @@ impl NamedPress {
         }
     }
 
+    /// The named press `input` is, keys and modifiers alike; `None` for any
+    /// other press.
+    #[must_use]
+    pub fn from_press(input: &KeyInput) -> Option<Self> {
+        [Self::Escape, Self::CtrlC]
+            .into_iter()
+            .find(|named| named.press() == *input)
+    }
+
     /// The key press itself.
     #[must_use]
     pub fn press(self) -> KeyInput {
@@ -138,6 +147,7 @@ impl NamedPress {
 #[derive(Debug)]
 pub struct ClientWrite {
     bytes: Vec<u8>,
+    press: Option<NamedPress>,
 }
 
 impl ClientWrite {
@@ -148,7 +158,11 @@ impl ClientWrite {
             .iter()
             .flat_map(|press| encode_key(press, modes))
             .collect();
-        Self { bytes }
+        let press = match presses {
+            [one] => NamedPress::from_press(one),
+            _ => None,
+        };
+        Self { bytes, press }
     }
 
     /// What a client message writes to a window in `input`; `None` when it
@@ -180,13 +194,21 @@ impl ClientWrite {
             }
             _ => Vec::new(),
         };
-        Self { bytes }.non_empty()
+        Self { bytes, press: None }.non_empty()
     }
 
     /// The bytes to write.
     #[must_use]
     pub fn bytes(&self) -> &[u8] {
         &self.bytes
+    }
+
+    /// The named press this write is: `Some` only for a write of exactly one
+    /// key press that is a [`NamedPress`], taken from that press and never
+    /// from the bytes, so a `0x03` or `ESC` inside text or a paste is none.
+    #[must_use]
+    pub fn press(&self) -> Option<NamedPress> {
+        self.press
     }
 
     fn non_empty(self) -> Option<Self> {

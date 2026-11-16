@@ -1144,15 +1144,43 @@ impl WindowEntry {
         data: &[u8],
         origin: InputOrigin,
     ) -> crate::pty::PtyResult<()> {
+        self.write_pressing(data, origin, None).await
+    }
+
+    /// [`WindowEntry::write_pty_input`] for a write that is the named key
+    /// `press`, which the detector is told of after the input and before the
+    /// write; `None` for a write that is no single named key.
+    pub(crate) async fn write_pressing(
+        &self,
+        data: &[u8],
+        origin: InputOrigin,
+        press: Option<crate::input_encode::NamedPress>,
+    ) -> crate::pty::PtyResult<()> {
         // Scoped so the `std::sync::Mutex` guard is released before the
         // `.await` below (`WindowEntry::detector`).
         {
             let guard = lock_recover(&self.detector);
             if let Some(detector) = guard.as_ref() {
-                detector.notify_input(classify_input_echo(data, origin));
+                let echo = classify_input_echo(data, origin);
+                match origin {
+                    InputOrigin::Interactive | InputOrigin::Message => detector.notify_input(echo),
+                    InputOrigin::Control => detector.notify_interrupt_input(echo),
+                }
+                if let Some(press) = press {
+                    detector.notify_press(press);
+                }
             }
         }
         self.session.write_input(data).await
+    }
+
+    /// Tells the detector that the daemon moved the CLI on without writing
+    /// to it (see [`DetectorHandle::notify_cli_moved_on`]). A no-op once the
+    /// window has exited.
+    pub(crate) fn note_cli_moved_on(&self) {
+        if let Some(detector) = lock_recover(&self.detector).as_ref() {
+            detector.notify_cli_moved_on();
+        }
     }
 
     /// How many writes this window's child input has taken, from every writer
@@ -1163,7 +1191,9 @@ impl WindowEntry {
     }
 
     /// Writes GUI input to this window's PTY, as
-    /// [`WindowEntry::write_pty_input`] does.
+    /// [`WindowEntry::write_pty_input`] does, telling the detector of the
+    /// named key the write is, if it is one (see
+    /// [`crate::input_encode::ClientWrite::press`]).
     ///
     /// # Errors
     ///
@@ -1173,7 +1203,8 @@ impl WindowEntry {
         write: &crate::input_encode::ClientWrite,
         origin: InputOrigin,
     ) -> crate::pty::PtyResult<()> {
-        self.write_pty_input(write.bytes(), origin).await
+        self.write_pressing(write.bytes(), origin, write.press())
+            .await
     }
 
     /// Verifies `candidate` against *this window's* auth token, which is what

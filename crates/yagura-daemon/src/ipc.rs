@@ -5244,16 +5244,15 @@ async fn execute_interrupt(
             Marked::NoOpenTurn => InterruptOutcome::NoOpenTurn,
         },
         InterruptMeans::Keys { keys, ends_waits } => {
-            let bytes = match keys {
-                Some(keys) => {
-                    let presses: Vec<_> = keys.iter().map(|key| key.press()).collect();
-                    ClientWrite::from_presses(&presses, entry.session().input_state().modes)
-                        .bytes()
-                        .to_vec()
-                }
-                None => config.interrupt_bytes.clone(),
+            let write = keys.map(|keys| {
+                let presses: Vec<_> = keys.iter().map(|key| key.press()).collect();
+                ClientWrite::from_presses(&presses, entry.session().input_state().modes)
+            });
+            let (bytes, press) = match &write {
+                Some(write) => (write.bytes(), write.press()),
+                None => (config.interrupt_bytes.as_slice(), None),
             };
-            if let Err(err) = control::interrupt_window(entry, &bytes).await {
+            if let Err(err) = control::interrupt_window(entry, bytes, press).await {
                 outbound.reply(&control_error_msg(&err));
                 return;
             }

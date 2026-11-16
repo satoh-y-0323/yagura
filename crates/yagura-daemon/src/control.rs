@@ -745,15 +745,22 @@ pub enum ControlError {
 
 /// Interrupts `entry`'s child by writing `bytes` into its PTY: the keys its
 /// profile's `[interrupt]` names, encoded for the window, or, for a window
-/// whose profile declares none, `DaemonConfig::interrupt_bytes`.
+/// whose profile declares none, `DaemonConfig::interrupt_bytes`. `press` is
+/// the named key `bytes` were encoded from when they are exactly one (see
+/// [`crate::input_encode::ClientWrite::press`]), told to the detector as a
+/// press; `None` for anything else.
 ///
 /// # Errors
 ///
 /// Returns [`ControlError::ChildExited`] when the child is already gone and
 /// [`ControlError::WriteFailed`] when the PTY write fails.
-pub async fn interrupt_window(entry: &WindowEntry, bytes: &[u8]) -> Result<(), ControlError> {
+pub async fn interrupt_window(
+    entry: &WindowEntry,
+    bytes: &[u8],
+    press: Option<crate::input_encode::NamedPress>,
+) -> Result<(), ControlError> {
     entry
-        .write_pty_input(bytes, InputOrigin::Control)
+        .write_pressing(bytes, InputOrigin::Control, press)
         .await
         .map_err(|err| match err {
             crate::pty::PtyError::ChildExited => ControlError::ChildExited,

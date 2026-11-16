@@ -6,7 +6,7 @@
 //! mouse encoders), plus yagura's own Shift+Enter.
 
 use yagura_daemon::input_encode::{
-    ClientWrite, PointerOutcome, WheelOutcome, encode_focus, encode_key, encode_paste,
+    ClientWrite, NamedPress, PointerOutcome, WheelOutcome, encode_focus, encode_key, encode_paste,
     encode_pointer, encode_text, encode_wheel,
 };
 use yagura_daemon::pty::InputState;
@@ -1208,6 +1208,25 @@ fn a_run_of_presses_is_written_press_by_press_in_the_windows_form() {
     // macOS and Linux windows write the legacy bytes.
     let write = ClientWrite::from_presses(std::slice::from_ref(&ctrl_c), kitty(0));
     assert_bytes(write.bytes().to_vec(), b"\x03", "Ctrl+C, legacy");
+
+    // The press a write carries is the key it was built from, whatever form
+    // the window reads it in; a run of keys is no single press.
+    let mut failures: Vec<String> = Vec::new();
+    for (form, modes) in [("records", win32(0)), ("legacy", kitty(0))] {
+        let press = ClientWrite::from_presses(std::slice::from_ref(&ctrl_c), modes).press();
+        if press != Some(NamedPress::CtrlC) {
+            failures.push(format!("w6 Ctrl+C written as {form}: {press:?}"));
+        }
+    }
+    let press = ClientWrite::from_presses(&[esc, up], win32(0)).press();
+    if press.is_some() {
+        failures.push(format!("w7 Esc then Up: {press:?}"));
+    }
+    assert!(
+        failures.is_empty(),
+        "a write carried the wrong press:\n{}",
+        failures.join("\n")
+    );
 }
 
 fn input_state() -> InputState {
@@ -1226,6 +1245,34 @@ fn text_from_the_gui_is_written_unchanged() {
                 .expect("text writes");
         assert_bytes(write.bytes().to_vec(), text.as_bytes(), text);
     }
+
+    // A control character inside text or a paste is not a key press.
+    let mut failures: Vec<String> = Vec::new();
+    let messages = [
+        (
+            "text",
+            ClientMessage::Text {
+                text: "\x03".into(),
+            },
+        ),
+        (
+            "paste",
+            ClientMessage::Paste {
+                text: "\x03".into(),
+            },
+        ),
+    ];
+    for (what, message) in messages {
+        let press = ClientWrite::from_message(&message, input_state()).and_then(|w| w.press());
+        if press.is_some() {
+            failures.push(format!("w5 a {what} holding 0x03: {press:?}"));
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "text was read as a press:\n{}",
+        failures.join("\n")
+    );
 }
 
 #[test]
@@ -1237,6 +1284,35 @@ fn a_key_press_from_the_gui_is_encoded_for_the_window() {
     let write =
         ClientWrite::from_message(&message(Key::Char('d')), input_state()).expect("Ctrl+D writes");
     assert_bytes(write.bytes().to_vec(), b"\x04", "GUI Ctrl+D");
+
+    // A key the GUI sends is a press only when it is a named press exactly,
+    // key and modifiers both.
+    let mut failures: Vec<String> = Vec::new();
+    let cases: [(&str, Key, Modifiers, Option<NamedPress>); 6] = [
+        ("w1 Ctrl+C", Key::Char('c'), CTRL, Some(NamedPress::CtrlC)),
+        ("w2 Ctrl+D", Key::Char('d'), CTRL, None),
+        (
+            "w3 Esc",
+            Key::Named(NamedKey::Escape),
+            NONE,
+            Some(NamedPress::Escape),
+        ),
+        ("w4 c", Key::Char('c'), NONE, None),
+        ("w4 Ctrl+Shift+C", Key::Char('c'), CTRL_SHIFT, None),
+        ("w4 Alt+C", Key::Char('c'), ALT, None),
+    ];
+    for (name, key, mods, expected) in cases {
+        let message = ClientMessage::Key(KeyInput { key, mods });
+        let press = ClientWrite::from_message(&message, input_state()).and_then(|w| w.press());
+        if press != expected {
+            failures.push(format!("{name}: expected {expected:?}, got {press:?}"));
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "a GUI key carried the wrong press:\n{}",
+        failures.join("\n")
+    );
 }
 
 #[test]

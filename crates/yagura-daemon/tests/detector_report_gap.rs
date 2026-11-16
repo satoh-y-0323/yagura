@@ -19,6 +19,7 @@ use yagura_daemon::detector::engine::{
     DetectorHandle, InputEcho, REPORT_GAP_GRACE, ReportsExpected, TURN_ACTIVE_QUIET,
     TURN_REPORT_STALE,
 };
+use yagura_daemon::input_encode::NamedPress;
 use yagura_protocol::{DetectedStatus, WindowStatus};
 
 const DEF: &str = r#"
@@ -45,6 +46,10 @@ status = "waiting_approval"
 pattern = 'Allow this command'
 priority = 30
 region = "bottom"
+
+[turn_end_key]
+key = "escape"
+shown = 'esc to interrupt'
 "#;
 
 /// Output that changes no cell: it keeps a presumed turn from going quiet.
@@ -127,6 +132,11 @@ impl Driver {
     async fn report_at(&mut self, ms: u64, status: WindowStatus) {
         self.advance_to(ms).await;
         self.engine.on_status_event(status);
+    }
+
+    async fn press_at(&mut self, ms: u64, press: NamedPress) {
+        self.advance_to(ms).await;
+        let _ = self.engine.on_press(press);
     }
 
     async fn gap_at(&mut self, ms: u64) -> bool {
@@ -247,6 +257,35 @@ async fn the_grace_runs_from_the_first_running_the_screen_confirmed() {
     assert!(
         e.gap_at(running_at + GRACE_MS + 600).await,
         "the estimate closes the stale time after its declaration plus the wait, not after the answer"
+    );
+
+    // Stage g: the declared key's press ends the estimate a taken-back engine
+    // was born into, so the next running screen starts a turn of its own and
+    // is marked once its grace elapses.
+    let mut failures: Vec<String> = Vec::new();
+    let mut g = Driver::new(Some(ReportsExpected::FromTakeBack));
+    for at in (0..=3_000).step_by(1_000) {
+        g.feed_at(at, &running()).await;
+    }
+    g.press_at(3_500, NamedPress::Escape).await;
+    g.feed_at(4_000, &idle()).await;
+    for at in (5_000..5_000 + GRACE_MS).step_by(1_000) {
+        g.feed_at(at, &running()).await;
+    }
+    if g.gap_at(5_000 + GRACE_MS - 500).await {
+        failures.push("G1 marked inside the grace of the turn after the press".to_string());
+    }
+    g.feed_at(5_000 + GRACE_MS, &running()).await;
+    if !g.gap_at(5_000 + GRACE_MS + 600).await {
+        failures.push(
+            "G1 the press did not end the taken-back estimate, so the turn after it was never marked"
+                .to_string(),
+        );
+    }
+    assert!(
+        failures.is_empty(),
+        "the press did not end the taken-back estimate:\n{}",
+        failures.join("\n")
     );
 }
 
