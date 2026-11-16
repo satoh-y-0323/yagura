@@ -5,7 +5,8 @@
 # vocabulary).
 schema_version = 1
 name = "muse-code"
-# Captured against Muse Code 1.4.12 on 2026-10-23 at 100x30; see
+# Captured against Muse Code 1.4.12 on 2026-10-23 at 100x30 and 1.4.20 on
+# 2026-11-16 at 88x30; see
 # tests/fixtures/muse-code/README.md for the extraction rule. The turn's
 # status line sits up to six rows above the footer (status, blank, upper
 # rule, composer, lower rule, footer), and the approval hint stays within
@@ -31,6 +32,15 @@ region = "bottom"
 [[rules]]
 status = "running"
 pattern = 'esc to interrupt\)'
+priority = 20
+region = "bottom"
+
+# A running command's output can push that status line out of reach; the
+# hint ending the command's last row stays drawn until it exits (checked on
+# 1.4.20). Matched as written, since other `ctrl+` hints outlive the turn.
+[[rules]]
+status = "running"
+pattern = '\(ctrl\+b to send to background\)'
 priority = 20
 region = "bottom"
 

@@ -1,6 +1,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-//! Judges `detection/muse-code.toml` against real Muse Code screen captures (1.4.12).
+//! Judges `detection/muse-code.toml` against real Muse Code screen captures (1.4.12 and
+//! 1.4.20).
 //! See `tests/fixtures/muse-code/README.md` for fixture provenance, the
 //! `VtScreen::bottom_lines(16)` extraction rule, and the redactions applied.
 
@@ -34,6 +35,11 @@ const FIXTURE_100X30_ECHO_WAKE_ASYNC: &str =
     include_str!("fixtures/muse-code/100x30-echo-wake-async.txt");
 const FIXTURE_100X30_WSL_IDLE: &str = include_str!("fixtures/muse-code/100x30-wsl-idle.txt");
 const FIXTURE_100X30_WSL_DONE: &str = include_str!("fixtures/muse-code/100x30-wsl-done.txt");
+
+const FIXTURE_88X30_V1420_RUNNING_TOOL_OUTPUT: &str =
+    include_str!("fixtures/muse-code/88x30-v1420-running-tool-output.txt");
+const FIXTURE_88X30_V1420_DONE_AFTER_TOOL: &str =
+    include_str!("fixtures/muse-code/88x30-v1420-done-after-tool.txt");
 
 /// The real fixtures with their recorded geometry and expected verdict, per
 /// `tests/fixtures/muse-code/README.md`. The approval boxes keep `esc to interrupt)`
@@ -155,6 +161,20 @@ const CASES: &[(&str, &str, u16, u16, WindowStatus)] = &[
         "100x30-wsl-done",
         FIXTURE_100X30_WSL_DONE,
         100,
+        30,
+        WindowStatus::WaitingInput,
+    ),
+    (
+        "88x30-v1420-running-tool-output",
+        FIXTURE_88X30_V1420_RUNNING_TOOL_OUTPUT,
+        88,
+        30,
+        WindowStatus::Running,
+    ),
+    (
+        "88x30-v1420-done-after-tool",
+        FIXTURE_88X30_V1420_DONE_AFTER_TOOL,
+        88,
         30,
         WindowStatus::WaitingInput,
     ),

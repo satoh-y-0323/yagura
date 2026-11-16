@@ -1,7 +1,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 //! Judges `detection/copilot-cli.toml` against real GitHub Copilot CLI screen captures
-//! (1.0.101). See `tests/fixtures/copilot-cli/README.md` for fixture provenance, the
+//! (1.0.101 and 1.0.112). See `tests/fixtures/copilot-cli/README.md` for fixture provenance, the
 //! `VtScreen::bottom_lines(16)` extraction rule, and the redactions applied.
 
 use crate::common;
@@ -74,6 +74,25 @@ const FIXTURE_100X30_SIDEBAR_FOCUSED: &str =
     include_str!("fixtures/copilot-cli/100x30-sidebar-focused.txt");
 const FIXTURE_100X30_SIDEBAR_CLOSED: &str =
     include_str!("fixtures/copilot-cli/100x30-sidebar-closed.txt");
+
+const FIXTURE_88X30_V112_RUNNING_JUST_SUBMITTED: &str =
+    include_str!("fixtures/copilot-cli/88x30-v112-running-just-submitted.txt");
+const FIXTURE_88X30_V112_RUNNING_THINKING: &str =
+    include_str!("fixtures/copilot-cli/88x30-v112-running-thinking.txt");
+const FIXTURE_88X30_V112_RUNNING_TOOL: &str =
+    include_str!("fixtures/copilot-cli/88x30-v112-running-tool.txt");
+const FIXTURE_122X30_V112_RUNNING_TOOL_WSL: &str =
+    include_str!("fixtures/copilot-cli/122x30-v112-running-tool-wsl.txt");
+const FIXTURE_88X30_V112_RUNNING_BACKGROUND_SHELLS: &str =
+    include_str!("fixtures/copilot-cli/88x30-v112-running-background-shells.txt");
+const FIXTURE_88X30_V112_CTRL_C_ONCE: &str =
+    include_str!("fixtures/copilot-cli/88x30-v112-ctrl-c-once.txt");
+const FIXTURE_88X30_V112_INTERRUPTED: &str =
+    include_str!("fixtures/copilot-cli/88x30-v112-interrupted.txt");
+const FIXTURE_88X30_V112_DONE: &str = include_str!("fixtures/copilot-cli/88x30-v112-done.txt");
+const FIXTURE_88X30_V112_IDLE: &str = include_str!("fixtures/copilot-cli/88x30-v112-idle.txt");
+const FIXTURE_88X30_V112_APPROVAL_COMMAND: &str =
+    include_str!("fixtures/copilot-cli/88x30-v112-approval-command.txt");
 
 /// The real fixtures read from the screen text alone, with their recorded geometry and
 /// expected verdict, per `tests/fixtures/copilot-cli/README.md`.
@@ -315,6 +334,76 @@ const CASES: &[(&str, &str, u16, u16, WindowStatus)] = &[
         100,
         30,
         WindowStatus::WaitingInput,
+    ),
+    (
+        "88x30-v112-running-just-submitted",
+        FIXTURE_88X30_V112_RUNNING_JUST_SUBMITTED,
+        88,
+        30,
+        WindowStatus::Running,
+    ),
+    (
+        "88x30-v112-running-thinking",
+        FIXTURE_88X30_V112_RUNNING_THINKING,
+        88,
+        30,
+        WindowStatus::Running,
+    ),
+    (
+        "88x30-v112-running-tool",
+        FIXTURE_88X30_V112_RUNNING_TOOL,
+        88,
+        30,
+        WindowStatus::Running,
+    ),
+    (
+        "122x30-v112-running-tool-wsl",
+        FIXTURE_122X30_V112_RUNNING_TOOL_WSL,
+        122,
+        30,
+        WindowStatus::Running,
+    ),
+    (
+        "88x30-v112-running-background-shells",
+        FIXTURE_88X30_V112_RUNNING_BACKGROUND_SHELLS,
+        88,
+        30,
+        WindowStatus::Running,
+    ),
+    (
+        "88x30-v112-ctrl-c-once",
+        FIXTURE_88X30_V112_CTRL_C_ONCE,
+        88,
+        30,
+        WindowStatus::WaitingInput,
+    ),
+    (
+        "88x30-v112-interrupted",
+        FIXTURE_88X30_V112_INTERRUPTED,
+        88,
+        30,
+        WindowStatus::WaitingInput,
+    ),
+    (
+        "88x30-v112-done",
+        FIXTURE_88X30_V112_DONE,
+        88,
+        30,
+        WindowStatus::WaitingInput,
+    ),
+    (
+        "88x30-v112-idle",
+        FIXTURE_88X30_V112_IDLE,
+        88,
+        30,
+        WindowStatus::WaitingInput,
+    ),
+    (
+        "88x30-v112-approval-command",
+        FIXTURE_88X30_V112_APPROVAL_COMMAND,
+        88,
+        30,
+        WindowStatus::WaitingApproval,
     ),
 ];
 

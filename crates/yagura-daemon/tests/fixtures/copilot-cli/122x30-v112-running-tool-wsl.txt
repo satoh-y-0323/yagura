@@ -1,0 +1,16 @@
+ ❯ Thought for 1s                                                                                                        ┃
+                                                                                                                         ┃
+ $ Shell Ping localhost 40 times 32 lines…                                                                           30s ┃
+   ping -c 40 127.0.0.1                                                                                                  ┃
+                                                                                                                         ┃
+ ❯ Thought for 2s                                                                                                        ┃
+                                                                                                                         ┃
+ ● Read shell output Waiting up to 20 seconds for command output 45 lines…                                            5s ┃
+                                                                                                                         ┃
+ ● done                                                                                                                  ┃
+                                                                                                                         ┃
+ /mnt/c/Users/demo/work/project                [⎇ main%]                                           Session: 0.31 AIC used
+╻▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄
+┃  
+╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
+ ● Working · 503 B ctrl+c interrupt                                                           Copilot Fusion → gpt-6-luna 

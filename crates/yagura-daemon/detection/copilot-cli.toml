@@ -5,7 +5,8 @@
 # vocabulary).
 schema_version = 1
 name = "copilot-cli"
-# Captured against GitHub Copilot CLI 1.0.101 on 2026-10-21 at 100x30; see
+# Captured against GitHub Copilot CLI 1.0.101 on 2026-10-21 at 100x30 and
+# 1.0.112 on 2026-11-16 at 88x30 (122x30 under WSL); see
 # tests/fixtures/copilot-cli/README.md for the extraction rule and fixture
 # provenance. Three lines reach the composer's last row, the border under it
 # and the footer line; the approval boxes put their navigation hint second
@@ -28,13 +29,15 @@ pattern = '(?i)^(?:[^│]*││\s{0,3}|[│\s]{0,4})↑/↓ to navigate\b'
 priority = 30
 region = "bottom"
 
-# The footer while a turn runs: `esc esc interrupt`, right after a prompt is
-# sent `esc esc edit prompt`, and after a single Esc `esc again to interrupt`.
-# The glyph before `Working` changes from frame to frame, so the rule does not
-# depend on it.
+# The footer while a turn runs names the key that stops it, whatever the key:
+# `ctrl+c interrupt` on 1.0.112, also while it waits for background shells;
+# `esc esc interrupt`, after a single Esc `esc again to interrupt`, and right
+# after a prompt is sent `esc esc edit prompt` on 1.0.101. The glyph before
+# `Working` changes from frame to frame, so the rule does not depend on it.
+# Only a key name may precede `interrupt`, so prose never reads as running.
 [[rules]]
 status = "running"
-pattern = '\besc (esc (interrupt|edit prompt)|again to interrupt)\b'
+pattern = '(?:^|\s)(?:esc|(?:ctrl|alt|shift|cmd|meta|option)\+\S+) (?:again to )?interrupt\b|\besc esc edit prompt\b'
 priority = 20
 region = "bottom"
 

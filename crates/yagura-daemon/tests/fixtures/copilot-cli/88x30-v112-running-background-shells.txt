@@ -1,0 +1,16 @@
+ $ Shell Run ping in background 1 line…                                                ┃
+   ping -n 41 127.0.0.1                                                                ┃
+                                                                                       ┃
+ ● done                                                                                ┃
+                                                                                       ┃
+ ● Shell "Run ping in background" completed                                            ┃
+                                                                                       ┃
+ ● Read shell output Reading command output 48 lines…                                  ┃
+                                                                                       ┃
+ ● done                                                                                ┃
+                                                                                       ┃
+ ~\work\project               [⎇ main%]                          Session: 0.43 AIC used
+╻▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄
+┃  
+╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
+ ● Waiting for background s… · 30s · 120 B ctrl+c interrupt Copilot Fusion → gpt-6-luna 

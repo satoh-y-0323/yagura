@@ -1,6 +1,6 @@
 # Muse Code CLI screen fixtures
 
-Seventeen real-session captures of Muse Code, kept to exercise
+Nineteen real-session captures of Muse Code, kept to exercise
 `crates/yagura-daemon/detection/muse-code.toml` against real screen content
 instead of hand-written approximations.
 
@@ -31,6 +31,8 @@ footer below the lower rule reads `<model> · <effort> · <folder> · <approval>
 | 100x30-echo-wake-async | 100 | 30 | WaitingInput | 1.4.12 |
 | 100x30-wsl-idle | 100 | 30 | WaitingInput | 1.4.12 |
 | 100x30-wsl-done | 100 | 30 | WaitingInput | 1.4.12 |
+| 88x30-v1420-running-tool-output | 88 | 30 | Running | 1.4.20 |
+| 88x30-v1420-done-after-tool | 88 | 30 | WaitingInput | 1.4.20 |
 
 ## Capture conditions
 
@@ -72,6 +74,28 @@ replayed into a fresh `VtScreen(100, 30)` and read through
 | 100x30-wsl-idle | WSL, `--provider echo`, per-run managed hooks | the empty composer after start |
 | 100x30-wsl-done | the same window | after one turn |
 
+`88x30-v1420-running-tool-output` was captured on 2026-11-16 against Muse Code 1.4.20
+(`muse-code` profile, Windows) in a yagura window 88 columns wide (a test instance of
+the GUI and daemon); the row count of 30 is the fixture's frame and was not measured.
+The daemon ran with debug logging, so every evaluation recorded its
+`detector match window` lines, the bottom eight rows the rules read. The point is a
+shell command (`ping -n 41 127.0.0.1`) running after it printed several rows: those
+rows push the turn's heading, `◆ Running command · … running (0s · esc to interrupt)`,
+above the eight rows, and the last of them ends with `(ctrl+b to send to background)`.
+The bottom eight rows are the recorded lines, verbatim, trailing spaces included. The
+eight rows above them are put together from the lines recorded a moment earlier in
+the same turn (the heading as last recorded, at 0s, and the first output row) and from
+`read_output` with 16 lines (the version banner). The CLI printed the command's cp932
+output as if it were UTF-8, so the output rows hold replacement characters; they are
+kept as the window showed them.
+
+`88x30-v1420-done-after-tool` is the same window after that turn ended, with
+`◆ Ran command · … · ✓ · 42s · ctrl+o` above `◆ done`. The bottom eight rows are the
+recorded lines, verbatim; the eight rows above them are `read_output` with 16 lines
+at the end of the scene. The recorded composer row reads `❯ `, where `read_output`
+shows the empty composer's hint (`❯ Start a message with ! to run a shell command
+yourself`); the fixture follows the recorded row.
+
 ## Extraction rule
 
 Each fixture is exactly 16 lines, LF-terminated, with no trailing whitespace
@@ -95,5 +119,8 @@ the same columns.
   `Trust target:` path with `\\?\C:\Users\demo\work\project` the same way
   (`/mnt/c/Users/demo/work/project` in `100x30-wsl-trust`, which has no
   `Trust target:` row).
+
+- In the `v1420` fixtures the folder in the footer
+  (`~/github_project\yagura_test`) is replaced with `~/work/project` the same way.
 
 Nothing else in the captured text was altered.

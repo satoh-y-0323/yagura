@@ -1,6 +1,6 @@
 # GitHub Copilot CLI screen fixtures
 
-Thirty-five real-session captures, used by `tests/detector_copilot_cli.rs` to exercise
+Forty-five real-session captures, used by `tests/detector_copilot_cli.rs` to exercise
 `crates/yagura-daemon/detection/copilot-cli.toml` against real screen content
 instead of hand-written approximations.
 
@@ -54,6 +54,16 @@ way, so they are captured once.
 | 100x30-sidebar-interrupted | 100 | 30 | WaitingInput | 1.0.101 |
 | 100x30-sidebar-focused | 100 | 30 | Unknown | 1.0.101 |
 | 100x30-sidebar-closed | 100 | 30 | WaitingInput | 1.0.101 |
+| 88x30-v112-running-just-submitted | 88 | 30 | Running | 1.0.112 |
+| 88x30-v112-running-thinking | 88 | 30 | Running | 1.0.112 |
+| 88x30-v112-running-tool | 88 | 30 | Running | 1.0.112 |
+| 122x30-v112-running-tool-wsl | 122 | 30 | Running | 1.0.112 |
+| 88x30-v112-running-background-shells | 88 | 30 | Running | 1.0.112 |
+| 88x30-v112-ctrl-c-once | 88 | 30 | WaitingInput | 1.0.112 |
+| 88x30-v112-interrupted | 88 | 30 | WaitingInput | 1.0.112 |
+| 88x30-v112-done | 88 | 30 | WaitingInput | 1.0.112 |
+| 88x30-v112-idle | 88 | 30 | WaitingInput | 1.0.112 |
+| 88x30-v112-approval-command | 88 | 30 | WaitingApproval | 1.0.112 |
 
 ## Capture conditions
 
@@ -123,6 +133,40 @@ sidebar up to its first `│`.
 The wrapped-draft capture keeps text only, so the test puts the cursor at the end of
 the draft, where the CLI leaves it, before judging it.
 
+The `v112` fixtures were captured on 2026-11-16 against GitHub Copilot CLI 1.0.112
+in yagura windows (a test instance of the GUI and daemon): the native Windows binary
+at 88 columns, and the WSL binary started as the bundled `wsl-copilot-cli` profile
+starts it, at 122 columns (`-wsl`). The row count of 30 is the fixture's frame and was
+not measured. The daemon ran with debug logging, so every evaluation recorded its
+`detector match window` lines: the bottom rows the rules read, after the composer's
+body is taken out. Each fixture is built from those recorded lines and from
+`read_output` with 16 lines, taken when the scene ended:
+
+- The rows the rules read are the recorded lines, verbatim. They differ from
+  `read_output` in two ways, and the fixtures follow the recorded lines: the
+  composer's body row is `┃  ` (`read_output` trims it to `┃`), and the footer keeps
+  the trailing space the terminal painted after the model name.
+- The rows above them are context only, copied from `read_output` at the end of the
+  scene. For the running fixtures that is the screen after the turn, so the history
+  they show is not the history on screen at the recorded moment.
+- In `88x30-v112-approval-command` the box replaces the composer and the footer, and
+  only its last three rows were recorded; the thirteen rows above them are left blank.
+
+| fixture | point in the session (recorded lines) |
+|---|---|
+| 88x30-v112-running-just-submitted | a prompt sent a moment ago, `● Working ctrl+c interrupt`; 1.0.112 never showed `esc esc edit prompt` |
+| 88x30-v112-running-thinking | a turn with no tool, `◉ Working · 371 B ctrl+c interrupt` (the glyph cycles through `●◉◎○`) |
+| 88x30-v112-running-tool | a shell command running right after its approval, `● Working · 116 B ctrl+c interrupt` |
+| 122x30-v112-running-tool-wsl | the same point, WSL binary |
+| 88x30-v112-running-background-shells | a shell command started in the background; the turn stays open, `● Waiting for background s… · 30s · 120 B ctrl+c interrupt` (the left text is shortened by the window's width, the right-aligned hint is not) |
+| 88x30-v112-ctrl-c-once | one Ctrl+C during that command: `● Cancelling`, which already cancels the turn |
+| 88x30-v112-interrupted | the composer right after the cancel, with `Operation aborted by user` and `Operation cancelled by user` above |
+| 88x30-v112-done | after one completed turn with no tool |
+| 88x30-v112-idle | the empty composer after start |
+| 88x30-v112-approval-command | the shell command approval box |
+
+No 1.0.112 screen had its right-aligned hint left out for the window's width.
+
 ## Extraction rule
 
 Each fixture is exactly 16 lines, LF-terminated, with no trailing whitespace
@@ -152,5 +196,11 @@ columns.
   with `~\work\project`.
 - In `100x30-tab-sessions` the title of every earlier session in the list is
   replaced with `Earlier session`.
+
+- In the `v112` fixtures the folder in the footer line above the composer
+  (`~\github_project\yagura_test`) is replaced with `~\work\project`, and the WSL one
+  (`/mnt/c/Users/<user>/github_project/yagura_test`) with
+  `/mnt/c/Users/demo/work/project`, padded with spaces right after the dummy so the
+  branch and the right-aligned parts stay in the same columns.
 
 Nothing else in the captured text was altered.
