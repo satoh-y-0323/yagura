@@ -2774,8 +2774,9 @@ impl IpcServer {
     ///
     /// # Errors
     ///
-    /// Returns the answer the caller must send: `profile_disabled` when the
-    /// named profile's `enabled` key switches it off, `unsupported` when a
+    /// Returns the answer the caller must send: `profile_not_found` when the
+    /// named profile is not one `list_profiles` reports, `profile_disabled`
+    /// when its `enabled` key switches it off, `unsupported` when a
     /// supplied launch option cannot pass this host's program
     /// ([`crate::profile::shim_limits`]), `invalid_argument` for every other
     /// rejection here, none of which depends on who is asking. A
@@ -3065,12 +3066,13 @@ impl IpcServer {
     /// state a concurrent change has already replaced: the change permit
     /// (owner liveness, range) -> whether the task's
     /// currently bound window (if any) is still alive -> the resolved
-    /// assignment (unassigned, or naming a profile that has since vanished,
-    /// is refused before anything is spawned) -> the open gate, which may
-    /// wait for an approver while the lock stays held -> the window itself,
-    /// opened through the same [`IpcServer::plan_from_profile`] /
-    /// [`open_planned`] pair [`IpcServer::handle_open_window_from_profile`]
-    /// uses -> the binding record ([`open_task_window`]).
+    /// assignment (an unassigned task is refused) -> the window's launch,
+    /// decided by the same [`IpcServer::plan_from_profile`]
+    /// [`IpcServer::handle_open_window_from_profile`] uses, so a profile that
+    /// has since vanished is the same `profile_not_found` there -> the open
+    /// gate, which may wait for an approver while the lock stays held -> the
+    /// window itself, opened through [`open_planned`] -> the binding record
+    /// ([`open_task_window`]). Nothing is spawned before the open gate.
     async fn handle_open_task_window(
         &self,
         outbound: &Arc<Outbound>,
@@ -3100,15 +3102,10 @@ impl IpcServer {
             }
         }
 
-        let (roles_result, profile_listing) =
+        let (roles_result, _profiles) =
             plan::load_role_and_profile_state_blocking(&self.config, &self.role_and_profile_reads)
                 .await;
         let roles = roles_result.ok();
-        let profile_ids: std::collections::HashSet<String> = profile_listing
-            .profiles
-            .into_iter()
-            .map(|entry| entry.id)
-            .collect();
 
         let guard = self.ledger.locks().lock(&plan_id).await;
         let origin = state.origin.clone();
@@ -3197,13 +3194,6 @@ impl IpcServer {
             outbound.reply(&plan::task_unassigned_msg());
             return;
         };
-        if !profile_ids.contains(&assignment.profile) {
-            outbound.reply(&error_msg(
-                "invalid_argument",
-                "the assigned profile does not exist",
-            ));
-            return;
-        }
 
         let options = crate::profile::LaunchOptionValues {
             model: assignment.model.clone(),
@@ -4848,10 +4838,14 @@ fn error_msg(code: &str, message: &str) -> DaemonMessage {
 /// [`crate::profile::ProfileLaunchError`] as the wire code the three
 /// profile-addressed launch paths (`open_window_from_profile`,
 /// `open_task_window`, `send_handoff`) send through
-/// [`IpcServer::plan_from_profile`]: `Disabled` alone is `profile_disabled`,
-/// every other variant a caller mistake reported as `invalid_argument`.
+/// [`IpcServer::plan_from_profile`]: `UnknownProfile` is `profile_not_found`,
+/// `Disabled` is `profile_disabled`, every other variant a caller mistake
+/// reported as `invalid_argument`.
 fn profile_launch_error_msg(err: &crate::profile::ProfileLaunchError) -> DaemonMessage {
     match err {
+        crate::profile::ProfileLaunchError::UnknownProfile => {
+            error_msg("profile_not_found", &err.to_string())
+        }
         crate::profile::ProfileLaunchError::Disabled => {
             error_msg("profile_disabled", &err.to_string())
         }

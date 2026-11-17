@@ -919,8 +919,10 @@ pub enum InjectionSpecError {
 #[error("schema version {0}")]
 pub struct UnsupportedSchemaVersion(pub u32);
 
-/// Errors refusing to resolve a launch (`OpenWindowFromProfile`'s
-/// `invalid_argument` conditions).
+/// Errors refusing to resolve a launch. The daemon answers
+/// [`ProfileLaunchError::UnknownProfile`] as `profile_not_found`,
+/// [`ProfileLaunchError::Disabled`] as `profile_disabled` and every other
+/// variant as `invalid_argument`.
 #[derive(Debug, Clone, Error)]
 pub enum ProfileLaunchError {
     /// The identifier is not one [`list_profiles`] currently reports (an

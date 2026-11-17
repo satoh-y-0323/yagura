@@ -1356,7 +1356,7 @@ async fn open_window_maps_an_unexpected_daemon_message_variant_to_internal() {
 
 #[test]
 fn tool_error_code_covers_every_adr_mcp_2_error_code() {
-    let cases: [(ToolError, &str); 9] = [
+    let cases: [(ToolError, &str); 10] = [
         (
             ToolError::DaemonUnavailable("x".to_string()),
             "daemon_unavailable",
@@ -1379,6 +1379,10 @@ fn tool_error_code_covers_every_adr_mcp_2_error_code() {
         (
             ToolError::ProfileDisabled("x".to_string()),
             "profile_disabled",
+        ),
+        (
+            ToolError::ProfileNotFound("x".to_string()),
+            "profile_not_found",
         ),
         (ToolError::Internal("x".to_string()), "internal"),
     ];
@@ -2874,8 +2878,8 @@ async fn open_window_relays_a_daemon_refusal_of_a_profile_launch_unchanged() {
     // The profile id is the daemon's to validate: an unknown one comes back
     // as its own refusal, not as an `internal` error from the bridge.
     let transport = MockTransport::with_response(Ok(DaemonMessage::Error {
-        code: "invalid_argument".to_string(),
-        message: "unknown profile: nope".to_string(),
+        code: "profile_not_found".to_string(),
+        message: "unknown launch profile".to_string(),
         rejected_argument: None,
     }));
     let args = OpenWindowArgs {
@@ -2891,7 +2895,11 @@ async fn open_window_relays_a_daemon_refusal_of_a_profile_launch_unchanged() {
 
     let err = open_window(&transport, args).await.expect_err("must fail");
 
-    assert_eq!(err.code(), "invalid_argument");
+    match &err {
+        ToolError::ProfileNotFound(message) => assert_eq!(message, "unknown launch profile"),
+        other => panic!("expected ToolError::ProfileNotFound, got {other:?}"),
+    }
+    assert_eq!(err.code(), "profile_not_found");
     assert_eq!(transport.call_count(), 1);
     match transport.last_sent() {
         ClientMessage::OpenWindowFromProfile { profile, .. } => assert_eq!(profile, "nope"),

@@ -947,7 +947,7 @@ async fn open_task_window_is_refused_for_unassigned_or_missing_profile_tasks() {
 
     std::fs::remove_file(profiles_dir.join("will-vanish.toml")).expect("remove the profile file");
     let reply = open_task_window(&mut owner, &plan.plan_id, "vanishing", None).await;
-    expect_error(reply, "invalid_argument");
+    expect_error(reply, "profile_not_found");
 }
 
 /// Already true of the leftover minimal arm: nothing is spawned when

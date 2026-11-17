@@ -99,6 +99,10 @@ pub enum ToolError {
     /// Not an argument error: repeating the same request reworded will not help.
     #[error("profile disabled: {0}")]
     ProfileDisabled(String),
+    /// The named launch profile is not one `list_profiles` currently reports.
+    /// Not an argument error: the identifier names nothing this host can launch.
+    #[error("profile not found: {0}")]
+    ProfileNotFound(String),
     /// The daemon reported that the named ticket number does not exist in
     /// the calling window's workspace, or belongs to another workspace.
     #[error("ticket not found: {0}")]
@@ -144,6 +148,7 @@ impl ToolError {
             Self::PlanNotApproved(_) => "plan_not_approved",
             Self::NameTaken(_) => "name_taken",
             Self::ProfileDisabled(_) => "profile_disabled",
+            Self::ProfileNotFound(_) => "profile_not_found",
             Self::TicketNotFound(_) => "ticket_not_found",
             Self::TicketsNotConfigured(_) => "tickets_not_configured",
             Self::TicketsConfigInvalid(_) => "tickets_config_invalid",
@@ -411,6 +416,7 @@ pub(crate) fn map_daemon_error(code: &str, message: String) -> ToolError {
         "plan_not_approved" => ToolError::PlanNotApproved(message),
         "name_taken" => ToolError::NameTaken(message),
         "profile_disabled" => ToolError::ProfileDisabled(message),
+        "profile_not_found" => ToolError::ProfileNotFound(message),
         "ticket_not_found" => ToolError::TicketNotFound(message),
         "tickets_not_configured" => ToolError::TicketsNotConfigured(message),
         "tickets_config_invalid" => ToolError::TicketsConfigInvalid(message),

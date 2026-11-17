@@ -858,7 +858,7 @@ async fn open_window_from_profile_reserved_environment_key_never_reaches_the_chi
 
 // =============================================================================
 // Unknown / invalid identifiers, and an identifier that resolves to no argv
-// on the host operating system -- all invalid_argument
+// on the host operating system -- all profile_not_found, and nothing opens
 // =============================================================================
 
 #[tokio::test]
@@ -877,7 +877,8 @@ async fn open_window_from_profile_with_an_unknown_identifier_is_rejected() {
 
     let response =
         call_open_window_from_profile(&mut client, "does-not-exist-anywhere", None, None).await;
-    expect_error(response, "invalid_argument");
+    expect_error(response, "profile_not_found");
+    assert!(call_list_windows(&mut client).await.is_empty());
 }
 
 #[tokio::test]
@@ -901,8 +902,9 @@ async fn open_window_from_profile_with_a_path_traversal_identifier_is_rejected_w
 
     for traversal_id in ["../outside/trap", "..\\outside\\trap"] {
         let response = call_open_window_from_profile(&mut client, traversal_id, None, None).await;
-        expect_error(response, "invalid_argument");
+        expect_error(response, "profile_not_found");
     }
+    assert!(call_list_windows(&mut client).await.is_empty());
 }
 
 #[tokio::test]
@@ -920,7 +922,8 @@ async fn open_window_from_profile_whose_operating_system_has_no_argv_is_rejected
     let mut client = harness.connect().await;
 
     let response = call_open_window_from_profile(&mut client, "no-host-argv", None, None).await;
-    expect_error(response, "invalid_argument");
+    expect_error(response, "profile_not_found");
+    assert!(call_list_windows(&mut client).await.is_empty());
 }
 
 // =============================================================================
@@ -1799,7 +1802,7 @@ async fn send_handoff_from_a_profile_starts_nothing_if_the_requester_disconnects
 }
 
 #[tokio::test]
-async fn send_handoff_with_an_unknown_profile_identifier_is_invalid_argument_without_any_approver()
+async fn send_handoff_with_an_unknown_profile_identifier_is_profile_not_found_without_any_approver()
 {
     let tree = TempDir::new("yagura-cli-test", "handoff-unknown-profile");
     let profiles_dir = tree.make_dir("profiles");
@@ -1831,7 +1834,7 @@ async fn send_handoff_with_an_unknown_profile_identifier_is_invalid_argument_wit
         "look",
     )
     .await;
-    expect_error(msg, "invalid_argument");
+    expect_error(msg, "profile_not_found");
     let after = call_list_windows(&mut client).await.len();
     assert_eq!(before, after);
 }
