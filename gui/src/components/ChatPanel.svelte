@@ -1013,9 +1013,9 @@
     font-size: var(--font-size-sm);
   }
 
-  .chat-input:focus {
-    outline: none;
-    border-color: var(--color-primary);
+  .chat-input:focus-visible {
+    outline: var(--line-width-strong) solid var(--ring);
+    outline-offset: 1px;
   }
 
   .chat-actions {
@@ -1159,8 +1159,8 @@
     gap: var(--space-sm);
     margin: 0;
     padding: var(--space-xs) var(--space-sm);
-    background-color: var(--color-warning);
-    color: var(--color-on-warning);
+    background-color: var(--st-approval-tint);
+    color: var(--fg-default);
     font-size: var(--font-size-xs);
   }
 

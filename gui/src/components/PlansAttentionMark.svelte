@@ -17,8 +17,9 @@
     height: 16px;
     padding: 0 3px;
     border-radius: 999px;
-    background-color: var(--color-warning);
-    color: var(--color-on-warning);
+    background-color: var(--st-approval-tint);
+    color: var(--fg-default);
+    box-shadow: inset 0 0 0 var(--line-width) var(--st-approval);
     font-size: 10px;
     line-height: 16px;
     text-align: center;

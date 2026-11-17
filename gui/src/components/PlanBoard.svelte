@@ -342,8 +342,8 @@
     margin: 0;
     padding: var(--space-xs) var(--space-sm);
     border-radius: var(--radius-sm);
-    background-color: var(--color-warning);
-    color: var(--color-on-warning);
+    background-color: var(--st-approval-tint);
+    color: var(--fg-default);
     font-size: var(--font-size-sm);
   }
 
@@ -384,7 +384,7 @@
 
   .plan-board__review-hint {
     margin: 0;
-    color: var(--color-warning-action);
+    color: var(--fg-default);
   }
 
   .plan-board__owner {
@@ -469,15 +469,16 @@
   }
 
   .plan-card[data-review-mark] {
-    border-left: 3px solid var(--color-warning-action);
+    border-left: 3px solid var(--st-approval);
   }
 
   .plan-card__mark {
     align-self: flex-start;
     padding: 0 var(--space-xs);
     border-radius: var(--radius-sm);
-    background-color: var(--color-warning-action);
-    color: var(--color-on-warning-action);
+    background-color: var(--st-approval-tint);
+    color: var(--fg-default);
+    box-shadow: inset 0 0 0 var(--line-width) var(--st-approval);
     font-size: var(--font-size-xs);
     font-weight: 600;
   }

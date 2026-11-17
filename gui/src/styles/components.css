@@ -11,48 +11,83 @@
   box-sizing: border-box;
 }
 
+/* Buttons come in four kinds: primary, secondary, ghost and danger. Hover and
+   press layer a tint over whatever fill the kind has, so each state looks
+   different from the others. A button that cannot act is either `:disabled` or
+   `aria-disabled="true"` (focusable, with its reason tied by aria-describedby);
+   both look the same. */
 .btn {
-  padding: var(--space-xs) var(--space-md);
-  border: 1px solid var(--color-border);
+  min-height: var(--button-height);
+  padding: 0 var(--space-3);
+  border: var(--line-width) solid transparent;
   border-radius: var(--radius-sm);
+  background-color: transparent;
+  color: var(--fg-default);
   font-family: inherit;
-  font-size: var(--font-size-sm);
+  font-size: var(--text-sm);
   cursor: pointer;
-  transition: all 0.2s;
+  transition:
+    background-color var(--dur-fast) var(--ease-out),
+    scale var(--dur-fast) var(--ease-out);
 }
 
-.btn:disabled {
-  opacity: 0.6;
+.btn:disabled,
+.btn[aria-disabled='true'],
+.status-panel__button:disabled,
+.status-panel__button[aria-disabled='true'],
+.window-controls__button:disabled,
+.window-controls__button[aria-disabled='true'] {
+  opacity: 0.5;
   cursor: not-allowed;
 }
 
 .btn-primary {
-  background-color: var(--color-primary);
-  color: var(--color-background);
-  border-color: var(--color-primary);
-}
-
-.btn-primary:hover:not(:disabled) {
-  background-color: var(--color-primary-hover);
+  background-color: var(--accent);
+  color: var(--on-accent);
 }
 
 .btn-secondary {
-  background-color: var(--color-surface);
-  color: var(--color-text-primary);
+  background-color: var(--bg-raised);
+  border-color: var(--line-strong);
 }
 
-.btn-secondary:hover:not(:disabled) {
-  background-color: var(--color-border);
+.btn-ghost {
+  background-color: transparent;
 }
 
 .btn-danger {
-  background-color: var(--color-error);
-  color: var(--color-background);
-  border-color: var(--color-error);
+  background-color: var(--danger);
+  color: var(--on-danger);
 }
 
-.btn-danger:hover:not(:disabled) {
-  background-color: var(--color-error-hover);
+.btn:hover:not(:disabled):not([aria-disabled='true']),
+.status-panel__button:hover:not(:disabled):not([aria-disabled='true']),
+.window-controls__menu-anchor:hover,
+.window-controls__button:hover:not(:disabled):not([aria-disabled='true']) {
+  background-image: linear-gradient(var(--bg-hover), var(--bg-hover));
+}
+
+.btn:active:not(:disabled):not([aria-disabled='true']),
+.status-panel__button:active:not(:disabled):not([aria-disabled='true']),
+.window-controls__menu-anchor:active,
+.window-controls__button:active:not(:disabled):not([aria-disabled='true']) {
+  background-image: linear-gradient(var(--bg-pressed), var(--bg-pressed));
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .btn:active:not(:disabled):not([aria-disabled='true']) {
+    scale: 0.97;
+  }
+}
+
+.btn:focus-visible,
+.status-panel__button:focus-visible,
+.window-controls__menu-anchor:focus-visible,
+.window-controls__button:focus-visible,
+.banner-close:focus-visible,
+.dialog-close:focus-visible {
+  outline: var(--line-width-strong) solid var(--ring);
+  outline-offset: 2px;
 }
 
 .dialog-content {
@@ -70,7 +105,7 @@
 .dialog-message {
   margin: 0;
   font-size: var(--font-size-base);
-  color: var(--color-text-secondary);
+  color: var(--fg-muted);
 }
 
 .dialog-actions {
@@ -87,32 +122,36 @@
 
 .dialog-label {
   font-size: var(--font-size-sm);
-  color: var(--color-text-secondary);
+  color: var(--fg-muted);
 }
 
 .dialog-input {
-  padding: var(--space-xs) var(--space-sm);
-  border: 1px solid var(--color-border);
+  min-height: var(--button-height);
+  padding: var(--space-1) var(--space-2);
+  border: var(--line-width) solid var(--line-strong);
   border-radius: var(--radius-sm);
-  background-color: var(--color-background);
-  color: var(--color-text-primary);
+  background-color: var(--bg-canvas);
+  color: var(--fg-default);
   font-family: inherit;
-  font-size: var(--font-size-sm);
+  font-size: var(--text-sm);
 }
 
-.dialog-input:focus {
-  outline: none;
-  border-color: var(--color-primary);
-  box-shadow: 0 0 0 2px var(--color-primary-hover);
+.dialog-input:focus-visible {
+  outline: var(--line-width-strong) solid var(--ring);
+  outline-offset: 1px;
+}
+
+.dialog-input[aria-invalid='true'] {
+  border-color: var(--danger);
 }
 
 /* The line a dialog shows when the daemon refused what was submitted. */
 .form-error {
   padding: var(--space-xs) var(--space-sm);
   border-radius: var(--radius-sm);
-  background-color: var(--color-background);
-  color: var(--color-error);
-  border: 1px solid var(--color-error);
+  background-color: var(--bg-canvas);
+  color: var(--danger);
+  border: 1px solid var(--danger);
   font-size: var(--font-size-sm);
 }
 
@@ -151,39 +190,29 @@
 .status-panel__button,
 .window-controls__menu-anchor,
 .window-controls__button {
-  border: 1px solid var(--color-border);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: var(--line-width) solid var(--line);
   border-radius: var(--radius-sm);
-  color: var(--color-text-primary);
+  color: var(--fg-default);
   font-family: inherit;
-  font-size: var(--font-size-sm);
+  font-size: var(--text-sm);
   cursor: pointer;
-}
-
-.status-panel__button:hover:not(:disabled),
-.window-controls__menu-anchor:hover,
-.window-controls__button:hover:not(:disabled) {
-  background-color: var(--color-border);
+  transition: background-color var(--dur-fast) var(--ease-out);
 }
 
 .status-panel__button {
-  padding: var(--space-xs) var(--space-sm);
-  background-color: var(--color-surface);
-  transition: all 0.2s;
-}
-
-/* Both interrupt buttons stay mounted whatever the status, so
-   the two surfaces need the same "cannot be pressed" look. */
-.status-panel__button:disabled,
-.window-controls__button:disabled {
-  opacity: 0.6;
-  cursor: not-allowed;
+  padding: var(--space-1) var(--space-2);
+  background-color: var(--bg-raised);
 }
 
 .window-controls__menu-anchor,
 .window-controls__button {
-  padding: 0 var(--space-sm);
-  background-color: var(--color-background);
-  line-height: 1.6;
+  min-width: var(--icon-button-size);
+  min-height: var(--icon-button-size);
+  padding: 0 var(--space-2);
+  background-color: var(--bg-canvas);
 }
 
 /* A dismiss glyph that borrows the colour of whatever surface it sits on:
@@ -213,9 +242,9 @@
   flex: 0 0 auto;
   gap: var(--space-xs);
   padding: 0 var(--space-xs);
-  border: 1px solid var(--color-text-secondary);
+  border: 1px solid var(--fg-muted);
   border-radius: var(--radius-sm);
-  color: var(--color-text-secondary);
+  color: var(--fg-muted);
   font-size: var(--font-size-xs);
   font-variant-numeric: tabular-nums;
   line-height: var(--line-height-base);

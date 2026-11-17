@@ -89,9 +89,8 @@
     cursor: pointer;
   }
 
-  .window-theme-select:focus {
-    outline: none;
-    border-color: var(--color-primary);
-    box-shadow: 0 0 0 2px var(--color-primary-hover);
+  .window-theme-select:focus-visible {
+    outline: var(--line-width-strong) solid var(--ring);
+    outline-offset: 1px;
   }
 </style>

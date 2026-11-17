@@ -20,6 +20,7 @@
     nav,
     themes,
   } from '../ui-messages';
+  import Icon from './Icon.svelte';
   import IconButton from './IconButton.svelte';
   import WindowMenu from './WindowMenu.svelte';
 
@@ -40,7 +41,7 @@
   let isMenuOpen = false;
   let menuAnchor: HTMLButtonElement | undefined;
 
-  // Derived once so `disabled` and the tooltip read one verdict, and so the
+  // Derived once so the reason and the tooltip read one verdict, and so the
   // button stays mounted whatever the status.
   $: interruptTarget = resolveConfirmTarget(entry.detected.status, 'interrupt');
   $: maximizeLabel = entry.display.isMaximized ? buttons.restore : buttons.maximize;
@@ -68,19 +69,19 @@
       isMenuOpen = !isMenuOpen;
     }}
   >
-    ⋯
+    <Icon name="ellipsis" />
   </IconButton>
   <IconButton
     data-window-control
     class="window-controls__button"
     label={buttons.interrupt}
     hint={describeInterruptHint(interruptTarget)}
-    disabled={!interruptTarget.allowed}
+    disabledReason={interruptTarget.allowed ? undefined : describeInterruptHint(interruptTarget)}
     on:click={() => {
       void actions.interrupt(entry);
     }}
   >
-    ⏹
+    <Icon name="square" />
   </IconButton>
   <IconButton
     data-window-control
@@ -89,7 +90,7 @@
     hint={hints.minimizeWindow}
     on:click={() => actions.minimize(entry)}
   >
-    −
+    <Icon name="minus" />
   </IconButton>
   <IconButton
     data-window-control
@@ -98,7 +99,7 @@
     hint={maximizeHint}
     on:click={() => actions.maximize(entry)}
   >
-    □
+    <Icon name={entry.display.isMaximized ? 'minimize-2' : 'maximize-2'} />
   </IconButton>
   <IconButton
     data-window-control
@@ -109,7 +110,7 @@
       void actions.close(entry);
     }}
   >
-    ✕
+    <Icon name="x" />
   </IconButton>
 
   <WindowMenu

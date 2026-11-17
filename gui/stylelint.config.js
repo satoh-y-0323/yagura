@@ -7,12 +7,6 @@ const COLOR_RULES = {
 
 // Files that still break a rule. Each leaves this list in the unit named beside it.
 const MIGRATING = [
-  // outline: none on the shared input focus; moves to the control components.
-  'src/styles/components.css',
-  // outline: none on the chat input; moves to the control components.
-  'src/components/ChatPanel.svelte',
-  // outline: none on the window theme select; moves to the control components.
-  'src/components/WindowMenu.svelte',
   // rgba() fallback for the backdrop; moves to the derived --backdrop token (overlay unit).
   'src/components/ModalDialog.svelte',
   // outline: none on the invisible typing input, whose focus the pane shows; decided with the terminal pane.

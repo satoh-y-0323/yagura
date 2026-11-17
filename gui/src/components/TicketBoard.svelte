@@ -179,8 +179,8 @@
     margin: 0;
     padding: var(--space-xs) var(--space-sm);
     border-radius: var(--radius-sm);
-    background-color: var(--color-warning);
-    color: var(--color-on-warning);
+    background-color: var(--st-approval-tint);
+    color: var(--fg-default);
     font-size: var(--font-size-sm);
     overflow-wrap: anywhere;
   }

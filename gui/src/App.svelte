@@ -3626,9 +3626,9 @@
   }
 
   .banner-warning {
-    background-color: var(--color-warning);
-    color: var(--color-on-warning);
-    border-bottom-color: var(--color-on-warning);
+    background-color: var(--st-approval-tint);
+    color: var(--fg-default);
+    border-bottom-color: var(--st-approval);
   }
 
   /* The restore candidate fetch's failure notice. Not part of the
@@ -3638,8 +3638,8 @@
   .restore-load-failed {
     padding: var(--space-sm) var(--space-md);
     border-bottom: 1px solid var(--color-border);
-    background-color: var(--color-warning);
-    color: var(--color-on-warning);
+    background-color: var(--st-approval-tint);
+    color: var(--fg-default);
     font-size: var(--font-size-sm);
   }
 

@@ -195,10 +195,12 @@
                   </div>
                   <div class="status-panel__actions">
                     <IconButton
-                      class="status-panel__button status-panel__button--warning"
+                      class="status-panel__button"
                       label={buttons.interrupt}
                       hint={describeInterruptHint(interruptTarget)}
-                      disabled={!interruptTarget.allowed}
+                      disabledReason={interruptTarget.allowed
+                        ? undefined
+                        : describeInterruptHint(interruptTarget)}
                       on:click={() => {
                         void actions.interrupt(entry);
                       }}
@@ -206,7 +208,7 @@
                       ⏹
                     </IconButton>
                     <IconButton
-                      class="status-panel__button status-panel__button--danger"
+                      class="status-panel__button"
                       label={buttons.close}
                       hint={hints.closeWindow}
                       on:click={() => {
@@ -392,25 +394,5 @@
   .status-panel__actions {
     display: flex;
     gap: var(--space-xs);
-  }
-
-  :global(.status-panel__button.status-panel__button--warning) {
-    background-color: var(--color-warning-action);
-    color: var(--color-on-warning-action);
-    border-color: var(--color-warning-action);
-  }
-
-  :global(.status-panel__button.status-panel__button--warning:hover) {
-    background-color: var(--color-warning-action-hover);
-  }
-
-  :global(.status-panel__button.status-panel__button--danger) {
-    background-color: var(--color-error);
-    color: var(--color-background);
-    border-color: var(--color-error);
-  }
-
-  :global(.status-panel__button.status-panel__button--danger:hover) {
-    background-color: var(--color-error-hover);
   }
 </style>

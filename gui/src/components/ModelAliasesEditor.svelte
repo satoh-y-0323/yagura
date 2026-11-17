@@ -388,8 +388,9 @@
     margin-left: var(--space-xs);
     padding: 0 var(--space-xs);
     border-radius: var(--radius-sm);
-    background-color: var(--color-warning-action);
-    color: var(--color-on-warning);
+    background-color: var(--st-approval-tint);
+    color: var(--fg-default);
+    box-shadow: inset 0 0 0 var(--line-width) var(--st-approval);
     font-family: var(--font-family-base);
     font-size: 10px;
     font-weight: 600;
