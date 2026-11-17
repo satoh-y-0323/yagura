@@ -71,8 +71,6 @@ enum StatusForm {
     JsonCommand,
     /// `mcp get <server>`, printed as `Prefix: value` lines.
     Lines,
-    /// A JSON settings file read directly.
-    JsonFile,
     /// `mcp list --json`, the server picked out of the array by name, plus a
     /// settings-file edit.
     JsonListWithTomlSet,
@@ -102,13 +100,6 @@ const CODEX_FORM: CliForm = CliForm {
     status: StatusForm::JsonCommandWithTomlSet,
 };
 
-const AGY_FORM: CliForm = CliForm {
-    scope: &[],
-    add_options: &[],
-    env_flag: "--env",
-    status: StatusForm::JsonFile,
-};
-
 const COPILOT_FORM: CliForm = CliForm {
     scope: &[],
     // Copilot's own 180-second default would end a call before the daemon's deadlines do.
@@ -129,12 +120,10 @@ const GROK_FORM: CliForm = CliForm {
 const SHIPPED_ROWS: &[(&str, CliForm, bool)] = &[
     ("claude-code", CLAUDE_FORM, false),
     ("codex-cli", CODEX_FORM, false),
-    ("antigravity-cli", AGY_FORM, false),
     ("copilot-cli", COPILOT_FORM, false),
     ("grok-build", GROK_FORM, false),
     ("wsl-claude-code", CLAUDE_FORM, true),
     ("wsl-codex-cli", CODEX_FORM, true),
-    ("wsl-antigravity-cli", AGY_FORM, true),
     ("wsl-copilot-cli", COPILOT_FORM, true),
     ("wsl-grok-build", GROK_FORM, true),
 ];
@@ -146,9 +135,6 @@ const SETTINGS_ONLY_ROWS: &[&str] = &["muse-code"];
 /// Shipped profiles that carry no registration and inject the bridge and the
 /// hooks on every launch instead.
 const INJECTED_PER_LAUNCH: &[&str] = &["wsl-muse-code"];
-
-/// The settings file the JSON-file status form reads.
-const AGY_SETTINGS_FILE: &str = ".gemini/config/mcp_config.json";
 
 /// The settings file the settings-file edit targets.
 const CODEX_SETTINGS_FILE: &str = ".codex/config.toml";
@@ -249,8 +235,8 @@ fn bridge_for(is_wsl: bool) -> &'static str {
 
 /// Whether a row reads or writes a settings file of its CLI's own, as
 /// opposed to reading every state from the CLI's own output.
-fn reads_files(spec: &McpRegistrationSpec, form: CliForm) -> bool {
-    form.status == StatusForm::JsonFile || spec.toml_set().is_some() || spec.json_entry().is_some()
+fn reads_files(spec: &McpRegistrationSpec) -> bool {
+    spec.toml_set().is_some() || spec.json_entry().is_some()
 }
 
 // =============================================================================
@@ -386,7 +372,7 @@ fn wsl_rows_carry_the_group_the_path_probe_the_env_forward_and_the_read_tool() {
 
         // A row that reads no file of its own has no use for the file tools.
         let tools = host_file_tools(id);
-        if !reads_files(&spec, *form) && tools.is_none() {
+        if !reads_files(&spec) && tools.is_none() {
             continue;
         }
         let Some(files) = tools else {
@@ -420,14 +406,14 @@ fn wsl_file_tools_run_inside_wsl_and_take_the_file_as_one_positional_argument() 
     // A name no script text would contain, with shell metacharacters: it must
     // arrive as its own argv element, never spliced into a script string.
     let file = ".probe dir/it's $(not run);`x`.json";
-    for (id, form, is_wsl) in SHIPPED_ROWS {
+    for (id, _form, is_wsl) in SHIPPED_ROWS {
         if !*is_wsl {
             continue;
         }
         let spec = shipped_spec(id);
         let Some(read) = spec.render_file_read(file) else {
             assert!(
-                !reads_files(&spec, *form),
+                !reads_files(&spec),
                 "{id} reads settings files, so it must carry a read tool"
             );
             continue;
@@ -473,8 +459,8 @@ fn wsl_file_tools_run_inside_wsl_and_take_the_file_as_one_positional_argument() 
 /// The canonical `add` for `form`: `mcp add [scope] [--env=pair ...] <server>
 /// -- [wrapper ...] <bridge> --profile <id>`, the wrapper being the profile's
 /// own ([`server_wrapper`]). Every flag precedes the name, as each CLI's usage line has
-/// it (`agy` rejects a flag after the name), and carries its value in the same
-/// argument, since `claude`'s variadic `-e <value>` would take the name too.
+/// it, and carries its value in the same argument, since `claude`'s variadic
+/// `-e <value>` would take the name too.
 fn expected_add(
     form: CliForm,
     id: &str,
@@ -560,9 +546,6 @@ fn each_row_reads_its_status_the_way_its_cli_reports_it() {
                 StatusPlan::Run(strings(&["mcp", "get", "yagura", "--json"]))
             }
             StatusForm::Lines => StatusPlan::Run(strings(&["mcp", "get", "yagura"])),
-            StatusForm::JsonFile => StatusPlan::ReadFile {
-                file: AGY_SETTINGS_FILE.to_string(),
-            },
             StatusForm::JsonListWithTomlSet => StatusPlan::Run(strings(&["mcp", "list", "--json"])),
         };
         assert_eq!(spec.render_status(&default_target()), expected, "{id}");
@@ -636,28 +619,6 @@ fn lines_status(id: &str, scope: &str, command: &str) -> String {
          Command: {command}\n  Args: --profile {id}\n  Environment:\n\nTo remove this server, \
          run: mcp remove \"yagura\" -s user\n"
     )
-}
-
-/// The server argv the shipped profile `id` registers with `bridge` as the
-/// bridge: what follows `--` in its add command (a shell wrapping the bridge
-/// comes first).
-fn registered_server_argv(id: &str, bridge: &str) -> Vec<String> {
-    let add = shipped_spec(id)
-        .render_add(&default_target(), bridge)
-        .expect("the add command renders");
-    let at = add
-        .iter()
-        .position(|arg| arg == "--")
-        .expect("the add command separates the server's command with `--`");
-    add[at + 1..].to_vec()
-}
-
-/// The JSON settings file listing servers registered for the profile `id`,
-/// each the server argv `id` registers with `bridge` as the bridge.
-fn json_settings(id: &str, server: &str, bridge: &str) -> String {
-    let argv = registered_server_argv(id, bridge);
-    json!({ "mcpServers": { server: { "command": argv[0], "args": argv[1..], "env": {} } } })
-        .to_string()
 }
 
 struct Derived {
@@ -782,73 +743,6 @@ fn the_lines_form_reads_not_registered_registered_and_differs() {
         );
         assert_eq!(derived.differs_in, strings(&["Scope"]), "{id}");
     }
-}
-
-#[test]
-fn the_json_file_form_reads_not_registered_registered_and_differs() {
-    for id in ["antigravity-cli", "wsl-antigravity-cli"] {
-        let is_wsl = id.starts_with("wsl-");
-        let bridge = bridge_for(is_wsl);
-        let other = if is_wsl {
-            "/mnt/c/Users/someone/elsewhere/yagura-mcp.exe"
-        } else {
-            OTHER_HOST_BRIDGE
-        };
-
-        // A host row reads the file itself; a WSL row reads it through its
-        // read tool, which reports a missing file by its declared exit.
-        let missing = if is_wsl {
-            exited(3, "", "")
-        } else {
-            StatusObservation::FileMissing
-        };
-        assert_state(
-            id,
-            "no settings file",
-            &derive(id, &missing, bridge),
-            RegistrationState::NotRegistered,
-        );
-
-        let other_server = exited(0, &json_settings(id, "some-other-server", bridge), "");
-        assert_state(
-            id,
-            "a settings file without this server",
-            &derive(id, &other_server, bridge),
-            RegistrationState::NotRegistered,
-        );
-
-        let registered = exited(0, &json_settings(id, "yagura", bridge), "");
-        assert_state(
-            id,
-            "registered",
-            &derive(id, &registered, bridge),
-            RegistrationState::Registered,
-        );
-
-        let other_bridge = exited(0, &json_settings(id, "yagura", other), "");
-        let derived = derive(id, &other_bridge, bridge);
-        assert_state(id, "another bridge", &derived, RegistrationState::Differs);
-        // What differs is the part of the server argv the bridge stands in.
-        let holding_bridge = if registered_server_argv(id, bridge)[0] == bridge {
-            "command"
-        } else {
-            "args"
-        };
-        assert_eq!(derived.differs_in, strings(&[holding_bridge]), "{id}");
-    }
-}
-
-#[test]
-fn a_wsl_read_tool_failure_other_than_the_missing_file_exit_is_not_read_as_unregistered() {
-    // Control for the missing-file exit above: another failure of the same
-    // tool must not be mistaken for "not registered".
-    let derived = derive("wsl-antigravity-cli", &exited(1, "", ""), WSL_BRIDGE);
-    assert_state(
-        "wsl-antigravity-cli",
-        "the read tool failed for another reason",
-        &derived,
-        RegistrationState::Unknown,
-    );
 }
 
 // =============================================================================

@@ -512,10 +512,6 @@ fn an_invalid_delivery_table_leaves_its_profile_out_of_the_listing_with_one_warn
 // the profiles this repository ships
 // =============================================================================
 
-const AGY_OUTPUT: &str = r#"{"injectSteps":[{"systemMessage":{"systemMessage":{text}}}]}"#;
-/// agy goes on with a stop's `reason` when the stop's answer decides `continue`.
-const AGY_BLOCK: &str = r#"{"decision":"continue","reason":{text}}"#;
-
 #[test]
 fn the_claude_code_profiles_deliver_plain_text_and_wake_a_waiting_cli_through_a_wait() {
     for id in ["claude-code", "wsl-claude-code"] {
@@ -572,27 +568,6 @@ fn the_host_codex_profile_says_how_to_get_a_build_that_is_not_a_windows_shim() {
         )),
         "the text, the command to copy and the page are carried apart"
     );
-}
-
-#[test]
-fn the_antigravity_profiles_inject_text_as_a_json_system_message_and_have_no_way_to_wake() {
-    for id in ["antigravity-cli", "wsl-antigravity-cli"] {
-        let delivery = shipped_delivery(id);
-        assert_eq!(
-            delivery.output,
-            DoorOutputs {
-                block: OutputForm::Template(AGY_BLOCK.into()),
-                ..every_door(OutputForm::Template(AGY_OUTPUT.into()))
-            },
-            "{id}"
-        );
-        assert_eq!(delivery.wake, WakeMode::None, "{id}");
-        assert_eq!(
-            delivery.launch_prompt,
-            Some(strings(&["-i", "{prompt}"])),
-            "{id}"
-        );
-    }
 }
 
 #[test]

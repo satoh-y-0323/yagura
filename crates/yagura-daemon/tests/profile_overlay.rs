@@ -57,7 +57,7 @@ fn an_empty_directory_lists_every_shipped_profile_for_the_host() {
         .iter()
         .map(|entry| entry.id.as_str())
         .collect();
-    for id in ["claude-code", "codex-cli", "antigravity-cli", "shell"] {
+    for id in ["claude-code", "codex-cli", "shell"] {
         assert!(ids.contains(&id), "{id} must be listed, got {ids:?}");
     }
     assert!(listing.warnings.is_empty(), "{:?}", listing.warnings);

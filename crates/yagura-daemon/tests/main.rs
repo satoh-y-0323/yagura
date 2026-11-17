@@ -37,7 +37,6 @@ mod delivery_launch_context;
 mod detection_layers;
 mod detection_load_reval;
 mod detection_warning_wording;
-mod detector_antigravity_cli;
 mod detector_claude_code;
 mod detector_codex_cli;
 mod detector_codex_running;

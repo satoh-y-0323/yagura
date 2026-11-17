@@ -218,19 +218,6 @@ fn shell_profile_ships_no_mcp_table() {
     );
 }
 
-#[test]
-fn antigravity_cli_family_profiles_ship_no_mcp_table() {
-    for id in ["antigravity-cli", "wsl-antigravity-cli"] {
-        let profile = parse_repo_profile(id);
-
-        assert!(
-            profile.mcp.is_none(),
-            "{id} has no per-launch MCP injection point (agy reads MCP servers only from \
-             its own global registration), so it must ship no [mcp] table"
-        );
-    }
-}
-
 // ---------------------------------------------------------------------
 // The WSL profiles exec the CLI through a fixed wrapper, no value spliced into it
 // ---------------------------------------------------------------------
@@ -254,41 +241,6 @@ fn wsl_codex_cli_windows_argv_execs_the_cli_through_a_fixed_wrapper() {
         argv,
         vec!["wsl", "-e", "bash", "-lic", "exec \"$0\" \"$@\"", "codex"],
         "wsl-codex-cli's windows argv must be the fixed exec wrapper, got {argv:?}"
-    );
-}
-
-#[test]
-fn antigravity_cli_windows_argv_execs_agy_directly() {
-    let argv = windows_argv("antigravity-cli");
-
-    assert_eq!(
-        argv,
-        vec!["agy"],
-        "antigravity-cli's windows argv must start agy directly, got {argv:?}"
-    );
-}
-
-/// The WSL agy profile's `bash -c` runs one fixed statement before the CLI -- it puts the
-/// CLI's root in its environment -- and the statement ends by handing every argument the
-/// daemon appends on to the CLI through the same login-shell wrapper the other WSL profiles
-/// use. The argv is still fixed: no value of a launch is spliced into the statement.
-#[test]
-fn wsl_antigravity_cli_windows_argv_execs_the_cli_through_a_fixed_wrapper() {
-    let argv = windows_argv("wsl-antigravity-cli");
-
-    assert_eq!(
-        argv.len(),
-        6,
-        "wsl-antigravity-cli's windows argv is `wsl -e bash -c <statement> agy`, got {argv:?}"
-    );
-    assert_eq!(argv[..4], ["wsl", "-e", "bash", "-c"], "{argv:?}");
-    assert_eq!(argv[5], "agy", "{argv:?}");
-    assert!(
-        argv[4]
-            .trim_end()
-            .ends_with("exec bash -lic 'exec \"$0\" \"$@\"' \"$0\" \"$@\""),
-        "the statement ends by handing $0 and the daemon's arguments to the CLI: {:?}",
-        argv[4]
     );
 }
 
@@ -330,7 +282,7 @@ const WITHOUT_MODEL_CHOICES: &[&str] = &["copilot-cli", "shell", "wsl-copilot-cl
 #[test]
 fn every_bundled_profile_with_a_model_list_source_ships_model_choices() {
     let ids = bundled_profile_ids();
-    assert_eq!(ids.len(), 13, "the bundled set this test covers: {ids:?}");
+    assert_eq!(ids.len(), 11, "the bundled set this test covers: {ids:?}");
     let mut with_choices = Vec::new();
     for id in &ids {
         let profile = parse_repo_profile(id);
@@ -372,23 +324,6 @@ fn the_claude_code_family_ships_the_values_its_aliases_already_point_at() {
                 );
             }
             other => panic!("{id} ships a fixed list, got {other:?}"),
-        }
-    }
-}
-
-#[test]
-fn the_antigravity_cli_family_lists_models_as_tab_separated_lines() {
-    for id in ["antigravity-cli", "wsl-antigravity-cli"] {
-        let profile = parse_repo_profile(id);
-        match model_choices(&profile) {
-            ModelChoicesSpec::Command {
-                args,
-                format: OutputFormat::Lines { separator },
-            } => {
-                assert_eq!(args, &vec!["models".to_string()], "{id}'s listing args");
-                assert_eq!(separator, "\t", "{id}'s lines are tab separated");
-            }
-            other => panic!("{id} lists models through a line-by-line command, got {other:?}"),
         }
     }
 }
@@ -440,9 +375,7 @@ fn the_codex_cli_family_lists_models_as_json_filtered_to_the_listed_ones() {
 /// The profiles whose every hook calls the `--hook` door: those whose hook text stays in
 /// a CLI's settings (a registration's `json_entry`, or Codex's trust record) and so must
 /// not change with a version, and Copilot's, whose events the door's table tells apart.
-const HOOK_DOOR_PROFILES: [&str; 9] = [
-    "antigravity-cli",
-    "wsl-antigravity-cli",
+const HOOK_DOOR_PROFILES: [&str; 7] = [
     "grok-build",
     "wsl-grok-build",
     "muse-code",
@@ -613,20 +546,11 @@ fn every_hook_a_cli_keeps_calls_the_hook_door_of_its_own_profile_with_one_handle
                     .iter()
                     .position(|token| *token == "--hook")
                     .unwrap_or_else(|| panic!("{id}/{event}: no --hook door in {line:?}"));
-                if id == "wsl-antigravity-cli" {
-                    // The guest's command hands the door what it collected after the pair.
-                    assert_eq!(
-                        tokens[at + 1..].get(..2),
-                        Some(&[id, event.as_str()][..]),
-                        "{id}/{event}: the door names this profile and this event first: \n                         {line:?}"
-                    );
-                } else {
-                    assert_eq!(
-                        tokens[at + 1..],
-                        [id, event.as_str()],
-                        "{id}/{event}: the door names this profile and this event: {line:?}"
-                    );
-                }
+                assert_eq!(
+                    tokens[at + 1..],
+                    [id, event.as_str()],
+                    "{id}/{event}: the door names this profile and this event: {line:?}"
+                );
                 for flag in OLD_DOOR_FLAGS {
                     assert!(
                         !line.contains(flag),
@@ -689,18 +613,6 @@ fn expected_hook_events(id: &str) -> Vec<(&'static str, HookEvent)> {
     use WindowStatus::{Running, WaitingApproval, WaitingInput};
     let not_a_continuation = ("/stop_hook_active", serde_json::json!(false));
     match id {
-        "antigravity-cli" | "wsl-antigravity-cli" => vec![
-            ("PreInvocation", event(Some(Running), Some(Take), None)),
-            ("SessionStart", event(None, Some(Context), None)),
-            ("PostToolUse", event(Some(Running), None, None)),
-            (
-                "Stop",
-                blocking_stop(&[
-                    ("/terminationReason", serde_json::json!("NO_TOOL_CALL")),
-                    ("/executionNum", serde_json::json!(0)),
-                ]),
-            ),
-        ],
         "copilot-cli" | "wsl-copilot-cli" => {
             vec![
                 ("sessionStart", event(None, Some(Context), None)),
@@ -983,10 +895,6 @@ fn hooks_injection_text(spec: &yagura_daemon::profile::InjectionSpec) -> String 
 /// data must render the same text wherever its values come from.
 const HOOK_REGISTRATION_TEXT_SHA256: &[(&str, &str)] = &[
     (
-        "antigravity-cli",
-        "3a8f276af1e57b4d9305ccd60e49ac136c2c57ba9733be79e589b43c20a791f5",
-    ),
-    (
         "claude-code",
         "283e7e1326367cb0b4af9a3630ee6972a0b437986e44b079002e5f9e8dd227d6",
     ),
@@ -1028,13 +936,6 @@ const HOOK_REGISTRATION_TEXT_SHA256: &[(&str, &str)] = &[
     ),
 ];
 
-/// The sha256 of the hook text of `wsl-antigravity-cli` before its command collected what the
-/// daemon judges a guest's hook by. That command is written into the guest's `hooks.json`
-/// and rewritten by the daemon at each launch, so it is not one a CLI keeps by hash; it is
-/// no longer pinned to this text, and must not render it again.
-const GUEST_HOOK_TEXT_BEFORE_COLLECTION_SHA256: &str =
-    "d48fe04b10130a122f70876bfcb11ed08555ed1dcf070f66bfe81745a07e27b8";
-
 fn sha256_hex(text: &str) -> String {
     use sha2::Digest;
     sha2::Sha256::digest(text.as_bytes())
@@ -1045,16 +946,8 @@ fn sha256_hex(text: &str) -> String {
 
 #[test]
 fn the_hook_registrations_a_cli_keeps_render_the_same_text_from_the_profiles_data() {
-    let guest = hook_registration_text(&parse_repo_profile("wsl-antigravity-cli"));
-    assert_ne!(
-        sha256_hex(&guest),
-        GUEST_HOOK_TEXT_BEFORE_COLLECTION_SHA256,
-        "wsl-antigravity-cli's hook command must collect what the daemon judges a guest's \
-         hook by, so its text is no longer the one it had without"
-    );
     let measured: Vec<(String, String)> = bundled_profile_ids()
         .into_iter()
-        .filter(|id| id != "wsl-antigravity-cli")
         .filter_map(|id| {
             let text = hook_registration_text(&parse_repo_profile(&id));
             (!text.is_empty()).then(|| (id, sha256_hex(&text)))

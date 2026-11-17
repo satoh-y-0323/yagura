@@ -84,19 +84,6 @@ async fn codex_cli_body_containing_a_dialog_phrase_is_still_waiting_input() {
     assert_eq!(status, WindowStatus::WaitingInput);
 }
 
-#[tokio::test(start_paused = true)]
-async fn antigravity_cli_body_containing_a_task_count_is_still_waiting_input() {
-    let status = judge_fixture(
-        "antigravity-cli.toml",
-        "antigravity-cli",
-        100,
-        30,
-        "100x30-waiting-body-task-count",
-    )
-    .await;
-    assert_eq!(status, WindowStatus::WaitingInput);
-}
-
 // =====================================================================
 // A composer that has grown taller (but still fits the screen) reads like an
 // empty one.
@@ -133,19 +120,6 @@ async fn codex_cli_composer_grown_by_two_envelopes_is_waiting_input() {
     let status = judge_fixture(
         "codex-cli.toml",
         "codex-cli",
-        100,
-        30,
-        "100x30-grown-body-two-envelopes",
-    )
-    .await;
-    assert_eq!(status, WindowStatus::WaitingInput);
-}
-
-#[tokio::test(start_paused = true)]
-async fn antigravity_cli_composer_grown_by_two_envelopes_is_waiting_input() {
-    let status = judge_fixture(
-        "antigravity-cli.toml",
-        "antigravity-cli",
         100,
         30,
         "100x30-grown-body-two-envelopes",
@@ -297,7 +271,7 @@ async fn claude_code_finished_line_is_not_running() {
 
 #[tokio::test(start_paused = true)]
 async fn real_dialogs_stay_waiting_approval() {
-    let cases: [(&str, &str, u16, u16, &str); 9] = [
+    let cases: [(&str, &str, u16, u16, &str); 6] = [
         (
             "claude-code.toml",
             "claude-code",
@@ -336,27 +310,6 @@ async fn real_dialogs_stay_waiting_approval() {
         (
             "codex-cli.toml",
             "codex-cli",
-            80,
-            24,
-            "80x24-permission-dialog",
-        ),
-        (
-            "antigravity-cli.toml",
-            "antigravity-cli",
-            100,
-            30,
-            "100x30-permission-dialog",
-        ),
-        (
-            "antigravity-cli.toml",
-            "antigravity-cli",
-            100,
-            30,
-            "100x30-permission-dialog-empty-composer",
-        ),
-        (
-            "antigravity-cli.toml",
-            "antigravity-cli",
             80,
             24,
             "80x24-permission-dialog",

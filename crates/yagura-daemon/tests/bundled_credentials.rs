@@ -198,13 +198,7 @@ fn the_env_profiles_keep_their_credentials_and_codex_blanks_them_for_its_tools()
     }
     // Muse Code's form depends on the OS its window runs on, which its windows measure
     // (`credentials_launch_injection.rs`).
-    for id in [
-        "grok-build",
-        "wsl-grok-build",
-        "antigravity-cli",
-        "wsl-antigravity-cli",
-        "shell",
-    ] {
+    for id in ["grok-build", "wsl-grok-build", "shell"] {
         let credentials = shipped(id).credentials;
         assert_eq!(
             credentials.mode,

@@ -498,12 +498,11 @@ async fn the_shipped_claude_code_hooks_table_is_written_out_when_a_window_opens(
 
 #[test]
 fn profiles_without_a_hooks_table_keep_none() {
-    for id in ["shell", "antigravity-cli", "wsl-antigravity-cli"] {
-        let source = read_doc_verbatim(&format!("../../profiles/{id}.toml"));
-        let root: toml::Table = source.parse().expect("bundled profile is TOML");
-        assert!(
-            root.get("hooks").is_none(),
-            "{id} must not ship a [hooks] table"
-        );
-    }
+    let id = "shell";
+    let source = read_doc_verbatim(&format!("../../profiles/{id}.toml"));
+    let root: toml::Table = source.parse().expect("bundled profile is TOML");
+    assert!(
+        root.get("hooks").is_none(),
+        "{id} must not ship a [hooks] table"
+    );
 }

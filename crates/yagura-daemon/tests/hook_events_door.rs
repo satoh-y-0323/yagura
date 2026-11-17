@@ -1249,7 +1249,7 @@ struct StopCase {
 }
 
 /// The CLIs given a stop's block, with the marks their own stop input carries.
-fn stop_cases() -> [StopCase; 4] {
+fn stop_cases() -> [StopCase; 3] {
     [
         StopCase {
             profile: "grok-build",
@@ -1284,34 +1284,11 @@ fn stop_cases() -> [StopCase; 4] {
             ],
             decision: "block",
         },
-        StopCase {
-            profile: "antigravity-cli",
-            event: "Stop",
-            first_stop: AGY_FIRST_STOP,
-            not_to_block: &[
-                (
-                    "a continuation",
-                    r#"{"terminationReason":"NO_TOOL_CALL","executionNum":1}"#,
-                ),
-                (
-                    "no continuation mark",
-                    r#"{"terminationReason":"NO_TOOL_CALL"}"#,
-                ),
-                (
-                    "a stop for another reason",
-                    r#"{"terminationReason":"OTHER_REASON","executionNum":0}"#,
-                ),
-            ],
-            decision: "continue",
-        },
     ]
 }
 
 /// A stop that is not a continuation, as Grok Build's stop input says it.
 const GROK_FIRST_STOP: &str = r#"{"stop_hook_active":false,"stopHookActive":false}"#;
-/// The first stop of a turn that ended without a tool call, as the Antigravity CLI's stop
-/// input says it.
-pub(crate) const AGY_FIRST_STOP: &str = r#"{"terminationReason":"NO_TOOL_CALL","executionNum":0}"#;
 
 /// A stop's door hands everything waiting over in one block, and only at a stop that is
 /// not a continuation and meets the profile's condition; at any other stop, and with

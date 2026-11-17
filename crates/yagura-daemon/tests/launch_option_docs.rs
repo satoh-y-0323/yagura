@@ -14,8 +14,7 @@ use crate::common;
 
 use common::docs::read_doc_verbatim;
 use yagura_daemon::profile::{
-    LaunchOptionAxis, LaunchOptionSpec, LaunchOptionValues, ProfileLaunchError,
-    apply_launch_options, parse_profile, resolve_option_value,
+    LaunchOptionSpec, LaunchOptionValues, apply_launch_options, parse_profile, resolve_option_value,
 };
 
 /// Reads and parses one of the repository's own shipped profiles by id
@@ -129,40 +128,6 @@ fn shell_profile_maps_neither_launch_option_axis() {
     );
 }
 
-#[test]
-fn antigravity_cli_family_profiles_select_the_antigravity_detection_and_ship_only_a_model_table() {
-    for id in ["antigravity-cli", "wsl-antigravity-cli"] {
-        let profile = parse_repo_profile(id);
-        assert_eq!(
-            profile.detection.as_deref(),
-            Some("antigravity-cli"),
-            "{id} must select the antigravity-cli detection definition"
-        );
-
-        let model = profile
-            .options
-            .model
-            .as_ref()
-            .unwrap_or_else(|| panic!("{id} must ship a [model] table"));
-        assert_eq!(
-            alias_keys(model),
-            ["fast", "default", "strong"],
-            "{id}'s [model] table must declare exactly these aliases, in this order"
-        );
-        assert!(
-            model.args.iter().any(|arg| arg.contains("{value}")),
-            "{id}'s [model] args must contain the {{value}} placeholder, found {:?}",
-            model.args
-        );
-
-        assert!(
-            profile.options.effort.is_none(),
-            "{id} must ship no [effort] table at all: agy has no independent effort flag, \
-             so effort is selected only through a [model] alias"
-        );
-    }
-}
-
 // --- the bundled profiles' mapping (pure functions) -------------------------
 
 #[test]
@@ -234,36 +199,6 @@ fn applying_a_documented_model_alias_to_the_bundled_codex_cli_profile_resolves_i
 
     let tail = &argv[argv.len() - 2..];
     assert_eq!(tail, ["-m", fast_value]);
-}
-
-#[test]
-fn applying_an_effort_launch_option_to_the_bundled_antigravity_cli_profile_is_refused() {
-    let profile = parse_repo_profile("antigravity-cli");
-    let mut argv = vec!["agy".to_string()];
-
-    let err = apply_launch_options(
-        &mut argv,
-        &profile.options,
-        &LaunchOptionValues {
-            model: None,
-            effort: Some("high".to_string()),
-        },
-    )
-    .expect_err("antigravity-cli ships no [effort] table, so an effort value must be refused");
-
-    assert!(
-        matches!(
-            err,
-            ProfileLaunchError::UnsupportedLaunchOption(LaunchOptionAxis::Effort)
-        ),
-        "the refusal must be the same UnsupportedLaunchOption(Effort) error every other \
-         effort-less profile produces, got {err:?}"
-    );
-    assert_eq!(
-        argv,
-        vec!["agy".to_string()],
-        "a refused launch option must not leave a partially built argv behind"
-    );
 }
 
 // --- self-tests for the `common::docs` helpers ------------------------------

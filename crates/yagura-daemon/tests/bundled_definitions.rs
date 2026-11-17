@@ -98,7 +98,6 @@ fn bundled_definitions_declare_which_cli_abandons_calls_at_turn_end() {
     for (name, abandons) in [
         ("codex-cli", true),
         ("claude-code", false),
-        ("antigravity-cli", false),
         ("generic-shell", false),
     ] {
         let source = bundled_definition_source(name)
