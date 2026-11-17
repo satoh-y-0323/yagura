@@ -79,10 +79,6 @@ pub(crate) struct ProcessFacts {
     /// A zombie or a process being torn down.
     pub(crate) exited: bool,
     pub(crate) start: ProcessStart,
-    /// The name the kernel keeps of it from its start: Linux's command name,
-    /// macOS's `pbi_comm`. Renaming or replacing its executable afterwards
-    /// does not change it. `None` when the reading holds none.
-    pub(crate) name: Option<Vec<u8>>,
 }
 
 /// One reading of the process `pid`; `None` when no process has that id.
@@ -94,18 +90,6 @@ pub(crate) struct ProcessFacts {
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) fn process_facts(pid: u32) -> io::Result<Option<ProcessFacts>> {
     platform::facts_of(pid)
-}
-
-/// The creation time of the process `pid` as the raw 100 ns ticks, which
-/// order processes, and as its start; `None` when no process has that id.
-///
-/// # Errors
-///
-/// Returns the operating system's error when the process is there but its
-/// creation time cannot be read.
-#[cfg(windows)]
-pub(crate) fn process_creation(pid: u32) -> io::Result<Option<(u64, ProcessStart)>> {
-    platform::creation_of(pid).map(|read| read.map(|(ticks, start)| (ticks, ProcessStart(start))))
 }
 
 /// A handle on one running process, opened by its id and checked against
@@ -238,14 +222,6 @@ mod platform {
 
     /// The process's start: its creation time, in 100 ns ticks.
     fn created(handle: &OwnedHandle) -> io::Result<String> {
-        created_ticks(handle).map(start_text)
-    }
-
-    fn start_text(ticks: u64) -> String {
-        ticks.to_string()
-    }
-
-    fn created_ticks(handle: &OwnedHandle) -> io::Result<u64> {
         let mut creation = FILETIME::default();
         let mut exit = FILETIME::default();
         let mut kernel = FILETIME::default();
@@ -262,7 +238,8 @@ mod platform {
             )
         }
         .map_err(|error| win32_error_to_io(&error))?;
-        Ok(u64::from(creation.dwHighDateTime) << 32 | u64::from(creation.dwLowDateTime))
+        let ticks = u64::from(creation.dwHighDateTime) << 32 | u64::from(creation.dwLowDateTime);
+        Ok(ticks.to_string())
     }
 
     fn wait_for(handle: &OwnedHandle) -> io::Result<()> {
@@ -297,13 +274,6 @@ mod platform {
     pub(super) fn start_of(pid: u32) -> io::Result<Option<String>> {
         match open_process(pid, PROCESS_QUERY_LIMITED_INFORMATION)? {
             Some(handle) => created(&handle).map(Some),
-            None => Ok(None),
-        }
-    }
-
-    pub(super) fn creation_of(pid: u32) -> io::Result<Option<(u64, String)>> {
-        match open_process(pid, PROCESS_QUERY_LIMITED_INFORMATION)? {
-            Some(handle) => created_ticks(&handle).map(|ticks| Some((ticks, start_text(ticks)))),
             None => Ok(None),
         }
     }
@@ -344,55 +314,39 @@ mod platform {
     }
 }
 
-// A Linux `/proc/<pid>/stat` line is read here whatever the host, as a WSL
-// guest's lines reach a Windows daemon too.
-
-/// The process id a `/proc/<pid>/stat` line starts with.
-pub(crate) fn stat_pid(stat: &str) -> Option<u32> {
-    stat.split_once(' ')?.0.parse().ok()
-}
-
-/// The command name in a `/proc/<pid>/stat` line: from the first `(` to the
-/// last `)`, as the name may hold spaces and parentheses itself.
-pub(crate) fn stat_name(stat: &str) -> Option<&str> {
-    let (_, from_name) = stat.split_once('(')?;
-    let (name, _) = from_name.rsplit_once(')')?;
-    Some(name)
-}
-
-/// The state and the start time (in clock ticks since boot) in a
-/// `/proc/<pid>/stat` line. The command name before them is in
-/// parentheses and may hold spaces and parentheses itself, so the fields
-/// are counted from the last `)`.
-pub(crate) fn state_and_start(stat: &str) -> Option<(char, &str)> {
-    let (_, after_name) = stat.rsplit_once(')')?;
-    let mut fields = after_name.split_whitespace();
-    let state = fields.next()?.chars().next()?;
-    // The start time is the 22nd field; the state is the 3rd.
-    let start = fields.nth(18)?;
-    Some((state, start))
-}
-
-/// The parent, group and session ids in a `/proc/<pid>/stat` line: the
-/// 4th to 6th fields.
-pub(crate) fn family(stat: &str) -> Option<(u32, u32, u32)> {
-    let (_, after_name) = stat.rsplit_once(')')?;
-    let mut fields = after_name.split_whitespace().skip(1);
-    let ppid = fields.next()?.parse().ok()?;
-    let pgid = fields.next()?.parse().ok()?;
-    let sid = fields.next()?.parse().ok()?;
-    Some((ppid, pgid, sid))
-}
-
 #[cfg(target_os = "linux")]
 mod platform {
     use std::io;
     use std::os::fd::{AsRawFd as _, FromRawFd as _, OwnedFd};
 
-    use super::{Liveness, family, stat_name, state_and_start};
+    use super::Liveness;
 
     #[derive(Debug)]
     pub(super) struct Handle(OwnedFd);
+
+    /// The state and the start time (in clock ticks since boot) in a
+    /// `/proc/<pid>/stat` line. The command name before them is in
+    /// parentheses and may hold spaces and parentheses itself, so the fields
+    /// are counted from the last `)`.
+    fn state_and_start(stat: &str) -> Option<(char, &str)> {
+        let (_, after_name) = stat.rsplit_once(')')?;
+        let mut fields = after_name.split_whitespace();
+        let state = fields.next()?.chars().next()?;
+        // The start time is the 22nd field; the state is the 3rd.
+        let start = fields.nth(18)?;
+        Some((state, start))
+    }
+
+    /// The parent, group and session ids in a `/proc/<pid>/stat` line: the
+    /// 4th to 6th fields.
+    fn family(stat: &str) -> Option<(u32, u32, u32)> {
+        let (_, after_name) = stat.rsplit_once(')')?;
+        let mut fields = after_name.split_whitespace().skip(1);
+        let ppid = fields.next()?.parse().ok()?;
+        let pgid = fields.next()?.parse().ok()?;
+        let sid = fields.next()?.parse().ok()?;
+        Some((ppid, pgid, sid))
+    }
 
     /// The process's state and start, the start tied to this boot, since
     /// clock ticks count from it; `None` when no process has that id.
@@ -435,7 +389,6 @@ mod platform {
             sid,
             exited: has_exited(state),
             start: super::ProcessStart(format!("{}:{ticks}", boot.trim())),
-            name: stat_name(&stat).map(|name| name.as_bytes().to_vec()),
         }))
     }
 
@@ -561,16 +514,6 @@ mod platform {
         Ok(read_bsdinfo(pid)?.map(|info| (info.pbi_status, start_in(&info))))
     }
 
-    /// `pbi_comm` up to its NUL: the executable's name from the last exec,
-    /// which `setprogname` leaves alone (it writes `pbi_name`).
-    fn comm_in(info: &libc::proc_bsdinfo) -> Vec<u8> {
-        info.pbi_comm
-            .iter()
-            .take_while(|&&byte| byte != 0)
-            .map(|&byte| byte.to_ne_bytes()[0])
-            .collect()
-    }
-
     fn start_in(info: &libc::proc_bsdinfo) -> String {
         format!("{}.{:06}", info.pbi_start_tvsec, info.pbi_start_tvusec)
     }
@@ -603,7 +546,6 @@ mod platform {
             sid,
             exited,
             start: super::ProcessStart(start_in(&info)),
-            name: Some(comm_in(&info)),
         }))
     }
 
