@@ -20,6 +20,67 @@ function paletteOf(colour: string): Palette {
   return palette;
 }
 
+// What `applyPalette` may write beside the palette's own keys: the derived
+// tokens (design names) and `color-scheme`. The tints are one per status.
+const DERIVED_REQUIRED = [
+  '--bg-canvas',
+  '--bg-chrome',
+  '--bg-raised',
+  '--bg-hover',
+  '--bg-pressed',
+  '--bg-selected',
+  '--line',
+  '--line-strong',
+  '--fg-default',
+  '--fg-muted',
+  '--fg-faint',
+  '--ring',
+  '--accent',
+  '--on-accent',
+  '--danger',
+  '--on-danger',
+  '--st-approval',
+  '--st-input',
+  '--st-running',
+  '--st-halted',
+  '--st-unknown',
+  '--st-idle',
+  '--backdrop',
+  '--shadow-popover',
+  '--shadow-dialog',
+  'color-scheme',
+];
+const DERIVED_ALLOWED = [
+  ...DERIVED_REQUIRED,
+  ...['approval', 'input', 'running', 'halted', 'unknown', 'idle'].map(
+    (status) => `--st-${status}-tint`
+  ),
+];
+
+/** Checks the names written are the palette's own keys plus the derived tokens, and no others. */
+function expectOnlyOwnKeysAndDerived(calledNames: string[], palette: Palette): void {
+  const own = Object.keys(palette).map((key) => `--${key}`);
+  const names = new Set(calledNames);
+  for (const name of [...own, ...DERIVED_REQUIRED]) {
+    expect(names, `${name} should be written`).toContain(name);
+  }
+  const allowed = new Set([...own, ...DERIVED_ALLOWED]);
+  expect(calledNames.filter((name) => !allowed.has(name))).toEqual([]);
+}
+
+const UNUSED_KEYS = [
+  'color-primary-hover',
+  'color-error-hover',
+  'color-warning-action',
+  'color-warning-action-hover',
+  'color-on-warning',
+  'color-on-warning-action',
+];
+
+function omitKeys(palette: Palette, keys: readonly string[]): Palette {
+  return Object.fromEntries(Object.entries(palette).filter(([key]) => !keys.includes(key)));
+}
+
 function makePaletteTarget(): PaletteTarget & {
   setPropertyMock: ReturnType<typeof vi.fn<(name: string, value: string) => void>>;
 } {
@@ -89,25 +150,34 @@ function makeFakeSubscribable(initial: ThemeState): Pick<ThemeStore, 'subscribe'
 }
 
 describe('applyPalette', () => {
-  it('sets a CSS custom property, prefixed with --, for every key of a 35-key palette', () => {
+  it.each([
+    ['a 35-key', paletteOf('#123456')],
+    ['a 29-key', omitKeys(paletteOf('#123456'), UNUSED_KEYS)],
+  ])('writes every key of %s palette as a custom property with its value', (_label, palette) => {
     const target = makePaletteTarget();
-    const palette = paletteOf('#123456');
 
     applyPalette(target, palette);
 
-    expect(target.setPropertyMock).toHaveBeenCalledTimes(PALETTE_TOKEN_KEYS.length);
-    for (const key of PALETTE_TOKEN_KEYS) {
+    for (const key of Object.keys(palette)) {
       expect(target.setPropertyMock).toHaveBeenCalledWith(`--${key}`, '#123456');
     }
   });
 
-  it("adds no calls beyond the palette's own keys", () => {
-    const target = makePaletteTarget();
-    applyPalette(target, BUILT_IN_PALETTES.light);
+  it.each([
+    ['light', BUILT_IN_PALETTES.light],
+    ['a 29-key', omitKeys(BUILT_IN_PALETTES.light, UNUSED_KEYS)],
+  ])(
+    'writes the derived tokens and color-scheme beside the keys of %s, and nothing else',
+    (_label, palette) => {
+      const target = makePaletteTarget();
+      applyPalette(target, palette);
 
-    const calledNames = target.setPropertyMock.mock.calls.map((call: [string, string]) => call[0]);
-    expect(calledNames.sort()).toEqual(PALETTE_TOKEN_KEYS.map((key: string) => `--${key}`).sort());
-  });
+      const calledNames = target.setPropertyMock.mock.calls.map(
+        (call: [string, string]) => call[0]
+      );
+      expectOnlyOwnKeysAndDerived(calledNames, palette);
+    }
+  );
 });
 
 describe('applyTerminalTheme', () => {
@@ -200,7 +270,10 @@ describe('bindPalette', () => {
 
     bindPalette(store, (state: ThemeState) => state.appPalette, target);
 
-    expect(target.setPropertyMock).toHaveBeenCalledTimes(PALETTE_TOKEN_KEYS.length);
+    expectOnlyOwnKeysAndDerived(
+      target.setPropertyMock.mock.calls.map((call: [string, string]) => call[0]),
+      BUILT_IN_PALETTES.dark
+    );
     expect(target.setPropertyMock).toHaveBeenCalledWith(
       '--color-background',
       BUILT_IN_PALETTES.dark['color-background']

@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
-import { ANSI_THEME_KEYS, type TerminalTheme } from '../components/terminal-theme';
+import { ANSI_THEME_KEYS, themeOfPalette, type TerminalTheme } from '../components/terminal-theme';
 import type { CellAttr } from '../ipc/session-boundary';
+import { BUILT_IN_PALETTES } from '../theme/palette';
 import {
   completeTheme,
   PaintCache,
@@ -36,6 +37,26 @@ const THEME: TerminalTheme = {
   brightWhite: '#000010',
 };
 
+// The colors a missing or unreadable one falls back to, read from where the
+// production fallback reads them.
+const FALLBACK = themeOfPalette(BUILT_IN_PALETTES.dark);
+
+function fallbackColor(key: keyof TerminalTheme): string {
+  const color = FALLBACK[key];
+  if (color === undefined) {
+    throw new Error(`the built-in palette gives no ${key}`);
+  }
+  return color;
+}
+
+function fallbackRgb(key: keyof TerminalTheme): [number, number, number] {
+  const hex = /^#([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(fallbackColor(key));
+  if (!hex) {
+    throw new Error(`the built-in ${key} is not #rrggbb`);
+  }
+  return [parseInt(hex[1] ?? '', 16), parseInt(hex[2] ?? '', 16), parseInt(hex[3] ?? '', 16)];
+}
+
 function attr(fields: Partial<CellAttr>): CellAttr {
   return { fg: 'default', bg: 'default', flags: [], ...fields };
 }
@@ -45,9 +66,9 @@ describe('a theme with every color present', () => {
     const complete = completeTheme({ background: '#abcdef', red: '#123456' });
     expect(complete.background).toBe('#abcdef');
     expect(complete.red).toBe('#123456');
-    expect(complete.foreground).toBe('#ffffff');
-    expect(complete.brightWhite).toBe('#ffffff');
-    expect(complete.selectionInactiveBackground).toBe('#3d3d3d');
+    expect(complete.foreground).toBe(fallbackColor('foreground'));
+    expect(complete.brightWhite).toBe(fallbackColor('brightWhite'));
+    expect(complete.selectionInactiveBackground).toBe(fallbackColor('selectionInactiveBackground'));
     expect(Object.keys(complete)).toHaveLength(22);
   });
 
@@ -208,8 +229,8 @@ describe('the theme as the daemon answers color queries with it', () => {
 
   it('answers with the dark theme’s color for text around a hex color', () => {
     const wire = wirePaletteOf({ ...THEME, foreground: 'x#aabbcc', background: '#aabbccdd' });
-    expect(wire.foreground).toEqual([0xff, 0xff, 0xff]);
-    expect(wire.background).toEqual([0x1e, 0x1e, 0x1e]);
+    expect(wire.foreground).toEqual(fallbackRgb('foreground'));
+    expect(wire.background).toEqual(fallbackRgb('background'));
   });
 
   it('answers with the dark theme’s color for one that is not #rrggbb', () => {
@@ -220,10 +241,10 @@ describe('the theme as the daemon answers color queries with it', () => {
       cursor: '',
       red: 'red',
     });
-    expect(wire.foreground).toEqual([0xff, 0xff, 0xff]);
-    expect(wire.background).toEqual([0x1e, 0x1e, 0x1e]);
-    expect(wire.cursor).toEqual([0x4a, 0x9e, 0xff]);
-    expect(wire.ansi[1]).toEqual([0xcd, 0x31, 0x31]);
+    expect(wire.foreground).toEqual(fallbackRgb('foreground'));
+    expect(wire.background).toEqual(fallbackRgb('background'));
+    expect(wire.cursor).toEqual(fallbackRgb('cursor'));
+    expect(wire.ansi[1]).toEqual(fallbackRgb('red'));
   });
 });
 

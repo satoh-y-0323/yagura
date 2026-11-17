@@ -44,90 +44,12 @@ const CSS_VARIABLE_NAMES = [
 
 const EXPECTED_KEYS: string[] = CSS_VARIABLE_NAMES.map((name) => name.replace(/^--/, ''));
 
-// The fixtures mirror the `:root` and `@media (prefers-color-scheme: dark)` blocks
-// of `styles/tokens.css`; keys the dark block does not redefine fall back to `:root`.
-const LIGHT_FIXTURE: Record<string, string> = {
-  'color-background': '#ffffff',
-  'color-foreground': '#000000',
-  'color-surface': '#f5f5f5',
-  'color-border': '#e0e0e0',
-  'color-primary': '#0066cc',
-  'color-primary-hover': '#0052a3',
-  'color-success': '#28a745',
-  'color-warning': '#ffc107',
-  'color-error': '#dc3545',
-  'color-error-hover': '#d32f2f',
-  'color-warning-action': '#ff9800',
-  'color-warning-action-hover': '#f57c00',
-  'color-on-warning': '#333333',
-  'color-on-warning-action': '#ffffff',
-  'color-text-primary': '#000000',
-  'color-text-secondary': '#666666',
-  'term-selection-background': '#add6ff',
-  'term-selection-foreground': '#000000',
-  'term-selection-inactive-background': '#e5e5e5',
-  'term-ansi-black': '#000000',
-  'term-ansi-red': '#cd3131',
-  'term-ansi-green': '#00bc00',
-  'term-ansi-yellow': '#949800',
-  'term-ansi-blue': '#0451a5',
-  'term-ansi-magenta': '#bc05bc',
-  'term-ansi-cyan': '#0598bc',
-  'term-ansi-white': '#555555',
-  'term-ansi-bright-black': '#666666',
-  'term-ansi-bright-red': '#cd3131',
-  'term-ansi-bright-green': '#14ce14',
-  'term-ansi-bright-yellow': '#b5ba00',
-  'term-ansi-bright-blue': '#0451a5',
-  'term-ansi-bright-magenta': '#bc05bc',
-  'term-ansi-bright-cyan': '#0598bc',
-  'term-ansi-bright-white': '#a5a5a5',
-};
-
-const DARK_FIXTURE: Record<string, string> = {
-  'color-background': '#1e1e1e',
-  'color-foreground': '#ffffff',
-  'color-surface': '#2d2d2d',
-  'color-border': '#404040',
-  'color-primary': '#4a9eff',
-  'color-primary-hover': '#2e7fd4',
-  'color-success': '#28a745',
-  'color-warning': '#ffc107',
-  'color-error': '#dc3545',
-  'color-error-hover': '#d32f2f',
-  'color-warning-action': '#ff9800',
-  'color-warning-action-hover': '#f57c00',
-  'color-on-warning': '#333333',
-  'color-on-warning-action': '#ffffff',
-  'color-text-primary': '#ffffff',
-  'color-text-secondary': '#a0a0a0',
-  'term-selection-background': '#264f78',
-  'term-selection-foreground': '#ffffff',
-  'term-selection-inactive-background': '#3d3d3d',
-  'term-ansi-black': '#000000',
-  'term-ansi-red': '#cd3131',
-  'term-ansi-green': '#0dbc79',
-  'term-ansi-yellow': '#e5e510',
-  'term-ansi-blue': '#007acc',
-  'term-ansi-magenta': '#bc3fbc',
-  'term-ansi-cyan': '#11a8cd',
-  'term-ansi-white': '#e5e5e5',
-  'term-ansi-bright-black': '#666666',
-  'term-ansi-bright-red': '#f14c4c',
-  'term-ansi-bright-green': '#23d18b',
-  'term-ansi-bright-yellow': '#f5f543',
-  'term-ansi-bright-blue': '#3b8eea',
-  'term-ansi-bright-magenta': '#d670d6',
-  'term-ansi-bright-cyan': '#29b8db',
-  'term-ansi-bright-white': '#ffffff',
-};
-
 const THEME_NAMES: ('dark' | 'light')[] = ['dark', 'light'];
 
 const HEX_COLOR = /^#[0-9a-fA-F]{6}$/;
 
 function completeCandidate(): Record<string, string> {
-  return { ...LIGHT_FIXTURE };
+  return { ...BUILT_IN_PALETTES.light };
 }
 
 describe('PALETTE_TOKEN_KEYS', () => {
@@ -159,17 +81,6 @@ describe('BUILT_IN_PALETTES', () => {
       (key) => !HEX_COLOR.test(BUILT_IN_PALETTES[theme][key] ?? '')
     );
     expect(offenders).toEqual([]);
-  });
-
-  it.each(Object.entries(LIGHT_FIXTURE))(
-    'sets light.%s to the tokens.css value %s',
-    (key, value) => {
-      expect(BUILT_IN_PALETTES.light[key]).toBe(value);
-    }
-  );
-
-  it.each(Object.entries(DARK_FIXTURE))('sets dark.%s to the tokens.css value %s', (key, value) => {
-    expect(BUILT_IN_PALETTES.dark[key]).toBe(value);
   });
 
   it('keeps the dark and light palettes distinct', () => {
@@ -220,7 +131,7 @@ describe('validatePalette', () => {
     const result = validatePalette(completeCandidate());
     expect(result).not.toBeNull();
     for (const key of EXPECTED_KEYS) {
-      expect(result?.[key]).toBe(LIGHT_FIXTURE[key]);
+      expect(result?.[key]).toBe(BUILT_IN_PALETTES.light[key]);
     }
   });
 

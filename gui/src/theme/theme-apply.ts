@@ -1,4 +1,5 @@
 import { themeOfPalette, type TerminalTheme } from '../components/terminal-theme';
+import { deriveTokens } from './derive-tokens';
 import type { Palette } from './palette';
 import { resolveWindowPaletteFromState } from './theme-resolve';
 import type { ThemeState, ThemeStore } from './theme-store';
@@ -15,12 +16,18 @@ export interface TerminalThemeTarget {
 
 /**
  * Writes a palette to a target as CSS custom properties, one per key, with
- * the `--` prefix the stylesheets read them by.
+ * the `--` prefix the stylesheets read them by, then the semantic tokens
+ * derived from it and the `color-scheme` it implies.
  */
 export function applyPalette(target: PaletteTarget, palette: Palette): void {
   for (const [key, value] of Object.entries(palette)) {
     target.style.setProperty(`--${key}`, value);
   }
+  const { tokens, scheme } = deriveTokens(palette);
+  for (const [name, value] of Object.entries(tokens)) {
+    target.style.setProperty(name, value);
+  }
+  target.style.setProperty('color-scheme', scheme);
 }
 
 /**
