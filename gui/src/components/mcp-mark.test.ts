@@ -6,37 +6,24 @@
 import { describe, it, expect } from 'vitest';
 
 import { hints } from '../ui-messages';
-
-// Loaded per case so each case fails on its own while the module is missing.
-async function loadMcpMarkOf(): Promise<(typeof import('./mcp-mark'))['mcpMarkOf']> {
-  const module = await import('./mcp-mark');
-  return module.mcpMarkOf;
-}
+import { mcpMarkOf } from './mcp-mark';
 
 describe('mcpMarkOf', () => {
-  it('shows the mark when the window is connected', async () => {
-    const mcpMarkOf = await loadMcpMarkOf();
-
+  it('shows the mark when the window is connected', () => {
     expect(mcpMarkOf(true)).not.toBeNull();
   });
 
-  it('names a tooltip that reads "Connected to yagura"', async () => {
-    const mcpMarkOf = await loadMcpMarkOf();
-
+  it('names a tooltip that reads "Connected to yagura"', () => {
     const mark = mcpMarkOf(true);
 
     expect(mark === null ? null : hints[mark.tooltipKey]).toBe('Connected to yagura');
   });
 
-  it('shows nothing when the window is known not to be connected', async () => {
-    const mcpMarkOf = await loadMcpMarkOf();
-
+  it('shows nothing when the window is known not to be connected', () => {
     expect(mcpMarkOf(false)).toBeNull();
   });
 
-  it('shows nothing when the connection is unknown', async () => {
-    const mcpMarkOf = await loadMcpMarkOf();
-
+  it('shows nothing when the connection is unknown', () => {
     expect(mcpMarkOf(null)).toBeNull();
   });
 });

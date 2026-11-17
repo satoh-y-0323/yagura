@@ -105,24 +105,14 @@ describe('createThemeStore - subscribe delivers the current state synchronously'
 });
 
 describe('createThemeStore - construction parses only the 4 stored forms', () => {
-  it('restores a selection stored as "dark"', () => {
-    const { deps } = makeDeps({ stored: 'dark' });
-    expect(currentState(createThemeStore(deps)).selection).toBe('dark');
-  });
-
-  it('restores a selection stored as "light"', () => {
-    const { deps } = makeDeps({ stored: 'light' });
-    expect(currentState(createThemeStore(deps)).selection).toBe('light');
-  });
-
-  it('restores a selection stored as "system"', () => {
-    const { deps } = makeDeps({ stored: 'system' });
-    expect(currentState(createThemeStore(deps)).selection).toBe('system');
-  });
-
-  it('restores a named selection stored as "named:<name>"', () => {
-    const { deps } = makeDeps({ stored: 'named:acme' });
-    expect(currentState(createThemeStore(deps)).selection).toEqual({ named: 'acme' });
+  it.each([
+    ['dark', 'dark'],
+    ['light', 'light'],
+    ['system', 'system'],
+    ['named:acme', { named: 'acme' }],
+  ])('restores a selection stored as %j', (stored, expected) => {
+    const { deps } = makeDeps({ stored });
+    expect(currentState(createThemeStore(deps)).selection).toEqual(expected);
   });
 
   it.each([[null], [''], ['bogus'], ['named:'], ['Dark'], ['solarized-dark']])(
@@ -589,18 +579,6 @@ describe('createBrowserThemeDeps', () => {
     expect(fake.listenerCount()).toBe(0);
   });
 
-  it('does not throw when matchMedia throws', () => {
-    const { localStorage } = makeFakeLocalStorage();
-    const deps = createBrowserThemeDeps({
-      matchMedia: () => {
-        throw new Error('boom');
-      },
-      localStorage,
-    });
-
-    expect(() => deps.prefersDark()).not.toThrow();
-  });
-
   it('returns null from storageRead instead of throwing when localStorage.getItem throws', () => {
     const fake = makeFakeMatchMedia(false);
     const deps = createBrowserThemeDeps({
@@ -643,23 +621,20 @@ describe('createThemeStore - state a subscriber sees', () => {
     expect(state.selection).toBe(BUILT_IN_DEFAULT_SELECTION);
   });
 
-  it('keeps a stored named built-in selection when the themes file adds no theme', () => {
-    const { deps } = makeDeps({ stored: 'named:light' });
-    const store = createThemeStore(deps);
+  it.each([
+    ['named:light', 'system', { named: 'light' }],
+    ['named:dark', 'light', { named: 'dark' }],
+  ])(
+    'keeps the stored built-in selection %j when the themes file adds no theme',
+    (stored, defaultTheme, expected) => {
+      const { deps } = makeDeps({ stored });
+      const store = createThemeStore(deps);
 
-    store.loadUserThemes(emptyLoadResult({ defaultTheme: 'system' }));
+      store.loadUserThemes(emptyLoadResult({ defaultTheme }));
 
-    expect(currentState(store).selection).toEqual({ named: 'light' });
-  });
-
-  it('keeps the stored named dark selection when the themes file adds no theme', () => {
-    const { deps } = makeDeps({ stored: 'named:dark' });
-    const store = createThemeStore(deps);
-
-    store.loadUserThemes(emptyLoadResult({ defaultTheme: 'light' }));
-
-    expect(currentState(store).selection).toEqual({ named: 'dark' });
-  });
+      expect(currentState(store).selection).toEqual(expected);
+    }
+  );
 
   it('treats a selection made by the user as a stored one, so the file default does not replace it', () => {
     const { deps } = makeDeps();

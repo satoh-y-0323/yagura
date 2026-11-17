@@ -2,25 +2,17 @@ import { describe, it, expect } from 'vitest';
 
 import appSource from '../App.svelte?raw';
 import sessionClientSource from '../ipc/session-client.ts?raw';
+import approvalDialogSource from './ApprovalDialog.svelte?raw';
 import modalDialogSource from './ModalDialog.svelte?raw';
 import { findTagEnd, functionBody, resolveConditionExpression } from '../test-utils/markup-scan';
 
 /**
- * `ApprovalDialog.svelte` is read through `import.meta.glob`: a direct
- * `?raw` import of a missing file fails the whole file's collection,
- * reporting 0 tests instead of which contracts are unmet.
- *
  * Every contract below is measured by scanning source text, with no jsdom:
  * where focus actually lands, the real stacking order, and the 500 ms guard
  * as observed by a real click are left to the manual check and are
  * absent here.
  */
-const approvalDialogFiles = import.meta.glob('./ApprovalDialog.svelte', {
-  query: '?raw',
-  import: 'default',
-  eager: true,
-});
-const source = Object.values(approvalDialogFiles)[0] ?? '';
+const source = approvalDialogSource;
 
 /** The opening tag beginning at `marker`, including its closing `>`; '' when absent. */
 function openingTag(text: string, marker: string): string {

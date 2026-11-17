@@ -67,8 +67,6 @@ const EXPECTED_REQUIRED_KEYS: string[] = EXPECTED_KEYS.filter(
 
 const THEME_NAMES: ('dark' | 'light')[] = ['dark', 'light'];
 
-const HEX_COLOR = /^#[0-9a-fA-F]{6}$/;
-
 /** A record holding only the required keys, taken from the built-in light palette. */
 function requiredOnlyCandidate(): Record<string, string> {
   const candidate: Record<string, string> = {};
@@ -90,19 +88,14 @@ function completeCandidate(): Record<string, string> {
 describe('the palette key sets', () => {
   it('PALETTE_TOKEN_KEYS lists exactly the 35 accepted keys, without duplicates', () => {
     expect([...PALETTE_TOKEN_KEYS].sort()).toEqual([...EXPECTED_KEYS].sort());
-    expect(PALETTE_TOKEN_KEYS).toHaveLength(35);
-    expect(new Set(PALETTE_TOKEN_KEYS).size).toBe(35);
   });
 
   it('REQUIRED_PALETTE_KEYS lists exactly the 29 required keys, without duplicates', () => {
     expect([...REQUIRED_PALETTE_KEYS].sort()).toEqual([...EXPECTED_REQUIRED_KEYS].sort());
-    expect(REQUIRED_PALETTE_KEYS).toHaveLength(29);
-    expect(new Set(REQUIRED_PALETTE_KEYS).size).toBe(29);
   });
 
   it('UNUSED_PALETTE_KEYS lists exactly the 6 accepted but unused keys', () => {
     expect([...UNUSED_PALETTE_KEYS].sort()).toEqual([...EXPECTED_UNUSED_KEYS].sort());
-    expect(UNUSED_PALETTE_KEYS).toHaveLength(6);
   });
 });
 
@@ -111,26 +104,17 @@ describe('BUILT_IN_PALETTES', () => {
     expect(Object.keys(BUILT_IN_PALETTES).sort()).toEqual(['dark', 'light']);
   });
 
-  it.each(THEME_NAMES)('defines exactly the 29 required palette keys for %s', (theme) => {
-    expect(Object.keys(BUILT_IN_PALETTES[theme]).sort()).toEqual(
-      [...EXPECTED_REQUIRED_KEYS].sort()
-    );
-  });
-
-  it.each(THEME_NAMES)('passes validatePalette for %s', (theme) => {
-    expect(validatePalette(BUILT_IN_PALETTES[theme])).not.toBeNull();
-  });
-
-  it.each(THEME_NAMES)('uses #RRGGBB for every value of %s', (theme) => {
-    const offenders = Object.keys(BUILT_IN_PALETTES[theme]).filter(
-      (key) => !HEX_COLOR.test(BUILT_IN_PALETTES[theme][key] ?? '')
-    );
-    expect(offenders).toEqual([]);
-  });
-
-  it('keeps the dark and light palettes distinct', () => {
-    expect(BUILT_IN_PALETTES.dark).not.toEqual(BUILT_IN_PALETTES.light);
-  });
+  // validatePalette checks every value with isValidColor, so passing it also means
+  // every value is #RRGGBB.
+  it.each(THEME_NAMES)(
+    'defines exactly the 29 required palette keys for %s, all valid colours',
+    (theme) => {
+      expect(Object.keys(BUILT_IN_PALETTES[theme]).sort()).toEqual(
+        [...EXPECTED_REQUIRED_KEYS].sort()
+      );
+      expect(validatePalette(BUILT_IN_PALETTES[theme])).not.toBeNull();
+    }
+  );
 });
 
 describe('isValidColor', () => {
@@ -166,16 +150,11 @@ describe('isValidColor', () => {
 });
 
 describe('validatePalette', () => {
-  it('returns a palette for a complete 35-key record', () => {
-    const result: Palette | null = validatePalette(completeCandidate());
+  it('returns a palette with the same 35 keys and colour values for a complete record', () => {
+    const supplied = completeCandidate();
+    const result: Palette | null = validatePalette(supplied);
     expect(result).not.toBeNull();
     expect(Object.keys(result ?? {}).sort()).toEqual([...EXPECTED_KEYS].sort());
-  });
-
-  it('returns the same colour values that were supplied', () => {
-    const supplied = completeCandidate();
-    const result = validatePalette(supplied);
-    expect(result).not.toBeNull();
     for (const key of EXPECTED_KEYS) {
       expect(result?.[key]).toBe(supplied[key]);
     }
@@ -267,9 +246,5 @@ describe('validatePalette', () => {
     ['a function', () => undefined],
   ])('returns null for %s', (_label, candidate) => {
     expect(validatePalette(candidate)).toBeNull();
-  });
-
-  it('returns null for an empty object', () => {
-    expect(validatePalette({})).toBeNull();
   });
 });

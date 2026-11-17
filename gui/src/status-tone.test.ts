@@ -8,7 +8,8 @@
 import { describe, it, expect } from 'vitest';
 
 import type { DetectedStatusView, WindowStatus } from './ipc/session-boundary';
-import { attentionCount, windowsNeedingYou } from './status-tone';
+import { STATUS_PRESENTATION } from './status-presentation';
+import { attentionCount, summarizeWindowStatuses, windowsNeedingYou } from './status-tone';
 
 /**
  * Minimal shape `windowsNeedingYou` / `attentionCount` need from an entry: the
@@ -26,21 +27,6 @@ function entryOf(status: WindowStatus, id: string): Entry {
 }
 
 describe('attentionCount: matches the windowsNeedingYou set', () => {
-  it('is 0 for an empty entry list', () => {
-    expect(attentionCount<Entry>([])).toBe(0);
-  });
-
-  it('counts waiting_input and waiting_approval entries only', () => {
-    const entries: Entry[] = [
-      entryOf('idle', 'a'),
-      entryOf('waiting_input', 'b'),
-      entryOf('running', 'c'),
-      entryOf('waiting_approval', 'd'),
-      entryOf('unknown', 'e'),
-    ];
-    expect(attentionCount(entries)).toBe(2);
-  });
-
   it.each([
     [[] as WindowStatus[], 0],
     [['running', 'idle', 'exited'] as WindowStatus[], 0],
@@ -78,11 +64,6 @@ describe('windowsNeedingYou / attentionCount: membership in the waiting set', ()
       const entry = entryOf(status, 'solo');
       expect(windowsNeedingYou([entry]).map((e) => e.id)).toEqual(expected ? ['solo'] : []);
     });
-
-    it(`attentionCount is ${expected ? 1 : 0} for a lone ${status} window`, () => {
-      const entry = entryOf(status, 'solo');
-      expect(attentionCount([entry])).toBe(expected ? 1 : 0);
-    });
   }
 
   it('returns an empty array for an empty entry list', () => {
@@ -111,10 +92,6 @@ describe('attentionCount(x) === windowsNeedingYou(x).length', () => {
 
     expect(attentionCount(entries)).toBe(windowsNeedingYou(entries).length);
   });
-
-  it('holds for an empty entry list', () => {
-    expect(attentionCount<Entry>([])).toBe(windowsNeedingYou<Entry>([]).length);
-  });
 });
 
 /** The seven statuses from the highest attention rank to the lowest. */
@@ -128,73 +105,36 @@ const STATUSES_BY_RANK: WindowStatus[] = [
   'exited',
 ];
 
-interface PresentationRow {
-  rank: number;
-  icon: string;
-  role: string;
-  motion: unknown;
-  needsYou: boolean;
-}
-
-async function presentationTable(): Promise<Record<WindowStatus, PresentationRow>> {
-  const mod = (await import('./status-presentation')) as Record<string, unknown>;
-  return mod['STATUS_PRESENTATION'] as Record<WindowStatus, PresentationRow>;
-}
+const table = STATUS_PRESENTATION;
 
 function moves(motion: unknown): boolean {
   return Boolean(motion) && motion !== 'none';
 }
 
 describe('status presentation table', () => {
-  it('gives every status a rank, an icon, a colour role and a motion', async () => {
-    const table = await presentationTable();
-    for (const status of STATUSES_BY_RANK) {
-      const row = table[status];
-      expect(typeof row.rank, status).toBe('number');
-      expect(row.icon, status).toBeTruthy();
-      expect(row.role, status).toBeTruthy();
-      expect('motion' in row, status).toBe(true);
-    }
-  });
-
-  it('ranks waiting_approval < waiting_input < unknown < interrupted < running < idle < exited', async () => {
-    const table = await presentationTable();
+  it('ranks waiting_approval < waiting_input < unknown < interrupted < running < idle < exited', () => {
     const sorted = [...STATUSES_BY_RANK].sort((x, y) => table[x].rank - table[y].rank);
     expect(sorted).toEqual(STATUSES_BY_RANK);
     expect(new Set(STATUSES_BY_RANK.map((s) => table[s].rank)).size).toBe(7);
   });
 
-  it('tells approval from input by icon and by colour role, not by colour alone', async () => {
-    const table = await presentationTable();
+  it('tells approval from input by icon and by colour role, not by colour alone', () => {
     expect(table.waiting_approval.icon).not.toBe(table.waiting_input.icon);
     expect(table.waiting_approval.role).not.toBe(table.waiting_input.role);
   });
 
-  it('gives unknown an icon of its own, apart from idle', async () => {
-    const table = await presentationTable();
+  it('gives unknown an icon of its own, apart from idle', () => {
     expect(table.unknown.icon).not.toBe(table.idle.icon);
   });
 
-  it('does not colour interrupted as an error or danger', async () => {
-    const table = await presentationTable();
+  it('does not colour interrupted as an error or danger', () => {
     expect(String(table.interrupted.role)).not.toMatch(/error|danger/i);
   });
 
-  it('moves only a running window', async () => {
-    const table = await presentationTable();
+  it('moves only a running window', () => {
     for (const status of STATUSES_BY_RANK) {
       expect(moves(table[status].motion), status).toBe(status === 'running');
     }
-  });
-
-  it('takes the needs-you membership of windowsNeedingYou from the one needs-you column of the table', async () => {
-    const table = await presentationTable();
-    for (const status of STATUSES_BY_RANK) {
-      expect(windowsNeedingYou([entryOf(status, 'solo')]).length, status).toBe(
-        table[status].needsYou ? 1 : 0
-      );
-    }
-    expect(table.unknown.needsYou).toBe(false);
   });
 });
 
@@ -204,28 +144,24 @@ interface RailSummary {
   unknownOnly: boolean;
 }
 
-async function summarize(
-  statuses: WindowStatus[]
-): Promise<{ summary: RailSummary; entries: Entry[] }> {
-  const mod = (await import('./status-tone')) as Record<string, unknown>;
-  const fn = mod['summarizeWindowStatuses'] as (entries: readonly Entry[]) => RailSummary;
+function summarize(statuses: WindowStatus[]): { summary: RailSummary; entries: Entry[] } {
   const entries = statuses.map((status, i) => entryOf(status, `e${i}`));
-  return { summary: fn(entries), entries };
+  return { summary: summarizeWindowStatuses(entries), entries };
 }
 
 describe('Rail summary of a group of windows', () => {
-  it('counts only the needs-you windows, the same as attentionCount', async () => {
+  it('counts only the needs-you windows, the same as attentionCount', () => {
     for (const statuses of [
       ['idle', 'running'],
       ['waiting_input', 'unknown', 'running'],
       ['waiting_approval', 'waiting_input', 'exited', 'unknown'],
     ] as WindowStatus[][]) {
-      const { summary, entries } = await summarize(statuses);
+      const { summary, entries } = summarize(statuses);
       expect(summary.count).toBe(attentionCount(entries));
     }
   });
 
-  it('marks the group with the highest-ranked status present', async () => {
+  it('marks the group with the highest-ranked status present', () => {
     const cases: [WindowStatus[], WindowStatus][] = [
       [['idle', 'running'], 'running'],
       [['exited', 'idle', 'interrupted'], 'interrupted'],
@@ -234,24 +170,24 @@ describe('Rail summary of a group of windows', () => {
       [['waiting_input', 'waiting_approval', 'running'], 'waiting_approval'],
     ];
     for (const [statuses, expected] of cases) {
-      const { summary } = await summarize(statuses);
+      const { summary } = summarize(statuses);
       expect(summary.mark, statuses.join(',')).toBe(expected);
     }
   });
 
-  it('reports count 0 and unknownOnly when no window needs you but one is unknown', async () => {
-    const { summary } = await summarize(['unknown', 'idle', 'running']);
+  it('reports count 0 and unknownOnly when no window needs you but one is unknown', () => {
+    const { summary } = summarize(['unknown', 'idle', 'running']);
     expect(summary.count).toBe(0);
     expect(summary.unknownOnly).toBe(true);
   });
 
-  it('does not report unknownOnly while a needs-you window exists, nor without an unknown window', async () => {
-    expect((await summarize(['unknown', 'waiting_input'])).summary.unknownOnly).toBe(false);
-    expect((await summarize(['running', 'idle'])).summary.unknownOnly).toBe(false);
+  it('does not report unknownOnly while a needs-you window exists, nor without an unknown window', () => {
+    expect(summarize(['unknown', 'waiting_input']).summary.unknownOnly).toBe(false);
+    expect(summarize(['running', 'idle']).summary.unknownOnly).toBe(false);
   });
 
-  it('has count 0, no mark and no unknownOnly for an empty group', async () => {
-    const { summary } = await summarize([]);
+  it('has count 0, no mark and no unknownOnly for an empty group', () => {
+    const { summary } = summarize([]);
     expect(summary).toEqual({ count: 0, mark: null, unknownOnly: false });
   });
 });

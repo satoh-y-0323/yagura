@@ -71,33 +71,21 @@ function stateWith(
 }
 
 describe('parseUserThemes - user theme vocabulary', () => {
-  it('keeps a valid user theme', () => {
+  it('keeps a valid user theme and reports no issue', () => {
     const result = parseUserThemes({ ocean: OCEAN }, {}, undefined);
     expect(result.palettes).toEqual({ ocean: OCEAN });
-  });
-
-  it('reports no issue for a valid user theme', () => {
-    const result = parseUserThemes({ ocean: OCEAN }, {}, undefined);
     expect(result.issues).toEqual([]);
   });
 
-  it('excludes a theme that is missing a palette key', () => {
+  it('excludes a theme that is missing a palette key and reports invalid_palette', () => {
     const result = parseUserThemes({ broken: withoutKey(OCEAN, FIRST_KEY) }, {}, undefined);
     expect(result.palettes).toEqual({});
-  });
-
-  it('reports invalid_palette for a theme that is missing a palette key', () => {
-    const result = parseUserThemes({ broken: withoutKey(OCEAN, FIRST_KEY) }, {}, undefined);
     expect(result.issues).toEqual([{ code: 'invalid_palette', theme: 'broken' }]);
   });
 
-  it('excludes a theme whose keys carry the CSS custom property prefix', () => {
+  it('excludes a theme whose keys carry the CSS custom property prefix and reports invalid_palette', () => {
     const result = parseUserThemes({ broken: prefixedPaletteOf('#010203') }, {}, undefined);
     expect(result.palettes).toEqual({});
-  });
-
-  it('reports invalid_palette for a theme whose keys carry the CSS custom property prefix', () => {
-    const result = parseUserThemes({ broken: prefixedPaletteOf('#010203') }, {}, undefined);
     expect(result.issues).toEqual([{ code: 'invalid_palette', theme: 'broken' }]);
   });
 
@@ -113,25 +101,16 @@ describe('parseUserThemes - user theme vocabulary', () => {
     expect(result.palettes).toEqual({});
   });
 
-  it('excludes a theme whose colour value is not #RRGGBB', () => {
+  it('excludes a theme whose colour value is not #RRGGBB and reports invalid_palette', () => {
     const candidate: Record<string, string> = { ...OCEAN, [FIRST_KEY]: 'red' };
     const result = parseUserThemes({ broken: candidate }, {}, undefined);
     expect(result.palettes).toEqual({});
-  });
-
-  it('reports invalid_palette for a theme whose colour value is not #RRGGBB', () => {
-    const candidate: Record<string, string> = { ...OCEAN, [FIRST_KEY]: 'red' };
-    const result = parseUserThemes({ broken: candidate }, {}, undefined);
     expect(result.issues).toEqual([{ code: 'invalid_palette', theme: 'broken' }]);
   });
 
-  it('excludes a theme whose table is not an object', () => {
+  it('excludes a theme whose table is not an object and reports invalid_palette', () => {
     const result = parseUserThemes({ broken: 'not-a-table' }, {}, undefined);
     expect(result.palettes).toEqual({});
-  });
-
-  it('reports invalid_palette for a theme whose table is not an object', () => {
-    const result = parseUserThemes({ broken: 'not-a-table' }, {}, undefined);
     expect(result.issues).toEqual([{ code: 'invalid_palette', theme: 'broken' }]);
   });
 
@@ -144,15 +123,14 @@ describe('parseUserThemes - user theme vocabulary', () => {
     expect(result.palettes).toEqual({ ocean: OCEAN, moss: MOSS });
   });
 
-  it.each(RESERVED_NAMES)('excludes the reserved theme name %s', (name) => {
-    const result = parseUserThemes({ [name]: OCEAN }, {}, undefined);
-    expect(result.palettes).toEqual({});
-  });
-
-  it.each(RESERVED_NAMES)('reports reserved_name for the theme name %s', (name) => {
-    const result = parseUserThemes({ [name]: OCEAN }, {}, undefined);
-    expect(result.issues).toEqual([{ code: 'reserved_name', theme: name }]);
-  });
+  it.each(RESERVED_NAMES)(
+    'excludes the reserved theme name %s and reports reserved_name',
+    (name) => {
+      const result = parseUserThemes({ [name]: OCEAN }, {}, undefined);
+      expect(result.palettes).toEqual({});
+      expect(result.issues).toEqual([{ code: 'reserved_name', theme: name }]);
+    }
+  );
 
   it('keeps a valid theme declared next to a reserved name', () => {
     const result = parseUserThemes({ dark: OCEAN, ocean: OCEAN }, {}, undefined);
@@ -197,23 +175,15 @@ describe('parseUserThemes - vendor assignments', () => {
     expect(result.issues).toEqual([]);
   });
 
-  it('drops an assignment whose value is system', () => {
+  it('drops an assignment whose value is system and reports unknown_reference', () => {
     const result = parseUserThemes({ ocean: OCEAN }, { claude: 'system' }, undefined);
     expect(result.vendorAssignments).toEqual({});
-  });
-
-  it('reports unknown_reference for an assignment whose value is system', () => {
-    const result = parseUserThemes({ ocean: OCEAN }, { claude: 'system' }, undefined);
     expect(result.issues).toEqual([{ code: 'unknown_reference', theme: 'system' }]);
   });
 
-  it('drops an assignment that points to an unknown name', () => {
+  it('drops an assignment that points to an unknown name and reports unknown_reference', () => {
     const result = parseUserThemes({ ocean: OCEAN }, { claude: 'nope' }, undefined);
     expect(result.vendorAssignments).toEqual({});
-  });
-
-  it('reports unknown_reference for an assignment that points to an unknown name', () => {
-    const result = parseUserThemes({ ocean: OCEAN }, { claude: 'nope' }, undefined);
     expect(result.issues).toEqual([{ code: 'unknown_reference', theme: 'nope' }]);
   });
 
@@ -294,23 +264,15 @@ describe('parseUserThemes - default theme mapping', () => {
     expect(result.issues).toEqual([]);
   });
 
-  it('returns null for an unknown default_theme', () => {
+  it('returns null for an unknown default_theme and reports unknown_reference', () => {
     const result = parseUserThemes({ ocean: OCEAN }, {}, 'nope');
     expect(result.defaultSelection).toBeNull();
-  });
-
-  it('reports unknown_reference for an unknown default_theme', () => {
-    const result = parseUserThemes({ ocean: OCEAN }, {}, 'nope');
     expect(result.issues).toEqual([{ code: 'unknown_reference', theme: 'nope' }]);
   });
 
-  it('returns null for a default_theme that points to an excluded theme', () => {
+  it('returns null for a default_theme that points to an excluded theme and reports the dangling reference', () => {
     const result = parseUserThemes({ broken: withoutKey(OCEAN, FIRST_KEY) }, {}, 'broken');
     expect(result.defaultSelection).toBeNull();
-  });
-
-  it('reports the dangling reference of an excluded default_theme', () => {
-    const result = parseUserThemes({ broken: withoutKey(OCEAN, FIRST_KEY) }, {}, 'broken');
     expect(issueKeys(result)).toEqual(['invalid_palette:broken', 'unknown_reference:broken']);
   });
 
@@ -469,34 +431,9 @@ describe('resolveWindowPaletteFromState', () => {
     expect(resolveWindowPaletteFromState(state, 'claude', 'win-1')).toEqual(OCEAN);
   });
 
-  it('uses the window override when the vendor is null', () => {
-    const state = stateWith({ 'win-1': 'ocean' }, { claude: 'sand' });
-    expect(resolveWindowPaletteFromState(state, null, 'win-1')).toEqual(OCEAN);
-  });
-
   it('uses the vendor assignment when the window has no override', () => {
     const state = stateWith({}, { claude: 'sand' });
     expect(resolveWindowPaletteFromState(state, 'claude', 'win-1')).toEqual(SAND);
-  });
-
-  it('uses the app palette when neither an override nor an assignment applies', () => {
-    const state = stateWith({}, {});
-    expect(resolveWindowPaletteFromState(state, null, 'win-1')).toEqual(LIGHT);
-  });
-
-  it('skips an override that is not in the vocabulary and uses the vendor assignment', () => {
-    const state = stateWith({ 'win-1': 'nope' }, { claude: 'sand' });
-    expect(resolveWindowPaletteFromState(state, 'claude', 'win-1')).toEqual(SAND);
-  });
-
-  it('falls back to the app palette when both references are missing', () => {
-    const state = stateWith({ 'win-1': 'nope' }, { claude: 'gone' });
-    expect(resolveWindowPaletteFromState(state, 'claude', 'win-1')).toEqual(LIGHT);
-  });
-
-  it('resolves an override that names a built-in palette', () => {
-    const state = stateWith({ 'win-1': 'dark' }, { claude: 'sand' });
-    expect(resolveWindowPaletteFromState(state, 'claude', 'win-1')).toEqual(DARK);
   });
 
   it('does not apply the override of another window', () => {

@@ -6,25 +6,14 @@
 import { describe, it, expect } from 'vitest';
 
 import { hints } from '../ui-messages';
-
-// Loaded per case so each case fails on its own while the module is missing.
-async function loadStatusReportMarkOf(): Promise<
-  (typeof import('./status-report-mark'))['statusReportMarkOf']
-> {
-  const module = await import('./status-report-mark');
-  return module.statusReportMarkOf;
-}
+import { statusReportMarkOf } from './status-report-mark';
 
 describe('statusReportMarkOf', () => {
-  it('shows the mark when the reports are missing', async () => {
-    const statusReportMarkOf = await loadStatusReportMarkOf();
-
+  it('shows the mark when the reports are missing', () => {
     expect(statusReportMarkOf(true)).not.toBeNull();
   });
 
-  it('names a tooltip that says the reports are not arriving', async () => {
-    const statusReportMarkOf = await loadStatusReportMarkOf();
-
+  it('names a tooltip that says the reports are not arriving', () => {
     const mark = statusReportMarkOf(true);
 
     expect(mark === null ? null : hints[mark.tooltipKey]).toBe(
@@ -32,15 +21,11 @@ describe('statusReportMarkOf', () => {
     );
   });
 
-  it('shows nothing when the reports are arriving or not expected', async () => {
-    const statusReportMarkOf = await loadStatusReportMarkOf();
-
+  it('shows nothing when the reports are arriving or not expected', () => {
     expect(statusReportMarkOf(false)).toBeNull();
   });
 
-  it('shows nothing when the state is unknown', async () => {
-    const statusReportMarkOf = await loadStatusReportMarkOf();
-
+  it('shows nothing when the state is unknown', () => {
     expect(statusReportMarkOf(null)).toBeNull();
   });
 });

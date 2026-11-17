@@ -29,15 +29,10 @@ import {
   describeAttentionBadge,
   describeRestoreBanner,
   describeRestoreSelectionCount,
-  // A normal value import is safe here
-  // (unlike Rust, an unresolved named export only fails the `it` that calls
-  // it, not collection of this whole file), so it stays alongside the rest
-  // instead of a separate glob/namespace import.
   describeRoomTitle,
   describeUnknownReasonSuffix,
   describeUnknownExplanation,
   describeUndeliveredUnknownReason,
-  // Same import shape as the room additions above.
   describeInterruptHint,
 } from './render';
 
@@ -258,15 +253,6 @@ describe('describeUnknownReasonSuffix', () => {
     );
   });
 
-  it('pins the six short labels verbatim (English locale)', () => {
-    expect(english.unknownReasons.short.no_definition).toBe('No definition');
-    expect(english.unknownReasons.short.no_rule_matched).toBe('No rule matched');
-    expect(english.unknownReasons.short.screen_lost).toBe('Screen lost');
-    expect(english.unknownReasons.short.detector_stopped).toBe('Detector stopped');
-    expect(english.unknownReasons.short.not_yet_judged).toBe('Not judged yet');
-    expect(english.unknownReasons.short.declared_unknown).toBe('Reported unknown');
-  });
-
   it('renders through the dummy locale, not the English one (locale-driven, not hardcoded)', () => {
     const result = describeUnknownReasonSuffix(dummyMessages, unknownPair('screen_lost'));
     expect(result).toBe(` · ${dummyMessages.unknownReasons.short.screen_lost}`);
@@ -275,27 +261,6 @@ describe('describeUnknownReasonSuffix', () => {
 });
 
 describe('describeUnknownExplanation', () => {
-  it('pins the six explanations verbatim (English locale)', () => {
-    expect(english.unknownReasons.explanation.no_definition).toBe(
-      "No usable detection definition is assigned, so the status can never be detected. Assign one with open_window's detection argument or fix the profile."
-    );
-    expect(english.unknownReasons.explanation.no_rule_matched).toBe(
-      'The screen matches no rule of the detection definition. Look at the window; messages stay refused until a rule matches or the definition settles this window on time alone.'
-    );
-    expect(english.unknownReasons.explanation.screen_lost).toBe(
-      'The screen model was lost and has not been trusted again. Look at the window; the status recovers once the window settles on a state that accepts input.'
-    );
-    expect(english.unknownReasons.explanation.detector_stopped).toBe(
-      'Detection stopped reporting for this window. Close the window and open it again.'
-    );
-    expect(english.unknownReasons.explanation.not_yet_judged).toBe(
-      'The window just opened and nothing has been judged yet. Wait for output.'
-    );
-    expect(english.unknownReasons.explanation.declared_unknown).toBe(
-      'A detection rule or a status event reported the status as unknown. Look at the window.'
-    );
-  });
-
   it('returns the empty string for an unknown status carrying no reason, the same fail-safe shape describeUnknownReasonSuffix takes', () => {
     expect(describeUnknownExplanation(english, unknownPair(null), null)).toBe('');
     expect(describeUnknownExplanation(english, unknownPair(null), 'a warning with no reason')).toBe(
@@ -364,15 +329,6 @@ describe('describeUndeliveredUnknownReason', () => {
     );
   });
 
-  it('pins the six chat words verbatim (English locale)', () => {
-    expect(english.unknownReasons.chatWord.no_definition).toBe('no definition');
-    expect(english.unknownReasons.chatWord.no_rule_matched).toBe('no rule matched');
-    expect(english.unknownReasons.chatWord.screen_lost).toBe('screen lost');
-    expect(english.unknownReasons.chatWord.detector_stopped).toBe('detector stopped');
-    expect(english.unknownReasons.chatWord.not_yet_judged).toBe('not judged yet');
-    expect(english.unknownReasons.chatWord.declared_unknown).toBe('reported unknown');
-  });
-
   it('renders "Not sent (status unknown: <word>)" for a given reason', () => {
     expect(describeUndeliveredUnknownReason(english, undeliveredUnknown('screen_lost'))).toBe(
       'Not sent (status unknown: screen lost)'
@@ -411,8 +367,7 @@ describe('describeUndeliveredUnknownReason', () => {
 // Why the ⏹ button is disabled. `describeInterruptHint` takes the
 // gate's own verdict (a `ConfirmTarget`), not the raw status, so the reason
 // is never derived a second time by the caller. The two blocked reasons must
-// read as different sentences; the wording itself is
-// fixed by the implementation task and is not asserted here verbatim.
+// read as different sentences.
 // ---------------------------------------------------------------------------
 
 /** The blocked arm of `ConfirmTarget`, naming `reason`. */

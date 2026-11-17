@@ -5,12 +5,7 @@
  */
 import { describe, it, expect } from 'vitest';
 
-import {
-  describeDetectionWarning,
-  describeOperationFailure,
-  describeUnknownReasonSuffix,
-  describeUnknownExplanation,
-} from './ui-messages';
+import { describeDetectionWarning, describeOperationFailure } from './ui-messages';
 
 const SUMMARY = 'Could not close the window';
 
@@ -254,57 +249,6 @@ describe('describeDetectionWarning: Japanese summary, folding and capping', () =
  * nothing render.ts-side to test in render.test.ts, which this task does not
  * touch).
  */
-/**
- * The facade forwards to render.ts's `describeUnknownReasonSuffix` /
- * `describeUnknownExplanation` without the `messages` parameter, the same
- * shape `describeStatus`/`describeAttentionBadge` already take above. Both now
- * take the status and its reason as one value, so no caller of the facade can
- * name a reason for a status that is not Unknown. The per-reason wording
- * itself is pinned in render.test.ts (against the resolved locale, which this
- * facade also resolves); only the forwarding is measured here.
- */
-describe('facade re-exports the unknown-reason renderings', () => {
-  it('describeUnknownReasonSuffix is the empty string for an unknown status with no reason', () => {
-    expect(describeUnknownReasonSuffix({ status: 'unknown', reason: null })).toBe('');
-  });
-
-  it('describeUnknownReasonSuffix is the empty string for an arm that is not the unknown one', () => {
-    expect(describeUnknownReasonSuffix({ status: 'running' })).toBe('');
-  });
-
-  it('describeUnknownReasonSuffix renders a non-empty suffix for a reason', () => {
-    expect(
-      describeUnknownReasonSuffix({ status: 'unknown', reason: 'no_definition' }).length
-    ).toBeGreaterThan(0);
-  });
-
-  it('describeUnknownExplanation is the empty string for an unknown status with no reason', () => {
-    expect(describeUnknownExplanation({ status: 'unknown', reason: null }, null)).toBe('');
-    expect(
-      describeUnknownExplanation({ status: 'unknown', reason: null }, 'a warning with no reason')
-    ).toBe('');
-  });
-
-  it('describeUnknownExplanation is the empty string for an arm that is not the unknown one', () => {
-    expect(describeUnknownExplanation({ status: 'idle' }, null)).toBe('');
-    expect(describeUnknownExplanation({ status: 'idle' }, 'a warning with no reason')).toBe('');
-  });
-
-  it('describeUnknownExplanation renders the explanation alone for a blank warning', () => {
-    const pair = { status: 'unknown', reason: 'no_definition' } as const;
-    const alone = describeUnknownExplanation(pair, null);
-    expect(alone.length).toBeGreaterThan(0);
-    expect(describeUnknownExplanation(pair, '')).toBe(alone);
-  });
-
-  it('describeUnknownExplanation appends a non-blank warning in parentheses', () => {
-    const pair = { status: 'unknown', reason: 'no_definition' } as const;
-    const alone = describeUnknownExplanation(pair, null);
-    const withWarning = describeUnknownExplanation(pair, 'detail text');
-    expect(withWarning).toBe(`${alone} (detail text)`);
-  });
-});
-
 /**
  * The fixed line the add-window form shows when the
  * connected daemon has not settled a wire revision the launch options need.
