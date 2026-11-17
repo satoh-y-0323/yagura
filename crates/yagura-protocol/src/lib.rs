@@ -2567,9 +2567,9 @@ struct BuiltInPalettes {
     palettes: BTreeMap<String, BTreeMap<String, String>>,
 }
 
-/// The built-in default palette, the GUI's default theme, as the daemon
-/// answers color queries with it before the GUI has sent any
-/// [`DefaultPalettes`].
+/// The palette the daemon answers color queries with before the GUI has sent
+/// any [`DefaultPalettes`]. It is the GUI's default theme except when that
+/// follows the OS (`system`), which the daemon cannot see: then it is dark.
 ///
 /// Read from the same files the GUI draws its built-in themes with, by the
 /// rule of [`default_palette_of`].

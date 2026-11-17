@@ -111,8 +111,6 @@ export function tooltip(node: HTMLElement, initial: TooltipOptions | undefined) 
     }
   }
 
-  // `:focus-visible` alone is not enough: WebKit matches it for a focus a script
-  // moved after a pointer press, such as a dialog's initial focus.
   function handleFocus(): void {
     controller.focusTrigger(node.matches(':focus-visible') && modality.isKeyboard());
   }
