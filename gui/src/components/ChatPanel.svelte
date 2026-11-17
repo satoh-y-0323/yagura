@@ -271,7 +271,10 @@
     menuTrigger = undefined;
   }
 
-  function handleRoomMenuClose(reason: 'escape' | 'outside' | 'resize'): void {
+  /** Ties the explanatory sentence to the item it explains. */
+  const ROOM_MENU_NOTE_ID = 'room-menu-note';
+
+  function handleRoomMenuClose(reason: 'escape' | 'tab' | 'outside' | 'resize'): void {
     const trigger = menuTrigger;
     closeRoomMenu();
     if (reason === 'escape') {
@@ -503,7 +506,8 @@
       role="menuitem"
       on:click={() => chooseRoomAction(onClearRoom)}
     >
-      {chat.clearHistoryItem}
+      <span class="popup-menu__icon" aria-hidden="true"></span>
+      <span class="popup-menu__label">{chat.clearHistoryItem}</span>
     </button>
     <hr class="popup-menu__divider" />
     <button
@@ -511,12 +515,14 @@
       class="popup-menu__item"
       role="menuitem"
       disabled={deleteNote !== null}
+      aria-describedby={deleteNote === null ? undefined : ROOM_MENU_NOTE_ID}
       on:click={() => chooseRoomAction(onDeleteRoom)}
     >
-      {chat.deleteRoomItem}
+      <span class="popup-menu__icon" aria-hidden="true"></span>
+      <span class="popup-menu__label">{chat.deleteRoomItem}</span>
     </button>
     {#if deleteNote !== null}
-      <div class="room-menu__note">{deleteNote}</div>
+      <div id={ROOM_MENU_NOTE_ID} class="room-menu__note">{deleteNote}</div>
     {/if}
   </PopupMenu>
 
@@ -885,9 +891,9 @@
   }
 
   .room-menu__note {
-    padding: 0 var(--space-sm) 2px;
-    color: var(--color-text-secondary);
-    font-size: var(--font-size-xs);
+    padding: 0 var(--space-2) var(--space-0_5);
+    color: var(--fg-muted);
+    font-size: var(--text-xs);
   }
 
   .room-row__stop {

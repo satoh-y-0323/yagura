@@ -31,6 +31,7 @@
   import StatusPanel from './components/StatusPanel.svelte';
   import TabBar from './components/TabBar.svelte';
   import TileIcon from './components/TileIcon.svelte';
+  import Tooltip from './components/Tooltip.svelte';
   import { bodyEscapePanel } from './components/panel-focus';
   import { pointerDrag, type PointerDragOptions } from './components/pointer-drag';
   import {
@@ -3599,6 +3600,12 @@
   }}
 />
 
+<Tooltip />
+
+<!-- Where tooltips and menus are drawn while no modal dialog is open; one that is
+     open has its own host inside it. -->
+<div id="overlay-layer"></div>
+
 <style>
   :global(html),
   :global(body) {
@@ -3720,6 +3727,20 @@
     flex: 1 1 auto;
     min-height: 0;
     overflow: hidden;
+    /* Keeps the windows' z-order from competing with the overlay layer. */
+    isolation: isolate;
+  }
+
+  /* Above every panel; the elements drawn in it set their own order. */
+  #overlay-layer {
+    position: fixed;
+    inset: 0;
+    z-index: 100;
+    pointer-events: none;
+  }
+
+  #overlay-layer > :global(*) {
+    pointer-events: auto;
   }
 
   .empty-main {

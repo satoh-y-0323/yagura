@@ -7,8 +7,6 @@ const COLOR_RULES = {
 
 // Files that still break a rule. Each leaves this list in the unit named beside it.
 const MIGRATING = [
-  // rgba() fallback for the backdrop; moves to the derived --backdrop token (overlay unit).
-  'src/components/ModalDialog.svelte',
   // outline: none on the invisible typing input, whose focus the pane shows; decided with the terminal pane.
   'src/components/TerminalPane.svelte',
 ];

@@ -12,7 +12,7 @@
 
   $: anchorRect = isOpen && anchor ? anchor.getBoundingClientRect() : null;
 
-  function handleClose(reason: 'escape' | 'outside' | 'resize'): void {
+  function handleClose(reason: 'escape' | 'tab' | 'outside' | 'resize'): void {
     onClose();
     if (reason === 'escape') {
       anchor?.focus();
@@ -47,14 +47,17 @@
       onRename?.();
     }}
   >
-    {menus.rename}
+    <span class="popup-menu__icon" aria-hidden="true"></span>
+    <span class="popup-menu__label">{menus.rename}</span>
   </button>
   <hr class="popup-menu__divider" />
   <button type="button" class="popup-menu__item" role="menuitem" disabled>
-    {menus.copyOutput}
+    <span class="popup-menu__icon" aria-hidden="true"></span>
+    <span class="popup-menu__label">{menus.copyOutput}</span>
   </button>
   <button type="button" class="popup-menu__item" role="menuitem" disabled>
-    {menus.detectionDefinition}
+    <span class="popup-menu__icon" aria-hidden="true"></span>
+    <span class="popup-menu__label">{menus.detectionDefinition}</span>
   </button>
 </PopupMenu>
 

@@ -162,7 +162,6 @@
 .status-panel__room-heading,
 .status-panel__header,
 .dialog-header,
-.popup-menu__item,
 .window-menu__theme-item {
   display: flex;
   align-items: center;
@@ -170,7 +169,7 @@
 }
 
 /* The two of the above that also space their children apart:
-   the remaining four keep their children packed at the start, so this stays
+   the remaining three keep their children packed at the start, so this stays
    a separate, narrower selector list rather than widening the group above. */
 .status-panel__header,
 .dialog-header {

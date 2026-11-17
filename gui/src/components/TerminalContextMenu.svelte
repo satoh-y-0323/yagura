@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Icon from './Icon.svelte';
   import PopupMenu from './PopupMenu.svelte';
   import type { Rect } from './menu-position';
   import { menus } from '../ui-messages';
@@ -20,31 +21,18 @@
 <PopupMenu {isOpen} {anchor} {onClose}>
   <button
     type="button"
-    class="popup-menu__item terminal-menu__item"
+    class="popup-menu__item"
     role="menuitem"
     disabled={!canCopy}
     on:click={onCopy}
   >
-    <span>{menus.copy}</span><span class="terminal-menu__keys">{copyKeys}</span>
+    <span class="popup-menu__icon" aria-hidden="true"><Icon name="copy" /></span>
+    <span class="popup-menu__label">{menus.copy}</span>
+    <span class="popup-menu__badge">{copyKeys}</span>
   </button>
-  <button
-    type="button"
-    class="popup-menu__item terminal-menu__item"
-    role="menuitem"
-    on:click={onPaste}
-  >
-    <span>{menus.paste}</span><span class="terminal-menu__keys">{pasteKeys}</span>
+  <button type="button" class="popup-menu__item" role="menuitem" on:click={onPaste}>
+    <span class="popup-menu__icon" aria-hidden="true"></span>
+    <span class="popup-menu__label">{menus.paste}</span>
+    <span class="popup-menu__badge">{pasteKeys}</span>
   </button>
 </PopupMenu>
-
-<style>
-  .terminal-menu__item {
-    justify-content: space-between;
-    gap: var(--space-md);
-  }
-
-  .terminal-menu__keys {
-    color: var(--color-text-secondary);
-    font-size: var(--font-size-xs);
-  }
-</style>

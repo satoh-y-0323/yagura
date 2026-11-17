@@ -33,7 +33,10 @@
     describePaneNotice,
     describeUnknownExplanation,
     describeUnknownReasonSuffix,
+    statusLabels,
   } from '../ui-messages';
+  import Icon from './Icon.svelte';
+  import IconButton from './IconButton.svelte';
   import McpMark from './McpMark.svelte';
   import QueuedMark from './QueuedMark.svelte';
   import StatusBadge from './StatusBadge.svelte';
@@ -87,6 +90,7 @@
 
   $: rect = resolveRect(entry.display, area);
   $: notice = describePaneNotice($sessionStore.phase);
+  $: unknownExplanation = describeUnknownExplanation(entry.detected, entry.detectionWarning);
 
   // The scope element only exists once the window is in the DOM, so the
   // palette is bound from `onMount` rather than at initialization.
@@ -216,16 +220,23 @@
         <McpMark mcpConnected={entry.mcpConnected} />
         <StatusReportMark statusReportsMissing={entry.statusReportsMissing} />
         <QueuedMark count={entry.queuedCount} />
-        <span
-          class="float-window__status"
-          title={describeUnknownExplanation(entry.detected, entry.detectionWarning)}
-        >
+        <span class="float-window__status">
           <StatusBadge
             status={entry.detected.status}
             variant="label"
             detail={describeUnknownReasonSuffix(entry.detected)}
           />
         </span>
+        {#if unknownExplanation !== ''}
+          <IconButton
+            data-window-control
+            class="float-window__why"
+            label={statusLabels.unknown}
+            toggletip={unknownExplanation}
+          >
+            <Icon name="info" size="sm" />
+          </IconButton>
+        {/if}
         {#if entry.detected.status === 'exited' && entry.exitCode !== null}
           <span class="float-window__exit">{describeExitCode(entry.exitCode)}</span>
         {/if}
@@ -306,6 +317,31 @@
   .float-window__status {
     display: inline-flex;
     flex: 0 0 auto;
+  }
+
+  /* A ghost icon button: no frame, the hover and focus layers come from the tokens. */
+  :global(.float-window__why) {
+    display: inline-flex;
+    flex: 0 0 auto;
+    align-items: center;
+    justify-content: center;
+    min-width: var(--icon-button-hit-min);
+    min-height: var(--icon-button-hit-min);
+    padding: 0;
+    border: none;
+    border-radius: var(--radius-sm);
+    background-color: transparent;
+    color: var(--fg-muted);
+    cursor: pointer;
+  }
+
+  :global(.float-window__why:hover) {
+    background-color: var(--bg-hover);
+  }
+
+  :global(.float-window__why:focus-visible) {
+    outline: var(--line-width-strong) solid var(--ring);
+    outline-offset: 1px;
   }
 
   .float-window__exit {

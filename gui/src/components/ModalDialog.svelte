@@ -89,6 +89,9 @@
   <div class="modal-body">
     <slot />
   </div>
+  <!-- Where tooltips and menus opened from inside this dialog are drawn: the dialog
+       makes everything outside it inert, so they cannot live anywhere else. -->
+  <div class="modal-overlay-host"></div>
 </dialog>
 
 <style>
@@ -104,7 +107,7 @@
   }
 
   .modal-dialog::backdrop {
-    background-color: var(--overlay-backdrop, rgba(0, 0, 0, 0.5));
+    background-color: var(--backdrop);
   }
 
   .modal-body {
