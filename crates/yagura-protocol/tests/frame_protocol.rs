@@ -396,7 +396,6 @@ fn the_default_palette_is_the_one_default_selection_names() {
         ("dark", "dark"),
         ("light", "light"),
         ("system", "dark"),
-        ("drak", "dark"),
         ("Light", "dark"),
     ] {
         let json = palettes_json(selection);

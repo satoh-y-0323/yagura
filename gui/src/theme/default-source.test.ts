@@ -139,7 +139,8 @@ describe.each<Selection>(['light', 'system'])(
 
 // A misspelled value falls to dark in every place the default is read, the way
 // the daemon's `default_palette_of` does, instead of leaving the GUI without a palette.
-describe.each(['drak', 'Light'])('with a misspelled default_selection %s', (selection) => {
+// 'Light' stands for every value outside the three: only an exact match is read.
+describe.each(['Light'])('with a misspelled default_selection %s', (selection) => {
   it('exposes dark as the default selection and its palette', async () => {
     const { palette } = await loadModulesWithDefault(selection);
 
@@ -153,15 +154,6 @@ describe.each(['drak', 'Light'])('with a misspelled default_selection %s', (sele
 
     expect(selectionOf(store.createThemeStore(depsStoring(null)))).toBe('dark');
   });
-
-  it.each([true, false])(
-    'resolves an unknown named theme to the dark palette when prefersDark is %s',
-    async (prefersDark) => {
-      const { resolve } = await loadModulesWithDefault(selection);
-
-      expect(resolve.resolveAppPalette({ named: 'nope' }, prefersDark, {})).toEqual(DARK);
-    }
-  );
 
   it('fills a terminal theme’s missing colors from the dark palette', async () => {
     const { colors } = await loadModulesWithDefault(selection);

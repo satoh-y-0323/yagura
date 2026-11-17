@@ -87,8 +87,12 @@ function readStoredSelection(deps: ThemeStoreDeps): string | null {
 }
 
 /** The selection to start on: the stored one when it parses, else the built-in default. */
-function initialSelection(deps: ThemeStoreDeps): AppThemeSelection {
-  return parseStoredSelection(readStoredSelection(deps)) ?? BUILT_IN_DEFAULT_SELECTION;
+function initialSelection(stored: AppThemeSelection | null): AppThemeSelection {
+  return stored ?? BUILT_IN_DEFAULT_SELECTION;
+}
+
+function storedSelectionOf(deps: ThemeStoreDeps): AppThemeSelection | null {
+  return parseStoredSelection(readStoredSelection(deps));
 }
 
 /**
@@ -99,7 +103,7 @@ function initialSelection(deps: ThemeStoreDeps): AppThemeSelection {
 export function startupPalette(deps: ThemeStoreDeps): Palette {
   // A named selection cannot be resolved before the themes file is read, so it
   // falls to the default, as `resolveAppPalette` does for an unknown name.
-  return resolveAppPalette(initialSelection(deps), deps.prefersDark(), {});
+  return resolveAppPalette(initialSelection(storedSelectionOf(deps)), deps.prefersDark(), {});
 }
 
 /**
@@ -113,10 +117,10 @@ export function startupPalette(deps: ThemeStoreDeps): Palette {
 export function createThemeStore(deps: ThemeStoreDeps): ThemeStore {
   const listeners = new Set<(state: ThemeState) => void>();
 
-  const storedSelection = parseStoredSelection(readStoredSelection(deps));
+  const storedSelection = storedSelectionOf(deps);
   let hasStoredSelection = storedSelection !== null;
 
-  let selection: AppThemeSelection = storedSelection ?? BUILT_IN_DEFAULT_SELECTION;
+  let selection: AppThemeSelection = initialSelection(storedSelection);
   // Null-prototype, matching `parseUserThemes`'s output shape, so the window
   // between construction and `loadUserThemes` carries the same guarantee.
   let userPalettes: Record<string, Palette> = Object.create(null) as Record<string, Palette>;
