@@ -304,26 +304,6 @@ pub(crate) struct TakeBackSpawn<'a> {
     pub(crate) lost: LostNotice,
 }
 
-/// The window's PTY child as its holder's `Welcome` named it, which a request
-/// in the window's name is traced back to.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum ChildAnchor {
-    /// The holder has not let the daemon in yet.
-    Unwelcomed,
-    /// The holder named no child: one older than the field.
-    Unnamed,
-    /// The child had already exited by the `Welcome`.
-    Exited,
-    /// The child, with its start as read when the `Welcome` came; `None`
-    /// when it could not be read.
-    Child {
-        /// Its id.
-        pid: u32,
-        /// Its start.
-        start: Option<yagura_os::ProcessStart>,
-    },
-}
-
 /// What a session shares with its link, made before the link starts.
 struct Shared {
     copy: SharedCopy,
@@ -872,21 +852,14 @@ impl PtySession {
     }
 
     /// Get the OS process ID of the child, as the holder's `Welcome` named
-    /// it; `0` before the `Welcome`, or when it named none.
+    /// it; `0` before the `Welcome`, when it named none, or when the child had
+    /// already exited by then.
     ///
     /// The value is not cleared when the child exits, so callers must not
     /// treat it as a liveness indicator; use [`PtySession::exit_status`] for
     /// that.
     pub fn child_process_id(&self) -> u32 {
-        match self.link.child_anchor() {
-            ChildAnchor::Child { pid, .. } => pid,
-            _ => 0,
-        }
-    }
-
-    /// The child the holder's `Welcome` named, with its start.
-    pub(crate) fn child_anchor(&self) -> ChildAnchor {
-        self.link.child_anchor()
+        self.link.child_pid().unwrap_or(0)
     }
 
     /// Get the exit status of the child process.

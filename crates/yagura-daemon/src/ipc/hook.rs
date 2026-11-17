@@ -83,8 +83,6 @@ pub(super) struct HookRequest<'a> {
     pub(super) profile_id: &'a str,
     pub(super) name: &'a str,
     pub(super) input: Option<Vec<HookInputValue>>,
-    /// The process id of the connection's peer.
-    pub(super) peer: Option<u32>,
 }
 
 impl IpcServer {
@@ -103,15 +101,9 @@ impl IpcServer {
             profile_id,
             name,
             input,
-            peer,
         } = request;
         let Some(entry) = self
-            .authenticate_window(
-                outbound,
-                HookDoor::new("run_hook", peer),
-                token,
-                Some(window_id),
-            )
+            .authenticate_window(outbound, HookDoor::new("run_hook"), token, Some(window_id))
             .await
         else {
             return;
