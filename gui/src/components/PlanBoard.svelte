@@ -514,7 +514,7 @@
 
   .plan-card__writes,
   .plan-card__depends {
-    font-family: var(--font-family-mono);
+    font-family: var(--font-mono);
     font-size: var(--font-size-xs);
     color: var(--color-text-secondary);
     overflow-wrap: anywhere;
@@ -550,7 +550,7 @@
   }
 
   .plan-card__path {
-    font-family: var(--font-family-mono);
+    font-family: var(--font-mono);
     font-size: var(--font-size-xs);
     color: var(--color-text-secondary);
     overflow-wrap: anywhere;

@@ -260,7 +260,7 @@
 
   .ticket-card__number {
     flex: 0 0 auto;
-    font-family: var(--font-family-mono);
+    font-family: var(--font-mono);
     font-size: var(--font-size-xs);
     color: var(--color-text-secondary);
   }

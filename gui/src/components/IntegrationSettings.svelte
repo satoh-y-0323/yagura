@@ -212,7 +212,7 @@
     grid-column: 1;
     white-space: pre-wrap;
     overflow-wrap: anywhere;
-    font-family: var(--font-family-mono);
+    font-family: var(--font-mono);
     font-size: var(--font-size-xs);
     color: var(--color-text-secondary);
   }
@@ -227,7 +227,7 @@
   }
 
   .integration-settings__writes code {
-    font-family: var(--font-family-mono);
+    font-family: var(--font-mono);
     color: var(--color-text-primary);
   }
 
@@ -268,7 +268,7 @@
     border-radius: var(--radius-sm);
     background-color: var(--color-background);
     white-space: pre-wrap;
-    font-family: var(--font-family-mono);
+    font-family: var(--font-mono);
     font-size: var(--font-size-xs);
     color: var(--color-text-secondary);
   }

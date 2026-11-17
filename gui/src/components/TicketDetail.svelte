@@ -183,7 +183,7 @@
 
   .ticket-detail__number,
   .ticket-detail__time {
-    font-family: var(--font-family-mono);
+    font-family: var(--font-mono);
     font-size: var(--font-size-xs);
     color: var(--color-text-secondary);
   }
@@ -238,7 +238,7 @@
   }
 
   .ticket-detail__fields dt {
-    font-family: var(--font-family-mono);
+    font-family: var(--font-mono);
     font-size: var(--font-size-xs);
     color: var(--color-text-secondary);
   }

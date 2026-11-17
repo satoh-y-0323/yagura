@@ -92,7 +92,7 @@
     overflow: auto;
     white-space: pre-wrap;
     overflow-wrap: anywhere;
-    font-family: var(--font-family-mono);
+    font-family: var(--font-mono);
     font-size: var(--font-size-sm);
   }
 </style>

@@ -340,7 +340,7 @@
 
   .form-textarea {
     resize: vertical;
-    font-family: var(--font-family-mono);
+    font-family: var(--font-mono);
     min-height: 80px;
   }
 

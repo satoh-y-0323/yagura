@@ -57,7 +57,7 @@
     padding: 0 var(--space-sm);
     border: 1px solid var(--color-border);
     border-radius: var(--radius-sm);
-    font-family: var(--font-family-mono);
+    font-family: var(--font-mono);
     overflow-wrap: anywhere;
     user-select: text;
   }

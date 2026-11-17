@@ -204,7 +204,7 @@
   }
 
   .profile-settings__id {
-    font-family: var(--font-family-mono);
+    font-family: var(--font-mono);
     font-size: var(--font-size-xs);
     color: var(--color-text-secondary);
   }
@@ -238,7 +238,7 @@
 
   .profile-settings__command {
     grid-column: 1;
-    font-family: var(--font-family-mono);
+    font-family: var(--font-mono);
     font-size: var(--font-size-sm);
     color: var(--color-text-secondary);
     overflow-wrap: anywhere;

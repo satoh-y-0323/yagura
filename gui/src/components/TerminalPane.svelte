@@ -93,7 +93,7 @@
    */
   function readTerminalFont(): { family: string; size: number } {
     const styles = getComputedStyle(document.documentElement);
-    const family = styles.getPropertyValue('--font-family-mono').trim();
+    const family = styles.getPropertyValue('--font-mono').trim();
     const size = Number.parseFloat(styles.getPropertyValue('--font-size-sm'));
     return {
       family: family === '' ? 'monospace' : family,

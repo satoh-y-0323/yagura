@@ -285,7 +285,7 @@
   .profile-detail__input {
     flex: 1;
     min-width: 0;
-    font-family: var(--font-family-mono);
+    font-family: var(--font-mono);
     font-size: var(--font-size-sm);
     background-color: var(--color-surface);
     color: var(--color-text-primary);
@@ -319,13 +319,13 @@
   }
 
   .profile-detail__key {
-    font-family: var(--font-family-mono);
+    font-family: var(--font-mono);
     font-size: var(--font-size-xs);
     color: var(--color-text-secondary);
   }
 
   .profile-detail__value {
-    font-family: var(--font-family-mono);
+    font-family: var(--font-mono);
     overflow-wrap: anywhere;
     min-width: 0;
   }

@@ -1132,7 +1132,7 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-    font-family: var(--font-family-mono);
+    font-family: var(--font-mono);
   }
 
   .delivery[data-tone='active'] {
@@ -1212,7 +1212,7 @@
   .roster-list__id {
     flex: 0 0 auto;
     color: var(--color-text-secondary);
-    font-family: var(--font-family-mono);
+    font-family: var(--font-mono);
     font-size: 11px;
   }
 

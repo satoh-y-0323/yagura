@@ -309,7 +309,7 @@
   }
 
   .model-aliases__source code {
-    font-family: var(--font-family-mono);
+    font-family: var(--font-mono);
     color: var(--color-text-primary);
   }
 
@@ -380,7 +380,7 @@
   }
 
   .model-aliases__alias {
-    font-family: var(--font-family-mono);
+    font-family: var(--font-mono);
     white-space: nowrap;
   }
 
@@ -408,7 +408,7 @@
   }
 
   .model-aliases__shipped {
-    font-family: var(--font-family-mono);
+    font-family: var(--font-mono);
     color: var(--color-text-secondary);
     white-space: nowrap;
   }
