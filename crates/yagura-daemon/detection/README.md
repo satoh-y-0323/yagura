@@ -22,7 +22,6 @@ Definitions in this directory:
 
 - `claude-code` -- Claude Code.
 - `codex-cli` -- Codex CLI.
-- `antigravity-cli` -- Antigravity CLI (`agy`).
 - `copilot-cli` -- GitHub Copilot CLI (`copilot`).
 - `muse-code` -- Muse Code (`muse`).
 - `grok-build` -- Grok Build (`grok`).
@@ -300,8 +299,8 @@ itself is detected.
 | --- | --- |
 | `abandoned_at_turn_end` | `true` when the CLI, on ending its turn, drops a call that is still out and does not cancel it, so the call's connection stays open and nothing tells the daemon the call was given up. The daemon then reads the window instead: once the window has been `running` since the call was made and comes to rest at `waiting_input`, `interrupted`, `idle` or `exited` (a window that is closed counts as `exited`), the call is answered at once (a call still waiting for an approver as `approval_timeout`, withdrawn with nothing done; a `wait_for_status` as timed out; a `wait_for_report` with no report taken, so a report arriving later stays in the inbox). `unknown` and `waiting_approval` never end a call. Leave it `false` for a CLI that cancels the calls it drops or keeps them alive past the end of a turn: for such a CLI, coming back to `waiting_input` does not mean the call was given up. Default: `false`. |
 
-The bundled `codex-cli` definition sets it to `true`; `claude-code` and
-`antigravity-cli` set it to `false`. `copilot-cli` leaves it out (so
+The bundled `codex-cli` and `muse-code` definitions set it to `true`;
+`claude-code` sets it to `false`. `copilot-cli` leaves it out (so
 `false`): Copilot CLI sends the server a cancellation for a call it drops,
 whether the turn is interrupted or the call times out (checked with 1.0.101).
 
@@ -760,8 +759,8 @@ debounced by `confirm_ms` like any other.
 
 ### Bundled profiles
 
-The bundled profiles for Claude Code, Codex CLI, Antigravity CLI, GitHub
-Copilot CLI, Muse Code and Grok Build, and their WSL versions, give the CLI its hooks themselves, so nothing has to be written
+The bundled profiles for Claude Code, Codex CLI, GitHub Copilot CLI, Muse
+Code and Grok Build, and their WSL versions, give the CLI its hooks themselves, so nothing has to be written
 by hand. Each event maps to a report as follows, checked with the CLI version
 named:
 
@@ -769,7 +768,6 @@ named:
 | --- | --- | --- | --- | --- |
 | Claude Code 2.1.285 (`claude-code`, `wsl-claude-code`) | `--settings` at every launch | `UserPromptSubmit`, `PreToolUse`, `PostToolUse` | `PermissionRequest` | `Stop`, `StopFailure` |
 | Codex CLI 0.159.2 on Windows, 0.158.0 in WSL (`codex-cli`, `wsl-codex-cli`) | `-c hooks.<Event>=...` at every launch, while their trust is registered | `UserPromptSubmit`, `PreToolUse`, `PostToolUse` | `PermissionRequest` | `Stop`, `Interrupt` |
-| Antigravity CLI 1.2.14 (`antigravity-cli`, `wsl-antigravity-cli`) | a `yagura` entry in `~/.gemini/config/hooks.json`, written by registration | `PreInvocation`, `PostToolUse` | -- | -- |
 | GitHub Copilot CLI 1.0.101 (`copilot-cli`, `wsl-copilot-cli`) | a plugin directory, `--plugin-dir` at every launch | `userPromptSubmitted`, `preToolUse`, `postToolUse`, `postToolUseFailure` | -- | `agentStop` |
 | Muse Code 1.4.12 (`muse-code`) | on Windows, a managed hooks file named in `%USERPROFILE%\.config\muse\settings.json`, written by registration; on macOS and Linux, `-c managed_hooks_path=...` at every launch | `UserPromptSubmit` | `PermissionRequest` | `Stop`, `StopFailure`, `Interrupt` |
 | Muse Code 1.4.12 (`wsl-muse-code`) | a managed hooks file, `-c managed_hooks_path=...` at every launch | `UserPromptSubmit` | `PermissionRequest` | `Stop`, `StopFailure`, `Interrupt` |
@@ -818,21 +816,6 @@ date are written again when the window opens, while yagura is still
 registered with Codex CLI (see
 [Out-of-date hook entries](../../../docs/mcp-setup.md#out-of-date-hook-entries)).
 
-**Antigravity CLI** reads hooks only from its own files, not from anything
-passed at launch. Registering yagura with it from Settings > Integrations also
-adds an entry named `yagura` (`yagura-<instance>` for a named instance) to
-`~/.gemini/config/hooks.json`, which runs the daemon's copy in the `bin`
-folder by its absolute path; removing the registration takes the entry out.
-`agy` passes the command to a shell and escapes any quotes around a path, so
-a path holding whitespace cannot be written: on Windows the entry names the
-daemon by its 8.3 short name instead, and registration fails with a message
-saying so when there is none (8.3 names can be turned off on a volume).
-Every other entry in the file is left as it was. The entry applies to every
-`agy` session on the machine, but outside a window the door does
-nothing, and each command passes `--for-instance` so that another instance's
-entry stays silent inside a window (see above). An `agy` you start by hand inside a yagura shell window
-does report, for that window -- what it reports is true of that window.
-
 **GitHub Copilot CLI** takes launch-time hooks only from a plugin directory,
 so its profiles write one under the instance's state directory at every
 launch and name it with `--plugin-dir`; the WSL profile hands it over as a
@@ -878,8 +861,8 @@ and a window reports nothing before that prompt is answered.
 
 A window expects reports when its hooks were actually given to the CLI: a
 Claude Code or GitHub Copilot CLI window from a bundled profile, a Codex CLI
-window whose trust entries were in place when it opened, an Antigravity
-CLI, Muse Code (`muse-code`) or Grok Build window whose registration's entries
+window whose trust entries were in place when it opened, a Muse Code
+(`muse-code`) or Grok Build window whose registration's entries
 were in place when it opened, and a `wsl-muse-code` window. If such a window's screen shows a
 running turn and 10 seconds later no report has arrived at all, the window is
 marked:
@@ -915,11 +898,6 @@ the new daemon cannot tell when that turn began.
   nothing a rule can match. While a turn is open it reads as `running`; once
   the turn closes it cannot be told apart from a selection list that shows no
   key hint, so it stays `unknown` (`no_rule_matched`).
-- **Antigravity CLI reports neither an approval prompt nor an interrupt.**
-  Only `PreInvocation` and `PostToolUse` are used: `agy` expects the output of
-  a `PreToolUse` or `Stop` hook to carry a decision, which a status report does
-  not give. Its approval prompts come from the screen alone, and its turns
-  close on 5 seconds of quiet.
 - **GitHub Copilot CLI reports neither an approval prompt nor an interrupt.**
   The hook Copilot runs for a permission request fires before its own rules
   decide whether to ask, so it would report prompts that never appear; the

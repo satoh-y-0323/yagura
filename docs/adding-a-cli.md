@@ -7,6 +7,16 @@ then measures where that text actually lands. What each route is for is describe
 [How the daemon delivers text](mcp-setup.md#how-the-daemon-delivers-text); what you learn here fills
 in the profile's [`[delivery]` table](../profiles/README.md#delivery).
 
+## Before anything else: the CLI's terms
+
+yagura starts the CLI inside a window of its own, so a CLI belongs in yagura only when its
+provider's terms let it be run from inside a third-party application under the plan its users sign
+in with. Before measuring anything, read the CLI's terms of service and its provider's FAQ for each
+plan the CLI is offered under (a consumer plan and a business or API plan often differ), and record
+the passage and its URL with the other findings. If the terms do not allow it, or the provider says
+that running the CLI inside another application is not supported, do not add a profile: an account
+suspended for it can take the user's other services on the same account with it.
+
 ## 0. Keep two things apart
 
 - **What the CLI decides**: whether a piece of text reaches the model, in which role it arrives
@@ -64,7 +74,6 @@ Take every route the table marks "documented" and measure it once per route per 
      the role in the API request)
    - Codex CLI: `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl` (the `role` of each `response_item`;
      tool definitions are not recorded)
-   - Antigravity CLI: `~/.gemini/antigravity-cli/brain/<conversation>/.system_generated/logs/transcript.jsonl`
 5. For a route that wakes an idle session, deliver to a waiting window and record whether its status
    changes to `running`, and the role the delivered text carries (a user message, or marked as
    something else). For a CLI that cannot be woken, deliver, watch the status for 20 seconds to
@@ -204,9 +213,6 @@ going to change, and when you are done restore it and compare it byte for byte w
   an AI either a key that stops the work without discarding the user's draft or session, the hook
   answers measured to stop a tool call (with `ends_turn = true` only where you measured that the
   answer ends the turn), or `none`. Write down where an instruction sent after an AI's stop arrives.
-- Declare the name the operating system records for the CLI's own process in `[process_image]`,
-  measured on each operating system you declare it for, so a CLI nested in the window does not
-  speak for it (see [A window's own CLI](../profiles/README.md#a-windows-own-cli)).
 - Choose how the window's identity reaches the hooks and the MCP bridge (see
   [Credentials](../profiles/README.md#credentials)) by what the CLI lets a launch set:
   - If a launch-time setting (a flag, a settings file, a plugin directory) can carry both the hook

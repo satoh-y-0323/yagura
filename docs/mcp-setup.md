@@ -55,7 +55,7 @@ must follow.
 [Registering from the GUI](#registering-from-the-gui) does this for you. The GUI of a named instance
 registers the bridge as `yagura-<instance>` rather than `yagura`, and carries
 `YAGURA_INSTANCE=<instance>` in the registration's own environment (`-e` for Claude Code, `--env`
-for Codex CLI, Antigravity CLI, GitHub Copilot CLI and Grok Build), so a development instance's registration never overwrites, and
+for Codex CLI, GitHub Copilot CLI and Grok Build), so a development instance's registration never overwrites, and
 is never overwritten by, the default instance's `yagura`. The default instance registers as
 `yagura` with no environment. Register by hand the same way: pick a name of your own and pass
 `YAGURA_INSTANCE` through the CLI's environment flag.
@@ -87,12 +87,7 @@ MCP registration.** The daemon points that CLI at the bridge itself:
   `wsl-copilot-cli` and `wsl-muse-code` profiles carry one, and `muse-code` does on macOS and
   Linux; `shell` does not, `muse-code` does not on Windows (a Muse Code window there reaches yagura
   through the registration described in [Configuring Muse Code CLI](#configuring-muse-code-cli)),
-  and neither
-  does `antigravity-cli` or `wsl-antigravity-cli` -- Antigravity CLI
-  (`agy`) reads MCP servers only from its own global registration, not from anything passed at
-  launch, so a window opened from either of those two profiles needs the manual registration
-  described in [Configuring Antigravity CLI](#configuring-antigravity-cli) below, the same as a
-  session yagura did not start. `grok-build` and `wsl-grok-build` carry none either: Grok Build has
+  and `grok-build` and `wsl-grok-build` carry none either: Grok Build has
   no launch argument that adds an MCP server, so its windows reach yagura through the registration
   described in [Configuring Grok Build](#configuring-grok-build). What the table may contain, and when the daemon drops the
   injection instead, is in [profiles/README.md](../profiles/README.md#mcp-injection).
@@ -151,8 +146,7 @@ per-CLI sections after it are the manual alternative.
 **Status reports come with the same profiles.** The bundled Claude Code profiles also give the CLI
 hooks that report each turn's start and end to the daemon, so the window's status no longer depends
 on the screen alone. The Codex CLI profiles do the same only once yagura is registered with Codex
-CLI, and Antigravity CLI reports only once yagura is registered with it -- both from
-[Registering from the GUI](#registering-from-the-gui). The GitHub Copilot CLI profiles give the CLI
+CLI, from [Registering from the GUI](#registering-from-the-gui). The GitHub Copilot CLI profiles give the CLI
 its hooks at every launch, which it loads once you have answered its folder trust prompt. The
 `wsl-muse-code` profile, and `muse-code` on macOS and Linux, give Muse Code its hooks at every
 launch; `muse-code` on Windows reports once yagura is registered with Muse Code, and the Grok Build
@@ -181,10 +175,9 @@ The GUI's Settings panel (the gear button in the navigation rail) has an **Integ
 registers the bridge beside the running daemon with each CLI, so a session you start yourself can
 reach yagura. It lists one row for every launch profile with a `[mcp_registration]` table (see
 [profiles/README.md](../profiles/README.md#mcp-registration)): the bundled `claude-code`,
-`codex-cli`, `antigravity-cli`, `copilot-cli`, `muse-code` (on Windows only) and `grok-build` under
-"This computer", and `wsl-claude-code`, `wsl-codex-cli`, `wsl-antigravity-cli`, `wsl-copilot-cli`
-and `wsl-grok-build` under "WSL". `shell` and `wsl-muse-code` have no row, and neither does
-`muse-code` on macOS and Linux, where every launch passes what it needs.
+`codex-cli`, `copilot-cli`, `muse-code` (on Windows only) and `grok-build` under "This computer",
+and `wsl-claude-code`, `wsl-codex-cli`, `wsl-copilot-cli` and `wsl-grok-build` under "WSL".
+`shell` and `wsl-muse-code` have no row, and neither does `muse-code` on macOS and Linux, where every launch passes what it needs.
 
 Run the GUI and the daemon from the same release. A daemon of this release lists a row that has
 no command of its own (Muse Code), which a GUI from before it cannot read, so its Integrations tab
@@ -201,9 +194,8 @@ state:
   that has none.
 - **Registered to a different bridge**, or **Registered with a different** followed by what
   differs (`tool_timeout_sec`, `args` for the bridge's arguments (shown as **Registered with
-  different arguments**), `hooks.state` for Codex CLI's hook trust, `yagura` for
-  Antigravity CLI's hooks entry, or the entries of Muse Code's files): **Update** runs `mcp
-  remove`, then the same steps as Register. **Remove** is offered too. Hook entries that are
+  different arguments**), `hooks.state` for Codex CLI's hook trust, or the entries of Muse Code's
+  files): **Update** runs `mcp remove`, then the same steps as Register. **Remove** is offered too. Hook entries that are
   only out of date are written again as the tab reads them (see
   [Out-of-date hook entries](#out-of-date-hook-entries) below), so they show here only when that
   could not be done. When Muse Code's settings
@@ -244,13 +236,6 @@ they were:
   run `yagura-daemon --hook codex-cli <Event>` (`--hook wsl-codex-cli <Event>` in WSL), which a
   release does not change, so the hashes stay valid across updates. The same write takes out the
   trust of hooks the bundled profile no longer has (its `retired` keys).
-- **Antigravity CLI's hooks entry**: an entry named after the registration (`yagura`, or
-  `yagura-<instance>`) in `~/.gemini/config/hooks.json`, which runs the daemon at session start, on
-  each model call and after each tool. The file is created when it is missing; one that is not valid JSON is left
-  untouched and the step fails. The entry names the daemon by a path with no whitespace in it, since
-  Antigravity CLI cannot run one that has any: on Windows a path that holds a space is written by its
-  8.3 short name, and the step fails when it has none (see
-  [How a hook finds the daemon](../crates/yagura-daemon/detection/README.md#bundled-profiles)).
 - **Muse Code's two files** (Windows only), since Muse Code has no `mcp add`: in
   `%USERPROFILE%\.config\muse\settings.json`, the server entry
   `/mcpServers/<name>` and the two entries that point Muse at a managed hooks file,
@@ -283,10 +268,9 @@ added to it yourself -- such as `env_vars` -- is gone afterwards; yagura writes 
 **Reading the state.** The rows are read when the tab opens and after each operation, never in the
 background, and a row's out-of-date hook entries are written again as it is read (see
 [Out-of-date hook entries](#out-of-date-hook-entries)): `claude mcp get <name>` for Claude Code, `codex mcp get <name> --json` for Codex CLI,
-`copilot mcp get <name> --json` for GitHub Copilot CLI, `~/.gemini/config/mcp_config.json`
-(read, never written) for Antigravity CLI, Muse Code's two files above, and `grok mcp list --json`
-for Grok Build, plus the hook settings above, read back from `~/.codex/config.toml`,
-`~/.gemini/config/hooks.json` and `~/.grok/hooks/<name>.json`. `claude mcp get`
+`copilot mcp get <name> --json` for GitHub Copilot CLI, Muse Code's two files above, and
+`grok mcp list --json` for Grok Build, plus the hook settings above, read back from
+`~/.codex/config.toml` and `~/.grok/hooks/<name>.json`. `claude mcp get`
 starts the bridge briefly to check that it connects; that connection is `External` and changes no
 window's `mcp_connected`.
 
@@ -301,8 +285,8 @@ daemon has no bridge beside it, the tab says so and reads no row.
 
 ### Out-of-date hook entries
 
-The hooks a registration writes -- Antigravity CLI's hooks entry, Grok Build's hooks file, Muse
-Code's managed hooks, and Codex CLI's hook trust -- stay in the CLI's settings after an update. They
+The hooks a registration writes -- Grok Build's hooks file, Muse Code's managed hooks, and Codex
+CLI's hook trust -- stay in the CLI's settings after an update. They
 run `yagura-daemon --hook <profile-id> <Event>`, and what each event does is read from the profile
 when the hook runs (see [Hook events](../profiles/README.md#hook-events)), so an update rarely
 changes them. When it does, or when they were written by 0.3.0 or earlier, yagura writes them
@@ -310,13 +294,12 @@ again itself; there is no need to press Update.
 
 - **When**: each time a window opens from the profile, and each time the Integrations tab reads
   the rows -- for a row the CLI lists as registered, or registered with a difference. A row that
-  reads **Not registered** (for example after `agy mcp remove` by hand) is left as it is, and its
+  reads **Not registered** (for example after `grok mcp remove` by hand) is left as it is, and its
   hook entries are written again when its next window opens. The row then still reads **Not
   registered**: yagura does not run `mcp add` for you.
 - **Only with your consent**: only while this instance is still registered there, judged by what
-  this instance's **Remove** would take out -- the registration's own hooks entry for Antigravity
-  CLI, `/mcpServers/<name>` for Muse Code, the hooks in `~/.grok/hooks/<name>.json` for Grok Build,
-  and `[mcp_servers.<name>]` in `~/.codex/config.toml` for Codex CLI. After a Remove nothing is
+  this instance's **Remove** would take out -- `/mcpServers/<name>` for Muse Code, the hooks in
+  `~/.grok/hooks/<name>.json` for Grok Build, and `[mcp_servers.<name>]` in `~/.codex/config.toml` for Codex CLI. After a Remove nothing is
   written, and an instance you never registered gets nothing. Checking this uses only the reads
   of these files that opening a window or reading the row already makes, and starts no other
   process.
@@ -336,12 +319,11 @@ again itself; there is no need to press Update.
 managed hooks and Codex CLI's hook trust are shared by every instance. Once this release writes them
 in the `--hook` form, the older instance's daemon cannot read them: its `muse-code` windows report a
 failed hook, and it opens its Codex CLI windows without hooks. Update the older instance to put it
-right. Antigravity CLI and Grok Build keep the entries of each instance apart, and are not
-affected.
+right. Grok Build keeps the entries of each instance apart, and is not affected.
 
 ## Configuring Claude Code
 
-This section and the two after it are the manual alternative to
+This section and the per-CLI sections after it are the manual alternative to
 [Registering from the GUI](#registering-from-the-gui): for a machine without the GUI, a
 registration scope other than the user's, or a CLI whose profile has no `[mcp_registration]` table.
 Either way, the registration is for a session yagura does not start, or a CLI yagura cannot hand an
@@ -405,59 +387,6 @@ A handoff can only be replied to from inside a window if that window's CLI can r
 4. Run `codex mcp list` to confirm the server is registered and reachable.
 5. `codex` itself must be resolvable on `PATH` for a `send_handoff` targeting a `codex-cli` launch profile to spawn successfully -- a `profile` whose command cannot be found fails later, at spawn, as `spawn_failed`. On Windows it must be Codex CLI's standalone build, not the npm package: a profile that resolves to the npm package's `.cmd` shim is listed as unavailable (see [How the daemon delivers text](#how-the-daemon-delivers-text)).
 6. **Codex's own trust confirmation is not detected by yagura.** The first time Codex CLI runs in a working directory it has not seen before, it shows a directory/hooks trust dialog on its own terminal; yagura's shipped detection definitions do not recognize this prompt, so the window's status stays `unknown` forever, and the daemon hands nothing to an `unknown` window: what it sends waits in the window's inbox, and a handoff addressed to it is refused as `status_unknown`. Launch Codex by hand once in whatever `cwd` a window will run in, and clear that dialog, before relying on delivery to reach it.
-
-## Configuring Antigravity CLI
-
-Antigravity CLI (`agy`) reads MCP servers only from its own global registration
-(`~/.gemini/config/mcp_config.json`), never from anything passed at launch, so a window
-opened from the bundled `antigravity-cli` or `wsl-antigravity-cli` profile needs this
-registration too -- there is no `[mcp]` table for either of them to carry one (see
-[Windows yagura Opens](#windows-yagura-opens)). [Registering from the GUI](#registering-from-the-gui)
-does it for you, with the bridge's resolved path; the commands below are the manual alternative.
-
-**Windows** (`agy` 1.2.11): register the bridge's own absolute path directly, not a `cmd
-/c` wrapper around the `%YAGURA_MCP_BRIDGE%` environment variable that a window yagura
-opens carries. `agy` builds its server's Windows command line from its `command` /
-`args` registration without quoting an element that itself contains a space, so
-`cmd /c %YAGURA_MCP_BRIDGE%` fails to start whenever the bridge's own install path
-contains one (which the default per-user install location can) -- register the resolved
-path instead:
-
-```bash
-agy mcp add yagura -- <absolute path to yagura-mcp.exe>
-```
-
-**WSL**: `agy`'s Linux build can read the bridge path through the `YAGURA_MCP_BRIDGE`
-environment variable a WSL window yagura opens carries (translated to a Linux path by
-`WSLENV`, the same way [`wsl-codex-cli`](../profiles/README.md#wsl-profiles) forwards
-it), through a shell that reads it at startup rather than a literal path baked into the
-registration:
-
-```bash
-agy mcp add yagura -- bash -c 'exec "$YAGURA_MCP_BRIDGE"'
-```
-
-1. Run `agy mcp list` (or open agy's own `/mcp` screen) to confirm `yagura` is registered
-   and shows `Tools:` rather than an error -- the same command reports whether the
-   registration itself is broken, before any window is involved. Whether a particular
-   *window* connected is a separate question, answered the same way as for any other CLI
-   (see [Windows yagura Opens](#windows-yagura-opens)): `mcp_connected: true` and the
-   GUI's plug icon. `agy mcp remove yagura` undoes the registration.
-2. **A registration that names `%YAGURA_MCP_BRIDGE%` or `$YAGURA_MCP_BRIDGE` only starts
-   successfully inside a window yagura opened** -- that variable is one of the ones the
-   daemon injects into a window's own process tree (see
-   [Windows yagura Opens](#windows-yagura-opens)), so `agy` started by hand at a plain
-   terminal, or from any other launcher, has no value for it and the server fails to
-   start, showing as an error in `agy`'s own `/mcp` screen. Register the bridge's
-   resolved absolute path instead (as in the Windows form above) for a session you want
-   to reach yagura from outside a window it opened.
-3. **`agy` asks for approval before every call to a yagura tool**, not just the first
-   one in a session: its own approval dialog offers to always allow that tool for the
-   rest of the conversation, or to persist that choice to `settings.json` so it carries
-   across sessions -- whether to keep either is your call, not something yagura sets for
-   you. Until a call is allowed, it sits waiting on that dialog: a `send_handoff` reply
-   from an `agy` window is not delivered until the tool call it needs is approved on that
-   window's own screen.
 
 ## Configuring GitHub Copilot CLI
 
@@ -653,6 +582,28 @@ shows `waiting_approval` until you choose on its screen, and its hooks run only 
    no hook or command through which a text could reach the stopped session before you send it
    something yourself (see [interrupt_window](#interrupt_window)).
 
+## Removing yagura from Antigravity CLI
+
+yagura no longer supports Antigravity CLI (`agy`; see
+[Antigravity CLI is not supported](../README.md#antigravity-cli-is-not-supported)), so it has no
+Integrations row for it, and it does not start `agy` to take out what an earlier release
+registered. If you registered yagura with Antigravity CLI, remove it yourself, at your own
+terminal:
+
+1. **The hooks entry.** In `~/.gemini/config/hooks.json`, delete the entry named `yagura` -- or
+   `yagura-<instance>` for a [named instance](instances.md) -- and leave the other entries as they
+   are.
+2. **The MCP registration.** Run `agy mcp remove yagura` (`agy mcp remove yagura-<instance>` for
+   a named instance), or delete that server from `mcpServers` in `~/.gemini/config/mcp_config.json`.
+3. **WSL.** A registration made from a WSL row lives in the distribution's own home: do both
+   steps again inside it, on its `~/.gemini`.
+
+Left in place, the hooks entry runs in every `agy` session. Outside a yagura window it does
+nothing, and inside one it does nothing either, at most leaving a line in the daemon's log; once
+yagura is uninstalled, the entry names a daemon that is gone, and `agy` reports a failed hook. The
+MCP registration keeps showing yagura's tools to an `agy` you start yourself, as an `External`
+requester (see [Requester Identification](#requester-identification)).
+
 ## How the daemon delivers text
 
 Nothing a window is sent is typed into its CLI's input. A [`send_message`](#send_message), a [`send_handoff`](#send_handoff) to an existing window, a chat post, the chat announcement, the notice a task window starts with, the plan-approved notice and the report notice all go into the window's *inbox*, and the CLI takes them through a door its own extension points open: a hook, the request it is started with, or a command that queues a message on its session. A CLI answers a typed line as a prompt from its user, so typing text nobody wrote into it would leave what the CLI does with it to the model; a door hands it over as text the CLI's own hook or launch supplied.
@@ -662,7 +613,7 @@ Nothing a window is sent is typed into its CLI's input. A [`send_message`](#send
 | Command | Run by | What it does |
 | --- | --- | --- |
 | `yagura-daemon --deliver-context` | the CLI's session-start hook | prints the chat announcement and whatever waits in the inbox |
-| `yagura-daemon --deliver-take` | the hook that runs at the start of a turn (for Antigravity CLI, before a model call; for Grok Build and GitHub Copilot CLI, after a tool call) | prints whatever waits and takes it out of the inbox |
+| `yagura-daemon --deliver-take` | the hook that runs at the start of a turn (for Grok Build and GitHub Copilot CLI, after a tool call) | prints whatever waits and takes it out of the inbox |
 | `yagura-daemon --deliver-wait` | a hook the CLI runs in the background | waits until something arrives for an idle session, prints it, and ends with the exit code that wakes the CLI; only one such wait runs per window |
 | `yagura-daemon --report-session` | a hook that receives the CLI's session identifier | tells the daemon which session this window's CLI is, so it can be addressed later |
 | `yagura-daemon --hook <profile-id> <Event>` | any hook of a profile with a `[hook_events]` table | does what the named profile's `[hook_events]` says for the event -- report a status, record the session, print the context, take what waits, or hand it over as the block of a stop -- reading the profile each time it runs (see [Hook events](../profiles/README.md#hook-events)) |
@@ -691,14 +642,13 @@ A text counts as delivered when a door printed it and said so, or the wake comma
 | --- | --- | --- | --- |
 | `claude-code`, `wsl-claude-code` | `SessionStart` and `UserPromptSubmit` hooks, injected with `--settings` | -- | a background `Stop`/`SessionStart` hook that ends with exit code 2 when something arrives, registered again through the wake file (`FileChanged`) when it is gone |
 | `codex-cli`, `wsl-codex-cli` | `SessionStart` and `UserPromptSubmit` hooks, injected with `-c` | -- | `codex queue --thread <session> --message <text>`, run by the daemon |
-| `antigravity-cli`, `wsl-antigravity-cli` | `SessionStart` and `PreInvocation` hooks in `~/.gemini/config/hooks.json` | a block from the `Stop` hook of a turn that ended without a tool call (`terminationReason` `NO_TOOL_CALL`, `executionNum` 0) | none |
 | `copilot-cli`, `wsl-copilot-cli` | a `sessionStart` hook in a plugin directory, injected with `--plugin-dir`, which runs when the first prompt is sent; `postToolUse` takes the inbox after each tool call, since Copilot discards a command hook's output at the start of a turn | a block from `agentStop` | none |
 | `muse-code`, `wsl-muse-code` | `SessionStart` and `UserPromptSubmit` hooks in a managed hooks file (`SessionStart` runs when the first prompt is sent); see [Configuring Muse Code CLI](#configuring-muse-code-cli) for how each profile places it | a block from `Stop` | none |
 | `grok-build`, `wsl-grok-build` | no start-up door: the chat announcement is given with `--rules` when the window opens (`launch_context`). `PostToolUse` and `PostToolUseFailure` hooks in `~/.grok/hooks/<name>.json`, written by registration, take the inbox after each tool call; Grok Build passes a hook's output to its model only from the tool-call hooks and the stop's block | a block from `Stop` | none |
 
 What each profile declares is in [`[delivery]`](../profiles/README.md#delivery).
 
-**Which windows take part.** A window is handed text this way only if it was opened from a profile that declares `[delivery]` and its hooks were put in place when it opened. A window that was not -- a plain shell, a window opened with a raw `command`, a profile with no `[delivery]` table -- is not a chat participant, gets no announcement, and a `send_message` or `send_handoff` addressed to it is answered `undelivered_no_delivery`. The bundled Codex profiles inject their hooks only once yagura is registered with Codex CLI (from [Registering from the GUI](#registering-from-the-gui)), because Codex runs a command-line hook only once its trust is recorded; a `muse-code` window on Windows, an Antigravity CLI window and a Grok Build window take part only while the hooks their registration writes are in place.
+**Which windows take part.** A window is handed text this way only if it was opened from a profile that declares `[delivery]` and its hooks were put in place when it opened. A window that was not -- a plain shell, a window opened with a raw `command`, a profile with no `[delivery]` table -- is not a chat participant, gets no announcement, and a `send_message` or `send_handoff` addressed to it is answered `undelivered_no_delivery`. The bundled Codex profiles inject their hooks only once yagura is registered with Codex CLI (from [Registering from the GUI](#registering-from-the-gui)), because Codex runs a command-line hook only once its trust is recorded; a `muse-code` window on Windows and a Grok Build window take part only while the hooks their registration writes are in place.
 
 **Bounds.** A window's inbox is bounded; past it a chat post is `undelivered_exhausted`, and a `send_message` or `send_handoff` is `resource_exhausted`. One sender -- a window, or every caller that is no window, together -- may leave at most `[limits] max_queued_per_sender` envelopes (8 by default) waiting in one window; one more is `resource_exhausted`, and a slot comes free once one of them is handed over or withdrawn, the window ends, or the daemon restarts. When a window ends, the envelopes it left waiting in every other window are taken out; one a door is already carrying is left to it. A message or handoff still waiting when the daemon stops is lost (its `note` says so), and a chat post still waiting for a window that does not come back reads as `undelivered_restart`.
 
@@ -907,7 +857,7 @@ Hand work over to another window: an existing one (`window_id`) or a new one ope
 
 `window_id` and `profile` are mutually exclusive, and exactly one of them must be present -- omitting both, or sending both, is `invalid_argument`. `cwd` and `name` apply only to the `profile` form and are rejected alongside `window_id` as `invalid_argument`. `reference` and `note` are both required, must be non-empty, and must each be a single line -- no line breaks, control characters, or characters that could reorder or hide text (the same forbidden-character rule a window's display name is held to): a violation is refused as `invalid_argument`, naming the offending character's byte offset and Unicode code point without echoing the character itself. `reference` is limited to 512 bytes and `note` to 1024 bytes; the whole envelope described below is limited to 2048 bytes -- all three limits are checked independently, and any violation is `invalid_argument`.
 
-`profile` always opens a brand-new window; it never reuses one already running that profile (see [Opening a window from a launch profile](#opening-a-window-from-a-launch-profile) for `profile` resolution rules, which this shares -- an unknown `profile` id is `invalid_argument` and a profile the user has switched off is `profile_disabled` (see [Error Handling](#error-handling)), both checked before any approval decision is made). The new window's working directory defaults in this order: the `cwd` argument, then the requester's own window's `cwd` (when the caller is a window the daemon knows about), then the profile's own default; a `cwd` that does not resolve to an existing directory is `invalid_argument` regardless of which of the three supplied it. `name`, when sent, overrides the profile's `display_name` the same way it does for `open_window`.
+`profile` always opens a brand-new window; it never reuses one already running that profile (see [Opening a window from a launch profile](#opening-a-window-from-a-launch-profile) for `profile` resolution rules, which this shares -- a `profile` that [list_profiles](#list_profiles) does not report is `profile_not_found` and a profile the user has switched off is `profile_disabled` (see [Error Handling](#error-handling)), both checked before any approval decision is made). The new window's working directory defaults in this order: the `cwd` argument, then the requester's own window's `cwd` (when the caller is a window the daemon knows about), then the profile's own default; a `cwd` that does not resolve to an existing directory is `invalid_argument` regardless of which of the three supplied it. `name`, when sent, overrides the profile's `display_name` the same way it does for `open_window`.
 
 `model` and `effort` belong to the `profile` form too, follow exactly the rules [`open_window` documents for them](#opening-a-window-from-a-launch-profile), and are rejected alongside `window_id` as `invalid_argument` -- there is no CLI to start for a window that is already running. They are attributes of the *launch*, not of the request: neither appears in the envelope described below, and neither is shown to an approver (see [Approval Flow](#approval-flow)).
 
@@ -986,7 +936,7 @@ Spawn a new child window with a specified command.
 
 `model` and `effort` (both optional) pick the launched CLI's model and reasoning effort through the profile's own mapping, and are accepted **only** with `profile` -- sending either alongside `command` is `invalid_argument`. Each value is either one of the aliases that profile lists (see [list_profiles](#list_profiles), which reports every alias a profile accepts and what it stands for) or a name the CLI itself understands, passed through unchanged; omit one and the CLI's own default applies. A profile that does not map the option at all refuses it as `invalid_argument`, and so does a value outside the launch option value rule -- in both cases before any process is started. What each option means, and which values a profile maps, is the profile's business, not this server's: see [Launch options](../profiles/README.md#launch-options).
 
-`command` and `profile` are mutually exclusive, and exactly one of them must be present -- omitting both, or sending both, is `invalid_argument`. `profile` also cannot be combined with `detection` or `vendor`: a profile already carries its own detection definition and supplies its id as the window's `vendor` (`invalid_argument` if either is sent alongside `profile`). `cwd` and `name`, when sent, override the profile's own default working directory and its `display_name`; omitted, the profile's own values apply. An unknown profile id, a profile carrying no argv for the daemon's operating system, or one that omits `[command]` with no default shell resolved, are all `invalid_argument`. A profile the user has switched off (see [Disabling a profile](../profiles/README.md#disabling-a-profile)) is refused instead as `profile_disabled` (see [Error Handling](#error-handling)), checked before any process starts. An unresolvable *literal* command is not `invalid_argument`: it fails later, at spawn, as `spawn_failed`. A `command` that is empty, carries a NUL byte in an argv element, or resolves to a `.cmd` / `.bat` shim whose command line contains a character the command interpreter would reinterpret is still `invalid_argument`, as listed under [Error Handling](#error-handling).
+`command` and `profile` are mutually exclusive, and exactly one of them must be present -- omitting both, or sending both, is `invalid_argument`. `profile` also cannot be combined with `detection` or `vendor`: a profile already carries its own detection definition and supplies its id as the window's `vendor` (`invalid_argument` if either is sent alongside `profile`). `cwd` and `name`, when sent, override the profile's own default working directory and its `display_name`; omitted, the profile's own values apply. A profile id that [list_profiles](#list_profiles) does not report -- no such profile, one that cannot be read, or one carrying no argv for the daemon's operating system -- is refused as `profile_not_found` (see [Error Handling](#error-handling)), and one that omits `[command]` with no default shell resolved is `invalid_argument`. A profile the user has switched off (see [Disabling a profile](../profiles/README.md#disabling-a-profile)) is refused instead as `profile_disabled` (see [Error Handling](#error-handling)), checked before any process starts. An unresolvable *literal* command is not `invalid_argument`: it fails later, at spawn, as `spawn_failed`. A `command` that is empty, carries a NUL byte in an argv element, or resolves to a `.cmd` / `.bat` shim whose command line contains a character the command interpreter would reinterpret is still `invalid_argument`, as listed under [Error Handling](#error-handling).
 
 Whether an agent may start a window at all is the approval gate's business, separate from the profile: `open_window` is one of the gated tools (see [Approval Flow](#approval-flow)). The shipped default playbook lists it in `auto_approve`, so a start from a window or an external client runs at once; take it out of the list -- or switch **Open a window** off in Settings > Approvals -- and each start waits for a human decision that shows the command (or profile) and its working directory. A start from the GUI itself is never asked about. The same switch covers the windows `send_handoff` (with `profile`) and `open_task_window` open.
 
@@ -1030,7 +980,6 @@ Interrupt the command running in a window, the way the profile the window was op
 | `grok-build`, `wsl-grok-build` | Ctrl+C | stopped at its next `PreToolUse` or `PostToolUse`; the stop at `PostToolUse` ends the turn | only at your next turn: Grok Build has no hook or command that reaches a stopped session |
 | `muse-code`, `wsl-muse-code` | Escape | stopped at each tool result (`PostToolUse`, `PostToolUseFailure`) until the turn ends at `Stop` or `Interrupt`; a turn that calls no tool is not stopped | only at your next turn, as for Grok Build |
 | `codex-cli`, `wsl-codex-cli` | Escape | refused as `interrupt_unsupported` | -- |
-| `antigravity-cli`, `wsl-antigravity-cli` | Ctrl+C | refused as `interrupt_unsupported` | -- |
 
 **A batch of tool calls planned together is not stopped by an AI's interrupt (GitHub Copilot CLI).** Copilot CLI runs the hooks (`preToolUse`, `permissionRequest`) of a batch of tool calls planned together right after it plans them, all at once; the permission prompts and the executions come afterwards, one call at a time. An interrupt that arrives after the batch's hooks have run therefore does not refuse the batch's calls: with a setting that asks for permission, the remaining calls keep showing permission prompts (the user denies them, or stops Copilot with its Esc); with a setting that does not ask, the remaining calls run. The stop applies to the hooks of the tool calls Copilot makes after that. `stop_requested` means a stop was asked for, not when the CLI stops.
 
@@ -1038,7 +987,7 @@ A window opened without a profile, or from a profile with no `[interrupt]` table
 
 **A daemon restart forgets marks and turns.** The daemon keeps a window's turn and its mark in memory only: after a restart a taken-back window answers `stop_requested_unconfirmed` until a hook of its session reaches the new daemon, and a mark put before the restart stops nothing.
 
-**A CLI nested in the window does not speak for it.** A stop, like everything a window's hooks do, is answered only to the hooks of the window's own CLI: a CLI that one of the window's tools started does not claim the window (see [Credentials](../profiles/README.md#credentials)).
+**A CLI nested in the window speaks for it only where the window's credentials reach that CLI.** A stop, like everything a window's hooks do, is answered to whatever presents the window's credentials. A window whose profile hands them over at launch (`mode = "launch"`), or keeps them from its tools (Codex CLI's `shell_environment_policy`, Grok Build's launch overlay), does not give them to a CLI one of its tools starts. A window that keeps them in its environment and does neither -- Muse Code on Windows, or a shell window -- does, and that CLI's hooks and bridge act as the window -- in a window opened from a profile, those of a CLI that names the same profile (see [Credentials](../profiles/README.md#credentials) and [Requester Identification](#requester-identification)).
 
 Interrupting a window whose status is `unknown` is refused outright as `status_unknown`, before the profile is read and before the gate is reached, regardless of origin or the playbook (fail-safe: acting on a window whose state could not be detected risks firing into an unexpected prompt) -- see [Troubleshooting `status_unknown` and `child_exited`](#troubleshooting-status_unknown-and-child_exited) for a window stuck this way. An AI's interrupt of a window whose profile gives an AI no means is refused as `interrupt_unsupported`, also before the gate, and nothing is written; close the window with [`close_window`](#close_window), or ask the user to interrupt it. Interrupting a window whose child has already exited is refused as `child_exited`, also checked before the gate: this is reported the same way to every caller, not just the ones who would have needed an approval to learn it (`get_window_status` already lets anyone see a window has exited).
 
@@ -1169,7 +1118,7 @@ List the detection definition names the daemon can serve. They come from two lay
 
 List the launch profiles the daemon currently offers: the bundled profiles with your changes laid over them, and profiles of your own (see [Where profiles live](../profiles/README.md#where-profiles-live)). This is a non-destructive, read-only operation and is not subject to the approval gate. The directory is read fresh on every call, so a profile added, edited or removed since the last call is reflected immediately.
 
-A profile the user has switched off (see [Disabling a profile](../profiles/README.md#disabling-a-profile)) is left out of this list entirely -- there is no key marking one as disabled, since every entry that does appear is usable. Naming a disabled profile in `open_window`, `send_handoff` or `open_task_window` is refused as `profile_disabled` (see [Error Handling](#error-handling)).
+A profile the user has switched off (see [Disabling a profile](../profiles/README.md#disabling-a-profile)) is left out of this list entirely -- there is no key marking one as disabled, since every entry that does appear is usable. Naming a disabled profile in `open_window`, `send_handoff` or `open_task_window` is refused as `profile_disabled`, and naming one this list does not report at all is refused as `profile_not_found` (see [Error Handling](#error-handling)).
 
 **Input:** None
 
@@ -1532,7 +1481,7 @@ Opens a window for one task of a plan, using the task's resolved assignment to p
 }
 ```
 
-Only the plan's owner window, while it is alive, may call this; an owner window that is no longer alive, or any other window, gets `not_plan_owner`. A window outside the plan entirely gets `plan_not_found`, the same answer a genuinely unknown `plan_id` gets. Calling this again for a task whose previously opened window is still alive is refused (`invalid_state`); once that window is closed or its process has exited, calling again opens a fresh one and replaces the binding recorded in [get_plan](#get_plan). While the plan's [`review`](#get_plan) is `"pending"`, the call is refused as `plan_not_approved` and no window is opened; see [Confirming a plan](plans.md#confirming-a-plan). `assignment.source` is one of `"user"`, `"parent"`, `"role"`, `"default"` or `"unassigned"` (see [create_plan](#create_plan)); opening a window for an unassigned task is refused as `invalid_state` instead of the shape above. When the resolved assignment's `profile` has been switched off (see [Disabling a profile](../profiles/README.md#disabling-a-profile)), opening the window is refused as `profile_disabled` instead (see [Error Handling](#error-handling)); a role can still resolve to a disabled profile, since saving `roles.toml` does not check that key (see [The role table](plans.md#the-role-table-rolestoml)).
+Only the plan's owner window, while it is alive, may call this; an owner window that is no longer alive, or any other window, gets `not_plan_owner`. A window outside the plan entirely gets `plan_not_found`, the same answer a genuinely unknown `plan_id` gets. Calling this again for a task whose previously opened window is still alive is refused (`invalid_state`); once that window is closed or its process has exited, calling again opens a fresh one and replaces the binding recorded in [get_plan](#get_plan). While the plan's [`review`](#get_plan) is `"pending"`, the call is refused as `plan_not_approved` and no window is opened; see [Confirming a plan](plans.md#confirming-a-plan). `assignment.source` is one of `"user"`, `"parent"`, `"role"`, `"default"` or `"unassigned"` (see [create_plan](#create_plan)); opening a window for an unassigned task is refused as `invalid_state` instead of the shape above. When the resolved assignment's `profile` has been switched off (see [Disabling a profile](../profiles/README.md#disabling-a-profile)), opening the window is refused as `profile_disabled` instead, and when it is not one [list_profiles](#list_profiles) reports, as `profile_not_found` (see [Error Handling](#error-handling)); a role can still resolve to a disabled profile, since saving `roles.toml` does not check that key (see [The role table](plans.md#the-role-table-rolestoml)).
 
 **A task with an `instruction` needs a profile that can be handed a request at launch**: when the resolved assignment's `profile` declares no `launch_prompt` in its `[delivery]` table (see [Launch profiles](../profiles/README.md#delivery)), or its program is a Windows `.cmd` / `.bat` file that cannot pass the request on the command line, the call is refused instead (`no_composer`, or `unsupported` for the shim) and the task is never bound to a window -- see [Error Handling](#error-handling). A task with no instruction still opens under any profile, since nothing needs to be handed over. Otherwise, the call replies as soon as the window is open and bound; it does not wait for the window. The window is started with a one-line `[yagura task]` notice, telling it to read its instruction with [get_plan](#get_plan), as its first request. Where that stands is the task's `instruction_notice` in [get_plan](#get_plan): `"pending"`, `"delivered"` or `"window_closed"`. The window stays open and bound to the task whatever happens to the notice. The notice's exact text and what each state means are in [Task instructions](plans.md#task-instructions). The call is refused as `resource_exhausted` (`the daemon already holds the maximum number of windows`) when the daemon already holds its maximum number of windows, before any window is opened; it does not take one of the slots [send_handoff](#send_handoff) counts.
 
@@ -1803,7 +1752,7 @@ All tools return errors in the standard MCP format:
 
 - **daemon_unavailable**: The yagura daemon is not running or connection failed
 - **window_not_found**: The specified `window_id` does not exist. This also covers a `window_id` that was valid but has since been evicted from the registry (an unattached `exited` window can be evicted once the daemon needs the slot back), and a `window_id` from before the daemon's last restart (see [Window ID Validity](#window-id-validity))
-- **invalid_argument**: Invalid input (e.g., empty command array, a NUL byte in an argv element, a character the command interpreter would reinterpret in a command line resolved through a `.cmd` / `.bat` shim, an unknown `profile` id, non-existent cwd, out-of-range `lines` / `timeout_sec`, `target_status: "unknown"`, a `send_handoff` with both or neither of `window_id` / `profile`, a `send_handoff` text field that is empty, over its byte limit, or carries a forbidden character, a `send_chat` / `broadcast_chat` / `read_chat` `room_id` that is neither `"main"` nor the caller's own workspace room (an approver's connection may name any room that exists), a `send_chat` / `broadcast_chat` `body` that has no visible character (empty, or only whitespace and zero-width joiners), over `CHAT_BODY_MAX_BYTES`, or carries a forbidden character, a `read_chat` `limit` outside `1..=CHAT_READ_LIMIT_MAX`, a `read_chat` from an unidentified connection with no `after_seq`, a `send_message` `text` with a control character other than a line ending or longer than one answer of the window's doors carries, or a `status_event` with no `window_id`). A `model` or `effort` is refused the same way for any of three reasons: it was sent with a `command` (`open_window`) or with a `window_id` (`send_handoff`) instead of a `profile`; the named profile does not map that option at all; or the value is outside the launch option value rule (ASCII letters, digits and `. _ - : / + @`, not starting with `-`, at most 128 bytes). All three are refused before any process is started
+- **invalid_argument**: Invalid input (e.g., empty command array, a NUL byte in an argv element, a character the command interpreter would reinterpret in a command line resolved through a `.cmd` / `.bat` shim, non-existent cwd, out-of-range `lines` / `timeout_sec`, `target_status: "unknown"`, a `send_handoff` with both or neither of `window_id` / `profile`, a `send_handoff` text field that is empty, over its byte limit, or carries a forbidden character, a `send_chat` / `broadcast_chat` / `read_chat` `room_id` that is neither `"main"` nor the caller's own workspace room (an approver's connection may name any room that exists), a `send_chat` / `broadcast_chat` `body` that has no visible character (empty, or only whitespace and zero-width joiners), over `CHAT_BODY_MAX_BYTES`, or carries a forbidden character, a `read_chat` `limit` outside `1..=CHAT_READ_LIMIT_MAX`, a `read_chat` from an unidentified connection with no `after_seq`, a `send_message` `text` with a control character other than a line ending or longer than one answer of the window's doors carries, or a `status_event` with no `window_id`). A `model` or `effort` is refused the same way for any of three reasons: it was sent with a `command` (`open_window`) or with a `window_id` (`send_handoff`) instead of a `profile`; the named profile does not map that option at all; or the value is outside the launch option value rule (ASCII letters, digits and `. _ - : / + @`, not starting with `-`, at most 128 bytes). All three are refused before any process is started
 - **name_taken**: A `name` sent to `open_window`, `send_handoff` (with `profile`) or `open_task_window` is carried by a running window already, or is reserved for chat mentions (`user`, `parent`, `all`). Nothing was opened; send another name, or none to get a numbered default
 - **spawn_failed**: Failed to start the child process
 - **resource_exhausted**: Maximum window limit reached (`open_window`, `open_task_window`), too many concurrent `wait_for_status` and `wait_for_report` calls already outstanding on this connection (`this connection already holds the maximum number of pending waits`), a target window whose inbox is full (`send_message`, `send_handoff`: `the window's inbox already holds as many messages as it takes`), a target window that already holds as many of this sender's envelopes as `[limits] max_queued_per_sender` allows (`send_message`, `send_handoff`; see [How the daemon delivers text](#how-the-daemon-delivers-text)), too many approval requests are already pending (daemon-wide or from this caller; see [Approval Flow](#approval-flow)), or too many `send_handoff` calls are still unanswered from this caller or across the daemon, whether each opened a window from a `profile` or addressed an existing `window_id` (see [send_handoff](#send_handoff)'s two-stage limit); the `message` names which of the two ran out: `too many handoffs are in flight (per-caller limit)` or `(daemon-wide limit)`
@@ -1813,7 +1762,7 @@ All tools return errors in the standard MCP format:
 - **status_unknown**: `interrupt_window` / `send_message` / a `send_handoff` addressed to an existing `window_id` was refused because the target window's status is `unknown` (fail-safe; cannot be relaxed by a playbook or by being the target window's own connection, and is reported the same way to every caller — see [Troubleshooting `status_unknown` and `child_exited`](#troubleshooting-status_unknown-and-child_exited)). The `message` names why that status could not be detected, as a phrase in parentheses: `the window's status could not be detected (<reason>), so this operation is refused`, where `<reason>` is the English phrase for the same reason `unknown_reason` carries (see [Why a window is `unknown`](#why-a-window-is-unknown)); the error code itself is unchanged. A `send_handoff` also reports this when the target window's status has slipped back to `unknown` between an approval decision and delivery. Does not apply to `close_window`. `send_chat` / `broadcast_chat` never return this: a post to an `unknown` window waits in its inbox (`"queued"` in [read_chat](#read_chat)'s `deliveries`), since a chat post may still reach other targets
 - **approval_denied**: An approver decided against a queued `interrupt_window` / `close_window` / `send_message` / `send_handoff` / `send_chat` / `broadcast_chat` request
 - **approval_timeout**: A queued request was still undecided when the approval deadline elapsed (`[limits].approval_timeout_secs`, default 60s; see [Playbooks: Approval and Limits](#playbooks-approval-and-limits)). A request to open a window (`open_window`, a `send_handoff` from a `profile`, `open_task_window`) whose requester's CLI dropped the call at the end of its turn (see the detection `[requests]` table) is withdrawn and answered this way too: no window was opened
-- **interrupt_unsupported**: `interrupt_window` from an AI was refused because the window's profile gives an AI no way to interrupt its CLI (Codex CLI, Antigravity CLI); nothing was written. The user's own interrupt is never refused
+- **interrupt_unsupported**: `interrupt_window` from an AI was refused because the window's profile gives an AI no way to interrupt its CLI (Codex CLI); nothing was written. The user's own interrupt is never refused
 - **requester_interrupted**: The request's own window was interrupted by an AI while the request waited for an approver, so it was withdrawn and nothing was done
 - **approval_not_pending**: An `approval_decision` named a `request_id` that this connection is not (or is no longer) waiting to decide -- already settled, withdrawn, or never issued to this connection (see [Approval Flow](#approval-flow))
 - **no_composer**: Nothing was sent, because the profile declares no way to hand its CLI a request at launch (no `launch_prompt` in its `[delivery]` table; see [Launch profiles](../profiles/README.md#delivery)). A `send_handoff` addressed to a `profile`, and an `open_task_window` for a task that carries an instruction, return it before anything starts; the code keeps its original name. `send_message` never returns it: a window that takes no text this way answers `undelivered_no_delivery` (see [send_message](#send_message))
@@ -1824,7 +1773,7 @@ All tools return errors in the standard MCP format:
 - **not_plan_owner**: `update_plan` / `delete_plan` / `open_task_window` was called by a window that is not the plan's owner, or by the owner window while it is no longer alive (closed, or its child process has exited)
 - **plan_not_approved**: `open_task_window` was called by the plan's living owner while the plan's review is still pending; no window is opened. Once an approver approves the plan, a one-line notice starting with `[yagura plan]` is handed to the owner's CLI and the call succeeds (see [Confirming a plan](plans.md#confirming-a-plan))
 - **profile_disabled**: `open_window` (with `profile`), `send_handoff` (with `profile`) and `open_task_window` refuse this way when the launch profile they would open a window from has been switched off in the user's settings (see [Disabling a profile](../profiles/README.md#disabling-a-profile)). This is not an argument error, so repeating the same request reworded will not help
-- **profile_not_found**: `open_window` (with `profile`), `send_handoff` (with `profile`) and `open_task_window` refuse this way when the launch profile they would open a window from is not one [list_profiles](#list_profiles) reports -- no such file, an identifier of the wrong shape, or a profile carrying no argv for the daemon's operating system. Nothing is started. Call `list_profiles` for the identifiers this host can launch
+- **profile_not_found**: `open_window` (with `profile`), `send_handoff` (with `profile`) and `open_task_window` refuse this way when the launch profile they would open a window from is not one [list_profiles](#list_profiles) reports -- no such file, an identifier of the wrong shape, a file that cannot be read as a profile, or a profile carrying no argv for the daemon's operating system. Nothing is started. Call `list_profiles` for the identifiers this host can launch
 - **ticket_not_found**: `get_ticket` / `update_ticket` / `add_ticket_result`, or a `create_plan` with `ticket`, named a ticket number the calling window's workspace does not hold -- one that does not exist, or one of another workspace; both cases answer identically. A `create_plan` refused this way creates no plan
 - **tickets_not_configured**: `create_ticket` / `update_ticket` was refused because the user has no `tickets.toml` defining the board's states and fields. Reading still works: `list_tickets` returns the summaries with `config_error` in place of `config`
 - **tickets_config_invalid**: `create_ticket` / `update_ticket` was refused because the user's `tickets.toml` could not be read as valid settings; the `message` names why, without quoting the file. Reading still works, as for `tickets_not_configured`
@@ -1946,7 +1895,7 @@ The GUI's Settings panel (the gear button in the navigation rail) has an **Appro
 1. **`"no approver is connected, so <tool> is denied"`**: nobody is currently registered as an approver to decide the request -- usually because the GUI is not running, or its control connection has not finished registering (see [Approver Registration](#approver-registration)). This is the ordinary case, and it is not specific to a broken or missing playbook: as long as an approver *is* connected, a missing playbook, an empty one, or one whose `auto_approve` does not list this tool all land in the approval queue instead of being denied outright -- this message means literally nobody was there to decide it.
 2. **`"the configured playbook failed to load, so <tool> is denied"`**: `--playbook` or `YAGURA_PLAYBOOK` resolved a path, but reading or parsing it failed. Check the daemon log (see [Debugging Connection Issues](#debugging-connection-issues)) for a warning line -- grep for `failed to load the playbook`, which names the exact error (a missing file reads as an I/O error, an unknown key or wrong-typed value as a TOML parse error).
 
-For a `send_handoff` addressed to a `profile`, both messages can also appear for this same reason **before the window is ever opened** -- this pre-launch check (see [send_handoff](#send_handoff)) asks the same question the gate would ask after opening the window, just earlier, so it never spawns a process it already knows it cannot deliver into. This is separate from an unknown `profile` id, which is always `invalid_argument` regardless of whether an approver is connected or the playbook loaded.
+For a `send_handoff` addressed to a `profile`, both messages can also appear for this same reason **before the window is ever opened** -- this pre-launch check (see [send_handoff](#send_handoff)) asks the same question the gate would ask after opening the window, just earlier, so it never spawns a process it already knows it cannot deliver into. This is separate from a `profile` that [list_profiles](#list_profiles) does not report, which is always `profile_not_found` regardless of whether an approver is connected or the playbook loaded.
 
 ### Troubleshooting `status_unknown` and `child_exited`
 
@@ -2020,7 +1969,7 @@ A connection's origin starts as `External` and can be upgraded exactly once, in 
 
 **A bridge names the profile it speaks for.** The bundled profiles' bridges pass `--profile <id>`, and `identify` carries it as a declaration. A window opened from a launch profile that gives its CLI hooks (a `[hooks]` table, or hook entries its registration writes) accepts a bridge as itself only when the bridge declares that window's own profile; a bridge that declares another, or none -- a CLI nested in the window, or a registration written before this declaration existed -- is refused (`profile_mismatch`) and stays `External`. A plain shell window, and one opened from a raw command, accept a bridge as before. The declaration is the bridge's own word, a mark that keeps yagura's own parts from claiming the wrong window, not a check on a process that holds the credentials (see [Credentials](../profiles/README.md#credentials)).
 
-**A window's claim is traced to its own CLI.** In a window whose profile declares the image of its CLI's process (`[process_image]`), a bridge's `identify`, like a hook door, is accepted only from the window's own CLI: the daemon follows the requester's parent processes up to the window's child and accepts it only when exactly one process on that path has the image. Two or more mean a CLI the window's CLI started, and a path it cannot follow is never guessed: both are refused (`lineage_refused`). A window whose launch overlay has not been made yet (a profile with `[launch_overlay]`, such as the WSL Grok Build profile) refuses every claim as `launch_overlay_pending`. Each refusal leaves the bridge `External`, with an `identity_warning` naming why. See [Credentials](../profiles/README.md#credentials) for what this protects and what it does not.
+**A claim can be refused although its credentials hold.** A window whose launch overlay has not been made yet (a profile with `[launch_overlay]`, such as the WSL Grok Build profile) refuses every claim as `launch_overlay_pending`. Each refusal leaves the bridge `External`, with an `identity_warning` naming why. A claim that is accepted speaks for the window whatever process made it: see [Credentials](../profiles/README.md#credentials) for which processes the window's credentials reach.
 
 **Limits under `YAGURA_STATUS_TOKEN_OVERRIDE`**: with the override active (see [StatusEvent Authentication](#statusevent-authentication)), every window shares the same token, so `identify` no longer distinguishes one window from another -- any connection that knows the override value can identify as *any* `window_id`. This is a test/development mechanism only; do not run it in production, where window identity would then carry no real guarantee.
 

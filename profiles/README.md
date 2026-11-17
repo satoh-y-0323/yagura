@@ -96,8 +96,8 @@ your own that uses one -- for example `env` under `[model]` or `[effort]`,
 `items` and `name` under `[mcp_registration.status]`, the `[credentials]`
 table, the `[hook_events]` table, `retired` under
 `[mcp_registration.toml_set.entries]`, `launch_only` under `[command]`, the
-top-level `subagent_pointer`, the `[hook_timeout]`, `[interrupt]`,
-`[process_image]` and `[launch_overlay]` tables, `when` or `deliver = "block"`
+top-level `subagent_pointer`, the `[hook_timeout]`, `[interrupt]` and
+`[launch_overlay]` tables, `when` or `deliver = "block"`
 in a `[hook_events]` event, `max_bytes` or a `block` output under
 `[delivery]`, `answers` under `[hooks]`, `state_base` under `[host_paths]`,
 `args_line` under `[mcp_registration.status]`, or a `[credentials]`, `[mcp]`
@@ -230,10 +230,6 @@ args = ["-c", "mcp_servers.{server}.command={bridge_toml}"]
 # user_keys = ["ctrl_c"]
 # ai = "none"
 
-[process_image]                # optional table; the name of the CLI's own
-                                # process. See "A window's own CLI" below
-# linux = "codex"
-
 [launch_overlay]               # optional table; a settings layer that keeps
                                 # the credentials from the CLI's tools. See
                                 # "Launch overlay" below
@@ -262,9 +258,7 @@ one of the rules under [MCP injection](#mcp-injection) and
 under [Delivery](#delivery); `subagent_pointer`, a `[hook_events]`,
 `[hook_timeout]` or `[interrupt]` table breaks a rule under
 [Hook events](#hook-events), [Hook timeout](#hook-timeout) or
-[Interrupt](#interrupt); a `[process_image]` table breaks a rule under
-[A window's own CLI](#a-windows-own-cli); a `[launch_overlay]` table breaks a
-rule under [Launch overlay](#launch-overlay); a `[host_paths]` table breaks a rule under
+[Interrupt](#interrupt); a `[launch_overlay]` table breaks a rule under [Launch overlay](#launch-overlay); a `[host_paths]` table breaks a rule under
 [Host paths](#host-paths); or a `[shim_guidance]` table breaks a rule under
 [Shim guidance](#shim-guidance). A profile stays valid, with the offending
 value dropped and a warning attached, when: `cwd` is relative or starts with
@@ -289,8 +283,8 @@ windows = ["wsl", "-e", "bash", "-lic", "exec \"$0\" \"$@\"", "codex"]
 ```
 
 On any other operating system this profile has nothing to launch: it does not
-appear in any profile listing there, and naming it directly is refused as an
-unknown profile. The `windows` argv itself is
+appear in any profile listing there, and naming it directly is refused as
+`profile_not_found`, as for a profile that does not exist. The `windows` argv itself is
 explained under [WSL profiles](#wsl-profiles).
 
 An argv element that is exactly `{daemon}` stands for the window's overlay
@@ -531,8 +525,8 @@ profile id: `open_window`'s `command` form launches whatever argv it is
 given directly, with no profile in the request to check (see
 [`open_window`](../docs/mcp-setup.md#open_window)); and a window already
 open when its profile was switched off keeps running regardless. Restoring a
-saved session does not reopen a window whose profile is now disabled from
-its saved argv either -- see
+saved session does not reopen a window whose profile is now disabled, nor any
+other window its profile can no longer open, from its saved argv -- see
 [Restoring a window opened from a profile](#restoring-a-window-opened-from-a-profile).
 
 **Downgrading**: an older build's profile parser does not know about
@@ -722,7 +716,8 @@ settings, `GROK_DEFAULT_MODEL` does not (Grok Build 1.0.70). Its rules:
 - The variables travel in the window's environment, never on its command
   line, so a `.cmd` / `.bat` program limits none of them.
 - A restored window reopened from its profile gets them again from the
-  recorded value; one that falls back to its saved argv does not (see
+  recorded value; a window that could not be reopened from its profile is not
+  started at all (see
   [Restoring a window opened from a profile](#restoring-a-window-opened-from-a-profile)).
 
 `aliases` is optional and maps a short name to the value actually passed.
@@ -779,41 +774,26 @@ names, are behind it:
 |---|---|---|
 | `claude-code`, `wsl-claude-code` | `fast` = `haiku`, `default` = `sonnet`, `strong` = `opus`, `fable` = `fable` | accepted, no aliases (levels pass through) |
 | `codex-cli`, `wsl-codex-cli` | `fast` = `gpt-5.6-luna`, `default` = `gpt-5.6-terra`, `strong` = `gpt-6-astra` | accepted, no aliases (levels pass through) |
-| `antigravity-cli`, `wsl-antigravity-cli` | `fast` = `gemini-3.8-flash-low`, `default` = `gemini-3.8-flash-medium`, `strong` = `gemini-3.1-pro-high` | not accepted (see below) |
 | `copilot-cli`, `wsl-copilot-cli` | `default` = `auto` only (see below) | accepted, no aliases (levels pass through) |
 | `muse-code`, `wsl-muse-code` | `fast` = `muse-spark-1.3`, `default` = `muse-spark-1.3`, `strong` = `muse-wonder-1.0` | accepted, no aliases (levels pass through) on macOS, Linux and in WSL; refused on Windows (see below) |
 | `grok-build`, `wsl-grok-build` | `fast` = `grok-4.7-build-fast`, `default` = `grok-4.7`, `strong` = `grok-4.7` | accepted, no aliases (levels pass through) |
 | `shell` | accepts neither option | -- |
 
 Those mappings come from each CLI's own `--help` (Claude Code 2.1.263, Codex
-CLI 0.153.4, Antigravity CLI 1.2.11, GitHub Copilot CLI 1.0.101, Muse Code
-1.4.12, Grok Build 1.0.70) and, for the reasoning levels and the
+CLI 0.153.4, GitHub Copilot CLI 1.0.101, Muse Code 1.4.12, Grok Build
+1.0.70) and, for the reasoning levels and the
 model names, the Codex configuration and models reference and Muse's models
 page. **Model names
 change over time**: read the table as the state when these profiles were
 written, and edit your own copies to whatever your CLI and your account
 actually accept -- yagura never validates a model name, it only passes it
-on. The `antigravity-cli` aliases were confirmed only against Antigravity's
-free-tier "Starter Quota"; a model a paid tier can select was not checked.
+on.
 
 GitHub Copilot CLI documents no model identifiers -- its supported models
 page gives display names only -- and has no command that lists them, so the
 Copilot profiles map `default` to `auto`, the value `--model` takes to let
 Copilot pick, and nothing else. Pass any other model name as it is, or pick
 one with the CLI's own `/model`. This was checked on a Copilot Free account.
-
-Antigravity CLI (`agy`) has an `--effort` flag, but it cannot be combined
-with the *effort-qualified* model ids `agy models` lists: `--model
-gemini-3.8-flash-low --effort high` is refused as a conflict, and an
-unqualified id such as `gemini-3.8-flash` is accepted only together with
-`--effort`. A `[model]` alias and an `[effort]` alias are chosen
-independently -- either may be absent -- so an `[effort]` table would leave
-some combinations refused. `antigravity-cli` and `wsl-antigravity-cli`
-therefore select the reasoning level through effort-qualified model ids and
-ship no `[effort]` table at all -- asking either for `effort` is refused the
-same way `shell` refuses `model`. An interactive `agy` does not fail on a
-refused selection: it warns and falls back to its own default model, which
-is the outcome this profile's `[model]` aliases exist to avoid.
 
 The Muse profiles ship no `[effort]` table, so asking either for `effort` is
 refused. Muse saves a level given with `--reasoning-effort` into the user's
@@ -883,9 +863,7 @@ and excludes the profile the same way.
 
 Of the profiles this repository ships, `claude-code` and `wsl-claude-code`
 carry a fixed `values` list, `codex-cli` and `wsl-codex-cli` ask Codex CLI
-(`codex debug models`, JSON), and `antigravity-cli` and
-`wsl-antigravity-cli` ask Antigravity CLI (`agy models`, one model per line,
-id and display name separated by a tab). `grok-build` and
+(`codex debug models`, JSON). `grok-build` and
 `wsl-grok-build` carry a fixed `values` list, since `grok models` prints no
 machine-readable form; once it prints JSON, the list can ask it instead.
 `copilot-cli` and
@@ -1048,8 +1026,8 @@ per-window path. Their `launch_args` set both variables to the empty string in
 `shell_environment_policy`, which keeps the real values out of the environment
 of the tools Codex runs. Their `[command] launch_only` adds `--no-daemon` to the
 window's spawn alone, so neither the wake nor the registration carries it.
-`grok-build`, `antigravity-cli`, `muse-code` on Windows and `shell` (and the WSL
-variants of the first two) keep `"env"` too: their hooks are written into the
+`grok-build`, `muse-code` on Windows and `shell` (and `wsl-grok-build`) keep
+`"env"` too: their hooks are written into the
 CLI's own settings by a registration, once for all windows, which has no place
 for a per-window path. Grok Build hands its environment to the shells its tools
 run, so its profiles hand the CLI a [launch overlay](#launch-overlay) that keeps
@@ -1067,85 +1045,9 @@ a nested CLI's bridge, a registration written for another profile -- from
 claiming the wrong window, not a check that a process holding the credentials
 cannot get past.
 
-### A window's own CLI
-
 The credentials reach every process the window's CLI starts that can read
 them -- in `"env"` mode its whole process tree. A CLI that one of the window's
-tools starts, running the same hooks and bridge, would then speak for the
-window. A profile that declares the image of its CLI's process stops that:
-
-```toml
-[process_image]
-windows = "agy.exe"             # keys chosen like [command]'s: windows,
-linux = "agy"                   # macos, linux, default
-```
-
-Each value is one name or a list of them, compared with the name the
-operating system recorded when the process started: on Windows the
-executable's file name, compared whole and without regard to case; on Linux
-the command name (`comm`); on macOS `pbi_comm`; for a CLI in a WSL guest, the
-guest's `comm`. A CLI that updates its own executable (renames it away,
-overwrites it, deletes it) keeps that name, so an update needs no new window.
-On Linux and macOS the name is at most 15 bytes and is compared to its first
-15 bytes; a pattern whose part before the `*` is shorter than 15 bytes does not
-check what follows the `*` against a 15-byte name, and a name of another length
-is compared whole. A name may carry one `*`, standing for any run of
-characters; a pattern with two, one that starts with `*` (`*agy`, `*`), or one
-holding `/` fails the profile. A pattern is matched against the whole name,
-never a part of a path. For a profile with [`[host_paths]`](#host-paths), whose
-CLI runs in a WSL guest, write the guest's name under the host's key
-(`windows`), compared with regard to case.
-
-**How a request is judged.** With the declaration, a hook door's request and a
-bridge's `identify` in the window's name are traced from the requesting
-process through its parents to the window's child: the request is the
-window's only when exactly one process on that path has a declared name. Two
-or more mean a CLI nested in the window's CLI, and the request is refused. So
-is a request whose path cannot be followed -- it does not reach the window's
-child, the system does not answer, the requester's process id is not known,
-or no process on it has the name -- since a verdict is never guessed. A
-refused hook door prints nothing, exits 0 and records neither a status nor a
-session, and what waits in the inbox stays there; a refused bridge stays
-`External`, with an `identity_warning` naming why (`lineage_refused`). The
-daemon logs a warning the first time a window refuses one; when the window's
-own CLI is refused, the declaration no longer matches its release. A window
-whose CLI has exited lets no request speak for it. A window whose profile
-declares no image is judged by its credentials alone, as before.
-
-In a WSL guest the daemon cannot follow the guest's processes, so the guest
-reports them. The window's `[command]` wraps the CLI in `bash`, which puts
-`YAGURA_GUEST_ROOT=<pid>:<boot id>:<start time>` in the CLI's environment; the
-hook's shell and the bridge's wrapper collect each step of their parents' line
-from `/proc/<pid>/stat`, up to that root, and hand them to the door as
-`--guest-root` and `--guest-step`. The daemon applies the same rule to those
-steps, and refuses a path that does not reach the root or holds a step it
-cannot read. Which rule applies is the window's fact, not the request's: a
-window whose profile has `[host_paths]` takes the guest's report, and any
-other is traced by the host's own process ids, whatever a request claims.
-
-**What this protects, and what it does not.** The judgement is made against a
-CLI nested in the window that runs its hooks and bridge as written. The
-declaration, the guest's report and the environment are the requester's own,
-so a tool that deliberately reads the credentials and speaks to the daemon
-itself, or rewrites what it reports, while it runs inside the window's CLI, is
-not stopped; neither is a nested CLI started through a link of another name,
-or from a copy renamed, whose recorded name is not the declared one. The bundled
-`antigravity-cli` and `wsl-antigravity-cli` declare `agy.exe` on Windows and
-`agy` on Linux and in the guest (Antigravity CLI 1.5.6); macOS is not declared
-yet, so a macOS window is judged by its credentials alone. A declaration you
-change takes effect for a window when it is opened again, or when the daemon
-starts again.
-
-**Windows opened before this release.** A window whose holder does not name
-its child process is not traced: it is judged by its credentials alone, with
-one warning per window, until it is opened again. A window recorded before
-this release carries no fact of whether its CLI runs in a guest: it takes
-the guest's report when the profile has `[host_paths]` now, and the host's
-process ids otherwise. A WSL window opened before this release has no
-`YAGURA_GUEST_ROOT`, and its hooks and bridge -- and a bridge registered before
-this release, which hands over no steps -- are judged by their credentials
-alone, with one warning per window, until it is opened again or registered
-again.
+tools starts, running the same hooks and bridge, then speaks for the window.
 
 ## Launch overlay
 
@@ -1217,8 +1119,8 @@ reports, its deliveries and its bridge as the window are refused
 CLI without the overlay, leaves the window's credentials in its tools'
 shells, and the window then never reports or takes part in delivery: the
 daemon does not take the credentials for the window. A tool that calls the
-door itself, with the credentials it can read, is the limit described under
-[A window's own CLI](#a-windows-own-cli).
+door itself, with the credentials it can read, speaks for the window as any
+process holding them does (see [Credentials](#credentials)).
 
 ## MCP injection
 
@@ -1228,13 +1130,6 @@ profile can call yagura's MCP tools without anything being registered in
 that CLI (see [docs/mcp-setup.md](../docs/mcp-setup.md#windows-yagura-opens)).
 A profile without the table gets no injection: that is how a profile says
 its CLI has no way to be handed an MCP server at launch (`shell` is one).
-`antigravity-cli` and `wsl-antigravity-cli` are another: Antigravity CLI
-(`agy`) reads MCP servers only from its own global registration, not from
-anything passed at launch, so there is no per-launch injection point to fill
-in. Reaching yagura's MCP bridge from an `agy` window means registering it
-once -- from Settings > Integrations in the GUI (see
-[MCP registration](#mcp-registration) below), or by hand with `agy mcp add`,
-see [docs/mcp-setup.md's "Configuring Antigravity CLI"](../docs/mcp-setup.md#configuring-antigravity-cli).
 `muse-code` has none on Windows: Muse Code's Windows launcher cannot carry the
 JSON a launch would pass, so there that profile reaches yagura through its
 registration instead (see [MCP registration](#mcp-registration)); on macOS
@@ -1482,8 +1377,8 @@ still registered (see "Out-of-date entries" under
 hook given with `-c` only once its trust is recorded in `~/.codex/config.toml`,
 and the key that records it carries characters a shim refuses, so
 registration writes the trust and the launch injects the hooks. A profile with
-no `[hooks]` table but a `json_entry` -- Antigravity CLI and Grok Build, which
-read hooks only from their own files, and `muse-code`, whose hooks live in
+no `[hooks]` table but a `json_entry` -- Grok Build, which reads hooks only
+from its own files, and `muse-code`, whose hooks live in
 the managed hooks file its registration writes -- injects nothing; the entry
 is the hook.
 
@@ -1503,7 +1398,6 @@ were checked with):
 | --- | --- | --- | --- |
 | `claude-code`, `wsl-claude-code` (Claude Code 2.1.285) | `UserPromptSubmit`, `PreToolUse`, `PostToolUse` | `PermissionRequest` | `Stop`, `StopFailure` |
 | `codex-cli` (Codex CLI 0.159.2), `wsl-codex-cli` (0.158.0) | `UserPromptSubmit`, `PreToolUse`, `PostToolUse` | `PermissionRequest` | `Stop`, `Interrupt` |
-| `antigravity-cli`, `wsl-antigravity-cli` (Antigravity CLI 1.2.14, through `json_entry`) | `PreInvocation`, `PostToolUse` | -- | -- |
 | `copilot-cli`, `wsl-copilot-cli` (GitHub Copilot CLI 1.0.101) | `userPromptSubmitted`, `preToolUse`, `postToolUse`, `postToolUseFailure` | -- | `agentStop` |
 | `muse-code` (through `json_entry` on Windows), `wsl-muse-code` (Muse Code 1.4.12) | `UserPromptSubmit` | `PermissionRequest` | `Stop`, `StopFailure`, `Interrupt` |
 | `grok-build`, `wsl-grok-build` (Grok Build 1.0.70, through `json_entry`) | `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `PostToolUseFailure` | `Notification` (`permission_prompt`) | `Stop`, `StopFailure`, `StopCancelled` |
@@ -1602,8 +1496,8 @@ session of that CLI, once for each instance registered there -- including
 inside another instance's window, where it would reach that window's daemon.
 So a registration that writes hooks of its own for each instance (an entry
 keyed by `{server}`, or a file named by it) passes `--for-instance {server}`
-to every door it runs, right after `{daemon}`, as the bundled Antigravity CLI
-and Grok Build hooks do. Inside a window a door whose `--for-instance` is not
+to every door it runs, right after `{daemon}`, as the bundled Grok Build
+hooks do. Inside a window a door whose `--for-instance` is not
 the window's own instance does nothing, like a door outside a window (see
 [Structured sources](../crates/yagura-daemon/detection/README.md#structured-sources---emit-status)).
 Hooks passed with a launch, or one file all instances share, run only once
@@ -1866,7 +1760,6 @@ The bundled profiles:
 | `grok-build`, `wsl-grok-build` | `ctrl_c` | `hook` | `PreToolUse` (false), `PostToolUse` (true) | `UserPromptSubmit` | `Stop`, `StopFailure`, `StopCancelled` | at the user's next turn |
 | `muse-code`, `wsl-muse-code` | `escape` | `hook` | `PostToolUse` (false), `PostToolUseFailure` (false) | `UserPromptSubmit` | `Stop`, `StopFailure`, `Interrupt` | at the user's next turn |
 | `codex-cli`, `wsl-codex-cli` | `escape` | `none` | -- | -- | -- | -- |
-| `antigravity-cli`, `wsl-antigravity-cli` | `ctrl_c` | `none` | -- | -- | -- | -- |
 
 Grok Build and Muse Code take an instruction sent after the stop only at the
 user's next turn: a turn their stop answer ends runs no stop hook that could
@@ -1874,9 +1767,9 @@ hand a block over, the events that end such a turn (`StopCancelled`,
 `Interrupt`) take no answer, and neither CLI documents a way to wake an idle
 session. This is to change once their documentation offers an event that
 ends a stopped turn and takes an answer, or a way to wake a session from
-outside. Codex CLI and Antigravity CLI offer no measured way for an AI to stop
-them that keeps the user's draft and session, so an AI's interrupt is refused
-there; close the window, or ask the user.
+outside. Codex CLI offers no measured way for an AI to stop it that keeps
+the user's draft and session, so an AI's interrupt is refused there; close
+the window, or ask the user.
 
 ## Delivery
 
@@ -1914,7 +1807,7 @@ block = '{"decision":"block","reason":{text}}'
 
 **Asking for the wait again.** A CLI with `wake = "wait"` can lose its registered wait while it waits for input: the daemon ended abnormally and the window outlived it, or the CLI's own time limit for the wait ran out. A window whose open recorded a *wake file* -- its profile's `[hooks]` has an [answer](#answers-a-hook-prints-without-the-daemon) naming `{wake_paths}`, and its hooks were put in place -- is asked again: when something waits that can be handed over, no wait is registered, and the window is neither `unknown` nor `exited`, the daemon writes the wake file once (its content changes with each write, and the file is never removed). It writes it again only after one of the window's doors ran, a wait was registered, or the window's status changed. A write that fails is logged once per window and tried again at the next of those. The CLI is to watch the file and register a wait again when it changes; the bundled Claude Code profiles do this with a `FileChanged` hook whose `matcher` is the file's name, `yagura_wake`, running `--deliver-wait`. That matcher compares file names, so a file of the same name in the working folder that changes also runs one `--deliver-wait`, which prints nothing when nothing waits. A window with no wake file -- a profile without such an answer, a window whose hooks were left out, one opened before this release -- and a window of an older daemon wait as before, for the CLI's next door. This is to be revisited when Claude Code's hooks documentation limits which events `asyncRewake` may be used on, or limits what `FileChanged` watches to the working folder; or when its documentation puts `CwdChanged`'s `watchPaths` at the top level, or a Claude Code release no longer brings the watch list back after a change of directory.
 
-**Where each bundled profile declares what.** The tables are in `claude-code.toml`, `codex-cli.toml`, `antigravity-cli.toml`, `copilot-cli.toml`, `muse-code.toml`, `grok-build.toml` and their `wsl-` counterparts; read them as the working examples. In short: Claude Code leaves a wait that ends with exit code 2 (`wake = "wait"`) and is asked for it again through its wake file, Codex CLI is woken with its own `queue` subcommand (`wake = "command"`), and Antigravity CLI, GitHub Copilot CLI, Muse Code and Grok Build have no way to be woken (`wake = "none"`): what waits is handed over at their next door, and as a block when their turn stops. Muse Code takes a hook's output for JSON once it starts with `[`, as yagura's texts can (`[yagura handoff] ...`), and a JSON answer must name the event it is for, so its profiles give `context`, `take` and `block` their own templates. Grok Build passes no session-start hook's output to its model, so its profiles hand it the room's introduction with `--rules` (`launch_context`), and take the inbox only after a tool call and at the end of a turn. Their start-up requests are given on each CLI's command line.
+**Where each bundled profile declares what.** The tables are in `claude-code.toml`, `codex-cli.toml`, `copilot-cli.toml`, `muse-code.toml`, `grok-build.toml` and their `wsl-` counterparts; read them as the working examples. In short: Claude Code leaves a wait that ends with exit code 2 (`wake = "wait"`) and is asked for it again through its wake file, Codex CLI is woken with its own `queue` subcommand (`wake = "command"`), and GitHub Copilot CLI, Muse Code and Grok Build have no way to be woken (`wake = "none"`): what waits is handed over at their next door, and as a block when their turn stops. Muse Code takes a hook's output for JSON once it starts with `[`, as yagura's texts can (`[yagura handoff] ...`), and a JSON answer must name the event it is for, so its profiles give `context`, `take` and `block` their own templates. Grok Build passes no session-start hook's output to its model, so its profiles hand it the room's introduction with `--rules` (`launch_context`), and take the inbox only after a tool call and at the end of a turn. Their start-up requests are given on each CLI's command line.
 
 **Windows and Codex CLI.** A wake command passes the text as a command-line argument, and a Windows `.cmd` / `.bat` file is started through the command interpreter, which reads parts of an argument as its own syntax. Such a profile is therefore listed as unavailable (reason kind 5 under [Availability](#availability)) instead of being started and failing later. For Codex CLI, whose npm package installs a `.cmd` shim, install the standalone build and put it ahead of the npm one on `PATH`; the bundled `codex-cli` profile's [`[shim_guidance]`](#shim-guidance) gives the command. A `launch_prompt` is subject to the same limit: a request that must be passed on the command line is refused when the program is a `.cmd` / `.bat` file (see [Shim guidance](#shim-guidance)).
 
@@ -2099,12 +1992,12 @@ default = ['/<session-flags>/config.toml:stop:0:1']
                                 # the registration owns. One table, or an
                                 # array [[mcp_registration.json_entry]] of
                                 # one per file
-file = ".gemini/config/hooks.json"  # home-relative; may carry {server}
+file = ".example/hooks.json"    # home-relative; may carry {server}
 # claim = "/managed_hooks_path"  # optional; see "Shared entries and the claim"
 [mcp_registration.json_entry.entries."{server}"]
                                 # a top-level name, or a JSON Pointer such as
                                 # "/mcpServers/{server}"
-PreInvocation = [{ type = "command", command = "{daemon} --for-instance {server} --hook antigravity-cli PreInvocation", timeout = 10 }]
+Stop = [{ type = "command", command = "{daemon} --for-instance {server} --hook example-cli Stop", timeout = 10 }]
 # [mcp_registration.json_entry.by_os.windows]
                                 # optional; more entries for one OS: windows /
                                 # macos / linux override default
@@ -2354,9 +2247,10 @@ alone.
 
 ## WSL profiles
 
-The six WSL profiles this repository ships (`wsl-claude-code`,
-`wsl-codex-cli`, `wsl-antigravity-cli`, `wsl-copilot-cli`, `wsl-muse-code`,
-`wsl-grok-build`) start the CLI with
+The five WSL profiles this repository ships (`wsl-claude-code`,
+`wsl-codex-cli`, `wsl-copilot-cli`, `wsl-muse-code`, `wsl-grok-build`) start
+the CLI with the form below; `wsl-grok-build` runs its overlay door in the same
+`bash -lic` statement before the `exec` (see [Launch overlay](#launch-overlay)):
 
 ```toml
 [command]
@@ -2422,16 +2316,17 @@ same working directory, name and launch option values, so edits to the
 profile since -- and its MCP injection, hooks and `[delivery]` table -- apply to the
 restored window.
 
-Only when the daemon refuses that launch (for example, the profile no longer
-exists, or no longer runs on this operating system) does the GUI fall back
-to re-spawning the saved argv, detection definition and `vendor` as they
-were recorded; a restored window opened that way gets no MCP injection and takes no part in
-[delivery](#delivery) --
-except when the refusal is `profile_disabled` (see
-[Disabling a profile](#disabling-a-profile)): retrying the saved argv would
-launch the very CLI the user switched off, so that window is left unopened
-instead, and its name is collected into a single notice covering every
-window the current restore held back this way. Any other failure is not
-retried. A window opened from a raw argv, or recorded by a daemon from
-before the snapshot kept the profile, is always restored from its saved
-argv.
+A window the daemon refuses to open from its profile -- the profile no
+longer exists, is disabled (see [Disabling a profile](#disabling-a-profile)),
+no longer runs on this operating system, or does not take a recorded value,
+among others -- is not opened at all: the GUI never falls back to the saved
+argv, which carries none of the profile's injection and would start the very
+CLI that was taken away or switched off. Every window a restore could not open
+is named in one notice with the daemon's reason (`Not restored (2):
+review-pane: unknown launch profile; build-runner: the launch profile is
+disabled`); names that do not fit are counted as `+N more` rather than cut.
+
+The saved argv, detection definition and `vendor` are used only for a window
+opened from a raw argv, and for one recorded by a daemon from before the
+snapshot kept the profile. A window restored that way gets no MCP injection and
+takes no part in [delivery](#delivery).

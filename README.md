@@ -2,14 +2,12 @@
 
 **Run agent CLIs from different vendors side by side, and let them work together.**
 
-yagura is a desktop app that runs any command -- Claude Code, Codex CLI, Antigravity CLI, GitHub
-Copilot CLI, Grok Build, Muse Code, or a plain shell -- in its own window, tells you at a glance which window
+yagura is a desktop app that runs any command -- Claude Code, Codex CLI, GitHub Copilot CLI,
+Grok Build, Muse Code, or a plain shell -- in its own window, tells you at a glance which window
 is working and which one is waiting for you, and gives the agents in those windows an MCP server to
 see and talk to each other.
 You stay in control: anything one agent does to another window waits for your approval unless you
 allow it.
-
-![One prompt to Claude Code: Antigravity CLI implements, Codex CLI reviews and finds gaps in the tests, and Claude Code asks you to decide](docs/images/demo.gif)
 
 ## Features
 
@@ -21,8 +19,6 @@ allow it.
   status, vendor and working directory.
 - Windows keep running in a background daemon, so closing the GUI does not stop your agents. Next
   time, yagura offers to bring your last layout back.
-
-![yagura with Claude Code, Codex CLI, Antigravity CLI and a shell open side by side](docs/images/overview.png)
 
 **Know who needs you**
 
@@ -37,7 +33,7 @@ allow it.
 - `yagura-mcp` gives an agent tools to list, open, read, message, interrupt and close windows.
   Windows opened from the bundled Claude Code, Codex CLI and GitHub Copilot CLI profiles, and from
   the Muse Code profiles on macOS, Linux and WSL, are connected automatically; register yagura in
-  Settings > Integrations for Antigravity CLI, Grok Build and, on Windows, Muse Code.
+  Settings > Integrations for Grok Build and, on Windows, Muse Code.
 - **Handoff**: pass a reference and a note to another window -- or to a new one, opened with the
   CLI you choose -- and learn whether its CLI took it.
 - **Chat rooms**: agents and you post to each other with `@name`, `@parent` and `@user`. A room
@@ -49,8 +45,8 @@ allow it.
   a floating window's title bar. See
   [how delivery works](docs/mcp-setup.md#how-the-daemon-delivers-text).
 - **Interrupting**: your own interrupt presses the CLI's key. An agent's stops the CLI at its next
-  tool call through its hooks, without touching your draft; Codex CLI and Antigravity CLI refuse
-  an agent's interrupt. See [interrupt_window](docs/mcp-setup.md#interrupt_window).
+  tool call through its hooks, without touching your draft; Codex CLI refuses an agent's
+  interrupt. See [interrupt_window](docs/mcp-setup.md#interrupt_window).
 - **Plans**: an agent hands yagura a plan of tasks with dependencies. yagura works out what can
   run in parallel, refuses tasks that would write the same files at the same time, and opens each
   task's window with the CLI, model and effort you assign.
@@ -58,8 +54,6 @@ allow it.
 - **Tickets**: each repository has a ticket board that agents keep through MCP and you read in the
   app. The states and the rules are yours, in `tickets.toml`; yagura enforces only the fields a
   state requires.
-
-![An approval dialog asking whether one window may send a message to another](docs/images/approval.png)
 
 **You decide**
 
@@ -74,10 +68,6 @@ allow it.
 - Dark, Light and System themes, or your own; per window or per vendor.
 - Rebindable keyboard shortcuts for moving between windows and panels.
 
-![The Chat panel with a room of agents and delivery states](docs/images/chat.png)
-
-![The Plans panel's board, with tasks grouped into waves](docs/images/plans.png)
-
 ## Install
 
 | Platform | How |
@@ -87,8 +77,8 @@ allow it.
 | Linux (Debian, Ubuntu) | Download the `.deb` from the [Releases](../../releases) page and install it with `sudo apt install ./yagura_<version>_amd64.deb`. |
 | Other systems, Intel Macs | Build from source -- see [docs/building.md](docs/building.md). |
 
-You also need the agent CLIs you want to run (Claude Code, Codex CLI, Antigravity CLI, GitHub
-Copilot CLI, Grok Build, Muse Code), installed and signed in as usual. yagura does not install or sign in to
+You also need the agent CLIs you want to run (Claude Code, Codex CLI, GitHub Copilot CLI, Grok
+Build, Muse Code), installed and signed in as usual. yagura does not install or sign in to
 them for you. On Windows, install Codex CLI's standalone build rather than the npm package: yagura
 wakes a waiting Codex CLI with a command that the npm package's `.cmd` launcher cannot pass text
 through, and lists the Codex CLI profile as unavailable until the standalone build is first on
@@ -111,7 +101,19 @@ through, and lists the Codex CLI profile as unavailable until the standalone bui
 To use yagura's tools from a CLI session that yagura did not start, register the MCP bridge in
 **Settings > Integrations**, or by hand as described in [docs/mcp-setup.md](docs/mcp-setup.md).
 
-![Settings > Integrations, registering yagura with each CLI](docs/images/integrations.png)
+## Antigravity CLI Is Not Supported
+
+yagura does not ship a profile, detection definition or Integrations entry for Antigravity CLI
+(`agy`). Google's [Antigravity terms](https://antigravity.google/terms/) (section 6) treat
+accessing the service through third-party software as a breach that can get the account
+suspended or terminated, and its [FAQ](https://antigravity.google/docs/faq/) says that wrapping
+`agy` inside third-party applications is not supported under consumer plans. A suspension can
+also take away the other services you sign in to with the same Google account.
+
+yagura does not stop any command from running, but we strongly recommend that you do not run
+`agy` signed in with a consumer account inside yagura. Check the terms of your own plan with
+Google. If you registered yagura with Antigravity CLI before, remove it as described in
+[Removing yagura from Antigravity CLI](docs/mcp-setup.md#removing-yagura-from-antigravity-cli).
 
 ## Documentation
 
@@ -156,8 +158,8 @@ To use yagura's tools from a CLI session that yagura did not start, register the
 - A window's id and token let its hooks and MCP bridge speak for it. In windows of the bundled
   Claude Code and GitHub Copilot CLI profiles, and of the WSL Muse Code profile, they reach only
   those, so a CLI that one of the window's tools starts cannot speak for the window. In a Codex CLI
-  window the tools Codex runs get them empty. Other windows -- Antigravity CLI, Grok Build, Muse Code
-  outside WSL, a shell -- still carry them in their environment, where any program started inside
+  window the tools Codex runs get them empty. Other windows -- Grok Build, Muse Code outside WSL, a
+  shell -- still carry them in their environment, where any program started inside
   can read them (see [profiles/README.md](profiles/README.md#credentials)).
 
 ## License

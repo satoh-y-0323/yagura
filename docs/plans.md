@@ -307,7 +307,8 @@ profile = "codex-cli"
   [profiles/README.md](../profiles/README.md#disabling-a-profile)) still counts as existing for the
   save check below: a role naming a disabled profile saves and loads exactly like any other row, and
   only opening a window through it is refused, as `profile_disabled`
-  ([docs/mcp-setup.md](mcp-setup.md#open_task_window)).
+  ([docs/mcp-setup.md](mcp-setup.md#open_task_window)). Opening a window through a role whose
+  profile has since been removed is refused as `profile_not_found`.
 
 The daemon finds the file in this order:
 

@@ -40,8 +40,8 @@ input typed into the pane (for example `pwd`) is answered by that shell.
 A command typed this way is a raw argv: it gets no MCP injection (see
 [MCP from a WSL Window](#mcp-from-a-wsl-window)). To run a CLI with yagura's MCP tools available,
 open it from the `WSL: Claude Code`, `WSL: Codex CLI`, `WSL: GitHub Copilot CLI` or
-`WSL: Muse Code` profile instead (`WSL: Antigravity CLI` and `WSL: Grok Build`
-open a window the same way but need their own MCP registration -- see
+`WSL: Muse Code` profile instead (`WSL: Grok Build` opens a window the same way
+but needs its own MCP registration -- see
 [MCP from a WSL Window](#mcp-from-a-wsl-window)).
 
 ## The Launch Form of the Bundled WSL Profiles
@@ -62,13 +62,8 @@ unexpanded. This needs `bash` in the distribution, and the **Linux** build of th
 inside it: the Windows build on the host is not what runs. See
 [profiles/README.md](../profiles/README.md#wsl-profiles).
 
-Two of them add a step before that form:
+One of them adds a step before that form:
 
-- `wsl-antigravity-cli` first runs a plain `bash -c` that records where the CLI's own process line
-  starts -- its process id, the guest's boot id and its start time -- in `YAGURA_GUEST_ROOT`, then
-  starts the form above. The window's hooks and bridge report their parent processes up to that
-  root, so the daemon can tell the window's own `agy` from one nested in it (see
-  [A window's own CLI](../profiles/README.md#a-windows-own-cli)).
 - `wsl-grok-build` runs, after the shell files and before Grok Build, the window's overlay door
   (`yagura-daemon.exe --launch-overlay`, the `{daemon}` element of its `[command]`) with what the
   guest holds of Grok Build's settings, and starts Grok Build only with the overlay it printed, in
@@ -77,7 +72,7 @@ Two of them add a step before that form:
   [Launch overlay](../profiles/README.md#launch-overlay)). A run that opens no window -- a
   registration, a listing -- starts Grok Build without the door.
 
-A Windows path is not readable from the Linux CLI as it is, so each of the six profiles also has
+A Windows path is not readable from the Linux CLI as it is, so each of the five profiles also has
 a top-level `[host_paths]` table that converts every path the daemon hands the CLI with
 `wsl -e wslpath -u` -- the bridge and the daemon a registration writes, and a settings file or
 directory a launch injection names. Their own launch injections name no path, so opening one of
@@ -89,22 +84,22 @@ file Muse Code takes only by their paths; those are converted at each launch. Se
 Because the shell is both a login and an interactive one, `~/.profile` and `~/.bashrc` run inside
 the window's process tree before the CLI replaces bash, and that tree's environment already carries
 the window's identity token (`YAGURA_STATUS_TOKEN`) when the profile keeps its credentials in the
-environment (`wsl-codex-cli`, `wsl-antigravity-cli`, `wsl-grok-build`), so anything those files start can
+environment (`wsl-codex-cli`, `wsl-grok-build`), so anything those files start can
 identify itself as the window. The `wsl-claude-code`, `wsl-copilot-cli` and `wsl-muse-code` windows hold
 none (see [Credentials](../profiles/README.md#credentials)). See "Who this identifies" under
 [Requester Identification](mcp-setup.md#requester-identification) for why the token is on the whole
 tree.
 
-None of the six WSL profiles names a `[command]` key for macOS or Linux, so on either of those
+None of the five WSL profiles names a `[command]` key for macOS or Linux, so on either of those
 the daemon leaves them out of every profile listing --
 see profiles/README.md's schema section for the OS-specific `[command]` selection rule.
 
 ## Model Lists from the WSL Profiles
 
-When the GUI's Models tab asks for the model list of `wsl-codex-cli` or `wsl-antigravity-cli`, the
-daemon runs the same launch form, prefix included, with the profile's listing arguments after the
-CLI -- for example `wsl -e bash -lic 'exec "$0" "$@"' codex debug models`. The list therefore comes
-from the Linux build inside the distribution, found through the same `PATH` after the same
+When the GUI's Models tab asks for the model list of `wsl-codex-cli`, the daemon runs the same
+launch form, prefix included, with the profile's listing arguments after the CLI -- for example
+`wsl -e bash -lic 'exec "$0" "$@"' codex debug models`. The list therefore comes from the Linux
+build inside the distribution, found through the same `PATH` after the same
 `~/.profile` and `~/.bashrc` have run. The listing is not a window, so it gets none of the variables
 a window's child is given. A CLI missing from the distribution makes bash exit with status 127, which
 reads as `codex was not found` (the CLI's name, not `wsl`). `wsl-claude-code`, `wsl-muse-code`
@@ -158,16 +153,7 @@ The `wsl-claude-code`, `wsl-copilot-cli` and `wsl-muse-code` definitions also pa
 
 The bridge then reaches the daemon over the same Windows named pipe as any other window's bridge.
 
-`wsl-antigravity-cli` carries no `[mcp]` table -- Antigravity CLI (`agy`) reads MCP servers only
-from its own global registration, the same as its Windows-native counterpart (see
-[Configuring Antigravity CLI](mcp-setup.md#configuring-antigravity-cli)). Register it with
-its row in Settings > Integrations: the registration starts the bridge through `bash -c`, which
-collects the bridge's parent processes in the guest and hands them to it with `--guest-root` and
-`--guest-step`, so the daemon can trace the bridge to the window's own `agy` (see
-[A window's own CLI](../profiles/README.md#a-windows-own-cli)). A registration written before this
-release starts the bridge without them; the row reads as differing, and **Update** writes it again.
-
-`wsl-grok-build` carries no `[mcp]` table either: Grok Build has no launch argument that adds an MCP
+`wsl-grok-build` carries no `[mcp]` table: Grok Build has no launch argument that adds an MCP
 server. Its row in Settings > Integrations registers the bridge inside the distribution by the
 `/mnt/c/...` path `wslpath` gives (see
 [Configuring Grok Build](mcp-setup.md#configuring-grok-build)). Grok Build hands an MCP server its
@@ -209,14 +195,6 @@ its next turn, as the reply's `note` says.
 the distribution receives the text unchanged. The program the daemon starts is `wsl.exe`, not an npm
 `.cmd` shim, so this profile needs no standalone build of Codex CLI the way the Windows-native
 `codex-cli` profile does (see [Delivery](../profiles/README.md#delivery)).
-
-## Folder Trust Is Separate Inside the Distribution
-
-Antigravity CLI keeps its own list of trusted working directories, and that list is not shared
-between the Windows-native binary and the one running inside WSL: a directory already trusted on
-the Windows side still shows `agy`'s "Do you trust the contents of this project?" confirmation the
-first time it runs there from a `WSL: Antigravity CLI` window, independent of whether the same path
-was ever confirmed outside the distribution.
 
 ## The Working Directory
 
