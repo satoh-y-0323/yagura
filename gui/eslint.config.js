@@ -327,6 +327,7 @@ export default [
       'vite.config.ts',
       'svelte.config.js',
       'eslint.config.js',
+      'stylelint.config.js',
     ],
   },
 ];
