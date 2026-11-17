@@ -73,7 +73,7 @@ async fn window_that_asks(
 
 #[tokio::test]
 async fn before_the_gui_sent_a_palette_a_color_query_is_answered_from_the_built_in_one() {
-    let built_in = yagura_protocol::built_in_dark_palette();
+    let built_in = yagura_protocol::built_in_default_palette();
     let (h, window_id, _view) = window_that_asks(
         "palette-none",
         &[QUERY_BACKGROUND, QUERY_FOREGROUND, DEVICE_STATUS],

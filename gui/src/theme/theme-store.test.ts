@@ -1,6 +1,11 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 
-import { BUILT_IN_PALETTES, PALETTE_TOKEN_KEYS } from './palette';
+import {
+  BUILT_IN_DEFAULT_SELECTION,
+  BUILT_IN_PALETTES,
+  PALETTE_TOKEN_KEYS,
+  builtInDefaultPalette,
+} from './palette';
 import type { LoadThemesResult, ThemesLoadFailure } from '../ipc/session-client';
 import {
   createBrowserThemeDeps,
@@ -121,10 +126,10 @@ describe('createThemeStore - construction parses only the 4 stored forms', () =>
   });
 
   it.each([[null], [''], ['bogus'], ['named:'], ['Dark'], ['solarized-dark']])(
-    'falls back to the built-in dark literal when storage holds %j',
+    'falls back to the built-in default selection when storage holds %j',
     (stored) => {
       const { deps } = makeDeps({ stored });
-      expect(currentState(createThemeStore(deps)).selection).toBe('dark');
+      expect(currentState(createThemeStore(deps)).selection).toBe(BUILT_IN_DEFAULT_SELECTION);
     }
   );
 });
@@ -173,15 +178,15 @@ describe('createThemeStore - loadUserThemes: exclusive 4-way branch', () => {
     expect(state.appPalette).toEqual(paletteOf('#020202'));
   });
 
-  it('(b) falls back to the built-in dark literal when the stored named theme is absent and no default resolves', () => {
+  it('(b) falls back to the built-in default selection when the stored named theme is absent and no default resolves', () => {
     const { deps } = makeDeps({ stored: 'named:missing' });
     const store = createThemeStore(deps);
 
     store.loadUserThemes(emptyLoadResult({ defaultTheme: null }));
 
     const state = currentState(store);
-    expect(state.selection).toBe('dark');
-    expect(state.appPalette).toEqual(BUILT_IN_PALETTES.dark);
+    expect(state.selection).toBe(BUILT_IN_DEFAULT_SELECTION);
+    expect(state.appPalette).toEqual(builtInDefaultPalette(deps.prefersDark()));
   });
 
   it('(c) counter-example: a stored mode-literal selection (light) is kept when the default is dark', () => {
@@ -232,25 +237,25 @@ describe('createThemeStore - loadUserThemes: exclusive 4-way branch', () => {
     expect(currentState(store).selection).toEqual({ named: 'custom' });
   });
 
-  it('(d) stays at the built-in dark literal when nothing was stored and no default resolves', () => {
+  it('(d) stays at the built-in default selection when nothing was stored and no default resolves', () => {
     const { deps } = makeDeps({ stored: null });
     const store = createThemeStore(deps);
 
     store.loadUserThemes(emptyLoadResult({ defaultTheme: null }));
 
-    expect(currentState(store).selection).toBe('dark');
+    expect(currentState(store).selection).toBe(BUILT_IN_DEFAULT_SELECTION);
   });
 });
 
 describe('createThemeStore - __proto__ named selection regression', () => {
-  it('(iv) falls back to the built-in dark palette when the stored selection names "__proto__" and no such theme was loaded', () => {
+  it('(iv) falls back to the built-in default palette when the stored selection names "__proto__" and no such theme was loaded', () => {
     const { deps } = makeDeps({ stored: 'named:__proto__' });
     const store = createThemeStore(deps);
 
     store.loadUserThemes(emptyLoadResult({ defaultTheme: null }));
 
     const state = currentState(store);
-    expect(state.appPalette).toEqual(BUILT_IN_PALETTES.dark);
+    expect(state.appPalette).toEqual(builtInDefaultPalette(deps.prefersDark()));
   });
 });
 
@@ -406,7 +411,7 @@ describe('createThemeStore - storage exception resilience', () => {
     expect(() => {
       store = createThemeStore(deps);
     }).not.toThrow();
-    expect(currentState(store as ThemeStore).selection).toBe('dark');
+    expect(currentState(store as ThemeStore).selection).toBe(BUILT_IN_DEFAULT_SELECTION);
   });
 
   it('does not throw when storageWrite throws during select(), and still delivers the new state', () => {
@@ -635,7 +640,7 @@ describe('createThemeStore - state a subscriber sees', () => {
 
     expect(state.issues).toEqual([]);
     expect(state.loadFailure).toBeNull();
-    expect(state.selection).toBe('dark');
+    expect(state.selection).toBe(BUILT_IN_DEFAULT_SELECTION);
   });
 
   it('keeps a stored named built-in selection when the themes file adds no theme', () => {

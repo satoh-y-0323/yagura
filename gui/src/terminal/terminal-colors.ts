@@ -11,17 +11,18 @@ import {
 } from '../components/terminal-theme';
 import type { CellAttr, CellColor, ColorOverride, Rgb } from '../ipc/session-boundary';
 import type { WirePalette } from '../ipc/session-client';
-import { BUILT_IN_PALETTES } from '../theme/palette';
+import { builtInDefaultPalette } from '../theme/palette';
 
 /**
  * Colors a theme falls back to for a token that resolved to nothing: the
- * built-in dark palette's, which holds every token.
+ * built-in default palette's, which holds every token. No OS preference
+ * reaches here, so `system` reads as dark, as in the daemon.
  */
 const FALLBACK_THEME: TerminalTheme = (() => {
-  const dark = themeOfPalette(BUILT_IN_PALETTES.dark);
+  const fallback = themeOfPalette(builtInDefaultPalette(true));
   const theme = {} as TerminalTheme;
   for (const key of Object.keys(THEME_TOKENS) as (keyof TerminalTheme)[]) {
-    theme[key] = dark[key] ?? '#000000';
+    theme[key] = fallback[key] ?? '#000000';
   }
   return theme;
 })();

@@ -1,6 +1,13 @@
 import { describe, it, expect } from 'vitest';
 import type { Palette } from './palette';
-import { PALETTE_TOKEN_KEYS, BUILT_IN_PALETTES, isValidColor, validatePalette } from './palette';
+import {
+  PALETTE_TOKEN_KEYS,
+  REQUIRED_PALETTE_KEYS,
+  UNUSED_PALETTE_KEYS,
+  BUILT_IN_PALETTES,
+  isValidColor,
+  validatePalette,
+} from './palette';
 
 // The palette vocabulary is declared here as CSS custom property names so that
 // the expected key set is derived (not hand-copied) by stripping the '--' prefix.
@@ -44,22 +51,58 @@ const CSS_VARIABLE_NAMES = [
 
 const EXPECTED_KEYS: string[] = CSS_VARIABLE_NAMES.map((name) => name.replace(/^--/, ''));
 
+// Accepted for compatibility with older theme files but read by nothing.
+const EXPECTED_UNUSED_KEYS: string[] = [
+  'color-primary-hover',
+  'color-error-hover',
+  'color-warning-action',
+  'color-warning-action-hover',
+  'color-on-warning',
+  'color-on-warning-action',
+];
+
+const EXPECTED_REQUIRED_KEYS: string[] = EXPECTED_KEYS.filter(
+  (key) => !EXPECTED_UNUSED_KEYS.includes(key)
+);
+
 const THEME_NAMES: ('dark' | 'light')[] = ['dark', 'light'];
 
 const HEX_COLOR = /^#[0-9a-fA-F]{6}$/;
 
-function completeCandidate(): Record<string, string> {
-  return { ...BUILT_IN_PALETTES.light };
+/** A record holding only the required keys, taken from the built-in light palette. */
+function requiredOnlyCandidate(): Record<string, string> {
+  const candidate: Record<string, string> = {};
+  for (const key of EXPECTED_REQUIRED_KEYS) {
+    candidate[key] = BUILT_IN_PALETTES.light[key] ?? '';
+  }
+  return candidate;
 }
 
-describe('PALETTE_TOKEN_KEYS', () => {
-  it('lists exactly the keys derived from the 35 CSS variable names', () => {
-    expect([...PALETTE_TOKEN_KEYS].sort()).toEqual([...EXPECTED_KEYS].sort());
-  });
+/** The required keys plus the 6 accepted-but-unused ones: the shape of an older theme file. */
+function completeCandidate(): Record<string, string> {
+  const candidate = requiredOnlyCandidate();
+  for (const key of EXPECTED_UNUSED_KEYS) {
+    candidate[key] = '#010203';
+  }
+  return candidate;
+}
 
-  it('contains 35 entries without duplicates', () => {
+describe('the palette key sets', () => {
+  it('PALETTE_TOKEN_KEYS lists exactly the 35 accepted keys, without duplicates', () => {
+    expect([...PALETTE_TOKEN_KEYS].sort()).toEqual([...EXPECTED_KEYS].sort());
     expect(PALETTE_TOKEN_KEYS).toHaveLength(35);
     expect(new Set(PALETTE_TOKEN_KEYS).size).toBe(35);
+  });
+
+  it('REQUIRED_PALETTE_KEYS lists exactly the 29 required keys, without duplicates', () => {
+    expect([...REQUIRED_PALETTE_KEYS].sort()).toEqual([...EXPECTED_REQUIRED_KEYS].sort());
+    expect(REQUIRED_PALETTE_KEYS).toHaveLength(29);
+    expect(new Set(REQUIRED_PALETTE_KEYS).size).toBe(29);
+  });
+
+  it('UNUSED_PALETTE_KEYS lists exactly the 6 accepted but unused keys', () => {
+    expect([...UNUSED_PALETTE_KEYS].sort()).toEqual([...EXPECTED_UNUSED_KEYS].sort());
+    expect(UNUSED_PALETTE_KEYS).toHaveLength(6);
   });
 });
 
@@ -68,8 +111,10 @@ describe('BUILT_IN_PALETTES', () => {
     expect(Object.keys(BUILT_IN_PALETTES).sort()).toEqual(['dark', 'light']);
   });
 
-  it.each(THEME_NAMES)('defines exactly the 35 palette keys for %s', (theme) => {
-    expect(Object.keys(BUILT_IN_PALETTES[theme]).sort()).toEqual([...EXPECTED_KEYS].sort());
+  it.each(THEME_NAMES)('defines exactly the 29 required palette keys for %s', (theme) => {
+    expect(Object.keys(BUILT_IN_PALETTES[theme]).sort()).toEqual(
+      [...EXPECTED_REQUIRED_KEYS].sort()
+    );
   });
 
   it.each(THEME_NAMES)('passes validatePalette for %s', (theme) => {
@@ -77,7 +122,7 @@ describe('BUILT_IN_PALETTES', () => {
   });
 
   it.each(THEME_NAMES)('uses #RRGGBB for every value of %s', (theme) => {
-    const offenders = EXPECTED_KEYS.filter(
+    const offenders = Object.keys(BUILT_IN_PALETTES[theme]).filter(
       (key) => !HEX_COLOR.test(BUILT_IN_PALETTES[theme][key] ?? '')
     );
     expect(offenders).toEqual([]);
@@ -128,17 +173,43 @@ describe('validatePalette', () => {
   });
 
   it('returns the same colour values that were supplied', () => {
-    const result = validatePalette(completeCandidate());
+    const supplied = completeCandidate();
+    const result = validatePalette(supplied);
     expect(result).not.toBeNull();
     for (const key of EXPECTED_KEYS) {
-      expect(result?.[key]).toBe(BUILT_IN_PALETTES.light[key]);
+      expect(result?.[key]).toBe(supplied[key]);
     }
   });
 
-  it.each(EXPECTED_KEYS)('returns null when the key %s is missing', (missingKey) => {
-    const candidate = completeCandidate();
-    delete candidate[missingKey];
-    expect(validatePalette(candidate)).toBeNull();
+  it.each(EXPECTED_REQUIRED_KEYS)(
+    'returns null when the required key %s is missing',
+    (missingKey) => {
+      const candidate = completeCandidate();
+      delete candidate[missingKey];
+      expect(validatePalette(candidate)).toBeNull();
+    }
+  );
+
+  it.each(EXPECTED_UNUSED_KEYS)(
+    'returns a palette when the unused key %s is missing',
+    (missingKey) => {
+      const candidate = completeCandidate();
+      delete candidate[missingKey];
+      expect(validatePalette(candidate)).not.toBeNull();
+    }
+  );
+
+  it('returns a palette for a record with only the 29 required keys', () => {
+    const result = validatePalette(requiredOnlyCandidate());
+    expect(result).not.toBeNull();
+    expect(Object.keys(result ?? {}).sort()).toEqual([...EXPECTED_REQUIRED_KEYS].sort());
+  });
+
+  it('returns null when an unused key is present with a value that is not #RRGGBB', () => {
+    for (const key of EXPECTED_UNUSED_KEYS) {
+      const candidate: Record<string, string> = { ...completeCandidate(), [key]: '#fff' };
+      expect(validatePalette(candidate), key).toBeNull();
+    }
   });
 
   it('returns null when an unknown key is present', () => {

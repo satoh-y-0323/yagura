@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { BUILT_IN_PALETTES, PALETTE_TOKEN_KEYS } from './palette';
+import { BUILT_IN_PALETTES, PALETTE_TOKEN_KEYS, builtInDefaultPalette } from './palette';
 import type {
   AppThemeSelection,
   ThemeIssue,
@@ -347,14 +347,16 @@ describe('resolveAppPalette', () => {
     expect(resolveAppPalette(selection, false, { ocean: OCEAN })).toEqual(OCEAN);
   });
 
-  it('falls back to the built-in dark palette for an unknown name', () => {
+  it('falls back to the built-in default palette for an unknown name', () => {
     const selection: AppThemeSelection = { named: 'nope' };
-    expect(resolveAppPalette(selection, false, { ocean: OCEAN })).toEqual(DARK);
+    expect(resolveAppPalette(selection, false, { ocean: OCEAN })).toEqual(
+      builtInDefaultPalette(false)
+    );
   });
 
-  it('falls back to the built-in dark palette when userPalettes is empty', () => {
+  it('falls back to the built-in default palette when userPalettes is empty', () => {
     const selection: AppThemeSelection = { named: 'ocean' };
-    expect(resolveAppPalette(selection, true, {})).toEqual(DARK);
+    expect(resolveAppPalette(selection, true, {})).toEqual(builtInDefaultPalette(true));
   });
 
   it('resolves the named form of the built-in dark palette', () => {
@@ -570,11 +572,15 @@ describe('theme names that collide with the language', () => {
 
   it('falls back to the built-in palettes for a named theme whose palette is missing', () => {
     const palettes = { ocean: undefined } as unknown as Record<string, Record<string, string>>;
-    expect(resolveAppPalette({ named: 'ocean' }, false, palettes)).toEqual(DARK);
+    expect(resolveAppPalette({ named: 'ocean' }, false, palettes)).toEqual(
+      builtInDefaultPalette(false)
+    );
   });
 
   it('does not resolve a named theme through the prototype chain', () => {
-    expect(resolveAppPalette({ named: 'toString' }, false, {})).toEqual(DARK);
+    expect(resolveAppPalette({ named: 'toString' }, false, {})).toEqual(
+      builtInDefaultPalette(false)
+    );
   });
 });
 

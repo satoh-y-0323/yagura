@@ -3,7 +3,7 @@
 //! A window no view is attached to answers its program's color queries from
 //! the default palettes the GUI last sent (`set_default_palettes`): the one
 //! assigned to the window's vendor, else the app's; before any were sent, from
-//! the built-in dark palette. The answer does not depend on whether a view
+//! the built-in default palette. The answer does not depend on whether a view
 //! sent `set_palette` before the program asked.
 //!
 //! The child is `hex_echo --emit`: right after starting it writes the queries,
@@ -179,9 +179,10 @@ async fn a_window_whose_vendor_has_no_assignment_answers_from_the_app_palette() 
 }
 
 #[tokio::test]
-async fn before_any_default_palettes_were_sent_a_window_answers_from_the_built_in_dark_palette() {
+async fn before_any_default_palettes_were_sent_a_window_answers_from_the_built_in_default_palette()
+{
     let h = Harness::start("default-palette-built-in", DaemonConfig::default()).await;
-    let built_in = yagura_protocol::built_in_dark_palette();
+    let built_in = yagura_protocol::built_in_default_palette();
     assert_ne!(
         built_in.background,
         app_palette().background,
@@ -194,6 +195,6 @@ async fn before_any_default_palettes_were_sent_a_window_answers_from_the_built_i
         &h,
         &window_id,
         &built_in,
-        "with no default palettes sent, a window must answer with the built-in dark palette",
+        "with no default palettes sent, a window must answer with the built-in default palette",
     );
 }

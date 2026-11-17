@@ -193,7 +193,7 @@ fn the_frames_and_launch_fields_the_daemon_link_added_round_trip() {
         awaits_successor: true,
         log_file: Some(PathBuf::from("state").join("daemon.log")),
         history_rows: 1000,
-        palette: Some(yagura_protocol::built_in_dark_palette()),
+        palette: Some(yagura_protocol::built_in_default_palette()),
         fault: None,
         scopes: Some(yagura_protocol::holder::HolderScopes {
             holder: "yagura_w1_holder.scope".to_owned(),
@@ -386,7 +386,7 @@ fn the_frames_of_the_terminal_in_the_holder_round_trip() {
             bytes: b"\x1b[I".to_vec(),
         },
         HolderFrame::SetPalette {
-            palette: yagura_protocol::built_in_dark_palette(),
+            palette: yagura_protocol::built_in_default_palette(),
         },
         HolderFrame::SetViewFocus { focused: true },
         HolderFrame::Attach { generation: 2 },

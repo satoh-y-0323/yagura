@@ -1,4 +1,11 @@
-import { BUILT_IN_PALETTES, hasOwnKey, isRecordLike, Palette, validatePalette } from './palette';
+import {
+  BUILT_IN_PALETTES,
+  builtInDefaultPalette,
+  hasOwnKey,
+  isRecordLike,
+  Palette,
+  validatePalette,
+} from './palette';
 
 /** The app theme selections yagura ships; a user theme cannot take one of these names. */
 export const BUILT_IN_SELECTIONS = ['dark', 'light', 'system'] as const;
@@ -131,7 +138,7 @@ export function parseUserThemes(
 
 /**
  * Resolves the application palette for a given selection. Named references
- * that do not exist fall back to the built-in dark palette. The `system`
+ * that do not exist fall back to the built-in default palette. The `system`
  * selection follows the OS preference.
  */
 export function resolveAppPalette(
@@ -155,7 +162,11 @@ export function resolveAppPalette(
     return userPalette;
   }
 
-  return namedTheme === 'light' ? BUILT_IN_PALETTES.light : BUILT_IN_PALETTES.dark;
+  // `dark` and `light` name the built-in palettes; any other name falls back to the default.
+  if (namedTheme === 'dark' || namedTheme === 'light') {
+    return BUILT_IN_PALETTES[namedTheme];
+  }
+  return builtInDefaultPalette(prefersDark);
 }
 
 /**

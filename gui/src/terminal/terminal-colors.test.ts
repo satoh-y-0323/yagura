@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { ANSI_THEME_KEYS, themeOfPalette, type TerminalTheme } from '../components/terminal-theme';
 import type { CellAttr } from '../ipc/session-boundary';
-import { BUILT_IN_PALETTES } from '../theme/palette';
+import { builtInDefaultPalette } from '../theme/palette';
 import {
   completeTheme,
   PaintCache,
@@ -37,12 +37,10 @@ const THEME: TerminalTheme = {
   brightWhite: '#000010',
 };
 
-// The colors a missing or unreadable one falls back to, read from where the
-// production fallback reads them.
-const FALLBACK = themeOfPalette(BUILT_IN_PALETTES.dark);
-
+// The colors a missing or unreadable one falls back to: the built-in default
+// palette, which reads `system` as dark because this path has no OS preference.
 function fallbackColor(key: keyof TerminalTheme): string {
-  const color = FALLBACK[key];
+  const color = themeOfPalette(builtInDefaultPalette(true))[key];
   if (color === undefined) {
     throw new Error(`the built-in palette gives no ${key}`);
   }
@@ -62,7 +60,7 @@ function attr(fields: Partial<CellAttr>): CellAttr {
 }
 
 describe('a theme with every color present', () => {
-  it('takes the colors it is given and fills the rest from the dark theme', () => {
+  it('takes the colors it is given and fills the rest from the default theme', () => {
     const complete = completeTheme({ background: '#abcdef', red: '#123456' });
     expect(complete.background).toBe('#abcdef');
     expect(complete.red).toBe('#123456');
@@ -227,13 +225,13 @@ describe('the theme as the daemon answers color queries with it', () => {
     expect(wire.foreground).toEqual([0xaa, 0xbb, 0xcc]);
   });
 
-  it('answers with the dark theme’s color for text around a hex color', () => {
+  it('answers with the default theme’s color for text around a hex color', () => {
     const wire = wirePaletteOf({ ...THEME, foreground: 'x#aabbcc', background: '#aabbccdd' });
     expect(wire.foreground).toEqual(fallbackRgb('foreground'));
     expect(wire.background).toEqual(fallbackRgb('background'));
   });
 
-  it('answers with the dark theme’s color for one that is not #rrggbb', () => {
+  it('answers with the default theme’s color for one that is not #rrggbb', () => {
     const wire = wirePaletteOf({
       ...THEME,
       foreground: 'rgb(1, 2, 3)',

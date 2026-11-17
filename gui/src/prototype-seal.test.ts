@@ -45,7 +45,11 @@ describe('the entry point seals Object.prototype before it mounts the app', () =
   it('hands mount a prototype that is already sealed', async () => {
     expect(Object.isExtensible(Object.prototype)).toBe(true);
 
-    vi.stubGlobal('document', { getElementById: () => ({}), addEventListener: () => undefined });
+    vi.stubGlobal('document', {
+      getElementById: () => ({}),
+      addEventListener: () => undefined,
+      documentElement: { style: { setProperty: () => undefined } },
+    });
     await import('./main');
 
     expect(mountMock).toHaveBeenCalledTimes(1);

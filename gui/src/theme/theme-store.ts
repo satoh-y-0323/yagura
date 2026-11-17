@@ -1,6 +1,6 @@
 import type { LoadThemesResult, ThemesLoadFailure } from '../ipc/session-client';
 import { createGuardedLocalStorage } from '../storage/guarded-storage';
-import { hasOwnKey, type Palette } from './palette';
+import { BUILT_IN_DEFAULT_SELECTION, hasOwnKey, type Palette } from './palette';
 import {
   parseUserThemes,
   isBuiltInSelection,
@@ -100,7 +100,7 @@ export function createThemeStore(deps: ThemeStoreDeps): ThemeStore {
   const storedSelection = parseStoredSelection(readStoredSelection(deps));
   let hasStoredSelection = storedSelection !== null;
 
-  let selection: AppThemeSelection = storedSelection ?? 'dark';
+  let selection: AppThemeSelection = storedSelection ?? BUILT_IN_DEFAULT_SELECTION;
   // Null-prototype, matching `parseUserThemes`'s output shape, so the window
   // between construction and `loadUserThemes` carries the same guarantee.
   let userPalettes: Record<string, Palette> = Object.create(null) as Record<string, Palette>;
@@ -148,7 +148,7 @@ export function createThemeStore(deps: ThemeStoreDeps): ThemeStore {
     if (typeof selection === 'string' || isResolvableName(selection.named)) {
       return selection;
     }
-    return defaultSelection ?? 'dark';
+    return defaultSelection ?? BUILT_IN_DEFAULT_SELECTION;
   };
 
   // The store lives as long as the application, so the remover is not kept:

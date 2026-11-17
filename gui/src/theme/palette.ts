@@ -82,11 +82,42 @@ export const PALETTE_TOKEN_KEYS: PaletteKey[] = [
 ];
 
 /**
+ * Keys that are still accepted, so a theme file written for an older version
+ * stays valid, but that nothing reads.
+ */
+export const UNUSED_PALETTE_KEYS: PaletteKey[] = [
+  'color-primary-hover',
+  'color-error-hover',
+  'color-warning-action',
+  'color-warning-action-hover',
+  'color-on-warning',
+  'color-on-warning-action',
+];
+
+/** The keys a palette must hold: every accepted key except {@link UNUSED_PALETTE_KEYS}. */
+export const REQUIRED_PALETTE_KEYS: PaletteKey[] = PALETTE_TOKEN_KEYS.filter(
+  (key) => !UNUSED_PALETTE_KEYS.includes(key)
+);
+
+type DefaultSelection = 'dark' | 'light' | 'system';
+
+/**
  * The built-in palettes, always available even when the themes file is
  * absent or fails to load. The daemon reads the same file for the colors it
  * answers a window's color queries with before the GUI has sent any.
  */
-export const BUILT_IN_PALETTES: Record<'dark' | 'light', Palette> = builtInPalettes;
+export const BUILT_IN_PALETTES: Record<'dark' | 'light', Palette> = builtInPalettes.palettes;
+
+/** The theme used when nothing else is selected: the one source of the default theme. */
+export const BUILT_IN_DEFAULT_SELECTION = builtInPalettes.default_selection as DefaultSelection;
+
+/** The palette {@link BUILT_IN_DEFAULT_SELECTION} names; `system` follows `prefersDark`. */
+export function builtInDefaultPalette(prefersDark: boolean): Palette {
+  if (BUILT_IN_DEFAULT_SELECTION === 'system') {
+    return prefersDark ? BUILT_IN_PALETTES.dark : BUILT_IN_PALETTES.light;
+  }
+  return BUILT_IN_PALETTES[BUILT_IN_DEFAULT_SELECTION];
+}
 
 const HEX_COLOR_PATTERN = /^#[0-9a-fA-F]{6}$/;
 
@@ -118,8 +149,9 @@ export function isValidColor(value: unknown): boolean {
 }
 
 /**
- * Validates that a value is an object holding every expected palette key with
- * a valid colour. Returns `null` when invalid.
+ * Validates that a value is an object holding every required palette key,
+ * with no key outside the accepted set and a valid colour for each. Returns
+ * `null` when invalid.
  */
 export function validatePalette(value: unknown): Palette | null {
   if (!isRecordLike(value)) {
@@ -128,13 +160,13 @@ export function validatePalette(value: unknown): Palette | null {
 
   const palette = value;
   const keys = Object.keys(palette);
-  const expectedKeySet = new Set<string>(PALETTE_TOKEN_KEYS);
+  const acceptedKeySet = new Set<string>(PALETTE_TOKEN_KEYS);
 
-  if (keys.length !== expectedKeySet.size) {
+  if (!keys.every((key) => acceptedKeySet.has(key))) {
     return null;
   }
 
-  if (!keys.every((key) => expectedKeySet.has(key))) {
+  if (!REQUIRED_PALETTE_KEYS.every((key) => hasOwnKey(palette, key))) {
     return null;
   }
 

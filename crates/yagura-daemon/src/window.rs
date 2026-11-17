@@ -1848,7 +1848,7 @@ impl WindowRegistry {
             shutting_down: AtomicBool::new(false),
             participation: Arc::default(),
             default_palettes: Mutex::new(DefaultPalettes {
-                app: yagura_protocol::built_in_dark_palette(),
+                app: yagura_protocol::built_in_default_palette(),
                 vendors: BTreeMap::new(),
             }),
         }

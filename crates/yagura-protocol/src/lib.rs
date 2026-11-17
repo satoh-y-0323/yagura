@@ -2560,14 +2560,41 @@ struct TerminalTokens {
     ansi: Vec<String>,
 }
 
-/// The built-in dark palette, the GUI's default theme, as the daemon answers
-/// color queries with it before the GUI has sent any [`DefaultPalettes`].
+/// `built-in-palettes.json`: the default theme and the built-in palettes.
+#[derive(Debug, Default, Deserialize)]
+struct BuiltInPalettes {
+    default_selection: String,
+    palettes: BTreeMap<String, BTreeMap<String, String>>,
+}
+
+/// The built-in default palette, the GUI's default theme, as the daemon
+/// answers color queries with it before the GUI has sent any
+/// [`DefaultPalettes`].
 ///
-/// Read from the same files the GUI draws its built-in themes with. Should
-/// they lack a color, the color is black.
+/// Read from the same files the GUI draws its built-in themes with, by the
+/// rule of [`default_palette_of`].
 #[must_use]
-pub fn built_in_dark_palette() -> Palette {
-    let palette = built_in_palette_tokens("dark").unwrap_or_default();
+pub fn built_in_default_palette() -> Palette {
+    default_palette_of(BUILT_IN_PALETTES_JSON)
+}
+
+/// The palette that `default_selection` of a palettes file (the shape of
+/// `built-in-palettes.json`) names. `light` selects the light palette; `dark`,
+/// `system` (the daemon does not know the OS preference) and any other value
+/// select the dark one.
+///
+/// Never fails: a file that cannot be read, or a palette or terminal token
+/// that lacks a color, yields black for that color.
+#[must_use]
+pub fn default_palette_of(palettes_json: &str) -> Palette {
+    let file: BuiltInPalettes = serde_json::from_str(palettes_json).unwrap_or_default();
+    let name = if file.default_selection == "light" {
+        "light"
+    } else {
+        "dark"
+    };
+    let mut palettes = file.palettes;
+    let palette = palettes.remove(name).unwrap_or_default();
     let terminal: TerminalTokens = serde_json::from_str(TERMINAL_TOKENS_JSON).unwrap_or_default();
     let color = |key: &str| {
         terminal
@@ -2583,12 +2610,6 @@ pub fn built_in_dark_palette() -> Palette {
         cursor: color("cursor"),
         ansi: terminal.ansi.iter().map(|key| color(key)).collect(),
     }
-}
-
-fn built_in_palette_tokens(name: &str) -> Option<BTreeMap<String, String>> {
-    let mut palettes: BTreeMap<String, BTreeMap<String, String>> =
-        serde_json::from_str(BUILT_IN_PALETTES_JSON).ok()?;
-    palettes.remove(name)
 }
 
 /// `#rrggbb` as an [`Rgb`].

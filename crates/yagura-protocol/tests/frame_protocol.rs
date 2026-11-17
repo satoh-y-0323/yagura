@@ -332,34 +332,85 @@ fn scroll_view_carries_signed_lines_and_positive_goes_back_into_history() {
 
 // --- the built-in palette ---------------------------------------------
 
-/// The daemon's built-in palette is the GUI's built-in dark theme, read from
-/// the files both take it from (the colors, and which token each terminal
-/// color is), color by color.
-#[test]
-fn the_built_in_dark_palette_is_the_dark_theme_of_the_shared_file() {
-    let palettes: Value = serde_json::from_str(include_str!("../built-in-palettes.json")).unwrap();
+/// The shared palettes file as JSON: the colors of `dark` and `light`, which
+/// terminal tokens they hold, and which palette is the default selection.
+fn palettes_json(default_selection: &str) -> String {
     let terminal: Value = serde_json::from_str(include_str!("../terminal-tokens.json")).unwrap();
-    let dark = &palettes["dark"];
+    let tokens: Vec<&str> = terminal["tokens"]
+        .as_object()
+        .unwrap()
+        .values()
+        .map(|token| token.as_str().unwrap())
+        .collect();
+    let palette_of = |base: usize| -> Value {
+        let colors: serde_json::Map<String, Value> = tokens
+            .iter()
+            .enumerate()
+            .map(|(at, token)| {
+                let channel = base + at;
+                (
+                    (*token).to_string(),
+                    json!(format!("#{channel:02x}{channel:02x}{channel:02x}")),
+                )
+            })
+            .collect();
+        Value::Object(colors)
+    };
+    json!({
+        "default_selection": default_selection,
+        "palettes": { "dark": palette_of(0x10), "light": palette_of(0x90) },
+    })
+    .to_string()
+}
+
+/// The terminal palette of `name` in `palettes_json`, read through the terminal
+/// token file the way the GUI reads it.
+fn expected_palette(palettes_json: &str, name: &str) -> Palette {
+    let palettes: Value = serde_json::from_str(palettes_json).unwrap();
+    let terminal: Value = serde_json::from_str(include_str!("../terminal-tokens.json")).unwrap();
+    let source = &palettes["palettes"][name];
     let rgb = |key: &str| -> [u8; 3] {
         let token = terminal["tokens"][key].as_str().unwrap();
-        let hex = dark[token].as_str().unwrap().trim_start_matches('#');
+        let hex = source[token].as_str().unwrap().trim_start_matches('#');
         let channel = |at: usize| u8::from_str_radix(&hex[at..at + 2], 16).unwrap();
         [channel(0), channel(2), channel(4)]
     };
     let ansi_keys = terminal["ansi"].as_array().unwrap();
     assert_eq!(ansi_keys.len(), 16);
-    let ansi: Vec<[u8; 3]> = ansi_keys
-        .iter()
-        .map(|key| rgb(key.as_str().unwrap()))
-        .collect();
+    Palette {
+        foreground: rgb("foreground"),
+        background: rgb("background"),
+        cursor: rgb("cursor"),
+        ansi: ansi_keys
+            .iter()
+            .map(|key| rgb(key.as_str().unwrap()))
+            .collect(),
+    }
+}
 
+/// The default palette is the one `default_selection` names; `system` is dark
+/// because the daemon cannot see the OS preference.
+#[test]
+fn the_default_palette_is_the_one_default_selection_names() {
+    for (selection, named) in [("dark", "dark"), ("light", "light"), ("system", "dark")] {
+        let json = palettes_json(selection);
+        assert_eq!(
+            yagura_protocol::default_palette_of(&json),
+            expected_palette(&json, named),
+            "default_selection {selection}"
+        );
+    }
+    let dark = expected_palette(&palettes_json("dark"), "dark");
+    let light = expected_palette(&palettes_json("light"), "light");
+    assert_ne!(dark, light, "the two palettes must be told apart");
+}
+
+/// The daemon's built-in default palette is the default of the file the GUI
+/// takes its built-in themes from, by the same rule.
+#[test]
+fn the_built_in_default_palette_is_the_default_of_the_shared_file() {
     assert_eq!(
-        yagura_protocol::built_in_dark_palette(),
-        Palette {
-            foreground: rgb("foreground"),
-            background: rgb("background"),
-            cursor: rgb("cursor"),
-            ansi,
-        }
+        yagura_protocol::built_in_default_palette(),
+        yagura_protocol::default_palette_of(include_str!("../built-in-palettes.json"))
     );
 }
