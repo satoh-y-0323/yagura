@@ -102,6 +102,14 @@ export const REQUIRED_PALETTE_KEYS: PaletteKey[] = PALETTE_TOKEN_KEYS.filter(
 type DefaultSelection = 'dark' | 'light' | 'system';
 
 /**
+ * Narrows the shipped `default_selection` to the three values the daemon also
+ * understands; anything else is `dark`, as in the daemon's `default_palette_of`.
+ */
+function defaultSelectionOf(value: unknown): DefaultSelection {
+  return value === 'light' || value === 'system' ? value : 'dark';
+}
+
+/**
  * The built-in palettes, always available even when the themes file is
  * absent or fails to load. The daemon reads the same file for the colors it
  * answers a window's color queries with before the GUI has sent any.
@@ -109,7 +117,7 @@ type DefaultSelection = 'dark' | 'light' | 'system';
 export const BUILT_IN_PALETTES: Record<'dark' | 'light', Palette> = builtInPalettes.palettes;
 
 /** The theme used when nothing else is selected: the one source of the default theme. */
-export const BUILT_IN_DEFAULT_SELECTION = builtInPalettes.default_selection as DefaultSelection;
+export const BUILT_IN_DEFAULT_SELECTION = defaultSelectionOf(builtInPalettes.default_selection);
 
 /** The palette {@link BUILT_IN_DEFAULT_SELECTION} names; `system` follows `prefersDark`. */
 export function builtInDefaultPalette(prefersDark: boolean): Palette {

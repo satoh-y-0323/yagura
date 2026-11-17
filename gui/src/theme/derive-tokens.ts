@@ -16,7 +16,8 @@ const WHITE: Rgb = [255, 255, 255];
 // Relative luminance at which black and white text have the same contrast.
 const LIGHT_BACKGROUND_LUMINANCE = 0.179;
 
-// Margin over the 3:1 non-text contrast the `--line-strong` border must keep.
+// Margin over the 3:1 non-text contrast that `--line-strong` and the quiet
+// status icon must keep.
 const LINE_STRONG_TARGET_RATIO = 3.2;
 
 function parseHex(value: string | undefined): Rgb {
@@ -88,6 +89,22 @@ function strongLine(background: Rgb, foreground: Rgb, surfaces: readonly Rgb[]):
 }
 
 /**
+ * The faintest mix of `muted` toward the background that keeps the target
+ * contrast against every surface, so a quiet status icon stays visible on each
+ * of them. `muted` itself is returned when no mix qualifies: it is measured as
+ * text at 4.5:1, so it also clears 3:1.
+ */
+function quietIcon(muted: Rgb, background: Rgb, surfaces: readonly Rgb[]): Rgb {
+  for (let step = 100; step >= 1; step -= 1) {
+    const candidate = mix(muted, background, step / 100);
+    if (surfaces.every((surface) => contrast(candidate, surface) >= LINE_STRONG_TARGET_RATIO)) {
+      return candidate;
+    }
+  }
+  return muted;
+}
+
+/**
  * Derives the semantic tokens from the required keys of a palette. Keys a
  * palette may leave out are never read here.
  */
@@ -137,7 +154,7 @@ export function deriveTokens(palette: Palette): DerivedTokens {
     ['running', success],
     ['halted', muted],
     ['unknown', muted],
-    ['idle', faint],
+    ['idle', quietIcon(muted, background, [background, chrome, surface])],
   ];
   for (const [name, color] of statuses) {
     tokens[`--st-${name}`] = toHex(color);

@@ -8,7 +8,7 @@
 
   import { placeMenu } from './menu-position';
   import { overlayPortal } from './overlay-host';
-  import { activeTooltip } from './tooltip';
+  import { activeTooltip, TOOLTIP_CLASS } from './tooltip';
 
   /** Space between the trigger and the tooltip. */
   const GAP_PX = 4;
@@ -42,7 +42,7 @@
 
 {#if active !== null}
   <div
-    class="tooltip"
+    class={TOOLTIP_CLASS}
     role={active.mode === 'toggle' ? 'status' : 'tooltip'}
     aria-hidden={active.announcedElsewhere ? 'true' : undefined}
     bind:this={element}
@@ -58,7 +58,8 @@
 {/if}
 
 <style>
-  .tooltip {
+  /* `TOOLTIP_CLASS` is `tooltip`; Svelte cannot scope a class held in a constant. */
+  :global(.tooltip) {
     position: fixed;
     max-width: 320px;
     padding: var(--space-1) var(--space-2);

@@ -31,7 +31,6 @@
     <span class="popup-menu__badge">{copyKeys}</span>
   </button>
   <button type="button" class="popup-menu__item" role="menuitem" on:click={onPaste}>
-    <span class="popup-menu__icon" aria-hidden="true"></span>
     <span class="popup-menu__label">{menus.paste}</span>
     <span class="popup-menu__badge">{pasteKeys}</span>
   </button>

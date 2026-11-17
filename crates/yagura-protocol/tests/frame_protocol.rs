@@ -392,7 +392,13 @@ fn expected_palette(palettes_json: &str, name: &str) -> Palette {
 /// because the daemon cannot see the OS preference.
 #[test]
 fn the_default_palette_is_the_one_default_selection_names() {
-    for (selection, named) in [("dark", "dark"), ("light", "light"), ("system", "dark")] {
+    for (selection, named) in [
+        ("dark", "dark"),
+        ("light", "light"),
+        ("system", "dark"),
+        ("drak", "dark"),
+        ("Light", "dark"),
+    ] {
         let json = palettes_json(selection);
         assert_eq!(
             yagura_protocol::default_palette_of(&json),
@@ -412,5 +418,17 @@ fn the_built_in_default_palette_is_the_default_of_the_shared_file() {
     assert_eq!(
         yagura_protocol::built_in_default_palette(),
         yagura_protocol::default_palette_of(include_str!("../built-in-palettes.json"))
+    );
+}
+
+/// The shared file names a default the GUI and the daemon both understand;
+/// any other value makes them break differently.
+#[test]
+fn the_shipped_default_selection_is_one_both_sides_understand() {
+    let file: Value = serde_json::from_str(include_str!("../built-in-palettes.json")).unwrap();
+    let selection = file["default_selection"].as_str().unwrap();
+    assert!(
+        ["dark", "light", "system"].contains(&selection),
+        "default_selection {selection:?}"
     );
 }

@@ -4,34 +4,18 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-interface Controller {
-  pointerEnterTrigger: () => void;
-  pointerLeaveTrigger: () => void;
-  pointerEnterTooltip: () => void;
-  pointerLeaveTooltip: () => void;
-  focusTrigger: (focusVisible: boolean) => void;
-  escape: () => void;
-  toggle: () => void;
-  pressOutside: () => void;
-}
+import { createTooltipController, type TooltipController } from './tooltip-controller';
 
 interface Harness {
-  controller: Controller;
+  controller: TooltipController;
   isVisible: () => boolean;
   shownCount: () => number;
 }
 
-type CreateController = (options: {
-  mode?: 'hover' | 'toggle';
-  onVisibleChange: (visible: boolean) => void;
-}) => Controller;
-
-async function makeController(mode: 'hover' | 'toggle'): Promise<Harness> {
-  const module = (await import('./tooltip-controller')) as Record<string, unknown>;
-  const create = module['createTooltipController'] as CreateController;
+function makeController(mode: 'hover' | 'toggle'): Harness {
   let visible = false;
   let shown = 0;
-  const controller = create({
+  const controller = createTooltipController({
     mode,
     onVisibleChange: (next) => {
       if (next && !visible) {
@@ -54,8 +38,8 @@ afterEach(() => {
 });
 
 describe('tooltip controller: when it appears', () => {
-  it('appears after the pointer has rested on the trigger for 500ms, and not before', async () => {
-    const { controller, isVisible } = await makeController('hover');
+  it('appears after the pointer has rested on the trigger for 500ms, and not before', () => {
+    const { controller, isVisible } = makeController('hover');
 
     controller.pointerEnterTrigger();
     vi.advanceTimersByTime(499);
@@ -65,8 +49,8 @@ describe('tooltip controller: when it appears', () => {
     expect(isVisible()).toBe(true);
   });
 
-  it('never appears when the pointer leaves the trigger before 500ms', async () => {
-    const { controller, isVisible, shownCount } = await makeController('hover');
+  it('never appears when the pointer leaves the trigger before 500ms', () => {
+    const { controller, isVisible, shownCount } = makeController('hover');
 
     controller.pointerEnterTrigger();
     vi.advanceTimersByTime(499);
@@ -77,16 +61,16 @@ describe('tooltip controller: when it appears', () => {
     expect(shownCount()).toBe(0);
   });
 
-  it('appears at once, with no delay, for a :focus-visible focus', async () => {
-    const { controller, isVisible } = await makeController('hover');
+  it('appears at once, with no delay, for a :focus-visible focus', () => {
+    const { controller, isVisible } = makeController('hover');
 
     controller.focusTrigger(true);
 
     expect(isVisible()).toBe(true);
   });
 
-  it('does not appear for a focus that is not :focus-visible (a mouse press)', async () => {
-    const { controller, isVisible } = await makeController('hover');
+  it('does not appear for a focus that is not :focus-visible (a mouse press)', () => {
+    const { controller, isVisible } = makeController('hover');
 
     controller.focusTrigger(false);
     vi.advanceTimersByTime(FAR_FUTURE_MS);
@@ -97,10 +81,10 @@ describe('tooltip controller: when it appears', () => {
 
 describe('tooltip controller: when it goes away', () => {
   it.each([
-    ['hover', (c: Controller) => c.pointerEnterTrigger(), 500],
-    ['focus-visible', (c: Controller) => c.focusTrigger(true), 0],
-  ])('Esc dismisses a tooltip shown by %s', async (_how, show, delayMs) => {
-    const { controller, isVisible } = await makeController('hover');
+    ['hover', (c: TooltipController) => c.pointerEnterTrigger(), 500],
+    ['focus-visible', (c: TooltipController) => c.focusTrigger(true), 0],
+  ])('Esc dismisses a tooltip shown by %s', (_how, show, delayMs) => {
+    const { controller, isVisible } = makeController('hover');
     show(controller);
     vi.advanceTimersByTime(delayMs);
     expect(isVisible()).toBe(true);
@@ -110,8 +94,40 @@ describe('tooltip controller: when it goes away', () => {
     expect(isVisible()).toBe(false);
   });
 
-  it('stays visible while the pointer moves from the trigger onto the tooltip itself (WCAG 1.4.13)', async () => {
-    const { controller, isVisible } = await makeController('hover');
+  it('goes away when focus leaves the trigger', () => {
+    const { controller, isVisible } = makeController('hover');
+    controller.focusTrigger(true);
+    expect(isVisible()).toBe(true);
+
+    controller.blurTrigger();
+
+    expect(isVisible()).toBe(false);
+  });
+
+  it('gets out of the way when the trigger is pressed, so it does not cover what the press opens', () => {
+    const { controller, isVisible } = makeController('hover');
+    controller.pointerEnterTrigger();
+    vi.advanceTimersByTime(500);
+    expect(isVisible()).toBe(true);
+
+    controller.pressTrigger();
+
+    expect(isVisible()).toBe(false);
+  });
+
+  it('does not appear after dispose, however long the clock runs', () => {
+    const { controller, isVisible, shownCount } = makeController('hover');
+    controller.pointerEnterTrigger();
+
+    controller.dispose();
+    vi.advanceTimersByTime(FAR_FUTURE_MS);
+
+    expect(isVisible()).toBe(false);
+    expect(shownCount()).toBe(0);
+  });
+
+  it('stays visible while the pointer moves from the trigger onto the tooltip itself (WCAG 1.4.13)', () => {
+    const { controller, isVisible } = makeController('hover');
     controller.pointerEnterTrigger();
     vi.advanceTimersByTime(500);
 
@@ -122,8 +138,8 @@ describe('tooltip controller: when it goes away', () => {
     expect(isVisible()).toBe(true);
   });
 
-  it('goes away once the pointer has left the trigger and never reached the tooltip', async () => {
-    const { controller, isVisible } = await makeController('hover');
+  it('goes away once the pointer has left the trigger and never reached the tooltip', () => {
+    const { controller, isVisible } = makeController('hover');
     controller.pointerEnterTrigger();
     vi.advanceTimersByTime(500);
 
@@ -133,8 +149,8 @@ describe('tooltip controller: when it goes away', () => {
     expect(isVisible()).toBe(false);
   });
 
-  it('goes away once the pointer has left both the trigger and the tooltip', async () => {
-    const { controller, isVisible } = await makeController('hover');
+  it('goes away once the pointer has left both the trigger and the tooltip', () => {
+    const { controller, isVisible } = makeController('hover');
     controller.pointerEnterTrigger();
     vi.advanceTimersByTime(500);
     controller.pointerLeaveTrigger();
@@ -148,8 +164,8 @@ describe('tooltip controller: when it goes away', () => {
 });
 
 describe('toggletip controller: the ⓘ chip in the window header', () => {
-  it('opens on a press and closes on the next press', async () => {
-    const { controller, isVisible } = await makeController('toggle');
+  it('opens on a press and closes on the next press', () => {
+    const { controller, isVisible } = makeController('toggle');
 
     controller.toggle();
     expect(isVisible()).toBe(true);
@@ -158,8 +174,8 @@ describe('toggletip controller: the ⓘ chip in the window header', () => {
     expect(isVisible()).toBe(false);
   });
 
-  it('closes on Esc', async () => {
-    const { controller, isVisible } = await makeController('toggle');
+  it('closes on Esc', () => {
+    const { controller, isVisible } = makeController('toggle');
     controller.toggle();
 
     controller.escape();
@@ -167,8 +183,8 @@ describe('toggletip controller: the ⓘ chip in the window header', () => {
     expect(isVisible()).toBe(false);
   });
 
-  it('closes on a press outside the chip and its trigger', async () => {
-    const { controller, isVisible } = await makeController('toggle');
+  it('closes on a press outside the chip and its trigger', () => {
+    const { controller, isVisible } = makeController('toggle');
     controller.toggle();
 
     controller.pressOutside();
@@ -176,13 +192,32 @@ describe('toggletip controller: the ⓘ chip in the window header', () => {
     expect(isVisible()).toBe(false);
   });
 
-  it('does not open from hover alone', async () => {
-    const { controller, isVisible, shownCount } = await makeController('toggle');
+  it('does not open from hover alone', () => {
+    const { controller, isVisible, shownCount } = makeController('toggle');
 
     controller.pointerEnterTrigger();
     vi.advanceTimersByTime(FAR_FUTURE_MS);
 
     expect(isVisible()).toBe(false);
     expect(shownCount()).toBe(0);
+  });
+});
+
+describe('tooltip controller: switching mode after creation', () => {
+  it('hides what is shown and then behaves as a toggletip', () => {
+    const { controller, isVisible } = makeController('hover');
+    controller.pointerEnterTrigger();
+    vi.advanceTimersByTime(FAR_FUTURE_MS);
+    expect(isVisible()).toBe(true);
+
+    controller.setMode('toggle');
+    expect(isVisible()).toBe(false);
+
+    controller.pointerEnterTrigger();
+    vi.advanceTimersByTime(FAR_FUTURE_MS);
+    expect(isVisible()).toBe(false);
+
+    controller.toggle();
+    expect(isVisible()).toBe(true);
   });
 });

@@ -27,7 +27,7 @@ function expectedTerminalPalette(selection: Selection): Record<string, string> {
   return selection === 'light' ? LIGHT : DARK;
 }
 
-async function loadModulesWithDefault(selection: Selection) {
+async function loadModulesWithDefault(selection: string) {
   vi.resetModules();
   vi.doMock(PALETTES_JSON, () => ({
     default: { default_selection: selection, palettes: { dark: DARK, light: LIGHT } },
@@ -136,3 +136,36 @@ describe.each<Selection>(['light', 'system'])(
     });
   }
 );
+
+// A misspelled value falls to dark in every place the default is read, the way
+// the daemon's `default_palette_of` does, instead of leaving the GUI without a palette.
+describe.each(['drak', 'Light'])('with a misspelled default_selection %s', (selection) => {
+  it('exposes dark as the default selection and its palette', async () => {
+    const { palette } = await loadModulesWithDefault(selection);
+
+    expect(palette.BUILT_IN_DEFAULT_SELECTION).toBe('dark');
+    expect(palette.builtInDefaultPalette(true)).toEqual(DARK);
+    expect(palette.builtInDefaultPalette(false)).toEqual(DARK);
+  });
+
+  it('starts the theme store on dark', async () => {
+    const { store } = await loadModulesWithDefault(selection);
+
+    expect(selectionOf(store.createThemeStore(depsStoring(null)))).toBe('dark');
+  });
+
+  it.each([true, false])(
+    'resolves an unknown named theme to the dark palette when prefersDark is %s',
+    async (prefersDark) => {
+      const { resolve } = await loadModulesWithDefault(selection);
+
+      expect(resolve.resolveAppPalette({ named: 'nope' }, prefersDark, {})).toEqual(DARK);
+    }
+  );
+
+  it('fills a terminal theme’s missing colors from the dark palette', async () => {
+    const { colors } = await loadModulesWithDefault(selection);
+
+    expect(colors.completeTheme({})).toMatchObject(themeOfPalette(DARK));
+  });
+});

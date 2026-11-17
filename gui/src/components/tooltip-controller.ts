@@ -23,6 +23,8 @@ export interface TooltipController {
   /** Opens a closed toggletip and closes an open one. */
   toggle: () => void;
   pressOutside: () => void;
+  /** Switches between `hover` and `toggle`; whatever is shown is hidden. */
+  setMode: (mode: 'hover' | 'toggle') => void;
   /** Cancels pending timers. */
   dispose: () => void;
 }
@@ -34,7 +36,7 @@ export interface TooltipControllerOptions {
 }
 
 export function createTooltipController(options: TooltipControllerOptions): TooltipController {
-  const mode = options.mode ?? 'hover';
+  let mode = options.mode ?? 'hover';
   let visible = false;
   let overTrigger = false;
   let overTooltip = false;
@@ -89,11 +91,11 @@ export function createTooltipController(options: TooltipControllerOptions): Tool
     }
   }
 
-  const hoverOnly = mode === 'hover';
+  const isHoverOnly = (): boolean => mode === 'hover';
 
   return {
     pointerEnterTrigger(): void {
-      if (!hoverOnly) {
+      if (!isHoverOnly()) {
         return;
       }
       overTrigger = true;
@@ -106,7 +108,7 @@ export function createTooltipController(options: TooltipControllerOptions): Tool
       }
     },
     pointerLeaveTrigger(): void {
-      if (!hoverOnly) {
+      if (!isHoverOnly()) {
         return;
       }
       overTrigger = false;
@@ -117,21 +119,21 @@ export function createTooltipController(options: TooltipControllerOptions): Tool
       scheduleHideIfIdle();
     },
     pointerEnterTooltip(): void {
-      if (!hoverOnly) {
+      if (!isHoverOnly()) {
         return;
       }
       overTooltip = true;
       cancelHide();
     },
     pointerLeaveTooltip(): void {
-      if (!hoverOnly) {
+      if (!isHoverOnly()) {
         return;
       }
       overTooltip = false;
       scheduleHideIfIdle();
     },
     focusTrigger(focusVisible: boolean): void {
-      if (!hoverOnly || !focusVisible) {
+      if (!isHoverOnly() || !focusVisible) {
         return;
       }
       focused = true;
@@ -144,12 +146,12 @@ export function createTooltipController(options: TooltipControllerOptions): Tool
     },
     blurTrigger(): void {
       focused = false;
-      if (hoverOnly && !overTrigger && !overTooltip) {
+      if (isHoverOnly() && !overTrigger && !overTooltip) {
         hideNow();
       }
     },
     pressTrigger(): void {
-      if (hoverOnly) {
+      if (isHoverOnly()) {
         hideNow();
       }
     },
@@ -163,6 +165,16 @@ export function createTooltipController(options: TooltipControllerOptions): Tool
       setVisible(!visible);
     },
     pressOutside(): void {
+      hideNow();
+    },
+    setMode(next): void {
+      if (next === mode) {
+        return;
+      }
+      mode = next;
+      overTrigger = false;
+      overTooltip = false;
+      focused = false;
       hideNow();
     },
     dispose(): void {

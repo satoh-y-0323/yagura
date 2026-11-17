@@ -1868,7 +1868,7 @@ impl WindowRegistry {
     }
 
     /// The palettes [`WindowRegistry::set_default_palettes`] last set; the
-    /// built-in dark palette for every window before that.
+    /// built-in default palette for every window before that.
     #[must_use]
     pub fn default_palettes(&self) -> DefaultPalettes {
         lock_recover(&self.default_palettes).clone()

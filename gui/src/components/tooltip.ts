@@ -55,6 +55,8 @@ export function tooltip(node: HTMLElement, initial: TooltipOptions | undefined) 
 
   function publish(): void {
     if (options === undefined || options.text === '') {
+      // Nothing to say: a text that was cleared while shown must not linger.
+      activeTooltip.update((current) => (current?.owner === owner ? null : current));
       return;
     }
     activeTooltip.set({
@@ -124,6 +126,7 @@ export function tooltip(node: HTMLElement, initial: TooltipOptions | undefined) 
   return {
     update(next: TooltipOptions | undefined): void {
       options = next;
+      controller.setMode(next?.mode ?? 'hover');
       if (isVisible) {
         publish();
       }

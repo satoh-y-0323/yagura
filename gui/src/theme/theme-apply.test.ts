@@ -1,6 +1,11 @@
 import { describe, it, expect, vi } from 'vitest';
 
-import { BUILT_IN_PALETTES, PALETTE_TOKEN_KEYS, type Palette } from './palette';
+import {
+  BUILT_IN_PALETTES,
+  PALETTE_TOKEN_KEYS,
+  UNUSED_PALETTE_KEYS,
+  type Palette,
+} from './palette';
 import { THEME_TOKENS, buildTheme, type TerminalTheme } from '../components/terminal-theme';
 import type { ThemeState, ThemeStore } from './theme-store';
 import {
@@ -68,14 +73,7 @@ function expectOnlyOwnKeysAndDerived(calledNames: string[], palette: Palette): v
   expect(calledNames.filter((name) => !allowed.has(name))).toEqual([]);
 }
 
-const UNUSED_KEYS = [
-  'color-primary-hover',
-  'color-error-hover',
-  'color-warning-action',
-  'color-warning-action-hover',
-  'color-on-warning',
-  'color-on-warning-action',
-];
+const UNUSED_KEYS = UNUSED_PALETTE_KEYS;
 
 function omitKeys(palette: Palette, keys: readonly string[]): Palette {
   return Object.fromEntries(Object.entries(palette).filter(([key]) => !keys.includes(key)));

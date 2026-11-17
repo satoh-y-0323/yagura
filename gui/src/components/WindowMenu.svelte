@@ -46,16 +46,13 @@
       onRename?.();
     }}
   >
-    <span class="popup-menu__icon" aria-hidden="true"></span>
     <span class="popup-menu__label">{menus.rename}</span>
   </button>
   <hr class="popup-menu__divider" />
   <button type="button" class="popup-menu__item" role="menuitem" disabled>
-    <span class="popup-menu__icon" aria-hidden="true"></span>
     <span class="popup-menu__label">{menus.copyOutput}</span>
   </button>
   <button type="button" class="popup-menu__item" role="menuitem" disabled>
-    <span class="popup-menu__icon" aria-hidden="true"></span>
     <span class="popup-menu__label">{menus.detectionDefinition}</span>
   </button>
 </PopupMenu>

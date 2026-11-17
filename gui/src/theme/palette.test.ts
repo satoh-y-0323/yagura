@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest';
+import shippedPalettes from '../../../crates/yagura-protocol/built-in-palettes.json';
 import type { Palette } from './palette';
 import {
   PALETTE_TOKEN_KEYS,
@@ -246,5 +247,12 @@ describe('validatePalette', () => {
     ['a function', () => undefined],
   ])('returns null for %s', (_label, candidate) => {
     expect(validatePalette(candidate)).toBeNull();
+  });
+});
+
+describe('the shipped palettes file', () => {
+  // The daemon reads the same file; any other value makes the two sides break differently.
+  it('names a default selection both sides understand', () => {
+    expect(['dark', 'light', 'system']).toContain(shippedPalettes.default_selection);
   });
 });

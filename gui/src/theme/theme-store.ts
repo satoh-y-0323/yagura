@@ -86,6 +86,22 @@ function readStoredSelection(deps: ThemeStoreDeps): string | null {
   }
 }
 
+/** The selection to start on: the stored one when it parses, else the built-in default. */
+function initialSelection(deps: ThemeStoreDeps): AppThemeSelection {
+  return parseStoredSelection(readStoredSelection(deps)) ?? BUILT_IN_DEFAULT_SELECTION;
+}
+
+/**
+ * The palette the application is first painted with, before the themes file is
+ * read. It registers no listener: the first paint is not kept up to date, the
+ * application's own store is.
+ */
+export function startupPalette(deps: ThemeStoreDeps): Palette {
+  // A named selection cannot be resolved before the themes file is read, so it
+  // falls to the default, as `resolveAppPalette` does for an unknown name.
+  return resolveAppPalette(initialSelection(deps), deps.prefersDark(), {});
+}
+
 /**
  * Creates the application theme store.
  *

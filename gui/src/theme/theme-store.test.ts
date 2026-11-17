@@ -727,3 +727,45 @@ describe('createBrowserThemeDeps - from the browser globals', () => {
     expect(() => remove()).not.toThrow();
   });
 });
+
+describe('the palette the app is first painted with', () => {
+  // The name is not fixed by the design: `startupPalette` is a guess to be
+  // settled with the implementation.
+  async function startupPaletteOf(deps: ThemeStoreDeps): Promise<Record<string, string>> {
+    const module = (await import('./theme-store')) as Record<string, unknown>;
+    const fn = module['startupPalette'] as (deps: ThemeStoreDeps) => Record<string, string>;
+    return fn(deps);
+  }
+
+  it.each([
+    ['light', false, BUILT_IN_PALETTES.light],
+    ['dark', true, BUILT_IN_PALETTES.dark],
+    ['system', true, BUILT_IN_PALETTES.dark],
+    ['system', false, BUILT_IN_PALETTES.light],
+  ] as const)(
+    'is the stored %s selection (prefersDark %s)',
+    async (stored, prefersDark, expected) => {
+      const { deps } = makeDeps({ stored, prefersDark });
+
+      expect(await startupPaletteOf(deps)).toEqual(expected);
+    }
+  );
+
+  it.each([null, 'bogus', 'named:gone'])(
+    'is the default palette when %s is stored',
+    async (stored) => {
+      const { deps } = makeDeps({ stored, prefersDark: true });
+
+      expect(await startupPaletteOf(deps)).toEqual(builtInDefaultPalette(true));
+    }
+  );
+
+  it('registers no listener for OS preference changes, so nothing outlives the paint', async () => {
+    const onPrefersDarkChange = vi.fn(() => () => {});
+    const { deps } = makeDeps({ stored: 'system' });
+
+    await startupPaletteOf({ ...deps, onPrefersDarkChange });
+
+    expect(onPrefersDarkChange).not.toHaveBeenCalled();
+  });
+});

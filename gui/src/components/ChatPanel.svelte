@@ -509,7 +509,6 @@
       role="menuitem"
       on:click={() => chooseRoomAction(onClearRoom)}
     >
-      <span class="popup-menu__icon" aria-hidden="true"></span>
       <span class="popup-menu__label">{chat.clearHistoryItem}</span>
     </button>
     <hr class="popup-menu__divider" />
@@ -521,7 +520,6 @@
       aria-describedby={deleteNote === null ? undefined : ROOM_MENU_NOTE_ID}
       on:click={() => chooseRoomAction(onDeleteRoom)}
     >
-      <span class="popup-menu__icon" aria-hidden="true"></span>
       <span class="popup-menu__label">{chat.deleteRoomItem}</span>
     </button>
     {#if deleteNote !== null}

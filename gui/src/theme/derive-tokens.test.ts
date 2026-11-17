@@ -1,19 +1,17 @@
 import { describe, it, expect } from 'vitest';
 
-import { BUILT_IN_PALETTES, PALETTE_TOKEN_KEYS, type Palette } from './palette';
+import {
+  BUILT_IN_PALETTES,
+  PALETTE_TOKEN_KEYS,
+  UNUSED_PALETTE_KEYS,
+  type Palette,
+} from './palette';
 import { applyPalette } from './theme-apply';
 
 // The derivation is measured through `applyPalette`, the one place L1 tokens
 // leave the module, so the tests do not depend on how derive-tokens is shaped.
 
-const UNUSED_KEYS = [
-  'color-primary-hover',
-  'color-error-hover',
-  'color-warning-action',
-  'color-warning-action-hover',
-  'color-on-warning',
-  'color-on-warning-action',
-] as const;
+const UNUSED_KEYS = UNUSED_PALETTE_KEYS;
 
 const SURFACES = ['--bg-canvas', '--bg-chrome', '--bg-raised'] as const;
 
@@ -101,17 +99,22 @@ describe.each(THEME_NAMES)('the tokens derived from the built-in %s palette', (t
     }
   });
 
-  it.each(['--st-approval', '--st-input', '--st-running', '--line-strong', '--ring'])(
-    'keeps %s at 3:1 on every surface',
-    (name) => {
-      for (const surface of SURFACES) {
-        expect(
-          ratioOnSurface(map(), name, surface),
-          `${name} on ${surface}`
-        ).toBeGreaterThanOrEqual(3);
-      }
+  it.each([
+    '--st-approval',
+    '--st-input',
+    '--st-running',
+    '--st-halted',
+    '--st-unknown',
+    '--st-idle',
+    '--line-strong',
+    '--ring',
+  ])('keeps %s at 3:1 on every surface', (name) => {
+    for (const surface of SURFACES) {
+      expect(ratioOnSurface(map(), name, surface), `${name} on ${surface}`).toBeGreaterThanOrEqual(
+        3
+      );
     }
-  );
+  });
 
   it.each([
     ['--on-accent', '--accent'],

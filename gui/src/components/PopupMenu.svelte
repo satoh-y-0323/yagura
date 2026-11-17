@@ -205,7 +205,8 @@
     z-index: var(--z-popover);
   }
 
-  /* One row is an icon frame, a label and an optional badge on the right. */
+  /* One row is an icon frame, a label and an optional badge on the right. The
+     frame stays reserved when an item has no icon, so labels line up. */
   .popup-menu :global(.popup-menu__item) {
     display: grid;
     grid-template-columns: var(--icon-md) 1fr auto;
@@ -229,7 +230,12 @@
     color: var(--fg-muted);
   }
 
+  .popup-menu :global(.popup-menu__label) {
+    grid-column: 2;
+  }
+
   .popup-menu :global(.popup-menu__badge) {
+    grid-column: 3;
     color: var(--fg-muted);
     font-size: var(--text-xs);
   }

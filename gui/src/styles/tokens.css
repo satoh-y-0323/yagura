@@ -89,9 +89,8 @@
   --dur-base: 160ms;
   --ease-out: cubic-bezier(0.2, 0.8, 0.2, 1);
 
-  /* Non-palette values: not part of the 35-key theme contract */
+  /* Non-palette values: not part of the theme contract */
   --shadow-modal: 0 4px 12px rgba(0, 0, 0, 0.3);
-  --overlay-backdrop: rgba(0, 0, 0, 0.5);
 }
 
 ::selection {
