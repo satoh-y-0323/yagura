@@ -6,7 +6,7 @@
    * children, optionally laid out as `popup-menu__icon`, `popup-menu__label`
    * and `popup-menu__badge`; a `<select>` is reachable like an item.
    */
-  import { afterUpdate, onMount } from 'svelte';
+  import { afterUpdate, onMount, tick } from 'svelte';
 
   import { isImeKey } from '../keymap/key-chord';
   import { handleMenuKey, type MenuEntry } from './menu-navigation';
@@ -84,12 +84,18 @@
         isPlaced = true;
       }
     }
-    // Not a focus trap: the menu is left on the next Tab. Focus goes to the menu
-    // itself so that Escape and the arrow keys reach it.
-    if (!menuElement.contains(document.activeElement)) {
+    // After `tick`, because a menu that is still hidden cannot take focus and
+    // Svelte does not run this callback again in the flush that reveals it.
+    void tick().then(focusMenu);
+  });
+
+  // Not a focus trap: the menu is left on the next Tab. Focus goes to the menu
+  // itself so that Escape and the arrow keys reach it.
+  function focusMenu(): void {
+    if (isOpen && menuElement !== undefined && !menuElement.contains(document.activeElement)) {
       menuElement.focus();
     }
-  });
+  }
 
   function navigable(): HTMLElement[] {
     return menuElement === undefined
