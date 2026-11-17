@@ -41,7 +41,7 @@ describe('attentionCount: matches the windowsNeedingYou set', () => {
 
 /**
  * The seven `WindowStatus` values written as a literal table here rather than
- * derived from `resolveTone` or any other production helper, so the
+ * derived from `STATUS_PRESENTATION` or any other production helper, so the
  * expectation cannot drift together with a change to the classification it is
  * meant to pin down.
  */
