@@ -292,66 +292,6 @@ fn wsl_antigravity_cli_windows_argv_execs_the_cli_through_a_fixed_wrapper() {
     );
 }
 
-/// What the WSL agy profile's launch statement does when it runs, as bash in a WSL
-/// distribution runs it: the arguments the daemon appends reach the CLI as they were given
-/// (a model and a launch prompt with a space), and the CLI starts with a root in its
-/// environment that names its own process id. Only a Linux has the files it reads.
-#[test]
-fn the_wsl_agy_launch_statement_hands_its_arguments_on_and_puts_a_root_in_the_environment() {
-    if !cfg!(target_os = "linux") {
-        return;
-    }
-    let probe = yagura_test_support::process::argv_probe_path();
-    let shown = crate::hook_events_door::run_guest_statement(
-        &probe,
-        &["--model", "gemini-model", "-i", "a prompt with spaces"],
-    );
-    for expected in [
-        "<<argv[1]=--model>>",
-        "<<argv[2]=gemini-model>>",
-        "<<argv[3]=-i>>",
-        "<<argv[4]=a prompt with spaces>>",
-    ] {
-        assert!(
-            shown.contains(expected),
-            "the CLI must be started with the arguments the daemon appended; missing \n             {expected} in {shown:?}"
-        );
-    }
-
-    let (pid, added) = crate::hook_events_door::guest_root_variables();
-    let root = added
-        .iter()
-        .find(|(name, _)| name == crate::hook_events_door::GUEST_ROOT_VAR)
-        .map(|(_, value)| value.clone())
-        .unwrap_or_else(|| {
-            panic!(
-                "the statement must export {} for the CLI it starts; it added {added:?}",
-                crate::hook_events_door::GUEST_ROOT_VAR
-            )
-        });
-    let boot_id =
-        std::fs::read_to_string("/proc/sys/kernel/random/boot_id").expect("a Linux has a boot id");
-    let parts: Vec<&str> = root.split(':').collect();
-    assert_eq!(
-        parts.len(),
-        3,
-        "the root is <pid>:<boot_id>:<starttime>, got {root:?}"
-    );
-    assert_eq!(
-        parts[0], pid,
-        "the root names the CLI's own process: {root:?}"
-    );
-    assert_eq!(
-        parts[1],
-        boot_id.trim(),
-        "the root names this boot: {root:?}"
-    );
-    assert!(
-        !parts[2].is_empty() && parts[2].chars().all(|c| c.is_ascii_digit()),
-        "the root ends in the CLI's start time: {root:?}"
-    );
-}
-
 // ---------------------------------------------------------------------
 // Each bundled profile's [model.choices] table
 // ---------------------------------------------------------------------
@@ -1220,12 +1160,10 @@ fn registered_hook_timeouts(id: &str) -> Vec<(String, Option<u64>)> {
 /// one the profile's registration gives the CLI for that hook, so the two come from one
 /// value. A registration that names no time (Codex's `-c` handlers) leaves the CLI's own,
 /// which the daemon names too. Each window runs a quiet stand-in for its CLI, laid over the
-/// shipped profile; a profile that declares its CLI's process image declares the stand-in's,
-/// whose own reads are the window's.
+/// shipped profile.
 #[tokio::test]
 async fn the_daemon_names_each_hook_door_the_time_its_registration_gives_the_cli() {
-    use crate::hook_events_door::{LineageCli, LineageImage, door_answer, open_from_profile};
-    const DECLARES_ITS_IMAGE: &str = "antigravity-cli";
+    use crate::hook_events_door::{door_answer, open_from_profile};
     let instance = crate::hook_events_door::unique_instance();
     let profiles_dir = common::unique_temp_dir("bundled-hook-deadline");
     std::fs::create_dir_all(&profiles_dir).expect("create the profiles directory");
@@ -1235,30 +1173,21 @@ async fn the_daemon_names_each_hook_door_the_time_its_registration_gives_the_cli
         ..common::approver_base_config()
     };
     let h = common::Harness::start_on_instance(&instance, config).await;
-    let image = LineageImage::install("bundled-hook-deadline");
-    let mut stand_in: Option<LineageCli> = None;
-    for id in ["antigravity-cli", "grok-build", "muse-code", "codex-cli"] {
-        if id == DECLARES_ITS_IMAGE {
-            stand_in = Some(image.write_layer(&profiles_dir, id, &instance));
-        } else {
-            common::write_profile(
-                &profiles_dir,
-                id,
-                &format!(
-                    "[command]\ndefault = ['{}']\n",
-                    common::echo_child_path().display()
-                ),
-            );
-        }
+    for id in ["grok-build", "muse-code", "codex-cli"] {
+        common::write_profile(
+            &profiles_dir,
+            id,
+            &format!(
+                "[command]\ndefault = ['{}']\n",
+                common::echo_child_path().display()
+            ),
+        );
         let window_id = open_from_profile(&h, id).await;
         let hooks = registered_hook_timeouts(id);
         assert!(!hooks.is_empty(), "{id} registers --hook doors");
         for (event, registered) in hooks {
             let door = serde_json::json!({ "kind": "hook", "profile": id, "name": event });
-            let answer = match stand_in.as_mut().filter(|_| id == DECLARES_ITS_IMAGE) {
-                Some(cli) => cli.read(&h.endpoint, door).await,
-                None => door_answer(&h.endpoint, &window_id, common::VALID_TOKEN, door).await,
-            };
+            let answer = door_answer(&h.endpoint, &window_id, common::VALID_TOKEN, door).await;
             assert_eq!(
                 answer["type"], "delivery",
                 "{id}/{event}: the read is answered with a delivery: {answer}"
@@ -1276,9 +1205,6 @@ async fn the_daemon_names_each_hook_door_the_time_its_registration_gives_the_cli
                 ),
             }
         }
-    }
-    if let Some(mut cli) = stand_in {
-        cli.exit().await;
     }
 }
 

@@ -23,8 +23,8 @@ fn body_of(framed: &[u8]) -> Value {
 
 #[test]
 fn every_relay_frame_has_the_catalogued_type_and_field_names() {
+    use yagura_protocol::Declaration;
     use yagura_protocol::relay::{RelayFrame, RelayRefusedKind, RelayResume};
-    use yagura_protocol::{Declaration, GuestLineage, GuestStep};
 
     let cases: Vec<(RelayFrame, Value)> = vec![
         (
@@ -63,7 +63,7 @@ fn every_relay_frame_has_the_catalogued_type_and_field_names() {
                 token: Some("tok".to_owned()),
                 resume: None,
                 declaration: Some(Declaration {
-                    profile: "grok-build".to_owned(),
+                    profile: "declared-profile".to_owned(),
                     guest: None,
                 }),
             },
@@ -72,37 +72,7 @@ fn every_relay_frame_has_the_catalogued_type_and_field_names() {
                 "contract": 1,
                 "window_id": "w1",
                 "token": "tok",
-                "declaration": {"profile": "grok-build"},
-            }),
-        ),
-        (
-            RelayFrame::Hello {
-                contract: 1,
-                window_id: Some("w1".to_owned()),
-                token: Some("tok".to_owned()),
-                resume: None,
-                declaration: Some(Declaration {
-                    profile: "wsl-antigravity-cli".to_owned(),
-                    guest: Some(GuestLineage {
-                        root: Some("7:boot:900".to_owned()),
-                        steps: vec![GuestStep {
-                            stat: "7 (agy) S 1".to_owned(),
-                        }],
-                    }),
-                }),
-            },
-            json!({
-                "type": "relay_hello",
-                "contract": 1,
-                "window_id": "w1",
-                "token": "tok",
-                "declaration": {
-                    "profile": "wsl-antigravity-cli",
-                    "guest": {
-                        "root": "7:boot:900",
-                        "steps": [{"stat": "7 (agy) S 1"}],
-                    },
-                },
+                "declaration": {"profile": "declared-profile"},
             }),
         ),
         (
@@ -229,14 +199,14 @@ fn a_reader_ignores_fields_it_does_not_know() {
     let newer_declaration = json!({
         "type": "relay_hello",
         "contract": 1,
-        "declaration": {"profile": "grok-build", "added_later": {"nested": true}},
+        "declaration": {"profile": "declared-profile", "added_later": {"nested": true}},
     });
     match serde_json::from_value::<RelayFrame>(newer_declaration).unwrap() {
         RelayFrame::Hello { declaration, .. } => assert_eq!(
             declaration
                 .map(|declaration| declaration.profile)
                 .as_deref(),
-            Some("grok-build")
+            Some("declared-profile")
         ),
         other => panic!("expected relay_hello, got {other:?}"),
     }

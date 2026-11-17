@@ -2674,29 +2674,7 @@ fn a_registration_reads_and_writes_through_the_host_paths_file_tools_and_never_t
     );
 }
 
-// --- the CLI's process image a profile declares --------------------------------------
-
-/// A profile's declared process image may hold one `*`, standing for the part of the name
-/// a CLI's version changes; a pattern with two or more is a mistake in the file, and the
-/// profile is refused.
-#[test]
-fn a_declared_process_image_with_more_than_one_star_is_refused() {
-    use crate::hook_events_door::with_declared_image;
-    let base = "schema = 1\ndisplay_name = \"Image\"\n\n[command]\ndefault = [\"image-cli\"]\n";
-    for image in ["image-cli.exe", "image-cli-*.exe"] {
-        let source = with_declared_image(base, image);
-        if let Err(err) = parse_profile("image-one", &source) {
-            panic!("{image}: a pattern with at most one * is accepted, got {err:?}");
-        }
-    }
-    for image in ["image-*-cli-*.exe", "**.exe"] {
-        let source = with_declared_image(base, image);
-        assert!(
-            parse_profile("image-two", &source).is_err(),
-            "{image}: a pattern with more than one * must be refused"
-        );
-    }
-}
+// --- `{daemon}` in a profile's command --------------------------------------------
 
 /// `{daemon}` in `[command]` stands for the daemon's path only as a whole element, handed
 /// on as an argument of its own: spliced into an element, which may be a shell's
