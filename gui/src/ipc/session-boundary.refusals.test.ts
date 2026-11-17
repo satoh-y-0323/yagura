@@ -7,9 +7,12 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 
 import {
-  BoundaryError,
   formatApprovalBody,
   MAX_DISPLAY_FIELD_CHARS,
+  sanitizeForDisplay,
+} from '../display/untrusted-text';
+import {
+  BoundaryError,
   narrowApprovalRequest,
   narrowApprovalRequestList,
   narrowApprovalRequestedPayload,
@@ -30,7 +33,6 @@ import {
   narrowWindowInfoList,
   narrowWindowListPayload,
   narrowWindowOpenFailure,
-  sanitizeForDisplay,
   WindowOpenFailureError,
 } from './session-boundary';
 

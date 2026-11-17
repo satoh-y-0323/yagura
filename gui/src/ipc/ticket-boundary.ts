@@ -1,17 +1,15 @@
 /**
  * The WebView-side boundary for the ticket board: the shapes the ticket
- * commands reply with, the `session://ticket-changed` payload, and the
- * display functions for ticket text.
+ * commands reply with, and the `session://ticket-changed` payload.
  *
  * The field names mirror the Rust wire types in `yagura-protocol` verbatim
  * (snake_case). Every reply is accepted as `unknown` and validated here with
  * the same readers `session-boundary` uses, so a field is only ever read
  * through an ownership test. Ticket text is written by an AI and read by a
- * person, so it is drawn only through the display functions below.
+ * person, so it is drawn only through `display/ticket-text`.
  */
 import {
   BoundaryError,
-  formatMultilineText,
   ownEntries,
   readOptionalInteger,
   readOptionalString,
@@ -23,18 +21,11 @@ import {
   requireRecord,
   requireString,
   requireStringArray,
-  sanitizeForDisplay,
   SESSION_EVENT,
   type UntrustedRecord,
 } from './session-boundary';
 
 export { BoundaryError };
-
-/**
- * Longest ticket body or result kept for display, in code points. The daemon
- * caps a body at 16 KiB of UTF-8, which is never more code points than this.
- */
-export const MAX_TICKET_TEXT_CHARS = 16 * 1024;
 
 /** One workspace that has tickets. */
 export interface TicketWorkspace {
@@ -137,16 +128,6 @@ export interface TicketChanged {
   workspace_id: number;
 }
 
-/** The one-line parts of a ticket summary, ready to draw as text. */
-export interface TicketSummaryDisplay {
-  /** `T-<n>`. */
-  label: string;
-  title: string;
-  state: string;
-  milestone: string | null;
-  updated_at: number;
-}
-
 /**
  * Validates the reply to `list_ticket_workspaces`: the envelope
  * `{ workspaces: [...] }` the daemon's own `TicketWorkspaceList` carries.
@@ -236,53 +217,6 @@ export function narrowTicketChanged(value: unknown): TicketChanged {
   const context = SESSION_EVENT.ticketChanged;
   const record = requireRecord(value, context);
   return { workspace_id: requireInteger(record, 'workspace_id', context) };
-}
-
-const TICKET_TEXT_KEPT_CONTROLS: ReadonlySet<string> = new Set(['\n', '\t']);
-
-/**
- * Prepares a ticket's body, a result, or other text of several lines for
- * display. Escaped like an approval body, except that tabs are kept and the
- * cap is {@link MAX_TICKET_TEXT_CHARS}.
- * @param value the text to display
- */
-export function formatTicketText(value: string): string {
-  return formatMultilineText(value, MAX_TICKET_TEXT_CHARS, TICKET_TEXT_KEPT_CONTROLS);
-}
-
-/**
- * The one-line parts of a ticket summary, each through `sanitizeForDisplay`.
- * @param summary the summary to display
- */
-export function displayTicketSummary(summary: TicketSummary): TicketSummaryDisplay {
-  return {
-    label: `T-${summary.number}`,
-    title: sanitizeForDisplay(summary.title),
-    state: sanitizeForDisplay(summary.state),
-    milestone: summary.milestone === null ? null : sanitizeForDisplay(summary.milestone),
-    updated_at: summary.updated_at,
-  };
-}
-
-const NO_KEPT_CONTROLS: ReadonlySet<string> = new Set();
-
-/**
- * A workspace row with its kind and path through `sanitizeForDisplay`. The
- * path also has its bidirectional controls written out, as an approval body
- * does, so a reordered path cannot pass for another repository.
- * @param workspace the workspace to display
- */
-export function displayTicketWorkspace(workspace: TicketWorkspace): TicketWorkspace {
-  return {
-    workspace_id: workspace.workspace_id,
-    kind: sanitizeForDisplay(workspace.kind),
-    // Already capped by `sanitizeForDisplay`, so it is not cut a second time.
-    path: formatMultilineText(
-      sanitizeForDisplay(workspace.path),
-      Number.POSITIVE_INFINITY,
-      NO_KEPT_CONTROLS
-    ),
-  };
 }
 
 function narrowTicketConfig(value: unknown, context: string): TicketConfig {

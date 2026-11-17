@@ -2,7 +2,8 @@
  * What an approval request with no target window is addressed to, as the
  * approval dialog and the "expired unseen" banner both name it.
  */
-import { sanitizeForDisplay, type ApprovalRequest } from '../ipc/session-boundary';
+import { sanitizeForDisplay } from '../display/untrusted-text';
+import type { ApprovalRequest } from '../ipc/session-boundary';
 import { dialogs } from '../ui-messages';
 
 /** The tools that post to a room, whose requests are addressed to no window. */

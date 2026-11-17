@@ -1,4 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
+import { MAX_DISPLAY_FIELD_CHARS } from '../display/untrusted-text';
 import {
   SESSION_EVENT,
   MIN_PTY_COLS,
@@ -12,7 +13,6 @@ import {
   isValidSize,
   BoundaryError,
   narrowRestoreCandidateList,
-  MAX_DISPLAY_FIELD_CHARS,
   narrowApprovalRequest,
   narrowApprovalRequestedPayload,
   narrowApprovalWithdrawnPayload,

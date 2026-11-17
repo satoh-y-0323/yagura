@@ -11,16 +11,18 @@
 import { describe, it, expect } from 'vitest';
 
 import {
-  BoundaryError,
   MAX_DISPLAY_FIELD_CHARS,
   formatApprovalBody,
   sanitizeForDisplay,
-} from './session-boundary';
+} from '../display/untrusted-text';
 import {
   MAX_TICKET_TEXT_CHARS,
   displayTicketSummary,
   displayTicketWorkspace,
   formatTicketText,
+} from '../display/ticket-text';
+import { BoundaryError } from './session-boundary';
+import {
   narrowTicketChanged,
   narrowTicketDetail,
   narrowTicketList,

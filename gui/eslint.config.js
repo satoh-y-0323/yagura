@@ -135,6 +135,8 @@ const NO_TEXT_SUBSTITUTION = [
   },
 ];
 
+const DISPLAY_ONLY_IMPORTS = '(^|/)(ipc|stores)/|^@tauri-apps/';
+
 const SOURCE_SYNTAX = [
   ...NO_RAW_HTML,
   ...NO_JAPANESE_TEXT,
@@ -235,36 +237,37 @@ export default [
   },
   {
     // Display-only parts read props and call back; the shell owns IPC and stores.
-    files: [
-      'src/banner-model.ts',
-      'src/components/AddWindowDialog.svelte',
-      'src/components/AppRail.svelte',
-      'src/components/ApprovalSettings.svelte',
-      'src/components/IntegrationSettings.svelte',
-      'src/components/KeyboardSettings.svelte',
-      'src/components/LaunchProfileFields.svelte',
-      'src/components/PlanBoard.svelte',
-      'src/components/PlansPanel.svelte',
-      'src/components/PopupMenu.svelte',
-      'src/components/ProfileSettings.svelte',
-      'src/components/RolesEditor.svelte',
-      'src/components/SettingsPanel.svelte',
-      'src/components/SettingsSwitch.svelte',
-      'src/components/TabBar.svelte',
-      'src/components/TerminalContextMenu.svelte',
-      'src/components/WindowControls.svelte',
-      'src/components/WindowMenu.svelte',
-    ],
+    // `display/` holds the text preparation they draw through, so it is one of them.
+    files: ['src/banner-model.ts', 'src/components/**/*.{ts,svelte}', 'src/display/**/*.ts'],
+    ignores: [...TEST_SOURCES, 'src/components/TerminalPane.svelte'],
     rules: {
       '@typescript-eslint/no-restricted-imports': [
         'error',
         {
           patterns: [
             {
-              regex: '(^|/)(ipc|stores)/|^@tauri-apps/',
+              regex: DISPLAY_ONLY_IMPORTS,
               allowTypeImports: true,
               message:
                 'A display-only part reads props and calls back; the shell owns IPC and stores.',
+            },
+          ],
+        },
+      ],
+    },
+  },
+  {
+    // The terminal pane reads and writes the clipboard itself; nothing else outside the shell.
+    files: ['src/components/TerminalPane.svelte'],
+    rules: {
+      '@typescript-eslint/no-restricted-imports': [
+        'error',
+        {
+          patterns: [
+            {
+              regex: '(^|/)(ipc/(?!clipboard$)|stores/)|^@tauri-apps/',
+              allowTypeImports: true,
+              message: 'The terminal pane may import only ipc/clipboard from the shell side.',
             },
           ],
         },

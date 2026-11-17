@@ -6,14 +6,9 @@
    * It owns no IPC and offers no edits. Ticket text is written by agents, so
    * every string drawn here goes through the ticket display functions first.
    */
-  import { sanitizeForDisplay } from '../ipc/session-boundary';
-  import {
-    displayTicketSummary,
-    formatTicketText,
-    type Ticket,
-    type TicketConfig,
-    type TicketMilestone,
-  } from '../ipc/ticket-boundary';
+  import { displayTicketSummary, formatTicketText } from '../display/ticket-text';
+  import { sanitizeForDisplay } from '../display/untrusted-text';
+  import type { Ticket, TicketConfig, TicketMilestone } from '../ipc/ticket-boundary';
   import { formatRestoreTimestamp } from '../session/restore-model';
   import { tickets as text } from '../ui-messages';
 

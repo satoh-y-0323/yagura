@@ -7,15 +7,13 @@
    * it in. Ticket text is written by agents, so every string drawn here goes
    * through the ticket display functions first.
    */
-  import { sanitizeForDisplay } from '../ipc/session-boundary';
   import {
     displayTicketSummary,
     displayTicketWorkspace,
     formatTicketText,
-    type TicketMilestone,
-    type TicketSummary,
-    type TicketWorkspace,
-  } from '../ipc/ticket-boundary';
+  } from '../display/ticket-text';
+  import { sanitizeForDisplay } from '../display/untrusted-text';
+  import type { TicketMilestone, TicketSummary, TicketWorkspace } from '../ipc/ticket-boundary';
   import {
     ticketWorkspaceName,
     type TicketBoard,

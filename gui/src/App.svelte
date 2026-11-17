@@ -52,8 +52,8 @@
   import { writeClipboardText } from './ipc/clipboard';
   import { pickFolder, subscribeFolderDrop } from './ipc/folder-picker';
   import { startFramePull, type FramePull } from './ipc/frame-pull';
+  import { sanitizeForDisplay } from './display/untrusted-text';
   import {
-    sanitizeForDisplay,
     ATTACH_VIEW_MIN_REVISION,
     type ApprovalRequest,
     type ChatChanged,

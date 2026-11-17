@@ -1,9 +1,6 @@
 <script lang="ts">
-  import {
-    formatApprovalBody,
-    sanitizeForDisplay,
-    type ApprovalRequest,
-  } from '../ipc/session-boundary';
+  import { formatApprovalBody, sanitizeForDisplay } from '../display/untrusted-text';
+  import type { ApprovalRequest } from '../ipc/session-boundary';
   import { isWithinGuard } from '../session/approval-queue';
   import { describeUntargeted } from '../session/approval-target';
   import { buttons, dialogs, describeStatus } from '../ui-messages';
