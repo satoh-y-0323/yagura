@@ -39,7 +39,7 @@ section for vendor and default theme selection:
 [themes.my-dark-theme]
 color-background = "#1e1e1e"
 color-foreground = "#ffffff"
-# ... all 35 palette keys required (see below)
+# ... all 29 required palette keys (see below)
 
 [assignments]
 default = "my-dark-theme"
@@ -55,12 +55,21 @@ Anything outside the `[themes.*]` and `[assignments]` sections is ignored. A fil
 is not an error — yagura will continue using the built-in palettes, and any vendor assignments will be applied
 to them.
 
-## Palette Keys (35 total)
+## Palette Keys (29 required)
 
-Each theme table must include **all 35 keys**. No more, no fewer. Each value must be a color in the format `#RRGGBB`
-(hex RGB with exactly 6 digits). Omitting a required key or including unknown keys will cause the entire theme to be rejected.
+Each theme table must include **all 29 required keys**. Each value must be a color in the format `#RRGGBB`
+(hex RGB with exactly 6 digits). Omitting a required key, including an unknown key, or giving any key a value that
+is not `#RRGGBB` will cause the entire theme to be rejected.
 
-### Color Tokens (16)
+Six more keys are still accepted so that a theme file written for an earlier version keeps loading, but yagura no
+longer reads them, so you can leave them out: `color-primary-hover`, `color-error-hover`, `color-warning-action`,
+`color-warning-action-hover`, `color-on-warning` and `color-on-warning-action`. When one is present its value must
+still be `#RRGGBB`. A file that has all 35 keys of earlier versions loads as it did.
+
+The palette is the only thing a theme sets. yagura derives the colors of its surfaces, text, lines, focus ring and
+status marks from these keys itself; they are not keys you write.
+
+### Color Tokens (10 required)
 
 ```toml
 color-background = "#1e1e1e"
@@ -68,15 +77,9 @@ color-foreground = "#ffffff"
 color-surface = "#2d2d2d"
 color-border = "#404040"
 color-primary = "#4a9eff"
-color-primary-hover = "#2e7fd4"
 color-success = "#28a745"
 color-warning = "#ffc107"
 color-error = "#dc3545"
-color-error-hover = "#d32f2f"
-color-warning-action = "#ff9800"
-color-warning-action-hover = "#f57c00"
-color-on-warning = "#333333"
-color-on-warning-action = "#ffffff"
 color-text-primary = "#ffffff"
 color-text-secondary = "#a0a0a0"
 ```
@@ -137,9 +140,9 @@ The value must be one of:
 
 - A reserved mode name: `"dark"`, `"light"`, or `"system"`
 - The name of a custom theme defined in `[themes.*]`
-- An unknown name results in a warning and defaults to `dark`
+- An unknown name results in a warning and falls back to the built-in default
 
-When omitted, `dark` is used. When set to `"system"`, yagura will follow the OS color scheme preference at
+When omitted, the built-in default is used (`dark` today; the choice is the `default_selection` of the palettes file built into yagura). When set to `"system"`, yagura will follow the OS color scheme preference at
 startup (but not update during execution; restart after changing OS theme to see the effect).
 
 ### Vendor Assignments
@@ -165,7 +168,7 @@ When omitted or empty, vendor windows use the app-wide selection.
 
 The daemon keeps the colors the GUI last resolved for each vendor and for the app, and answers a
 window's color queries with them from the moment the window opens, even before the GUI shows it
-(on an instance whose GUI has never run, with the built-in `dark` theme). A window's own theme override
+(on an instance whose GUI has never run, with the built-in default theme). A window's own theme override
 takes effect once the window is shown.
 
 A vendor key is not a detection definition name. `codex` above picks the theme
@@ -208,9 +211,9 @@ The app displays a banner indicating the failure reason:
 
 ### Contrast and Color Validity
 
-yagura does **not** validate color contrast ratios or test for accessibility. The 35 palette keys represent
-a semantic layout (e.g. "button primary state" vs "button hover state"), but yagura enforces only the hex
-format (`#RRGGBB`) and that all 35 keys are present. It is your responsibility to choose values that are
+yagura does **not** validate color contrast ratios or test for accessibility. The palette keys represent
+a semantic layout (e.g. background, surface, primary), but yagura enforces only the hex
+format (`#RRGGBB`) and that all 29 required keys are present. It is your responsibility to choose values that are
 readable on your display and for your use case.
 
 ## Loading and Updating
@@ -253,7 +256,7 @@ The stored value is one of: `"dark"`, `"light"`, `"system"`, or `"named:<theme-n
 
 ### Recovery
 
-If the selection is corrupted or lost, yagura falls back to the `default` assignment from `themes.toml`, or `dark` if
+If the selection is corrupted or lost, yagura falls back to the `default` assignment from `themes.toml`, or the built-in default if
 no `default` is specified. Clearing `localStorage` (via browser developer tools in yagura's WebView) will reset the
 selection to the default on the next startup.
 
@@ -280,15 +283,9 @@ color-foreground = "#e8e8e8"
 color-surface = "#1a1a1a"
 color-border = "#333333"
 color-primary = "#6ba3ff"
-color-primary-hover = "#4a7fb3"
 color-success = "#22c55e"
 color-warning = "#f59e0b"
 color-error = "#ef4444"
-color-error-hover = "#dc2626"
-color-warning-action = "#fb923c"
-color-warning-action-hover = "#f97316"
-color-on-warning = "#292524"
-color-on-warning-action = "#fafaf9"
 color-text-primary = "#f5f5f5"
 color-text-secondary = "#9ca3af"
 term-selection-background = "#1e3a5f"
@@ -321,12 +318,12 @@ This defines a complete custom dark theme and makes it the default.
 
 ```toml
 [themes.office-light]
-# ... all 35 keys, light palette
+# ... all 29 required keys, light palette
 color-background = "#ffffff"
 # ...
 
 [themes.coding-dark]
-# ... all 35 keys, dark palette
+# ... all 29 required keys, dark palette
 color-background = "#1e1e1e"
 # ...
 
