@@ -35,6 +35,14 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
-    "externalBin": ["binaries/yagura-daemon", "binaries/yagura-holder", "binaries/yagura-mcp"]
+    "externalBin": ["binaries/yagura-daemon", "binaries/yagura-holder", "binaries/yagura-mcp"],
+    "macOS": {
+      "minimumSystemVersion": "15.0"
+    },
+    "linux": {
+      "deb": {
+        "depends": ["libwebkit2gtk-4.1-0 (>= 2.50)"]
+      }
+    }
   }
 }

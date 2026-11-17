@@ -77,6 +77,11 @@ allow it.
 | Linux (Debian, Ubuntu) | Download the `.deb` from the [Releases](../../releases) page and install it with `sudo apt install ./yagura_<version>_amd64.deb`. |
 | Other systems, Intel Macs | Build from source -- see [docs/building.md](docs/building.md). |
 
+yagura supports the operating system releases their vendors still update: macOS 15 (Sequoia) or later,
+and on Linux WebKitGTK 2.50 or later, as Ubuntu 22.04 and later ship it. A release that its vendor
+stops updating is dropped in the next yagura release. Keep the system and its web engine (Safari on
+macOS, WebKitGTK on Linux) up to date: yagura draws its window with them.
+
 You also need the agent CLIs you want to run (Claude Code, Codex CLI, GitHub Copilot CLI, Grok
 Build, Muse Code), installed and signed in as usual. yagura does not install or sign in to
 them for you. On Windows, install Codex CLI's standalone build rather than the npm package: yagura
