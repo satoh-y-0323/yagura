@@ -28,6 +28,7 @@ import {
 import { WindowOpenFailureError } from '../ipc/session-boundary';
 import type { RestoreEntry, WindowInfo, WindowOpenFailure } from '../ipc/session-boundary';
 import { describeWindowOpenFailure } from '../window-open-failure-model';
+import { banners, EXTERNAL_TEXT_MAX_CODE_POINTS } from '../ui-messages';
 
 /** Builds a minimal RestoreEntry, overriding only the fields a case cares about. */
 function makeEntry(overrides: Partial<RestoreEntry> = {}): RestoreEntry {
@@ -681,9 +682,6 @@ describe('restoreSelected', () => {
 });
 
 describe('restoreNoticeForFailures', () => {
-  /** Longest externally supplied text kept, in code points (`render.ts`). */
-  const EXTERNAL_TEXT_MAX_CODE_POINTS = 200;
-
   function rejected(code: string, message: string, rejectedArgument: string | null = null) {
     const failure: WindowOpenFailure = { kind: 'rejected', code, message, rejectedArgument };
     return failure;
@@ -762,34 +760,49 @@ describe('restoreNoticeForFailures', () => {
     );
   });
 
-  it('lists only the whole lines that fit under the cap and counts the rest as "+M more"', () => {
-    // Each line is exactly 60 code points: three lines plus their joins fit
-    // under the cap, a fourth cannot whatever the joins are.
-    const names = Array.from(
-      { length: 10 },
-      (_, index) => `w-${String(index + 1).padStart(2, '0')}`
-    );
-    const failed = names.map((name) => ({
-      name,
-      failure: { kind: 'bare', message: 'x'.repeat(54) } as const,
-    }));
-    const lines = failed.map(({ name, failure }) => describeWindowOpenFailure(name, failure));
-    expect(lines.every((line) => Array.from(line).length === 60)).toBe(true);
+  // The second line's total (first line, join, second line, then the join and
+  // "+8 more" kept for the eight after it) lands on the cap or one past it.
+  it.each<[string, number, number]>([
+    ['the total with the "+M more" kept is exactly the cap', 0, 2],
+    ['the total with the "+M more" kept is one past the cap', 1, 1],
+  ])(
+    'lists only the whole lines that fit under the cap and counts the rest as "+M more": %s',
+    (_label, overCap, shownCount) => {
+      const separator = '; ';
+      const moreAfterSecond =
+        separator.length + Array.from(banners.restoreNotRestoredMore(8)).length;
+      const firstLength = 60;
+      const secondLength =
+        EXTERNAL_TEXT_MAX_CODE_POINTS - firstLength - separator.length - moreAfterSecond + overCap;
+      const lengths = [firstLength, secondLength, ...Array<number>(8).fill(60)];
+      const failed = lengths.map((length, index) => {
+        const name = `w-${String(index + 1).padStart(2, '0')}`;
+        return {
+          name,
+          failure: { kind: 'bare', message: 'x'.repeat(length - name.length - 2) } as const,
+        };
+      });
+      const names = failed.map(({ name }) => name);
+      const lines = failed.map(({ name, failure }) => describeWindowOpenFailure(name, failure));
+      expect(lines.map((line) => Array.from(line).length)).toEqual(lengths);
 
-    const notice = restoreNoticeForFailures(failed) ?? '';
+      const notice = restoreNoticeForFailures(failed) ?? '';
 
-    const prefix = 'Not restored (10): ';
-    expect(notice.startsWith(prefix)).toBe(true);
-    const detail = notice.slice(prefix.length);
-    expect(Array.from(detail).length).toBeLessThanOrEqual(EXTERNAL_TEXT_MAX_CODE_POINTS);
-    const shown = lines.filter((line) => detail.includes(line));
-    expect(shown).toEqual(lines.slice(0, 3));
-    expect(detail.endsWith(`+${names.length - shown.length} more`)).toBe(true);
-    for (const name of names.slice(shown.length)) {
-      expect(detail).not.toContain(name);
+      const prefix = 'Not restored (10): ';
+      expect(notice.startsWith(prefix)).toBe(true);
+      const detail = notice.slice(prefix.length);
+      expect(Array.from(detail).length).toBeLessThanOrEqual(EXTERNAL_TEXT_MAX_CODE_POINTS);
+      const shown = lines.filter((line) => detail.includes(line));
+      expect(shown).toEqual(lines.slice(0, shownCount));
+      expect(detail).toBe(
+        [...shown, banners.restoreNotRestoredMore(names.length - shownCount)].join(separator)
+      );
+      for (const name of names.slice(shownCount)) {
+        expect(detail).not.toContain(name);
+      }
+      expect(detail).not.toContain('…');
     }
-    expect(detail).not.toContain('…');
-  });
+  );
 
   it('always shows the first line whole, even when it alone is longer than the cap', () => {
     const first = {
