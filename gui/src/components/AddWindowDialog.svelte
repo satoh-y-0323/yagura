@@ -3,6 +3,7 @@
   import { buttons, errors, forms } from '../ui-messages';
   import { describeWindowOpenFailure, windowOpenFailureOf } from '../window-open-failure-model';
   import type { OpenWindowSubmission, ProfileOption } from './add-window-dialog-types';
+  import Icon from './Icon.svelte';
   import IconButton from './IconButton.svelte';
   import LaunchProfileFields from './LaunchProfileFields.svelte';
   import ModalDialog from './ModalDialog.svelte';
@@ -163,7 +164,7 @@
     <div class="dialog-header">
       <h2 class="dialog-title">{forms.addWindowTitle}</h2>
       <IconButton class="dialog-close" label={forms.closeDialog} on:click={handleCancel}>
-        ✕
+        <Icon name="x" />
       </IconButton>
     </div>
 

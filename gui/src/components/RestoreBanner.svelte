@@ -1,5 +1,6 @@
 <script lang="ts">
   import { buttons, hints, describeRestoreBanner } from '../ui-messages';
+  import Icon from './Icon.svelte';
   import IconButton from './IconButton.svelte';
 
   /** Number of restore candidates from the previous boot. */
@@ -18,7 +19,7 @@
     {buttons.chooseWindows}
   </button>
   <IconButton class="restore-banner__close" label={hints.dismissBanner} on:click={onDismiss}>
-    ✕
+    <Icon name="x" />
   </IconButton>
 </div>
 
@@ -39,6 +40,9 @@
   }
 
   :global(.restore-banner__close) {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
     background: none;
     border: none;
     color: inherit;

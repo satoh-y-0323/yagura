@@ -52,6 +52,10 @@ export type IconShape =
   | { tag: 'line'; attrs: { x1: string; y1: string; x2: string; y2: string } };
 
 export const ICON_SHAPES = {
+  'arrow-left': [
+    { tag: 'path', attrs: { d: 'm12 19-7-7 7-7' } },
+    { tag: 'path', attrs: { d: 'M19 12H5' } },
+  ],
   'shield-exclamation-point': [
     {
       tag: 'path',

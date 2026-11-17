@@ -8,6 +8,7 @@
    */
   import { displayTicketSummary, formatTicketText } from '../display/ticket-text';
   import { sanitizeForDisplay } from '../display/untrusted-text';
+  import Icon from './Icon.svelte';
   import type { Ticket, TicketConfig, TicketMilestone } from '../ipc/ticket-boundary';
   import { formatRestoreTimestamp } from '../session/restore-model';
   import { tickets as text } from '../ui-messages';
@@ -75,7 +76,7 @@
 
 <div class="ticket-detail">
   <button type="button" class="ticket-detail__back" on:click={onBack}
-    ><span aria-hidden="true">←</span> {text.backButton}</button
+    ><Icon name="arrow-left" size="xs" /> {text.backButton}</button
   >
 
   {#if ticket !== null}

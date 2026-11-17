@@ -9,6 +9,7 @@
    */
   import type { ComponentProps } from 'svelte';
 
+  import Icon from './Icon.svelte';
   import IconButton from './IconButton.svelte';
   import ModelAliasesEditor from './ModelAliasesEditor.svelte';
   import PlansAttentionMark from './PlansAttentionMark.svelte';
@@ -105,7 +106,9 @@
         >
       {/each}
     </div>
-    <IconButton class="plans-panel__close" label={buttons.close} on:click={onClose}>✕</IconButton>
+    <IconButton class="plans-panel__close" label={buttons.close} on:click={onClose}
+      ><Icon name="x" /></IconButton
+    >
   </header>
 
   <div class="plans-panel__body">
@@ -208,6 +211,9 @@
   }
 
   :global(.plans-panel__close) {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
     border: none;
     background: none;
     color: var(--color-text-secondary);

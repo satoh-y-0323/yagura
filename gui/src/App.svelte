@@ -21,6 +21,7 @@
   import ChatPanel from './components/ChatPanel.svelte';
   import ConfirmDialog from './components/ConfirmDialog.svelte';
   import FloatWindow from './components/FloatWindow.svelte';
+  import Icon from './components/Icon.svelte';
   import IconButton from './components/IconButton.svelte';
   import PlansPanel from './components/PlansPanel.svelte';
   import RenameDialog from './components/RenameDialog.svelte';
@@ -3322,7 +3323,7 @@
         label={hints.dismissBanner}
         on:click={() => handleDismissBanner(banner.id)}
       >
-        ✕
+        <Icon name="x" />
       </IconButton>
     </div>
   {/each}
@@ -3371,7 +3372,7 @@
             label={forms.addWindowTitle}
             on:click={openAddDialog}
           >
-            +
+            <Icon name="plus" />
           </IconButton>
           <IconButton
             class="status-panel__button arrange-window-trigger"

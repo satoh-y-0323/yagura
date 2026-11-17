@@ -2,6 +2,7 @@
   import { buttons, forms, hints, describeRestoreSelectionCount } from '../ui-messages';
   import type { RestoreEntry } from '../ipc/session-boundary';
   import { matchesOpenWindow } from '../session/restore-model';
+  import Icon from './Icon.svelte';
   import IconButton from './IconButton.svelte';
   import ModalDialog from './ModalDialog.svelte';
 
@@ -29,7 +30,9 @@
   <div class="restore-dialog-content">
     <div class="dialog-header">
       <h2 class="dialog-title">{buttons.chooseWindows}</h2>
-      <IconButton class="dialog-close" label={forms.closeDialog} on:click={onCancel}>✕</IconButton>
+      <IconButton class="dialog-close" label={forms.closeDialog} on:click={onCancel}
+        ><Icon name="x" /></IconButton
+      >
     </div>
 
     <div class="restore-bulk-actions">

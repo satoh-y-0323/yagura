@@ -9,6 +9,7 @@
    */
   import { tick } from 'svelte';
 
+  import Icon from './Icon.svelte';
   import IconButton from './IconButton.svelte';
   import PopupMenu from './PopupMenu.svelte';
   import type { Rect } from './menu-position';
@@ -453,10 +454,8 @@
             }}
           >
             {#if row.halted}
-              <span
-                class="room-row__stop"
-                aria-label={chat.roomStoppedLabel}
-                title={chat.roomStoppedLabel}>⏸</span
+              <span class="room-row__stop" title={chat.roomStoppedLabel}
+                ><Icon name="circle-stop" size="xs" label={chat.roomStoppedLabel} /></span
               >
             {/if}
             <span class="room-row__name"
@@ -485,7 +484,7 @@
             aria-expanded={row.room_id === menuRoomId}
             on:click={(event) => openRoomMenuFromButton(row.room_id, event)}
           >
-            ⋯
+            <Icon name="ellipsis" size="sm" />
           </IconButton>
         </li>
       {/each}
@@ -535,7 +534,7 @@
       <h2 class="chat-panel__title">{chat.panelTitle}</h2>
       <span class="chat-panel__room">{currentRoomName}</span>
       <IconButton class="chat-panel__close" label={chat.closePanel} on:click={onClose}>
-        ✕
+        <Icon name="x" />
       </IconButton>
     </div>
 
@@ -626,7 +625,7 @@
           label={hints.dismissBanner}
           on:click={() => (unresolvedNotice = null)}
         >
-          ✕
+          <Icon name="x" />
         </IconButton>
       </p>
     {/if}
@@ -849,6 +848,9 @@
 
   .room-row :global(.room-row__more) {
     position: relative;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
     flex: 0 0 auto;
     width: 22px;
     height: 22px;
@@ -858,8 +860,6 @@
     background: none;
     color: inherit;
     font-family: inherit;
-    font-size: var(--font-size-sm);
-    line-height: 22px;
     cursor: pointer;
     visibility: hidden;
   }
@@ -891,9 +891,8 @@
   }
 
   .room-row__stop {
+    display: inline-flex;
     flex: 0 0 auto;
-    font-size: 11px;
-    line-height: 1;
     color: var(--color-error);
   }
 
@@ -939,6 +938,9 @@
   }
 
   :global(.chat-panel__close) {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
     flex: 0 0 auto;
     padding: 0;
     border: none;

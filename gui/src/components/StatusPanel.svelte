@@ -5,6 +5,7 @@
   import type { WindowEntry } from '../stores/window-registry';
   import { attentionCount, summarizeWindowStatuses } from '../status-tone';
   import { groupByRoom } from '../sidebar/room-groups';
+  import Icon from './Icon.svelte';
   import IconButton from './IconButton.svelte';
   import McpMark from './McpMark.svelte';
   import StatusBadge from './StatusBadge.svelte';
@@ -205,7 +206,7 @@
                         void actions.interrupt(entry);
                       }}
                     >
-                      ⏹
+                      <Icon name="square" />
                     </IconButton>
                     <IconButton
                       class="status-panel__button"
@@ -215,7 +216,7 @@
                         void actions.close(entry);
                       }}
                     >
-                      ✕
+                      <Icon name="x" />
                     </IconButton>
                   </div>
                 </li>

@@ -6,6 +6,7 @@
    * this only renders what it is handed.
    */
   import type { ProfileOption } from './add-window-dialog-types';
+  import Icon from './Icon.svelte';
   import IconButton from './IconButton.svelte';
   import ProfileSettings from './ProfileSettings.svelte';
   import ApprovalSettings from './ApprovalSettings.svelte';
@@ -97,7 +98,8 @@
         >
       {/each}
     </div>
-    <IconButton class="settings-panel__close" label={buttons.close} on:click={onClose}>✕</IconButton
+    <IconButton class="settings-panel__close" label={buttons.close} on:click={onClose}
+      ><Icon name="x" /></IconButton
     >
   </header>
 
@@ -197,6 +199,9 @@
   }
 
   :global(.settings-panel__close) {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
     border: none;
     background: none;
     color: var(--color-text-secondary);

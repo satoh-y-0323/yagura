@@ -7,6 +7,7 @@
   import type { ProfileDetail } from '../ipc/profile-detail-boundary';
   import { canSaveCommand, detailSections, isCommandDirty } from '../settings/profile-detail-model';
   import { settings } from '../ui-messages';
+  import Icon from './Icon.svelte';
   import IconButton from './IconButton.svelte';
 
   export let detail: ProfileDetail | null;
@@ -74,7 +75,7 @@
                 class="profile-detail__remove"
                 label={settings.profileRemoveArgument(index)}
                 disabled={isSavingCommand}
-                on:click={() => removeArgument(index)}>✕</IconButton
+                on:click={() => removeArgument(index)}><Icon name="x" /></IconButton
               >
             {/if}
           </div>
@@ -295,6 +296,9 @@
   }
 
   :global(.profile-detail__remove) {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
     font: inherit;
     background: none;
     border: none;
