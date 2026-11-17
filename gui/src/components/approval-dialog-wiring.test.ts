@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 
 import appSource from '../App.svelte?raw';
 import sessionClientSource from '../ipc/session-client.ts?raw';
+import modalDialogSource from './ModalDialog.svelte?raw';
 import { findTagEnd, functionBody, resolveConditionExpression } from '../test-utils/markup-scan';
 
 /**
@@ -103,6 +104,20 @@ describe('ApprovalDialog.svelte: Deny and Approve buttons', () => {
       expect(afterBrace.startsWith('if')).toBe(true);
       expect(afterBrace.slice(0, afterBrace.indexOf('{'))).toContain('isWithinGuard(');
     }
+  });
+});
+
+describe('ApprovalDialog.svelte: focus returns to the safe button for each request', () => {
+  it('passes the request id to ModalDialog as refocusKey', () => {
+    const tag = openingTag(source, '<ModalDialog');
+    expect(tag).not.toBe('');
+    expect(boundExpression(tag, 'refocusKey')).toBe('request.request_id');
+  });
+
+  it('ModalDialog takes a refocusKey and answers its change with shouldRefocus and focusAutofocusDelegate', () => {
+    expect(modalDialogSource).toMatch(/export let refocusKey/);
+    expect(modalDialogSource).toMatch(/shouldRefocus\(/);
+    expect(modalDialogSource).toMatch(/focusAutofocusDelegate\(/);
   });
 });
 

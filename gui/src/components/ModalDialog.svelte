@@ -3,6 +3,7 @@
 
   import { isImeKey } from '../keymap/key-chord';
   import { modalFocusPort, type ModalFocusToken } from '../session/modal-focus-port';
+  import { focusAutofocusDelegate, shouldRefocus } from './modal-refocus';
 
   export let isOpen: boolean = false;
   export let onCancel: () => void;
@@ -13,6 +14,11 @@
   export let maxWidth: string | null = null;
   /** The window the dialog is about, or null; decides where focus goes once it closes. */
   export let subject: string | null = null;
+  /**
+   * Identifies what the open dialog is about; when it changes while the dialog
+   * stays open, focus goes back to the dialog's autofocus element.
+   */
+  export let refocusKey: string | null = null;
 
   let dialogElement: HTMLDialogElement | null = null;
 
@@ -45,6 +51,23 @@
       dialogElement.close();
       reportClosed();
     }
+  }
+
+  let lastRefocusKey: string | null = null;
+
+  // Reads and writes its own state in here so the `$:` below depends on its
+  // arguments only.
+  function refocusOnKeyChange(element: HTMLDialogElement, key: string | null, open: boolean): void {
+    const refocus = shouldRefocus(lastRefocusKey, key, open && element.open);
+    lastRefocusKey = key;
+    if (refocus) {
+      focusAutofocusDelegate(element);
+    }
+  }
+
+  // Must stay after the open/close block: it needs the dialog already shown.
+  $: if (dialogElement !== null) {
+    refocusOnKeyChange(dialogElement, refocusKey, isOpen);
   }
 
   // The browser turns an Escape into `cancel` even when the input method owns

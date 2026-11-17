@@ -62,7 +62,7 @@
   }
 </script>
 
-<ModalDialog bind:isOpen onCancel={handleCancel}>
+<ModalDialog bind:isOpen onCancel={handleCancel} refocusKey={request.request_id}>
   <div class="dialog-content">
     <h2 class="dialog-title">{title}</h2>
     <p class="dialog-message">{requesterLabel} → {request.tool} → {targetLabel}</p>
@@ -70,9 +70,10 @@
       <pre class="approval-body">{body}</pre>
     {/if}
     <div class="dialog-actions">
-      <!-- Deny comes first: it is the first focusable descendant, so the
-           focus the browser gives the modal cannot approve anything. -->
-      <button type="button" class="btn btn-secondary" on:click={handleDeny}>
+      <!-- The dialog focusing steps pick the autofocus element, so initial focus is always the
+           safe choice; markup order stays Deny first for when autofocus is not honored. -->
+      <!-- svelte-ignore a11y_autofocus -->
+      <button type="button" class="btn btn-secondary" autofocus on:click={handleDeny}>
         {buttons.deny}
       </button>
       <button type="button" class="btn btn-danger" on:click={handleApprove}>
