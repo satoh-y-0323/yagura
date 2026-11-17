@@ -7,6 +7,7 @@
 import { writable } from 'svelte/store';
 
 import { isImeKey } from '../keymap/key-chord';
+import { sharedInputModality } from './input-modality';
 import { createTooltipController } from './tooltip-controller';
 
 export interface TooltipOptions {
@@ -37,6 +38,8 @@ export function tooltip(node: HTMLElement, initial: TooltipOptions | undefined) 
   let options = initial;
   let isVisible = false;
   const owner = {};
+  // Started here, not on the first focus, so that the key that moves it is seen.
+  const modality = sharedInputModality();
 
   const controller = createTooltipController({
     mode: initial?.mode ?? 'hover',
@@ -108,8 +111,10 @@ export function tooltip(node: HTMLElement, initial: TooltipOptions | undefined) 
     }
   }
 
+  // `:focus-visible` alone is not enough: WebKit matches it for a focus a script
+  // moved after a pointer press, such as a dialog's initial focus.
   function handleFocus(): void {
-    controller.focusTrigger(node.matches(':focus-visible'));
+    controller.focusTrigger(node.matches(':focus-visible') && modality.isKeyboard());
   }
 
   function handleClick(): void {
