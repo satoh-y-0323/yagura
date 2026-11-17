@@ -162,32 +162,6 @@ describe('groupByRoom', () => {
     expect(groupsAfter.map((group) => group.roomId)).toEqual(['room-a', 'room-b']);
   });
 
-  it('sets attention to the count of entries needing the user (attentionCount)', () => {
-    const room = { roomId: 'room-a', name: 'Room A' };
-    const entries = [
-      makeEntry({ windowId: 'w-a', room, status: 'waiting_input' }),
-      makeEntry({ windowId: 'w-b', room, status: 'running' }),
-      makeEntry({ windowId: 'w-c', room, status: 'waiting_approval' }),
-    ];
-
-    const groups = groupByRoom(entries, new Set(), ['w-a', 'w-b', 'w-c']);
-
-    expect(groups[0]?.attention).toBe(2);
-  });
-
-  it('sets unknown to the count of entries whose status is unknown', () => {
-    const room = { roomId: 'room-a', name: 'Room A' };
-    const entries = [
-      makeEntry({ windowId: 'w-a', room, status: 'unknown' }),
-      makeEntry({ windowId: 'w-b', room, status: 'running' }),
-      makeEntry({ windowId: 'w-c', room, status: 'unknown' }),
-    ];
-
-    const groups = groupByRoom(entries, new Set(), ['w-a', 'w-b', 'w-c']);
-
-    expect(groups[0]?.unknown).toBe(2);
-  });
-
   it('sets minimized to the count of entries with display.isMinimized', () => {
     const room = { roomId: 'room-a', name: 'Room A' };
     const entries = [

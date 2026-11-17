@@ -279,7 +279,7 @@
     type WindowActions,
   } from './session/window-actions';
   import { syncWindows } from './session/window-sync';
-  import { attentionCount } from './status-tone';
+  import { summarizeWindowStatuses } from './status-tone';
   import { createWindowSessionStore } from './stores/session-store';
   import { createWindowRegistry, type WindowEntry } from './stores/window-registry';
   import { bindPalette } from './theme/theme-apply';
@@ -3341,7 +3341,7 @@
 
   <div class="layout">
     <AppRail
-      attentionCount={attentionCount($registry.windows)}
+      windowsSummary={summarizeWindowStatuses($registry.windows)}
       {appThemeValue}
       {appThemeOptions}
       onAppThemeChange={handleAppThemeChange}

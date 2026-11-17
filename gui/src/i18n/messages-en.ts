@@ -111,8 +111,8 @@ function englishList(items: readonly string[]): string {
 export const messagesEn = {
   statusLabels: {
     running: 'Running',
-    waiting_input: 'Waiting for input',
-    waiting_approval: 'Waiting for approval',
+    waiting_input: 'Needs input',
+    waiting_approval: 'Needs approval',
     interrupted: 'Interrupted',
     idle: 'Idle',
     exited: 'Exited',
@@ -394,37 +394,16 @@ export const messagesEn = {
     restoreSelectionCount: (selected: number, total: number): string =>
       `${selected} of ${total} selected`,
 
-    /** The room heading's Unknown-count badge. */
-    unknownBadge: (count: number): string =>
-      count === 1 ? '1 window in an unknown state' : `${count} windows in an unknown state`,
-
     /** The tooltip of a window's waiting-messages mark. */
     queuedMessages: (count: number): string =>
       `${count} queued ${count === 1 ? 'message' : 'messages'} — delivered on its next turn`,
   },
 
   /**
-   * A top-level group rather than a nesting under `statusLabels`, so that
-   * group's equality contract is not disturbed. The state-based group
-   * headings (`groups`) were retired: rooms replace them.
-   */
-  windowList: {
-    shortStatus: {
-      running: 'Running',
-      waiting_input: 'Needs input',
-      waiting_approval: 'Needs approval',
-      interrupted: 'Interrupted',
-      idle: 'Idle',
-      exited: 'Exited',
-      unknown: 'Unknown',
-    },
-  },
-
-  /**
    * Why a window's status is Unknown, in the three forms the sidebar suffix,
    * the title-bar/tooltip explanation, and the chat delivery chip each need.
-   * Top-level rather than nested under `statusLabels`, the same
-   * reason `windowList` is.
+   * Top-level rather than nested under `statusLabels`, so that group keeps
+   * its own key-set equality contract.
    */
   unknownReasons: {
     short: {

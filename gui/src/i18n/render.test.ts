@@ -34,7 +34,6 @@ import {
   // it, not collection of this whole file), so it stays alongside the rest
   // instead of a separate glob/namespace import.
   describeRoomTitle,
-  describeUnknownBadge,
   describeUnknownReasonSuffix,
   describeUnknownExplanation,
   describeUndeliveredUnknownReason,
@@ -128,12 +127,6 @@ describe('render.ts: output is driven by the given locale (dummy-locale swap)', 
     expect(result).toBe(dummyMessages.formats.windowListTitle('yagura', 2));
     expect(result).not.toBe(english.formats.windowListTitle('yagura', 2));
   });
-
-  it('describeUnknownBadge: renders from the dummy formats.unknownBadge template', () => {
-    const result = describeUnknownBadge(dummyMessages, 3);
-    expect(result).toBe(dummyMessages.formats.unknownBadge(3));
-    expect(result).not.toBe(english.formats.unknownBadge(3));
-  });
 });
 
 describe('render.ts: plural forms (contract (3), English locale)', () => {
@@ -190,14 +183,6 @@ describe('render.ts: plural forms (contract (3), English locale)', () => {
     const withoutTimestamp = describeRestoreBanner(english, 2, null);
     expect(withoutTimestamp).not.toContain('2026-08-29 10:15');
     expect(withoutTimestamp).not.toBe(withTimestamp);
-  });
-
-  it('describeUnknownBadge: uses the singular form for a count of 1', () => {
-    expect(describeUnknownBadge(english, 1)).toBe('1 window in an unknown state');
-  });
-
-  it.each([2, 5])('describeUnknownBadge: uses the plural form for count %i', (count) => {
-    expect(describeUnknownBadge(english, count)).toBe(`${count} windows in an unknown state`);
   });
 });
 

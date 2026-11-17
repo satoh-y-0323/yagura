@@ -5,9 +5,6 @@
  * `tabOrder` sorts to the end), so the sidebar never re-derives either.
  */
 
-import type { DetectedStatusView } from '../ipc/session-boundary';
-import { attentionCount } from '../status-tone';
-
 /**
  * The part of a window entry that decides which room it belongs to. A window
  * without a room stands for a room of its own, keyed by its working directory.
@@ -25,10 +22,6 @@ export interface RoomGroup<T> {
   name: string;
   /** The room's windows, ordered by their position in `tabOrder` (absent ids last). */
   entries: T[];
-  /** Number of windows needing the user. */
-  attention: number;
-  /** Number of windows whose status is unknown. */
-  unknown: number;
   /** Number of minimized windows. */
   minimized: number;
   /** Whether the room's windows are hidden behind its heading. */
@@ -78,7 +71,6 @@ function orderByTabPosition<T extends { windowId: string }>(
 export function groupByRoom<
   T extends RoomMember & {
     windowId: string;
-    detected: DetectedStatusView;
     display: { isMinimized: boolean };
   },
 >(
@@ -102,8 +94,6 @@ export function groupByRoom<
       roomId,
       name: room.name,
       entries: ordered,
-      attention: attentionCount(ordered),
-      unknown: ordered.filter((entry) => entry.detected.status === 'unknown').length,
       minimized: ordered.filter((entry) => entry.display.isMinimized).length,
       collapsed: collapsed.has(roomId),
     };

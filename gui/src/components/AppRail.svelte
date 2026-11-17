@@ -1,5 +1,7 @@
 <script lang="ts">
-  import { chat, describeAttentionBadge, nav, plans } from '../ui-messages';
+  import { chat, nav, plans } from '../ui-messages';
+  import type { WindowStatusSummary } from '../status-tone';
+  import StatusBadge from './StatusBadge.svelte';
   import PlansAttentionMark from './PlansAttentionMark.svelte';
   import type { PlansAttention } from '../plans/plan-board-model';
   import { themeMarkOf } from './theme-mark';
@@ -13,7 +15,7 @@
    * no store: the count and the theme wiring are both derived
    * upstream and handed in as props.
    */
-  export let attentionCount: number;
+  export let windowsSummary: WindowStatusSummary;
   export let appThemeValue: string;
   export let appThemeOptions: { value: string; label: string }[];
   export let onAppThemeChange: (event: Event) => void;
@@ -55,12 +57,12 @@
       />
       <line x1="3" y1="9" x2="21" y2="9" stroke="currentColor" stroke-width="2" />
     </svg>
-    {#if attentionCount > 0}
-      <span
-        class="app-rail__badge"
-        data-tone="attention"
-        aria-label={describeAttentionBadge(attentionCount)}>{attentionCount}</span
-      >
+    {#if windowsSummary.count > 0 && windowsSummary.mark !== null}
+      <span class="app-rail__badge">
+        <StatusBadge status={windowsSummary.mark} variant="count" count={windowsSummary.count} />
+      </span>
+    {:else if windowsSummary.unknownOnly}
+      <span class="app-rail__badge"><StatusBadge status="unknown" variant="icon" /></span>
     {/if}
   </IconButton>
 
@@ -124,7 +126,7 @@
       />
     </svg>
     {#if chatNeedsUser}
-      <span class="app-rail__badge" data-tone="attention" aria-label={chat.needsYouBadge}></span>
+      <span class="app-rail__badge app-rail__badge--dot" aria-label={chat.needsYouBadge}></span>
     {/if}
   </IconButton>
 
@@ -262,13 +264,15 @@
     position: absolute;
     top: 2px;
     right: 2px;
-    min-width: 16px;
-    height: 16px;
-    padding: 0 3px;
-    border-radius: 999px;
-    font-size: 10px;
-    line-height: 16px;
-    text-align: center;
+    display: flex;
+  }
+
+  /* The chat asks for the user: a bare dot in the input-needed colour. */
+  .app-rail__badge--dot {
+    width: 8px;
+    height: 8px;
+    border-radius: var(--radius-full);
+    background-color: var(--st-input);
   }
 
   .app-rail__plans-mark {

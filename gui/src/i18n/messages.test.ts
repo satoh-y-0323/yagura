@@ -213,31 +213,14 @@ export const dummyMessages: Messages = {
     attentionBadge: (count: number) => `DUMMY_attentionBadge(${count})`,
     restoreSelectionCount: (selected: number, total: number) =>
       `DUMMY_restoreSelectionCount(${selected}, ${total})`,
-    // The room heading's Unknown-count badge.
-    unknownBadge: (count: number) => `DUMMY_unknownBadge(${count})`,
     // The tooltip of a window's waiting-messages mark.
     queuedMessages: (count: number) => `DUMMY_queuedMessages(${count})`,
   },
 
-  // Top-level rather than nested under `statusLabels`, so that group's own
-  // equality contract below is not disturbed. `groups` (the state-based
-  // group headings) is retired: rooms replace them.
-  windowList: {
-    shortStatus: {
-      running: 'DUMMY_short_running',
-      waiting_input: 'DUMMY_short_waiting_input',
-      waiting_approval: 'DUMMY_short_waiting_approval',
-      interrupted: 'DUMMY_short_interrupted',
-      idle: 'DUMMY_short_idle',
-      exited: 'DUMMY_short_exited',
-      unknown: 'DUMMY_short_unknown',
-    },
-  },
-
   // Why a window's status is Unknown, in the three forms the sidebar
   // suffix, the title-bar/tooltip explanation, and the chat delivery chip
-  // each need. Top-level (not nested under `statusLabels`) for the same
-  // reason `windowList` is: it has its own key-set equality contract below.
+  // each need. Top-level (not nested under `statusLabels`) because it has
+  // its own key-set equality contract below.
   unknownReasons: {
     short: {
       no_definition: 'DUMMY_short_no_definition',

@@ -88,11 +88,6 @@ const CASES: ReadonlyArray<[string, () => unknown, () => unknown]> = [
     () => render.describeRoomTitle(messages, 'main', 2),
   ],
   [
-    'describeUnknownBadge',
-    () => facade.describeUnknownBadge(3),
-    () => render.describeUnknownBadge(messages, 3),
-  ],
-  [
     'describeUnknownReasonSuffix',
     () => facade.describeUnknownReasonSuffix(UNKNOWN_WITH_REASON),
     () => render.describeUnknownReasonSuffix(messages, UNKNOWN_WITH_REASON),

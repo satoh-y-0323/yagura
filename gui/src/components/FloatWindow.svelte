@@ -25,19 +25,18 @@
   import type { WindowActions } from '../session/window-actions';
   import type { SessionStore } from '../stores/session-store';
   import type { WindowDisplay, WindowEntry } from '../stores/window-registry';
-  import { resolveTone } from '../status-tone';
   import { bindPalette } from '../theme/theme-apply';
   import { resolveWindowPaletteFromState } from '../theme/theme-resolve';
   import type { ThemeStore } from '../theme/theme-store';
   import {
     describeExitCode,
     describePaneNotice,
-    describeStatus,
     describeUnknownExplanation,
     describeUnknownReasonSuffix,
   } from '../ui-messages';
   import McpMark from './McpMark.svelte';
   import QueuedMark from './QueuedMark.svelte';
+  import StatusBadge from './StatusBadge.svelte';
   import StatusReportMark from './StatusReportMark.svelte';
   import { isPressOnControl, pointerDrag, type PointerDragOptions } from './pointer-drag';
   import TerminalPane from './TerminalPane.svelte';
@@ -217,8 +216,16 @@
         <McpMark mcpConnected={entry.mcpConnected} />
         <StatusReportMark statusReportsMissing={entry.statusReportsMissing} />
         <QueuedMark count={entry.queuedCount} />
-        <!-- prettier-ignore -->
-        <span class="float-window__status" data-tone={resolveTone(entry.detected.status)} title={describeUnknownExplanation(entry.detected, entry.detectionWarning)}>{describeStatus(entry.detected.status)}{describeUnknownReasonSuffix(entry.detected)}</span>
+        <span
+          class="float-window__status"
+          title={describeUnknownExplanation(entry.detected, entry.detectionWarning)}
+        >
+          <StatusBadge
+            status={entry.detected.status}
+            variant="label"
+            detail={describeUnknownReasonSuffix(entry.detected)}
+          />
+        </span>
         {#if entry.detected.status === 'exited' && entry.exitCode !== null}
           <span class="float-window__exit">{describeExitCode(entry.exitCode)}</span>
         {/if}
@@ -297,10 +304,8 @@
   }
 
   .float-window__status {
+    display: inline-flex;
     flex: 0 0 auto;
-    padding: var(--space-xs) var(--space-sm);
-    border-radius: var(--radius-sm);
-    font-size: var(--font-size-sm);
   }
 
   .float-window__exit {

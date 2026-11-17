@@ -22,7 +22,6 @@ import {
   describeThemeIssues as renderDescribeThemeIssues,
   describeThemeName as renderDescribeThemeName,
   describeUndeliveredUnknownReason as renderDescribeUndeliveredUnknownReason,
-  describeUnknownBadge as renderDescribeUnknownBadge,
   describeUnknownExplanation as renderDescribeUnknownExplanation,
   describeUnknownReasonSuffix as renderDescribeUnknownReasonSuffix,
   describeWindowListTitle as renderDescribeWindowListTitle,
@@ -60,9 +59,6 @@ export const banners = messages.banners;
 
 /** Tooltips and helper text. */
 export const hints = messages.hints;
-
-/** The sidebar's short-form status names. */
-export const windowList = messages.windowList;
 
 /** The `⋯` window menu's item labels. */
 export const menus = messages.menus;
@@ -217,14 +213,6 @@ export function describeRestoreSelectionCount(selected: number, total: number): 
  */
 export function describeRoomTitle(name: string, count: number): string {
   return renderDescribeRoomTitle(messages, name, count);
-}
-
-/**
- * Describes the room heading's Unknown-count badge.
- * @param count the number of windows in an unknown state
- */
-export function describeUnknownBadge(count: number): string {
-  return renderDescribeUnknownBadge(messages, count);
 }
 
 /** Describes the tooltip of a window's waiting-messages mark. */

@@ -55,8 +55,6 @@ function groupsOf(order: readonly Win[]): RoomGroup<Win>[] {
         roomId: entry.roomId,
         name: entry.roomId,
         entries: [entry],
-        attention: 0,
-        unknown: 0,
         minimized: 0,
         collapsed: true,
       });

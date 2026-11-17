@@ -13,10 +13,10 @@
    */
   import { resolveDropIndex, type TabBounds } from '../layout/tab-order';
   import type { WindowActions } from '../session/window-actions';
-  import { resolveTone } from '../status-tone';
   import type { ThemeStore } from '../theme/theme-store';
   import { hints, nav } from '../ui-messages';
   import QueuedMark from './QueuedMark.svelte';
+  import StatusBadge from './StatusBadge.svelte';
   import WindowControls from './WindowControls.svelte';
 
   /**
@@ -151,8 +151,7 @@
         on:pointercancel={handleTabPointerCancel}
         on:click={(event) => handleTabClick(event, entry.windowId)}
       >
-        <span class="tab-bar__dot" data-tone={resolveTone(entry.detected.status)} aria-hidden="true"
-        ></span>
+        <StatusBadge status={entry.detected.status} variant="icon" />
         <span class="tab-bar__label">{entry.name}</span>
         <QueuedMark count={entry.queuedCount} />
       </button>
@@ -204,13 +203,6 @@
 
   .tab-bar__tab--minimized {
     opacity: 0.45;
-  }
-
-  .tab-bar__dot {
-    flex: 0 0 auto;
-    width: 8px;
-    height: 8px;
-    border-radius: 50%;
   }
 
   .tab-bar__label {

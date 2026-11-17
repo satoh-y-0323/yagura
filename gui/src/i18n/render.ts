@@ -73,11 +73,6 @@ export function describeRoomTitle(messages: Messages, name: string, count: numbe
   return messages.formats.windowListTitle(name, count);
 }
 
-/** Describes the room heading's Unknown-count badge. */
-export function describeUnknownBadge(messages: Messages, count: number): string {
-  return messages.formats.unknownBadge(count);
-}
-
 /** Describes the tooltip of a window's waiting-messages mark. */
 export function describeQueuedMessages(messages: Messages, count: number): string {
   return messages.formats.queuedMessages(count);

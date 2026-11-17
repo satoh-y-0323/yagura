@@ -3,10 +3,11 @@
   import type { WindowActions } from '../session/window-actions';
   import type { RoomActions } from '../session/room-actions';
   import type { WindowEntry } from '../stores/window-registry';
-  import { attentionCount, resolveTone } from '../status-tone';
+  import { attentionCount, summarizeWindowStatuses } from '../status-tone';
   import { groupByRoom } from '../sidebar/room-groups';
   import IconButton from './IconButton.svelte';
   import McpMark from './McpMark.svelte';
+  import StatusBadge from './StatusBadge.svelte';
   import StatusReportMark from './StatusReportMark.svelte';
   import TileIcon from './TileIcon.svelte';
   import {
@@ -14,12 +15,11 @@
     describeAttentionBadge,
     describeInterruptHint,
     describeRoomTitle,
-    describeUnknownBadge,
+    describeStatus,
     describeUnknownExplanation,
     describeUnknownReasonSuffix,
     describeWindowListTitle,
     hints,
-    windowList,
   } from '../ui-messages';
 
   export let entries: WindowEntry[];
@@ -30,6 +30,15 @@
   export let onGoToNextNeedingYou: () => void;
   /** Brings the window of a row the user chose on screen and moves the keyboard into it. */
   export let onSelectWindow: (entry: WindowEntry) => void;
+
+  /**
+   * The tooltip of a status mark: the explanation of an unknown status (the only
+   * place a window's detection warning is shown), the status word otherwise.
+   */
+  function statusTooltip(entry: WindowEntry): string {
+    const explanation = describeUnknownExplanation(entry.detected, entry.detectionWarning);
+    return explanation === '' ? describeStatus(entry.detected.status) : explanation;
+  }
 
   /** Toggles one room's collapsed state; shared by the click and keydown handlers. */
   function handleToggleRoom(roomId: string): void {
@@ -43,7 +52,6 @@
     {#if attentionCount(entries) > 0}
       <IconButton
         class="status-panel__count-badge"
-        data-tone="attention"
         label={describeAttentionBadge(attentionCount(entries))}
         hint={hints.goToNextNeedingYou}
         on:click={onGoToNextNeedingYou}>{attentionCount(entries)}</IconButton
@@ -56,6 +64,7 @@
   {:else}
     <div class="status-panel__rooms">
       {#each groupByRoom(entries, collapsed, tabOrder) as group (group.roomId)}
+        {@const summary = summarizeWindowStatuses(group.entries)}
         <div class="status-panel__room">
           <div class="status-panel__room-heading">
             <div
@@ -88,19 +97,10 @@
                 <path d="M4 6l4 4 4-4" />
               </svg>
               <span class="status-panel__room-name">{group.name}</span>
-              {#if group.attention > 0}
-                <span
-                  class="status-panel__room-badge"
-                  data-tone="attention"
-                  aria-label={describeAttentionBadge(group.attention)}>{group.attention}</span
-                >
-              {/if}
-              {#if group.unknown > 0}
-                <span
-                  class="status-panel__room-badge"
-                  data-tone="unknown"
-                  aria-label={describeUnknownBadge(group.unknown)}>{group.unknown}</span
-                >
+              {#if summary.count > 0 && summary.mark !== null}
+                <StatusBadge status={summary.mark} variant="count" count={summary.count} />
+              {:else if summary.unknownOnly}
+                <StatusBadge status="unknown" variant="icon" />
               {/if}
               <span class="status-panel__room-count">{group.entries.length}</span>
             </div>
@@ -146,17 +146,13 @@
               {#each group.entries as entry (entry.windowId)}
                 <!-- Derived once so `disabled` and the tooltip read one verdict. -->
                 {@const interruptTarget = resolveConfirmTarget(entry.detected.status, 'interrupt')}
-                <li
-                  class="status-panel__item"
-                  data-tone={resolveTone(entry.detected.status)}
-                  data-minimized={entry.display.isMinimized}
-                >
+                <li class="status-panel__item" data-minimized={entry.display.isMinimized}>
                   <div
                     class="status-panel__target"
                     data-window-id={entry.windowId}
                     role="button"
                     tabindex="0"
-                    aria-label={entry.name}
+                    aria-labelledby="status-panel-name-{entry.windowId} status-panel-status-{entry.windowId}"
                     title={hints.focusWindow}
                     on:click={() => onSelectWindow(entry)}
                     on:keydown={(event) => {
@@ -167,11 +163,24 @@
                     }}
                   >
                     <div class="status-panel__header">
-                      <span class="status-panel__name" title={entry.name}>{entry.name}</span>
+                      <span
+                        class="status-panel__name"
+                        id="status-panel-name-{entry.windowId}"
+                        title={entry.name}>{entry.name}</span
+                      >
                       <McpMark mcpConnected={entry.mcpConnected} />
                       <StatusReportMark statusReportsMissing={entry.statusReportsMissing} />
-                      <!-- prettier-ignore -->
-                      <span class="status-panel__status" title={describeUnknownExplanation(entry.detected, entry.detectionWarning)}>{windowList.shortStatus[entry.detected.status]}{describeUnknownReasonSuffix(entry.detected)}</span>
+                      <span
+                        class="status-panel__status"
+                        id="status-panel-status-{entry.windowId}"
+                        title={statusTooltip(entry)}
+                      >
+                        <StatusBadge
+                          status={entry.detected.status}
+                          variant="icon"
+                          detail={describeUnknownReasonSuffix(entry.detected)}
+                        />
+                      </span>
                     </div>
                     <div class="status-panel__info">
                       {#if entry.vendor}
@@ -243,10 +252,13 @@
     border: none;
     font-family: inherit;
     cursor: pointer;
-    padding: 0 var(--space-xs);
-    border-radius: 999px;
-    font-size: var(--font-size-sm);
-    font-weight: 600;
+    padding: 0 var(--space-1);
+    border-radius: var(--radius-full);
+    background-color: var(--bg-selected);
+    color: var(--fg-default);
+    font-size: var(--text-2xs);
+    font-weight: var(--weight-semibold);
+    font-variant-numeric: tabular-nums;
   }
 
   .status-panel__empty {
@@ -296,7 +308,6 @@
     white-space: nowrap;
   }
 
-  .status-panel__room-badge,
   .status-panel__room-count {
     flex: 0 0 auto;
     min-width: 1.25em;
@@ -352,11 +363,8 @@
   }
 
   .status-panel__status {
+    display: inline-flex;
     flex: 0 0 auto;
-    padding: var(--space-xs) var(--space-sm);
-    border-radius: var(--radius-sm);
-    font-size: var(--font-size-sm);
-    font-weight: 500;
   }
 
   .status-panel__info {

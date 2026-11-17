@@ -55,7 +55,7 @@ interface Win {
 }
 
 function group(roomId: string, entries: Win[]): RoomGroup<Win> {
-  return { roomId, name: roomId, entries, attention: 0, unknown: 0, minimized: 0, collapsed: true };
+  return { roomId, name: roomId, entries, minimized: 0, collapsed: true };
 }
 
 const A1: Win = { windowId: 'a1' };
