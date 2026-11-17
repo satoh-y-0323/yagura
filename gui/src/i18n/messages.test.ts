@@ -169,8 +169,8 @@ export const dummyMessages: Messages = {
     // this process's instance.
     invalidInstanceId: 'DUMMY_invalidInstanceId',
     storeOverrideWithNamedInstance: 'DUMMY_storeOverrideWithNamedInstance',
-    restoreSkippedDisabledProfiles: (names: readonly string[]) =>
-      `DUMMY_restoreSkippedDisabledProfiles(${names.join(',')})`,
+    restoreNotRestored: (count: number) => `DUMMY_restoreNotRestored(${count})`,
+    restoreNotRestoredMore: (count: number) => `DUMMY_restoreNotRestoredMore(${count})`,
   },
   hints: {
     windowList: 'DUMMY_windowList',

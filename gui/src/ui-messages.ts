@@ -26,6 +26,7 @@ import {
   describeUnknownExplanation as renderDescribeUnknownExplanation,
   describeUnknownReasonSuffix as renderDescribeUnknownReasonSuffix,
   describeWindowListTitle as renderDescribeWindowListTitle,
+  EXTERNAL_TEXT_MAX_CODE_POINTS,
   foldExternalText,
 } from './i18n/render';
 import type { ChatDeliveryOutcome, DetectedStatusView } from './ipc/session-boundary';
@@ -111,7 +112,7 @@ export function describeThemeName(name: string): string {
  * facade: folding external text is not message resolution, but the boundary
  * contract keeps `i18n/` imports to this one module.
  */
-export { describeOperationFailure, foldExternalText };
+export { describeOperationFailure, EXTERNAL_TEXT_MAX_CODE_POINTS, foldExternalText };
 
 /**
  * Builds the notice shown when a window opened but its detection definition

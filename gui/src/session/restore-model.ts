@@ -1,16 +1,17 @@
 /**
  * Pure decision functions behind the restore flow. Every function here is pure
  * -- no IPC, no DOM, no svelte store -- except {@link applyLayoutSteps}, which
- * only calls the injected {@link LayoutTarget}.
+ * only calls the injected {@link LayoutTarget}, and {@link restoreSelected},
+ * which only awaits the injected `open`.
  */
-import {
-  PROFILE_DISABLED_CODE,
-  type OnNameTaken,
-  type RestoreEntry,
-  type WindowInfo,
-  type WindowOpenFailure,
+import type {
+  OnNameTaken,
+  RestoreEntry,
+  WindowInfo,
+  WindowOpenFailure,
 } from '../ipc/session-boundary';
-import { banners } from '../ui-messages';
+import { banners, EXTERNAL_TEXT_MAX_CODE_POINTS } from '../ui-messages';
+import { describeWindowOpenFailure, windowOpenFailureOf } from '../window-open-failure-model';
 
 /** Byte cap of a `layout_json` payload (mirrors `yagura_protocol::MAX_LAYOUT_JSON_BYTES`). */
 export const MAX_LAYOUT_JSON_BYTES = 16_384;
@@ -370,45 +371,89 @@ function argvLaunchOf(candidate: RestoreEntry): RestoreLaunch {
   };
 }
 
+/** One restore candidate that could not be opened, and why. */
+export interface RestoreFailure {
+  name: string;
+  failure: WindowOpenFailure;
+}
+
+/** What {@link restoreSelected} opened and what it could not. */
+export interface RestoreOutcome {
+  /** The opened candidates with their new window ids, in input order. */
+  opened: { candidate: RestoreEntry; windowId: string }[];
+  failed: RestoreFailure[];
+}
+
 /**
- * The argv launch to retry with after a profile launch failed, `null` when no
- * retry is warranted.
+ * Opens each candidate once, from {@link restoreLaunchOf}, and keeps going
+ * past a refusal.
  *
- * Only a daemon rejection of the profile itself (`failure.kind ===
- * 'rejected'`) falls back: `local` / `unsupported` / `bare` are not the
- * daemon refusing the profile, so retrying under a different launch would
- * not address them. A profile the user switched off is not retried either:
- * the saved argv would start the very CLI they turned off. A candidate that
- * named no profile has no second form to retry with, so it is left alone
- * regardless of the failure kind.
+ * A refused profile is never retried from the saved argv: that argv carries
+ * none of the profile's injection (hooks, MCP, credentials).
+ *
+ * @param candidates the selected candidates, in the order to open them
+ * @param open launches one window and resolves with its id
  */
-export function restoreFallbackOf(
-  candidate: RestoreEntry,
-  failure: WindowOpenFailure
-): RestoreLaunch | null {
-  if (
-    candidate.profile === null ||
-    failure.kind !== 'rejected' ||
-    isProfileDisabledRefusal(failure)
-  ) {
+export async function restoreSelected(
+  candidates: readonly RestoreEntry[],
+  open: (launch: RestoreLaunch) => Promise<{ windowId: string }>
+): Promise<RestoreOutcome> {
+  const outcome: RestoreOutcome = { opened: [], failed: [] };
+  for (const candidate of candidates) {
+    try {
+      const { windowId } = await open(restoreLaunchOf(candidate));
+      outcome.opened.push({ candidate, windowId });
+    } catch (error) {
+      // The display derivative: the name comes from the store, which the
+      // restore UI treats as untrusted.
+      outcome.failed.push({ name: candidate.displayName, failure: windowOpenFailureOf(error) });
+    }
+  }
+  return outcome;
+}
+
+/** Joins the lines of the not-restored notice, the "+M more" count included. */
+const RESTORE_LINE_SEPARATOR = '; ';
+
+/**
+ * The one notice naming every window a restore could not open, each with its
+ * reason; `null` when nothing failed.
+ *
+ * A repeated line is shown once, in first-seen order. Lines are listed whole
+ * while they fit under the external-text cap and the rest are only counted:
+ * the joined text is not folded again, since that would cut a name midway.
+ * The first line is always shown.
+ *
+ * @param failed the windows that could not be opened, in the order tried
+ */
+export function restoreNoticeForFailures(failed: readonly RestoreFailure[]): string | null {
+  const lines = [
+    ...new Set(failed.map(({ name, failure }) => describeWindowOpenFailure(name, failure))),
+  ];
+  const [first, ...rest] = lines;
+  if (first === undefined) {
     return null;
   }
-  return argvLaunchOf(candidate);
-}
+  const lengthOf = (text: string): number => Array.from(text).length;
+  const moreLength = (count: number): number =>
+    count === 0
+      ? 0
+      : RESTORE_LINE_SEPARATOR.length + lengthOf(banners.restoreNotRestoredMore(count));
 
-/** Whether the daemon refused a launch because its profile is switched off. */
-export function isProfileDisabledRefusal(failure: WindowOpenFailure): boolean {
-  return failure.kind === 'rejected' && failure.code === PROFILE_DISABLED_CODE;
-}
-
-/**
- * The one-line notice naming the windows a restore held back because their
- * profile is switched off, each name once in first-seen order; `null` when
- * none was held back.
- */
-export function restoreNoticeForDisabled(names: readonly string[]): string | null {
-  const unique = [...new Set(names)];
-  return unique.length === 0 ? null : banners.restoreSkippedDisabledProfiles(unique);
+  const shown = [first];
+  let length = lengthOf(first);
+  for (const [index, line] of rest.entries()) {
+    const unshownAfter = rest.length - index - 1;
+    const grown = length + RESTORE_LINE_SEPARATOR.length + lengthOf(line);
+    if (grown + moreLength(unshownAfter) > EXTERNAL_TEXT_MAX_CODE_POINTS) {
+      break;
+    }
+    shown.push(line);
+    length = grown;
+  }
+  const unshown = lines.length - shown.length;
+  const parts = unshown === 0 ? shown : [...shown, banners.restoreNotRestoredMore(unshown)];
+  return `${banners.restoreNotRestored(lines.length)}: ${parts.join(RESTORE_LINE_SEPARATOR)}`;
 }
 
 /** Applies a layout plan, one target method call per step, in step order. */

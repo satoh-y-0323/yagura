@@ -216,7 +216,7 @@ export function describeThemeName(messages: Messages, name: string): string {
 // ---------------------------------------------------------------------------
 
 /** Longest externally supplied text kept, in code points. */
-const EXTERNAL_TEXT_MAX_CODE_POINTS = 200;
+export const EXTERNAL_TEXT_MAX_CODE_POINTS = 200;
 
 /**
  * The rejected value as text. Tauri commands reject with a plain string;

@@ -80,9 +80,6 @@ export const APPROVAL_SETTINGS_MIN_REVISION = 12;
  */
 export const MCP_REGISTRATION_MIN_REVISION = 13;
 
-/** The `error.code` a daemon answers with when asked to launch a disabled profile. */
-export const PROFILE_DISABLED_CODE = 'profile_disabled';
-
 /** The `error.code` a daemon answers with when a live window already carries the name. */
 export const NAME_TAKEN_CODE = 'name_taken';
 

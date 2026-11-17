@@ -330,12 +330,11 @@ export const messagesEn = {
     storeOverrideWithNamedInstance:
       'A named instance cannot run while YAGURA_STORE_DB is set, so yagura started without a daemon: both instances would open the same database, and whichever started last would discard the previous session saved by the other. Unset YAGURA_STORE_DB in this terminal and start yagura again.',
 
-    // Restore leaves out the windows whose launch profile is switched off,
-    // rather than starting the CLI from the saved command line.
-    restoreSkippedDisabledProfiles: (names: readonly string[]): string =>
-      names.length === 1
-        ? `Not restored because its launch profile is disabled: ${names.join(', ')}`
-        : `Not restored because their launch profiles are disabled: ${names.join(', ')}`,
+    // The lead of the one notice listing the windows a restore could not open.
+    restoreNotRestored: (count: number): string =>
+      count === 1 ? 'Not restored' : `Not restored (${count})`,
+    // Ends that notice when the lines that did not fit are only counted.
+    restoreNotRestoredMore: (count: number): string => `+${count} more`,
   },
 
   hints: {

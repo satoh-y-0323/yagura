@@ -258,10 +258,8 @@
     planLayoutApplication,
     layoutTargetsForOpened,
     layoutStepsForSnapshot,
-    isProfileDisabledRefusal,
-    restoreFallbackOf,
-    restoreLaunchOf,
-    restoreNoticeForDisabled,
+    restoreNoticeForFailures,
+    restoreSelected,
     type LayoutApplicationTarget,
     type LayoutTarget,
     type RestoreLaunch,
@@ -2860,47 +2858,21 @@
     isRestoreDialogOpen = false;
     isRestoreBannerDismissed = true;
 
-    const targets: LayoutApplicationTarget[] = [];
-    // Names of the windows a disabled profile held back, collected across
-    // the whole restore and reported once below, not per window.
-    const disabledProfileNames: string[] = [];
-    for (const candidate of selected) {
-      try {
-        let opened: OpenWindowResult;
-        try {
-          opened = await invokeRestoreLaunch(restoreLaunchOf(candidate));
-        } catch (error) {
-          const failure = windowOpenFailureOf(error);
-          // A profile the user switched off is not retried under its saved
-          // argv: that would start the very CLI they turned off.
-          if (isProfileDisabledRefusal(failure)) {
-            disabledProfileNames.push(candidate.name);
-            continue;
-          }
-          // A profile the daemon no longer recognizes still has the argv it
-          // was recorded with to fall back to; every other failure kind is
-          // left to propagate (restoreFallbackOf).
-          const fallback = restoreFallbackOf(candidate, failure);
-          if (fallback === null) {
-            throw error;
-          }
-          opened = await invokeRestoreLaunch(fallback);
-        }
-        targets.push({
-          windowId: opened.windowId,
-          position: candidate.position,
-          layout: candidate.layout,
-        });
-      } catch (error) {
-        console.error('failed to restore window:', error);
-      }
+    const { opened, failed } = await restoreSelected(selected, invokeRestoreLaunch);
+    for (const { name, failure } of failed) {
+      console.error('failed to restore window:', name, failure);
     }
+    const targets: LayoutApplicationTarget[] = opened.map(({ candidate, windowId }) => ({
+      windowId,
+      position: candidate.position,
+      layout: candidate.layout,
+    }));
     await refreshWindowList();
     applyLayoutSteps(buildLayoutTarget(), planLayoutApplication(targets, get(registry).tabOrder));
     returnFocusIfLost();
-    const disabledNotice = restoreNoticeForDisabled(disabledProfileNames);
-    if (disabledNotice !== null) {
-      operationError = disabledNotice;
+    const notice = restoreNoticeForFailures(failed);
+    if (notice !== null) {
+      operationError = notice;
     }
   }
 

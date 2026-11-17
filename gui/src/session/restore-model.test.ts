@@ -1,7 +1,7 @@
 /**
  * Pure decision functions behind the restore flow: no IPC, no DOM, no svelte
- * store. `applyLayoutSteps` is the sole exception and only calls the injected
- * `LayoutTarget`.
+ * store. `applyLayoutSteps` and `restoreSelected` are the exceptions and only
+ * call what they are given (a `LayoutTarget`, an `open` function).
  */
 import { describe, it, expect, vi } from 'vitest';
 
@@ -15,18 +15,19 @@ import {
   applyLayoutSteps,
   layoutTargetsForOpened,
   layoutStepsForSnapshot,
-  restoreFallbackOf,
   restoreLaunchOf,
-  isProfileDisabledRefusal,
-  restoreNoticeForDisabled,
+  restoreSelected,
+  restoreNoticeForFailures,
   MAX_LAYOUT_JSON_BYTES,
   type LayoutV1,
   type LayoutStep,
   type LayoutTarget,
   type LayoutApplicationTarget,
+  type RestoreLaunch,
 } from './restore-model';
-import { PROFILE_DISABLED_CODE } from '../ipc/session-boundary';
+import { WindowOpenFailureError } from '../ipc/session-boundary';
 import type { RestoreEntry, WindowInfo, WindowOpenFailure } from '../ipc/session-boundary';
+import { describeWindowOpenFailure } from '../window-open-failure-model';
 
 /** Builds a minimal RestoreEntry, overriding only the fields a case cares about. */
 function makeEntry(overrides: Partial<RestoreEntry> = {}): RestoreEntry {
@@ -569,125 +570,244 @@ describe('restoreLaunchOf', () => {
   });
 });
 
-describe('restoreFallbackOf', () => {
+describe('restoreSelected', () => {
   const profileCandidate = makeEntry({
+    position: 0,
     command: ['claude', '--model', 'opus'],
-    cwd: '/home/user/project',
-    name: 'main',
+    name: 'review-pane',
+    displayName: 'review-pane',
     vendor: 'claude-code',
     detection: 'claude-code',
     profile: 'claude-code',
     model: 'opus',
-    effort: null,
+  });
+  const argvCandidate = makeEntry({
+    position: 1,
+    command: ['bash', '-l'],
+    name: 'shell',
+    displayName: 'shell',
+    vendor: 'generic',
+    detection: 'shell',
+    profile: null,
+  });
+  const secondProfileCandidate = makeEntry({
+    position: 2,
+    name: 'build-runner',
+    displayName: 'build-runner',
+    profile: 'codex-cli',
   });
 
-  const rejected: WindowOpenFailure = {
+  const notFound: WindowOpenFailure = {
     kind: 'rejected',
-    code: 'invalid_argument',
-    message: 'unknown profile',
+    code: 'profile_not_found',
+    message: 'unknown launch profile',
     rejectedArgument: 'profile',
   };
 
-  it('falls back to the saved argv when the daemon rejected the profile launch', () => {
-    expect(restoreFallbackOf(profileCandidate, rejected)).toEqual({
+  /** A fake `open` answering each launch from `answer`; a throw becomes a rejection. */
+  function fakeOpen(answer: (launch: RestoreLaunch) => { windowId: string }) {
+    return vi.fn(
+      (launch: RestoreLaunch) =>
+        new Promise<{ windowId: string }>((resolve) => resolve(answer(launch)))
+    );
+  }
+
+  it('calls open exactly once per candidate with its restore launch, never retrying a refused profile from argv', async () => {
+    const open = fakeOpen((launch) => {
+      if (launch.name === 'review-pane') {
+        throw new WindowOpenFailureError(notFound);
+      }
+      return { windowId: `id-${launch.name}` };
+    });
+    const candidates = [profileCandidate, argvCandidate, secondProfileCandidate];
+
+    await restoreSelected(candidates, open);
+
+    expect(open.mock.calls.map(([launch]) => launch)).toEqual(
+      candidates.map((candidate) => restoreLaunchOf(candidate))
+    );
+    expect(
+      open.mock.calls.filter(([launch]) => launch.name === 'review-pane' && launch.kind === 'argv')
+    ).toHaveLength(0);
+  });
+
+  it('collects each refused candidate by name with its failure and keeps opening the rest', async () => {
+    const open = fakeOpen((launch) => {
+      if (launch.name === 'review-pane') {
+        throw new WindowOpenFailureError(notFound);
+      }
+      if (launch.name === 'shell') {
+        throw new Error('bridge failed');
+      }
+      return { windowId: `id-${launch.name}` };
+    });
+    const tail = makeEntry({ position: 3, name: 'docs-writer', displayName: 'docs-writer' });
+
+    const result = await restoreSelected(
+      [profileCandidate, argvCandidate, secondProfileCandidate, tail],
+      open
+    );
+
+    expect(result.failed).toEqual([
+      { name: 'review-pane', failure: notFound },
+      { name: 'shell', failure: { kind: 'bare', message: 'bridge failed' } },
+    ]);
+    expect(result.opened).toEqual([
+      { candidate: secondProfileCandidate, windowId: 'id-build-runner' },
+      { candidate: tail, windowId: 'id-docs-writer' },
+    ]);
+  });
+
+  it('opens a raw-command candidate once from its saved argv', async () => {
+    const open = fakeOpen(() => ({ windowId: 'id-shell' }));
+
+    const result = await restoreSelected([argvCandidate], open);
+
+    expect(open).toHaveBeenCalledTimes(1);
+    expect(open.mock.calls[0]?.[0]).toEqual({
       kind: 'argv',
-      command: ['claude', '--model', 'opus'],
+      command: ['bash', '-l'],
       cwd: '/home/user/project',
-      name: 'main',
-      detection: 'claude-code',
-      vendor: 'claude-code',
+      name: 'shell',
+      detection: 'shell',
+      vendor: 'generic',
       onNameTaken: 'number',
     });
-  });
-
-  it.each<{ label: string; failure: WindowOpenFailure }>([
-    { label: 'bare', failure: { kind: 'bare', message: 'bridge failed' } },
-    { label: 'local', failure: { kind: 'local', message: 'daemon unreachable' } },
-    { label: 'unsupported', failure: { kind: 'unsupported', requestType: 'open_window' } },
-  ])('does not fall back after a $label failure', ({ failure }) => {
-    expect(restoreFallbackOf(profileCandidate, failure)).toBeNull();
-  });
-
-  it('does not retry a candidate that was already opened from its argv', () => {
-    const argvCandidate = makeEntry({ command: ['bash'], profile: null });
-
-    expect(restoreFallbackOf(argvCandidate, rejected)).toBeNull();
-  });
-
-  it('does not reopen from the saved argv when the daemon refused the profile as disabled', () => {
-    const disabled: WindowOpenFailure = {
-      kind: 'rejected',
-      code: 'profile_disabled',
-      message: 'profile is disabled',
-      rejectedArgument: 'profile',
-    };
-
-    expect(restoreFallbackOf(profileCandidate, disabled)).toBeNull();
+    expect(result).toEqual({
+      opened: [{ candidate: argvCandidate, windowId: 'id-shell' }],
+      failed: [],
+    });
   });
 });
 
-describe('isProfileDisabledRefusal', () => {
-  function rejectedWith(code: string): WindowOpenFailure {
-    return { kind: 'rejected', code, message: 'refused', rejectedArgument: 'profile' };
+describe('restoreNoticeForFailures', () => {
+  /** Longest externally supplied text kept, in code points (`render.ts`). */
+  const EXTERNAL_TEXT_MAX_CODE_POINTS = 200;
+
+  function rejected(code: string, message: string, rejectedArgument: string | null = null) {
+    const failure: WindowOpenFailure = { kind: 'rejected', code, message, rejectedArgument };
+    return failure;
   }
 
-  it('names the wire code the daemon uses for a disabled profile', () => {
-    expect(PROFILE_DISABLED_CODE).toBe('profile_disabled');
+  it('is null when nothing failed', () => {
+    expect(restoreNoticeForFailures([])).toBeNull();
   });
 
-  it('is true for a daemon rejection carrying the disabled-profile code', () => {
-    expect(isProfileDisabledRefusal(rejectedWith('profile_disabled'))).toBe(true);
+  it('names one window with its reason', () => {
+    expect(
+      restoreNoticeForFailures([
+        { name: 'review-pane', failure: rejected('profile_not_found', 'unknown launch profile') },
+      ])
+    ).toBe('Not restored: review-pane: unknown launch profile');
   });
 
-  it.each(['invalid_argument', 'not_found', 'PROFILE_DISABLED', ''])(
-    'is false for a daemon rejection with code %j',
-    (code) => {
-      expect(isProfileDisabledRefusal(rejectedWith(code))).toBe(false);
-    }
-  );
-
-  it.each<{ label: string; failure: WindowOpenFailure }>([
-    { label: 'bare', failure: { kind: 'bare', message: 'profile_disabled' } },
-    { label: 'local', failure: { kind: 'local', message: 'profile_disabled' } },
-    { label: 'unsupported', failure: { kind: 'unsupported', requestType: 'profile_disabled' } },
-  ])('is false for a $label failure even when its text reads like the code', ({ failure }) => {
-    expect(isProfileDisabledRefusal(failure)).toBe(false);
-  });
-});
-
-describe('restoreNoticeForDisabled', () => {
-  function occurrences(text: string, needle: string): number {
-    return text.split(needle).length - 1;
-  }
-
-  it('is null when no window was held back', () => {
-    expect(restoreNoticeForDisabled([])).toBeNull();
-  });
-
-  it('is one line naming every held-back window in the order given', () => {
-    const notice = restoreNoticeForDisabled(['review-pane', 'build-runner', 'docs-writer']);
-
-    expect(notice).not.toBeNull();
-    const text = notice ?? '';
-    expect(text).not.toContain('\n');
-    const positions = ['review-pane', 'build-runner', 'docs-writer'].map((name) =>
-      text.indexOf(name)
+  it('counts several windows and lists each with its reason in the order given', () => {
+    expect(
+      restoreNoticeForFailures([
+        { name: 'review-pane', failure: rejected('profile_not_found', 'unknown launch profile') },
+        {
+          name: 'build-runner',
+          failure: rejected('profile_disabled', 'the launch profile is disabled'),
+        },
+      ])
+    ).toBe(
+      'Not restored (2): review-pane: unknown launch profile; build-runner: the launch profile is disabled'
     );
-    expect(positions.every((position) => position >= 0)).toBe(true);
-    expect(positions).toEqual([...positions].sort((a, b) => a - b));
   });
 
-  it('says more than the bare names', () => {
-    const notice = restoreNoticeForDisabled(['review-pane']) ?? '';
+  it('builds each line the way a failed window launch is described', () => {
+    const failed = [
+      { name: 'b', failure: rejected('spawn_failed', '') },
+      { name: 'c', failure: { kind: 'unsupported', requestType: 'open_window' } as const },
+      { name: 'd', failure: { kind: 'local', message: 'line\nbreak' } as const },
+    ];
 
-    expect(notice.length).toBeGreaterThan('review-pane'.length);
+    expect(restoreNoticeForFailures(failed)).toBe(
+      `Not restored (3): ${failed.map(({ name, failure }) => describeWindowOpenFailure(name, failure)).join('; ')}`
+    );
   });
 
-  it('names a window that appears twice only once', () => {
-    const notice = restoreNoticeForDisabled(['review-pane', 'build-runner', 'review-pane']) ?? '';
+  it('keeps a repeated line once, in first-seen order, but keeps the same name with another reason', () => {
+    expect(
+      restoreNoticeForFailures([
+        { name: 'review-pane', failure: rejected('profile_not_found', 'unknown launch profile') },
+        { name: 'build-runner', failure: { kind: 'bare', message: 'bridge failed' } },
+        { name: 'review-pane', failure: rejected('profile_not_found', 'unknown launch profile') },
+        {
+          name: 'review-pane',
+          failure: rejected('profile_disabled', 'the launch profile is disabled'),
+        },
+      ])
+    ).toBe(
+      'Not restored (3): review-pane: unknown launch profile; build-runner: bridge failed; review-pane: the launch profile is disabled'
+    );
+  });
 
-    expect(occurrences(notice, 'review-pane')).toBe(1);
-    expect(occurrences(notice, 'build-runner')).toBe(1);
+  it('puts a not-found, a disabled, a working-directory and a bare failure in one line, each with its own reason', () => {
+    const notice = restoreNoticeForFailures([
+      { name: 'r-a', failure: rejected('profile_not_found', 'unknown launch profile', 'profile') },
+      {
+        name: 'r-b',
+        failure: rejected('profile_disabled', 'the launch profile is disabled', 'profile'),
+      },
+      {
+        name: 'r-d',
+        failure: rejected('invalid_argument', 'the working directory does not exist', 'cwd'),
+      },
+      { name: 'r-e', failure: { kind: 'bare', message: 'bridge failed' } },
+    ]);
+
+    expect(notice).toBe(
+      'Not restored (4): r-a: unknown launch profile; r-b: the launch profile is disabled; r-d: the working directory does not exist; r-e: bridge failed'
+    );
+  });
+
+  it('lists only the whole lines that fit under the cap and counts the rest as "+M more"', () => {
+    // Each line is exactly 60 code points: three lines plus their joins fit
+    // under the cap, a fourth cannot whatever the joins are.
+    const names = Array.from(
+      { length: 10 },
+      (_, index) => `w-${String(index + 1).padStart(2, '0')}`
+    );
+    const failed = names.map((name) => ({
+      name,
+      failure: { kind: 'bare', message: 'x'.repeat(54) } as const,
+    }));
+    const lines = failed.map(({ name, failure }) => describeWindowOpenFailure(name, failure));
+    expect(lines.every((line) => Array.from(line).length === 60)).toBe(true);
+
+    const notice = restoreNoticeForFailures(failed) ?? '';
+
+    const prefix = 'Not restored (10): ';
+    expect(notice.startsWith(prefix)).toBe(true);
+    const detail = notice.slice(prefix.length);
+    expect(Array.from(detail).length).toBeLessThanOrEqual(EXTERNAL_TEXT_MAX_CODE_POINTS);
+    const shown = lines.filter((line) => detail.includes(line));
+    expect(shown).toEqual(lines.slice(0, 3));
+    expect(detail.endsWith(`+${names.length - shown.length} more`)).toBe(true);
+    for (const name of names.slice(shown.length)) {
+      expect(detail).not.toContain(name);
+    }
+    expect(detail).not.toContain('…');
+  });
+
+  it('always shows the first line whole, even when it alone is longer than the cap', () => {
+    const first = {
+      name: 'long-pane',
+      failure: { kind: 'bare', message: 'y'.repeat(300) } as const,
+    };
+    const firstLine = describeWindowOpenFailure(first.name, first.failure);
+    expect(Array.from(firstLine).length).toBeGreaterThan(EXTERNAL_TEXT_MAX_CODE_POINTS);
+
+    const notice =
+      restoreNoticeForFailures([
+        first,
+        { name: 'short-pane', failure: { kind: 'bare', message: 'bridge failed' } },
+      ]) ?? '';
+
+    expect(notice.startsWith(`Not restored (2): ${firstLine}`)).toBe(true);
+    expect(notice.endsWith('+1 more')).toBe(true);
+    expect(notice).not.toContain('short-pane');
   });
 });
 
