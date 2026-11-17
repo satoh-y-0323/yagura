@@ -390,6 +390,25 @@ fn fresh_open_store_reaches_the_shipped_schema_version_with_the_same_object_name
         "a fresh database must be migrated all the way to the end of the shipped series"
     );
 
+    let window_columns = |conn: &rusqlite::Connection| -> Vec<String> {
+        table_columns(conn, "windows")
+            .into_iter()
+            .map(|(_, name, ..)| name)
+            .collect()
+    };
+    let (_before_db, before_drop) =
+        migrated_readonly("store-fresh-open-before-026", &[&store::MIGRATIONS[..25]]);
+    assert!(
+        window_columns(&before_drop).contains(&"guest".to_string()),
+        "the window table must carry the guest column before migration 026, or the check \
+         below proves nothing about that migration"
+    );
+    assert!(
+        !window_columns(&conn).contains(&"guest".to_string()),
+        "migration 026 must leave the window table without the guest column no code reads \
+         or writes"
+    );
+
     let names: Vec<String> = read_schema(&conn)
         .into_iter()
         .map(|(_, name, _)| name)

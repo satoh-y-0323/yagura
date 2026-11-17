@@ -3682,51 +3682,14 @@ async fn start_with_token(sandbox: &Sandbox) -> RunningDaemon {
 /// numbered from here.
 const OVERLAY_FACT_MIGRATION: u32 = 23;
 
-/// The migrations numbered `number` or later, in order.
-fn migrations_from(number: u32) -> Vec<PathBuf> {
-    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations");
-    let mut later: Vec<PathBuf> = std::fs::read_dir(&dir)
-        .unwrap()
-        .map(|entry| entry.unwrap().path())
-        .filter(|path| {
-            path.file_name()
-                .and_then(OsStr::to_str)
-                .and_then(|name| name.get(..3))
-                .and_then(|n| n.parse::<u32>().ok())
-                .is_some_and(|n| n >= number)
-        })
-        .collect();
-    later.sort();
-    later
-}
-
-/// Puts the sandbox's store back as it was before the migration numbered `number`: every
-/// column it and the later ones add is dropped, and the schema version set back, so the
-/// next daemon migrates rows written before.
+/// Puts the sandbox's store back as it was before the migration numbered `number`: the
+/// column changes of it and the later ones are undone, and the schema version set back, so
+/// the next daemon migrates rows written before.
 fn store_before_migration(sandbox: &Sandbox, number: u32) {
+    let version = number - 1;
     let db = rusqlite::Connection::open(store_db(sandbox)).unwrap();
-    for path in migrations_from(number).iter().rev() {
-        let text = std::fs::read_to_string(path).unwrap();
-        let code: String = text
-            .lines()
-            .filter(|line| !line.trim_start().starts_with("--"))
-            .collect::<Vec<_>>()
-            .join("\n");
-        for statement in code.split(';').map(str::trim).filter(|s| !s.is_empty()) {
-            let words: Vec<&str> = statement.split_whitespace().collect();
-            match words.as_slice() {
-                ["ALTER", "TABLE", table, "ADD", "COLUMN", column, ..] => {
-                    db.execute(&format!("ALTER TABLE {table} DROP COLUMN {column}"), [])
-                        .unwrap();
-                }
-                _ => panic!(
-                    "{}: only a column a migration adds can be undone here: {statement}",
-                    path.display()
-                ),
-            }
-        }
-    }
-    db.pragma_update(None, "user_version", number - 1).unwrap();
+    common::store_fixtures::undo_column_migrations_after(&db, version as usize);
+    db.pragma_update(None, "user_version", version).unwrap();
 }
 
 // --- whether a window's overlay was made is a fact of the window -------------------------

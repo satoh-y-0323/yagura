@@ -486,7 +486,7 @@ pub fn seed_parcels_an_older_daemon_kept(
         )
         .expect("seeding an inbox parcel row must succeed");
     }
-    drop_columns_added_after(&conn, SCHEMA_DROPPING_UNSAVED_PARCELS);
+    undo_column_migrations_after(&conn, SCHEMA_DROPPING_UNSAVED_PARCELS);
     conn.pragma_update(None, "user_version", SCHEMA_KEEPING_UNSAVED_PARCELS)
         .expect("rewinding the schema version must succeed");
 }
@@ -494,27 +494,72 @@ pub fn seed_parcels_an_older_daemon_kept(
 /// The schema version whose migration drops the parcels a daemon no longer keeps.
 const SCHEMA_DROPPING_UNSAVED_PARCELS: usize = 20;
 
-/// Drops, newest first, every column the migrations after schema `version` add, so a
-/// daemon opening the store applies them again. A later migration that does anything
-/// but add columns cannot be undone this way, and panics.
-fn drop_columns_added_after(conn: &rusqlite::Connection, version: usize) {
-    for migration in yagura_daemon::store::MIGRATIONS[version..].iter().rev() {
-        let code: String = migration
-            .lines()
-            .filter(|line| !line.trim_start().starts_with("--"))
-            .collect::<Vec<_>>()
-            .join("\n");
-        for statement in code.split(';').map(str::trim).filter(|s| !s.is_empty()) {
+/// Undoes, newest statement first, the column changes of every migration after schema
+/// `version`, so a daemon opening the store applies them again: a column a migration adds
+/// is dropped, and a column a migration drops is added back as the earlier migration that
+/// added it declared it (its old values do not come back). A later migration that does
+/// anything else cannot be undone this way, and panics.
+pub fn undo_column_migrations_after(conn: &rusqlite::Connection, version: usize) {
+    let migrations = yagura_daemon::store::MIGRATIONS;
+    for (index, migration) in migrations.iter().enumerate().skip(version).rev() {
+        for statement in migration_statements(migration).into_iter().rev() {
             let words: Vec<&str> = statement.split_whitespace().collect();
             match words.as_slice() {
                 ["ALTER", "TABLE", table, "ADD", "COLUMN", column, ..] => {
                     conn.execute(&format!("ALTER TABLE {table} DROP COLUMN {column}"), [])
                         .expect("dropping a column a later schema added must succeed");
                 }
-                _ => panic!("only a column a later migration adds can be undone: {statement}"),
+                ["ALTER", "TABLE", table, "DROP", "COLUMN", column] => {
+                    let definition = added_column_definition(&migrations[..index], table, column);
+                    conn.execute(&format!("ALTER TABLE {table} ADD COLUMN {definition}"), [])
+                        .expect("adding back a column a later schema dropped must succeed");
+                }
+                _ => panic!(
+                    "only a column a later migration adds or drops can be undone: {statement}"
+                ),
             }
         }
     }
+}
+
+/// The statements of one migration, in order, without its comment lines.
+fn migration_statements(migration: &str) -> Vec<String> {
+    let code: String = migration
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("--"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    code.split(';')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+/// The column definition (`name type constraints`) the latest of `migrations` that adds
+/// `column` to `table` gave it. A column no migration adds this way (one a `CREATE TABLE`
+/// declares) cannot be added back, and panics.
+fn added_column_definition(migrations: &[&str], table: &str, column: &str) -> String {
+    for migration in migrations.iter().rev() {
+        for statement in migration_statements(migration).into_iter().rev() {
+            let words: Vec<&str> = statement.split_whitespace().collect();
+            if let ["ALTER", "TABLE", t, "ADD", "COLUMN", c, ..] = words.as_slice()
+                && *t == table
+                && *c == column
+            {
+                // Skip `ALTER TABLE <table> ADD COLUMN` and keep the rest as written.
+                let mut definition = statement.as_str();
+                for _ in 0..5 {
+                    definition = definition
+                        .trim_start()
+                        .split_once(char::is_whitespace)
+                        .map_or("", |(_, rest)| rest);
+                }
+                return definition.trim().to_string();
+            }
+        }
+    }
+    panic!("no earlier migration adds the column {table}.{column} that a later one drops")
 }
 
 /// The keys of the `inbox_parcels` rows kept for `window_id`, by seq; `None` while the
