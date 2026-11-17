@@ -630,7 +630,6 @@ async fn call_take(client: &mut Connection, window_id: &str) -> String {
                 window_id: window_id.to_string(),
                 token: VALID_TOKEN.to_string(),
                 door: yagura_protocol::Door::Take,
-                guest: None,
             },
         )
         .await,

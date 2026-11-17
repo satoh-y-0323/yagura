@@ -339,7 +339,6 @@ async fn every_event_of_a_profile_that_names_the_subagent_pointer_asks_for_its_v
                 name: name.to_string(),
                 input: None,
                 held: true,
-                guest: None,
             },
         )
         .await;
@@ -857,7 +856,6 @@ async fn an_older_hook_request_takes_nothing_but_still_records_the_status_and_th
         name: EVENT.to_string(),
         input,
         held: true,
-        guest: None,
     };
     let mut door = setup.h.connect().await;
     common::send(&mut door, &request(None)).await;

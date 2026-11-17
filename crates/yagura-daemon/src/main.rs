@@ -44,9 +44,9 @@ use yagura_daemon::profile_hook_events::HookOrigin;
 use yagura_daemon::store;
 use yagura_daemon::{DaemonConfig, IpcServer, WindowRegistry, WindowsShellSearch, resolve_shell};
 use yagura_protocol::{
-    ClientMessage, DOOR_ANSWER_TIMEOUT, DaemonMessage, DeliveryStream, Door, GuestLineage,
-    HookInputValue, HookPointer, HookPointerKind, WindowCredentials, WindowStatus,
-    decode_daemon_message, encode_client_message, frame_encode, process_window_credentials,
+    ClientMessage, DOOR_ANSWER_TIMEOUT, DaemonMessage, DeliveryStream, Door, HookInputValue,
+    HookPointer, HookPointerKind, WindowCredentials, WindowStatus, decode_daemon_message,
+    encode_client_message, frame_encode, process_window_credentials,
 };
 
 /// A client-side connection to the daemon's endpoint, named through the OS
@@ -207,12 +207,8 @@ async fn async_main(
         | CliCommand::ReportSession { .. }) => {
             return run_hook(&ipc, &endpoint, door, credentials).await;
         }
-        CliCommand::Hook {
-            profile,
-            event,
-            guest,
-        } => {
-            return run_hook_event(&ipc, &endpoint, (&profile, &event), guest, credentials).await;
+        CliCommand::Hook { profile, event } => {
+            return run_hook_event(&ipc, &endpoint, (&profile, &event), credentials).await;
         }
         // Run by `main` before anything else.
         CliCommand::LaunchOverlay => {
@@ -1013,7 +1009,6 @@ async fn run_hook_door(
         window_id: window_id.clone(),
         token: token.clone(),
         door,
-        guest: None,
     };
     let message = match command {
         CliCommand::DeliverContext { .. } => read(Door::Context),
@@ -1203,7 +1198,6 @@ async fn run_hook_event(
     ipc: &PlatformIpc,
     endpoint: &str,
     (profile, event): (&str, &str),
-    guest: Option<GuestLineage>,
     credentials: Option<WindowCredentials>,
 ) -> Result<ExitCode> {
     let started = Instant::now();
@@ -1214,7 +1208,7 @@ async fn run_hook_event(
             exchange_hook_event(
                 ipc,
                 endpoint,
-                (profile, event, guest),
+                (profile, event),
                 credentials,
                 (pointers, values),
                 (started, &drained),
@@ -1234,7 +1228,7 @@ async fn run_hook_event(
 async fn exchange_hook_event(
     ipc: &PlatformIpc,
     endpoint: &str,
-    (profile, event, guest): (&str, &str, Option<GuestLineage>),
+    (profile, event): (&str, &str),
     credentials: WindowCredentials,
     (pointers, values): (std::sync::mpsc::Sender<Vec<String>>, FoundValues),
     (started, drained): (Instant, &StdinDrain),
@@ -1248,7 +1242,6 @@ async fn exchange_hook_event(
             name: event.to_string(),
             input,
         },
-        guest: guest.clone(),
     };
     let mut client = ipc.connect(endpoint).await.with_context(|| {
         format!("failed to connect to the daemon endpoint {endpoint} for --hook")

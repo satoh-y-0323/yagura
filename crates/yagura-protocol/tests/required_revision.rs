@@ -370,7 +370,6 @@ fn one_message_per_variant_without_launch_option() -> Vec<ClientMessage> {
             name: "Stop".to_string(),
             input: None,
             held: false,
-            guest: None,
         },
         door_read("take"),
         client_from_wire(serde_json::json!({ "type": "deliver_printed" })),
@@ -976,7 +975,6 @@ fn run_hook_requires_revision_thirty_one_and_the_current_revision_is_thirty_four
         name: "Stop".to_string(),
         input: None,
         held: false,
-        guest: None,
     };
     assert_eq!(
         required_protocol_revision(&message),

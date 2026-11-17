@@ -61,9 +61,6 @@ pub(crate) struct WindowValues {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct WindowFacts {
-    /// Whether the window's CLI runs in another environment (a WSL guest):
-    /// its open converts the daemon's paths for it (`[host_paths]`).
-    pub runs_in_guest: Option<bool>,
     /// Whether the launch overlay of a window whose profile declares one was
     /// made; `None` for a window whose profile declared none when it opened.
     pub overlay: Option<OverlayFact>,
@@ -94,7 +91,6 @@ impl WindowFacts {
     #[must_use]
     pub(crate) fn or(self, other: Self) -> Self {
         Self {
-            runs_in_guest: self.runs_in_guest.or(other.runs_in_guest),
             overlay: self.overlay.or(other.overlay),
             wake: self.wake.or(other.wake),
             hook_timeouts: self.hook_timeouts.or(other.hook_timeouts),
@@ -506,7 +502,7 @@ fn read_rows(conn: &Connection) -> rusqlite::Result<Vec<StoredWindow>> {
     let mut statement = conn.prepare_fixed(
         "SELECT window_id, state, name, cwd, vendor, command_json, detection, profile, model, \
          effort, layout_json, session_id, opener, task_plan_id, task_id, credentials, \
-         child_scope, hooks, guest, overlay, wake, hook_timeouts FROM windows \
+         child_scope, hooks, overlay, wake, hook_timeouts FROM windows \
          ORDER BY opened_seq",
     )?;
     let rows = statement.query_map([], |row| {
@@ -573,16 +569,13 @@ fn row_values(row: &rusqlite::Row<'_>) -> rusqlite::Result<WindowValues> {
         credentials: credentials_kind(credentials_mode(&credentials)),
         hooks: text_of(row.get_ref(17)?).as_deref().map(route_named),
         facts: WindowFacts {
-            // Any process of the user can write the file: a cell that is not
-            // a flag reads as not kept.
-            runs_in_guest: row.get::<_, Option<bool>>(18).ok().flatten(),
-            overlay: text_of(row.get_ref(19)?)
+            overlay: text_of(row.get_ref(18)?)
                 .as_deref()
                 .and_then(OverlayFact::named),
-            wake: text_of(row.get_ref(20)?)
+            wake: text_of(row.get_ref(19)?)
                 .as_deref()
                 .and_then(crate::wake_file::WakeRecord::named),
-            hook_timeouts: text_of(row.get_ref(21)?)
+            hook_timeouts: text_of(row.get_ref(20)?)
                 .and_then(|kept| serde_json::from_str(&kept).ok())
                 .and_then(HookTimeouts::kept),
         },
@@ -716,9 +709,9 @@ fn insert_opening(
         "INSERT INTO windows \
          (window_id, name, cwd, vendor, command_json, detection, profile, model, effort, \
          layout_json, session_id, opener, task_plan_id, task_id, credentials, child_scope, \
-         hooks, guest, overlay, wake, hook_timeouts, state) \
+         hooks, overlay, wake, hook_timeouts, state) \
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, \
-         ?18, ?19, ?20, ?21, 'opening') \
+         ?18, ?19, ?20, 'opening') \
          ON CONFLICT(window_id) DO NOTHING",
         params![
             window_id,
@@ -738,7 +731,6 @@ fn insert_opening(
             values.credentials,
             child_scope,
             values.hooks,
-            values.facts.runs_in_guest,
             values.facts.overlay,
             wake,
             hook_timeouts,
@@ -759,7 +751,7 @@ fn update_values(
         "UPDATE windows SET name = ?2, cwd = ?3, vendor = ?4, command_json = ?5, \
          detection = ?6, profile = ?7, model = ?8, effort = ?9, layout_json = ?10, \
          session_id = ?11, opener = ?12, task_plan_id = ?13, task_id = ?14, credentials = ?15, \
-         hooks = ?16, guest = ?17, overlay = ?18, wake = ?19, hook_timeouts = ?20 \
+         hooks = ?16, overlay = ?17, wake = ?18, hook_timeouts = ?19 \
          WHERE window_id = ?1",
         params![
             window_id,
@@ -778,7 +770,6 @@ fn update_values(
             values.task_id,
             values.credentials,
             values.hooks,
-            values.facts.runs_in_guest,
             values.facts.overlay,
             wake,
             hook_timeouts,

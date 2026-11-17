@@ -64,7 +64,6 @@ fn every_relay_frame_has_the_catalogued_type_and_field_names() {
                 resume: None,
                 declaration: Some(Declaration {
                     profile: "declared-profile".to_owned(),
-                    guest: None,
                 }),
             },
             json!({

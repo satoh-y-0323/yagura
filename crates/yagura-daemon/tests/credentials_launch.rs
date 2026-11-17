@@ -259,7 +259,6 @@ async fn the_credentials_file_is_an_absolute_path_naming_the_window_and_a_token_
     let declaring = |profile: &str| {
         Some(Declaration {
             profile: profile.to_string(),
-            guest: None,
         })
     };
     for (what, candidate, declaration, accepted) in [
@@ -937,7 +936,6 @@ pub(crate) async fn claims(
                 token: token.to_string(),
                 declaration: Some(Declaration {
                     profile: profile.to_string(),
-                    guest: None,
                 }),
             },
         )
@@ -958,7 +956,6 @@ async fn door_take(sandbox: &Sandbox, window_id: &str, token: &str) -> DaemonMes
             window_id: window_id.to_string(),
             token: token.to_string(),
             door: yagura_protocol::Door::Take,
-            guest: None,
         },
     )
     .await;

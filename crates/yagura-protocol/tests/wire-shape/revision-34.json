@@ -136,14 +136,6 @@
           "name": "string",
           "profile": "string"
         },
-        "guest": {
-          "root": "string",
-          "steps": [
-            {
-              "stat": "string"
-            }
-          ]
-        },
         "token": "string",
         "type": "string",
         "window_id": "string"
@@ -184,14 +176,6 @@
       },
       "identify": {
         "declaration": {
-          "guest": {
-            "root": "string",
-            "steps": [
-              {
-                "stat": "string"
-              }
-            ]
-          },
           "profile": "string"
         },
         "token": "string",
@@ -337,14 +321,6 @@
         "type": "string"
       },
       "run_hook": {
-        "guest": {
-          "root": "string",
-          "steps": [
-            {
-              "stat": "string"
-            }
-          ]
-        },
         "held": "boolean",
         "input": [
           {

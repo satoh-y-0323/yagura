@@ -80,10 +80,10 @@ use yagura_protocol::{
     ChatDeliveryInfo, ChatHalt, ChatMessage, ChatParticipant, ChatRoomInfo, ClientMessage,
     ColorOverride, CursorShape, CursorState, DaemonMessage, DaemonProblem, DaemonProblemKind,
     Declaration, DefaultPalettes, DeliveryState, DeliveryStream, Frame, FrameLine, FrameRun,
-    GuestLineage, GuestStep, HookInputValue, HookPointer, HookPointerKind, InstructionNotice,
-    InstructionNoticeState, InterruptOutcome, Key, KeyInput, LaunchOptionAlias, LaunchOptionInfo,
-    McpRegistrationAction, McpRegistrationCommand, McpRegistrationEntry, McpRegistrationRow,
-    McpRegistrationState, McpRegistrationStatusInfo, McpRegistrationStep, McpRegistrationTomlSet,
+    HookInputValue, HookPointer, HookPointerKind, InstructionNotice, InstructionNoticeState,
+    InterruptOutcome, Key, KeyInput, LaunchOptionAlias, LaunchOptionInfo, McpRegistrationAction,
+    McpRegistrationCommand, McpRegistrationEntry, McpRegistrationRow, McpRegistrationState,
+    McpRegistrationStatusInfo, McpRegistrationStep, McpRegistrationTomlSet,
     McpRegistrationTomlValue, MilestoneInfo, ModelChoice, ModelChoiceSource, Modifiers, NamedKey,
     OnNameTaken, Palette, PaletteSlot, PlanInfo, PlanReview, PlanSummary, PlanTaskInfo,
     PlanTaskSpec, PlaybookState, PointerButton, PointerInput, PointerKind, ProfileCapability,
@@ -259,9 +259,7 @@ wire_sample!(enum CellFlag => Bold);
 wire_sample!(enum CursorShape => Block);
 wire_sample!(enum HookPointerKind => Presence);
 wire_sample!(struct HookPointer { pointer, kind, value });
-wire_sample!(struct Declaration { profile, guest });
-wire_sample!(struct GuestLineage { root, steps });
-wire_sample!(struct GuestStep { stat });
+wire_sample!(struct Declaration { profile });
 
 /// Hand-written for the same reason as `Key`'s: `HookInputValue` carries data
 /// in one variant.
@@ -835,7 +833,6 @@ fn client_message_corpus() -> Vec<ClientMessage> {
             name,
             input,
             held,
-            guest,
         }),
         // Revision 34's door requests, built from their wire form: one read
         // naming the door (the hook kind carries the most fields) and the
@@ -850,7 +847,6 @@ fn client_message_corpus() -> Vec<ClientMessage> {
                 "name": "sample",
                 "input": [{ "session": "sample" }],
             },
-            "guest": { "root": "sample", "steps": [{ "stat": "sample" }] },
         })),
         message_from_wire::<ClientMessage>(serde_json::json!({ "type": "deliver_printed" })),
         // Revision 34's request for a window's launch overlay, from a guest's facts.

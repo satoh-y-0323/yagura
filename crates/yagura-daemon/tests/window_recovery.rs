@@ -575,7 +575,6 @@ fn deliver_take(window_id: &str, token: &str) -> ClientMessage {
         window_id: window_id.to_owned(),
         token: token.to_owned(),
         door: yagura_protocol::Door::Take,
-        guest: None,
     }
 }
 
@@ -4368,7 +4367,6 @@ async fn a_taken_back_wait_window_with_no_wait_is_asked_again_and_its_next_wait_
             window_id: window_id.clone(),
             token: TOKEN.to_owned(),
             door: yagura_protocol::Door::Wait,
-            guest: None,
         },
     )
     .await;

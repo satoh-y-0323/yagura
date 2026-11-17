@@ -2371,7 +2371,6 @@ pub async fn identify_declaring(client: &mut Connection, window_id: &str, profil
             token: VALID_TOKEN.to_string(),
             declaration: profile.map(|profile| yagura_protocol::Declaration {
                 profile: profile.to_string(),
-                guest: None,
             }),
         },
     )

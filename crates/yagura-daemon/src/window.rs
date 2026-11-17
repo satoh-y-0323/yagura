@@ -412,22 +412,14 @@ pub enum LineageRule {
     /// window's child: exactly one process on the way may run one of these
     /// images.
     ProcessIds(Vec<ImagePattern>),
-    /// Traced by what a request collected of its lineage in the WSL guest the
-    /// window's CLI runs in, whose processes the kernel's ids do not reach, up
-    /// to the root the launch put in the CLI's environment: exactly one
-    /// process on the way may run one of these images.
-    Guest(Vec<ImagePattern>),
 }
 
 impl LineageRule {
-    /// The rule for a window whose profile declares `images` for this host
-    /// and whose CLI runs in another environment when `runs_in_guest`.
+    /// The rule for a window whose profile declares `images` for this host.
     #[must_use]
-    pub fn for_window(images: Vec<ImagePattern>, runs_in_guest: bool) -> Self {
+    pub fn for_window(images: Vec<ImagePattern>) -> Self {
         if images.is_empty() {
             Self::Matched
-        } else if runs_in_guest {
-            Self::Guest(images)
         } else {
             Self::ProcessIds(images)
         }
@@ -3341,12 +3333,7 @@ impl WindowRegistry {
             // Only an open creates the folder; a window taken back has its own.
             credentials_dir: None,
             hook_answers: crate::wake_file::HookAnswers::default(),
-            // A row or record older than the fact: the window is taken to run
-            // in another environment when its profile converts paths for one.
-            lineage: LineageRule::for_window(
-                profile.process_image,
-                values.facts.runs_in_guest.unwrap_or(profile.host_paths),
-            ),
+            lineage: LineageRule::for_window(profile.process_image),
             // A row or record older than the fact, of a window whose profile
             // now declares an overlay: its CLI may hold the credentials in its
             // tools, so they do not speak for it.
@@ -3590,8 +3577,6 @@ struct ProfileDetermined {
     wake_command: Option<WakeCommand>,
     /// The images of its CLI the profile declares for this host.
     process_image: Vec<ImagePattern>,
-    /// Whether the profile converts paths for a CLI in another environment.
-    host_paths: bool,
     /// The profile's `[launch_overlay]` table.
     launch_overlay: Option<crate::launch_overlay::LaunchOverlaySpec>,
 }
@@ -3633,7 +3618,6 @@ fn profile_determined(config: &DaemonConfig, window_id: &str, profile: &str) -> 
         delivery: launch.delivery,
         wake_command,
         process_image: launch.process_image,
-        host_paths: launch.host_paths.is_some(),
         launch_overlay: launch.launch_overlay,
     }
 }

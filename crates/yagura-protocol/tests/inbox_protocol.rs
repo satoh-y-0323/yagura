@@ -339,7 +339,6 @@ fn a_hook_event_that_waits_for_the_confirmation_says_so_and_one_that_does_not_is
         name: "Stop".to_string(),
         input: None,
         held,
-        guest: None,
     };
     assert_eq!(
         client_wire(&run_hook(true)),
