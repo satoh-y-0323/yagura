@@ -201,6 +201,7 @@
     margin: 0;
     padding: 0;
     border: 0;
+    /* stylelint-disable-next-line declaration-property-value-disallowed-list -- opacity 0, so a focus ring would never show; the pane draws the focus */
     outline: none;
     resize: none;
     overflow: hidden;

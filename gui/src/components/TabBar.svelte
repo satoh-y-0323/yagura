@@ -17,6 +17,7 @@
   import { hints, nav } from '../ui-messages';
   import QueuedMark from './QueuedMark.svelte';
   import StatusBadge from './StatusBadge.svelte';
+  import { tooltip } from './tooltip';
   import WindowControls from './WindowControls.svelte';
 
   /**
@@ -46,6 +47,8 @@
     windowId: string;
     originX: number;
   }
+
+  const REORDER_HINT_ID = 'tab-bar-reorder-hint';
 
   let drag: DragState | null = null;
   // eslint-disable-next-line svelte/prefer-svelte-reactivity -- an imperative DOM-ref cache for pointer-drag math, never read by the template, so it drives no reactivity of its own
@@ -137,6 +140,7 @@
 </script>
 
 <nav class="tab-bar" aria-label={nav.windowTabs}>
+  <span id={REORDER_HINT_ID} hidden>{hints.reorderTab}</span>
   <div class="tab-bar__tabs">
     {#each entries as entry (entry.windowId)}
       <button
@@ -144,7 +148,8 @@
         class="tab-bar__tab"
         class:tab-bar__tab--minimized={entry.display.isMinimized}
         aria-current={entry.windowId === activeEntry.windowId ? 'true' : undefined}
-        title={hints.reorderTab}
+        aria-describedby={REORDER_HINT_ID}
+        use:tooltip={{ text: hints.reorderTab, announcedElsewhere: true }}
         use:trackTabButton={entry.windowId}
         on:pointerdown={(event) => handleTabPointerDown(event, entry.windowId)}
         on:pointerup={(event) => handleTabPointerUp(event, entry.windowId)}

@@ -181,6 +181,7 @@ export const dummyMessages: Messages = {
     maximizeWindow: 'DUMMY_maximizeWindow',
     restoreWindow: 'DUMMY_restoreWindow',
     focusWindow: 'DUMMY_focusWindow',
+    whyUnknown: 'DUMMY_whyUnknown',
     dismissBanner: 'DUMMY_dismissBanner',
     reorderTab: 'DUMMY_reorderTab',
     tileWindows: 'DUMMY_tileWindows',

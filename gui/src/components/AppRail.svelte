@@ -6,6 +6,7 @@
   import type { PlansAttention } from '../plans/plan-board-model';
   import { themeMarkOf } from './theme-mark';
   import IconButton from './IconButton.svelte';
+  import { tooltip } from './tooltip';
   // The small-size glyph the .ico also uses at 16-32px; the master icon blurs at rail size.
   import appMark from '../../src-tauri/icons/icon-small.svg';
 
@@ -175,7 +176,7 @@
     <select
       class="theme-select"
       aria-label={nav.theme}
-      title={themeMark.tooltip}
+      use:tooltip={{ text: themeMark.tooltip, announcedElsewhere: true }}
       bind:value={appThemeValue}
       on:change={onAppThemeChange}
     >

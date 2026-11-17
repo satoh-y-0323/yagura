@@ -60,17 +60,18 @@
                 {/each}
               </div>
             {:else}
-              <div class="integration-settings__command" title={row.commandTitle}>
-                {row.command}
-              </div>
+              <div class="integration-settings__command">{row.commandTitle}</div>
             {/if}
             {#if row.tomlSetNote}
               <div class="integration-settings__extra">{row.tomlSetNote}</div>
             {/if}
             {#if row.entriesNote}
-              <div class="integration-settings__extra" title={row.entriesTitle}>
-                {row.entriesNote}
-              </div>
+              <div class="integration-settings__extra">{row.entriesNote}</div>
+              {#if row.entriesTitle}
+                <div class="integration-settings__extra integration-settings__entries">
+                  {row.entriesTitle}
+                </div>
+              {/if}
             {/if}
             {#if row.reason}
               <div class="integration-settings__extra">{row.reason}</div>
@@ -246,6 +247,12 @@
     grid-column: 1;
     font-size: var(--font-size-xs);
     color: var(--color-text-secondary);
+  }
+
+  .integration-settings__entries {
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    font-family: var(--font-mono);
   }
 
   .integration-settings__actions {

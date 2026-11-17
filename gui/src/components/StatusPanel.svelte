@@ -11,6 +11,7 @@
   import StatusBadge from './StatusBadge.svelte';
   import StatusReportMark from './StatusReportMark.svelte';
   import TileIcon from './TileIcon.svelte';
+  import { tooltip } from './tooltip';
   import {
     buttons,
     describeAttentionBadge,
@@ -32,12 +33,20 @@
   /** Brings the window of a row the user chose on screen and moves the keyboard into it. */
   export let onSelectWindow: (entry: WindowEntry) => void;
 
+  const FOCUS_HINT_ID = 'status-panel-focus-hint';
+
   /**
    * The tooltip of a status mark: the explanation of an unknown status (the only
    * place a window's detection warning is shown), the status word otherwise.
    */
+  function unknownExplanation(entry: WindowEntry): string {
+    return describeUnknownExplanation(entry.detected, entry.detectionWarning);
+  }
+
+  // The explanation is also linked to the row through aria-describedby, so the
+  // tooltip is never its only reader.
   function statusTooltip(entry: WindowEntry): string {
-    const explanation = describeUnknownExplanation(entry.detected, entry.detectionWarning);
+    const explanation = unknownExplanation(entry);
     return explanation === '' ? describeStatus(entry.detected.status) : explanation;
   }
 
@@ -63,6 +72,7 @@
   {#if entries.length === 0}
     <p class="status-panel__empty">{hints.noWindows}</p>
   {:else}
+    <span id={FOCUS_HINT_ID} hidden>{hints.focusWindow}</span>
     <div class="status-panel__rooms">
       {#each groupByRoom(entries, collapsed, tabOrder) as group (group.roomId)}
         {@const summary = summarizeWindowStatuses(group.entries)}
@@ -75,7 +85,10 @@
               data-collapsed={group.collapsed}
               aria-expanded={!group.collapsed}
               aria-label={describeRoomTitle(group.name, group.entries.length)}
-              title={group.collapsed ? hints.expandRoom : hints.collapseRoom}
+              use:tooltip={{
+                text: group.collapsed ? hints.expandRoom : hints.collapseRoom,
+                announcedElsewhere: true,
+              }}
               on:click={() => handleToggleRoom(group.roomId)}
               on:keydown={(event) => {
                 if (event.key === 'Enter' || event.key === ' ') {
@@ -154,7 +167,10 @@
                     role="button"
                     tabindex="0"
                     aria-labelledby="status-panel-name-{entry.windowId} status-panel-status-{entry.windowId}"
-                    title={hints.focusWindow}
+                    aria-describedby={unknownExplanation(entry) === ''
+                      ? FOCUS_HINT_ID
+                      : `${FOCUS_HINT_ID} status-panel-why-${entry.windowId}`}
+                    use:tooltip={{ text: hints.focusWindow, announcedElsewhere: true }}
                     on:click={() => onSelectWindow(entry)}
                     on:keydown={(event) => {
                       if (event.key === 'Enter' || event.key === ' ') {
@@ -167,14 +183,15 @@
                       <span
                         class="status-panel__name"
                         id="status-panel-name-{entry.windowId}"
-                        title={entry.name}>{entry.name}</span
+                        use:tooltip={{ text: entry.name, announcedElsewhere: true }}
+                        >{entry.name}</span
                       >
                       <McpMark mcpConnected={entry.mcpConnected} />
                       <StatusReportMark statusReportsMissing={entry.statusReportsMissing} />
                       <span
                         class="status-panel__status"
                         id="status-panel-status-{entry.windowId}"
-                        title={statusTooltip(entry)}
+                        use:tooltip={{ text: statusTooltip(entry), announcedElsewhere: true }}
                       >
                         <StatusBadge
                           status={entry.detected.status}
@@ -182,6 +199,11 @@
                           detail={describeUnknownReasonSuffix(entry.detected)}
                         />
                       </span>
+                      {#if unknownExplanation(entry) !== ''}
+                        <span id="status-panel-why-{entry.windowId}" hidden
+                          >{unknownExplanation(entry)}</span
+                        >
+                      {/if}
                     </div>
                     <div class="status-panel__info">
                       {#if entry.vendor}
@@ -190,7 +212,11 @@
                       {#if entry.display.isMinimized}
                         <span class="status-panel__cwd">{hints.minimizedMarker}</span>
                       {:else}
-                        <span class="status-panel__cwd" title={entry.cwd}>{entry.cwd}</span>
+                        <span
+                          class="status-panel__cwd"
+                          use:tooltip={{ text: entry.cwd, announcedElsewhere: true }}
+                          >{entry.cwd}</span
+                        >
                       {/if}
                     </div>
                   </div>

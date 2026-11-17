@@ -346,6 +346,7 @@ export const messagesEn = {
     maximizeWindow: 'Maximize the window',
     restoreWindow: 'Restore the window to its previous size',
     focusWindow: 'Click to bring to front',
+    whyUnknown: 'Why is the status unknown?',
     dismissBanner: 'Dismiss this notice',
     reorderTab: 'Drag to reorder',
     tileWindows: 'Tile windows',

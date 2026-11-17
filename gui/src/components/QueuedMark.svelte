@@ -5,6 +5,7 @@
    * see {@link import('../stores/window-registry').queuedCountOf}.
    */
   import { describeQueuedMessages } from '../ui-messages';
+  import { tooltip } from './tooltip';
 
   export let count: number | undefined;
 </script>
@@ -14,7 +15,7 @@
     class="queued-mark"
     role="img"
     aria-label={describeQueuedMessages(count)}
-    title={describeQueuedMessages(count)}
+    use:tooltip={{ text: describeQueuedMessages(count), announcedElsewhere: true }}
   >
     <svg
       class="queued-mark__icon"

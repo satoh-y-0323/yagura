@@ -117,6 +117,15 @@ const NO_BARE_LABELLED_BUTTON = [
   },
 ];
 
+// A `title` attribute is not read by keyboard users and would make a second tooltip mechanism.
+const NO_TITLE_ATTRIBUTE = [
+  {
+    selector: "SvelteStartTag[parent.kind='html'] > SvelteAttribute[key.name='title']",
+    message:
+      'Use the tooltip action, or visible text or aria-describedby: a title attribute is not read from the keyboard.',
+  },
+];
+
 // What is typed here is read by a machine (mentions, commands, paths, names), and macOS WebKit
 // rewrites quotes, dashes and words as they are typed unless spellcheck is off for the field.
 const NO_TEXT_SUBSTITUTION_MESSAGE =
@@ -143,6 +152,7 @@ const SOURCE_SYNTAX = [
   ...NO_GLOBAL_KEYDOWN,
   ...NO_BARE_LABELLED_BUTTON,
   ...NO_TEXT_SUBSTITUTION,
+  ...NO_TITLE_ATTRIBUTE,
 ];
 
 export default [
@@ -212,6 +222,7 @@ export default [
         ...NO_JAPANESE_TEXT,
         ...NO_BARE_LABELLED_BUTTON,
         ...NO_TEXT_SUBSTITUTION,
+        ...NO_TITLE_ATTRIBUTE,
         ...NO_LITERAL_MARKUP_TEXT,
       ],
     },

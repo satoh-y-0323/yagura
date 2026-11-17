@@ -26,7 +26,6 @@
     <span class="window-menu__theme-label">{menus.theme}</span>
     <select
       class="window-theme-select"
-      title={themes.windowSelectLabel}
       aria-label={themes.windowSelectLabel}
       bind:value={themeValue}
       on:change={onThemeChange}

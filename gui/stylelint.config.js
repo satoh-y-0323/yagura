@@ -5,11 +5,8 @@ const COLOR_RULES = {
   'function-disallowed-list': ['rgb', 'rgba', 'hsl', 'hsla'],
 };
 
-// Files that still break a rule. Each leaves this list in the unit named beside it.
-const MIGRATING = [
-  // outline: none on the invisible typing input, whose focus the pane shows; decided with the terminal pane.
-  'src/components/TerminalPane.svelte',
-];
+// Files that still break a rule. Each leaves this list in the unit that rewrites it.
+const MIGRATING = [];
 
 export default {
   overrides: [

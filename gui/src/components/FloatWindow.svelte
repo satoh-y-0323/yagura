@@ -33,7 +33,7 @@
     describePaneNotice,
     describeUnknownExplanation,
     describeUnknownReasonSuffix,
-    statusLabels,
+    hints,
   } from '../ui-messages';
   import Icon from './Icon.svelte';
   import IconButton from './IconButton.svelte';
@@ -43,6 +43,7 @@
   import StatusReportMark from './StatusReportMark.svelte';
   import { isPressOnControl, pointerDrag, type PointerDragOptions } from './pointer-drag';
   import TerminalPane from './TerminalPane.svelte';
+  import { tooltip } from './tooltip';
   import WindowControls from './WindowControls.svelte';
 
   /** The registry mutators that own this window's position and size. */
@@ -216,7 +217,12 @@
          twice. -->
     {#if !entry.display.isMaximized}
       <div class="float-window__bar" role="presentation" use:pointerDrag={moveDrag}>
-        <h2 class="float-window__title" title={entry.name}>{entry.name}</h2>
+        <h2
+          class="float-window__title"
+          use:tooltip={{ text: entry.name, announcedElsewhere: true }}
+        >
+          {entry.name}
+        </h2>
         <McpMark mcpConnected={entry.mcpConnected} />
         <StatusReportMark statusReportsMissing={entry.statusReportsMissing} />
         <QueuedMark count={entry.queuedCount} />
@@ -231,7 +237,7 @@
           <IconButton
             data-window-control
             class="float-window__why"
-            label={statusLabels.unknown}
+            label={hints.whyUnknown}
             toggletip={unknownExplanation}
           >
             <Icon name="info" size="sm" />

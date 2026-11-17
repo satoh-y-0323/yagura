@@ -16,6 +16,7 @@
   import { observeSize } from './observe-size';
   import { closeOnEscape } from './panel-focus';
   import { pointerDrag, type PointerDragOptions } from './pointer-drag';
+  import { tooltip } from './tooltip';
   import { isImeKey } from '../keymap/key-chord';
   import { resolveDisplayName, type ChatRoomState } from '../chat/chat-store';
   import { splitForMiddleEllipsis } from '../chat/middle-ellipsis';
@@ -438,7 +439,6 @@
         {@const name = splitForMiddleEllipsis(row.name)}
         <li
           class="room-row"
-          title={row.name}
           data-selected={row.room_id === currentRoomId}
           data-empty={row.participant_count === 0}
           data-menu-open={row.room_id === menuRoomId}
@@ -448,6 +448,7 @@
             class="room-row__hit"
             role="button"
             tabindex="0"
+            use:tooltip={{ text: row.name, announcedElsewhere: true }}
             on:click={() => onSelectRoom(row.room_id)}
             on:keydown={(event) => {
               if (event.key === 'Enter' || event.key === ' ') {
@@ -457,7 +458,9 @@
             }}
           >
             {#if row.halted}
-              <span class="room-row__stop" title={chat.roomStoppedLabel}
+              <span
+                class="room-row__stop"
+                use:tooltip={{ text: chat.roomStoppedLabel, announcedElsewhere: true }}
                 ><Icon name="circle-stop" size="xs" label={chat.roomStoppedLabel} /></span
               >
             {/if}
@@ -476,7 +479,7 @@
               <span
                 class="room-row__dot"
                 aria-label={chat.roomNeedsYouLabel}
-                title={chat.roomNeedsYouLabel}
+                use:tooltip={{ text: chat.roomNeedsYouLabel, announcedElsewhere: true }}
               ></span>
             {/if}
           </div>
@@ -604,17 +607,16 @@
           {#if message.deliveries.length > 0}
             <div class="msg__deliveries">
               {#each message.deliveries as delivery (delivery.window_id)}
-                <span
-                  class="delivery"
-                  data-tone={deliveryTone(delivery.state)}
-                  title={delivery.state === 'queued' ? (delivery.note ?? undefined) : undefined}
-                >
+                <span class="delivery" data-tone={deliveryTone(delivery.state)}>
                   <span class="delivery__to">{deliveryTarget(delivery.window_id)}</span>
                   <span
                     >{delivery.state === 'undelivered_unknown'
                       ? describeUndeliveredUnknownReason(delivery)
                       : describeDeliveryState(delivery.state)}</span
                   >
+                  {#if delivery.state === 'queued' && delivery.note}
+                    <span class="delivery__note">{delivery.note}</span>
+                  {/if}
                 </span>
               {/each}
             </div>

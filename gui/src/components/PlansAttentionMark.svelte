@@ -2,13 +2,20 @@
   /** The mark that flags plans needing the user; shared by the rail and the Board tab. */
   import type { PlansAttention } from '../plans/plan-board-model';
   import { plans } from '../ui-messages';
+  import { tooltip } from './tooltip';
 
   export let attention: NonNullable<PlansAttention>;
 
   $: text = plans.plansAttentionBadge(attention.kind === 'pending', attention.count);
 </script>
 
-<span class="plans-attention-mark" data-tone="attention" aria-label={text} title={text}></span>
+<span
+  class="plans-attention-mark"
+  data-tone="attention"
+  role="img"
+  aria-label={text}
+  use:tooltip={{ text, announcedElsewhere: true }}
+></span>
 
 <style>
   .plans-attention-mark {
