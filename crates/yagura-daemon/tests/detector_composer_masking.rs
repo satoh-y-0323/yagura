@@ -1,12 +1,13 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-//! The status a bundled detection definition reports must come from what the
-//! CLI itself draws, not from the text sitting in the composer.
+//! The status a detection definition reports must come from what the CLI
+//! itself draws, not from the text sitting in the composer.
 //!
 //! Every case feeds a real (or, where noted, synthesized) PTY byte stream to a
-//! `DetectionEngine` built from the bundled definition and reads the confirmed
-//! status. The streams live under `tests/fixtures/<cli>/composer/`; see the
-//! README next to them for their origin.
+//! `DetectionEngine` built from either a bundled definition or a neutral
+//! definition written in this file, and reads the confirmed status. The real
+//! streams live under `tests/fixtures/<cli>/composer/`; see the README next to
+//! them for their origin.
 
 use crate::common;
 
@@ -29,8 +30,13 @@ fn fixture(cli: &str, name: &str) -> Vec<u8> {
 /// screen and returns the status confirmed after the debounce has elapsed.
 async fn judge_stream(definition_file: &str, cols: u16, rows: u16, bytes: &[u8]) -> WindowStatus {
     let source = common::repo_definition_text(definition_file);
+    judge_stream_source(&source, cols, rows, bytes).await
+}
+
+/// [`judge_stream`] for a definition given as its TOML text.
+async fn judge_stream_source(source: &str, cols: u16, rows: u16, bytes: &[u8]) -> WindowStatus {
     let config = DaemonConfig::default();
-    let mut engine = common::new_engine_sized(&source, &config, cols, rows);
+    let mut engine = common::new_engine_sized(source, &config, cols, rows);
     engine.feed(bytes);
     common::tick_after_ms(&mut engine, 350).await;
     common::tick_after_ms(&mut engine, 350).await;
@@ -153,42 +159,95 @@ async fn antigravity_cli_composer_grown_by_two_envelopes_is_waiting_input() {
 // still found, so the CLI's own lines above and below it decide the status.
 // =====================================================================
 
+/// A neutral definition whose composer body may hold blank lines. Its window
+/// is shorter than the folded body below, so a rule sees the CLI's own lines
+/// only once the body has been taken out.
+const BLANK_LINES_DEFINITION: &str = r#"
+schema_version = 1
+name = "example-blank-lines-cli"
+bottom_line_count = 6
+
+[debounce]
+confirm_ms = 300
+
+[[rules]]
+status = "waiting_approval"
+pattern = '^\s{0,4}Use arrows to choose\b'
+priority = 30
+region = "bottom"
+
+[[rules]]
+status = "running"
+pattern = '^\* Working\b'
+priority = 20
+region = "bottom"
+
+[[rules]]
+status = "waiting_input"
+pattern = '^>( |$)'
+priority = 10
+region = "bottom"
+
+[composer]
+marker = '^>'
+separator = " "
+continuation_prefix = "  "
+blank_lines_in_body = true
+"#;
+
+/// The 1-based screen row of the line above the composer in
+/// [`folded_composer_screen`], and the row and column the cursor rests at.
+const STATUS_ROW: u16 = 3;
+const CURSOR_ROW: u16 = 19;
+const CURSOR_COL: u16 = 3;
+
+/// A draft folded under `> ↑ 25 more lines`, every fifth line blank (drawn as
+/// nothing), with the cursor shown past the prefix of a blank body line.
+/// `status_line` is the CLI's own line just above the composer.
+fn folded_composer_screen(status_line: &str) -> String {
+    let mut screen = String::from("\x1b[2J\x1b[H");
+    screen.push_str("Answer to the earlier question.\r\n\r\n");
+    screen.push_str(status_line);
+    screen.push_str("\r\n> \u{2191} 25 more lines\r\n");
+    for line in 26..40 {
+        if line % 5 == 0 {
+            screen.push_str("\r\n");
+        } else {
+            screen.push_str(&format!("  line {line}\r\n"));
+        }
+    }
+    screen.push_str("  ");
+    screen
+}
+
+// =====================================================================
+// A composer folded at its height limit, whose body has blank lines, is
+// still found, so the CLI's own lines above and below it decide the status.
+// =====================================================================
+
 #[tokio::test(start_paused = true)]
-async fn antigravity_cli_folded_body_with_blank_lines_is_waiting_input() {
-    let status = judge_fixture(
-        "antigravity-cli.toml",
-        "antigravity-cli",
-        100,
-        30,
-        "100x30-folded-body-blank-lines",
-    )
-    .await;
+async fn folded_body_with_blank_lines_is_waiting_input() {
+    let screen = folded_composer_screen("Ready.");
+    let status = judge_stream_source(BLANK_LINES_DEFINITION, 100, 30, screen.as_bytes()).await;
     assert_eq!(status, WindowStatus::WaitingInput);
 }
 
 #[tokio::test(start_paused = true)]
-async fn antigravity_cli_running_under_a_folded_body_with_blank_lines_is_running() {
-    let status = judge_fixture(
-        "antigravity-cli.toml",
-        "antigravity-cli",
-        100,
-        30,
-        "100x30-running-folded-body-blank-lines",
-    )
-    .await;
+async fn running_under_a_folded_body_with_blank_lines_is_running() {
+    let screen = folded_composer_screen("* Working (esc to interrupt)");
+    let status = judge_stream_source(BLANK_LINES_DEFINITION, 100, 30, screen.as_bytes()).await;
     assert_eq!(status, WindowStatus::Running);
 }
 
+/// The same draft after the turn ends: the CLI repaints its line above the
+/// composer and puts the cursor back where it was.
 #[tokio::test(start_paused = true)]
-async fn antigravity_cli_finished_turn_under_a_folded_body_with_blank_lines_is_waiting_input() {
-    let status = judge_fixture(
-        "antigravity-cli.toml",
-        "antigravity-cli",
-        100,
-        30,
-        "100x30-done-folded-body-blank-lines",
-    )
-    .await;
+async fn finished_turn_under_a_folded_body_with_blank_lines_is_waiting_input() {
+    let mut stream = folded_composer_screen("* Working (esc to interrupt)");
+    stream.push_str(&format!(
+        "\x1b[{STATUS_ROW};1H\x1b[2K* Worked for 12s\x1b[{CURSOR_ROW};{CURSOR_COL}H"
+    ));
+    let status = judge_stream_source(BLANK_LINES_DEFINITION, 100, 30, stream.as_bytes()).await;
     assert_eq!(status, WindowStatus::WaitingInput);
 }
 
@@ -312,7 +371,10 @@ async fn real_dialogs_stay_waiting_approval() {
 /// A dialog whose option line looks like a composer line (marker, then a
 /// numbered choice), followed by an indented explanation and an indented
 /// footer, with the cursor hidden, as a dialog draws it. With the cursor
-/// hidden nothing here is a composer, so the footer must still decide.
+/// hidden nothing here is a composer, so the footer must still decide. That
+/// holds for a definition whose composer body may hold blank lines too, even
+/// where the dialog's blank rows sit between its marker-shaped row and its
+/// footer.
 #[tokio::test(start_paused = true)]
 async fn dialog_shaped_like_a_composer_with_a_hidden_cursor_stays_waiting_approval() {
     let screen = concat!(
@@ -330,4 +392,24 @@ async fn dialog_shaped_like_a_composer_with_a_hidden_cursor_stays_waiting_approv
     );
     let status = judge_stream("codex-cli.toml", 100, 30, screen.as_bytes()).await;
     assert_eq!(status, WindowStatus::WaitingApproval);
+
+    let blank_rows_dialog = concat!(
+        "\x1b[2J\x1b[H",
+        "  Run this command?\r\n",
+        "\r\n",
+        "> 1. Yes\r\n",
+        "\r\n",
+        "  2. No\r\n",
+        "\r\n",
+        "  Use arrows to choose, enter to confirm",
+        "\x1b[?25l",
+    );
+    let status = judge_stream_source(
+        BLANK_LINES_DEFINITION,
+        100,
+        30,
+        blank_rows_dialog.as_bytes(),
+    )
+    .await;
+    assert_eq!(status, WindowStatus::WaitingApproval, "blank lines in body");
 }
