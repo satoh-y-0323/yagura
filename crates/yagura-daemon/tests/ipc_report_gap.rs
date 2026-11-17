@@ -162,11 +162,26 @@ fn str_array(items: &[&str]) -> toml::Value {
 /// The shipped `profile` with only its launch command swapped for the stub
 /// fixture, so the row is listed without any real CLI present.
 fn shipped_profile_with_stub_command(profile: &str) -> String {
+    with_stub_command(&read_doc_verbatim(&format!(
+        "../../profiles/{profile}.toml"
+    )))
+}
+
+/// The fixture profile `name` under `tests/fixtures/profiles` with only its launch
+/// command swapped for the stub fixture.
+fn fixture_profile_with_stub_command(name: &str) -> String {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/profiles")
+        .join(format!("{name}.toml"));
+    let source = std::fs::read_to_string(&path)
+        .unwrap_or_else(|err| panic!("read the fixture {}: {err}", path.display()));
+    with_stub_command(&source)
+}
+
+fn with_stub_command(source: &str) -> String {
     let stub = mcp_cli_stub_path();
     let stub = stub.to_str().expect("stub path is UTF-8");
-    let mut root: toml::Table = read_doc_verbatim(&format!("../../profiles/{profile}.toml"))
-        .parse()
-        .expect("the shipped profile is TOML");
+    let mut root: toml::Table = source.parse().expect("the profile is TOML");
     let mut command = toml::Table::new();
     command.insert("default".into(), str_array(&[stub]));
     root.insert("command".into(), toml::Value::Table(command));
@@ -174,6 +189,20 @@ fn shipped_profile_with_stub_command(profile: &str) -> String {
 }
 
 async fn listed_rows(tag: &str, profiles: &[&str]) -> Vec<McpRegistrationRow> {
+    let placed: Vec<(&str, String)> = profiles
+        .iter()
+        .map(|profile| (*profile, shipped_profile_with_stub_command(profile)))
+        .collect();
+    listed_rows_of(tag, &placed, None).await
+}
+
+/// The rows listed by a daemon of `instance_id` whose profiles are `placed`
+/// (identifier, source).
+async fn listed_rows_of(
+    tag: &str,
+    placed: &[(&str, String)],
+    instance_id: Option<&str>,
+) -> Vec<McpRegistrationRow> {
     let root = unique_temp_dir(tag);
     let profiles_dir = root.join("profiles");
     let home_dir = root.join("home");
@@ -181,17 +210,14 @@ async fn listed_rows(tag: &str, profiles: &[&str]) -> Vec<McpRegistrationRow> {
     for dir in [&profiles_dir, &home_dir] {
         std::fs::create_dir_all(dir).expect("create fixture dir");
     }
-    for profile in profiles {
-        write_profile(
-            &profiles_dir,
-            profile,
-            &shipped_profile_with_stub_command(profile),
-        );
+    for (id, source) in placed {
+        write_profile(&profiles_dir, id, source);
     }
     let config = DaemonConfig {
         profiles_dir: Some(profiles_dir),
         home_dir: Some(home_dir),
         registration_cwd: registration_cwd_in(&root),
+        instance_id: instance_id.map(str::to_string),
         report_dir: Some(report_dir),
         mcp_bridge: Some(root.join("bridge").join("yagura-mcp")),
         host_os: ProfileOs::host(),
@@ -220,32 +246,39 @@ fn row<'a>(rows: &'a [McpRegistrationRow], profile: &str) -> &'a McpRegistration
         .unwrap_or_else(|| panic!("the listing has no row for {profile}"))
 }
 
+/// A row whose registration owns one key, named after its server, of a JSON file it
+/// shares with the user's own entries previews that one key under the name the
+/// instance registers as.
 #[tokio::test]
-async fn the_antigravity_row_previews_the_hooks_entry_it_will_add() {
-    let rows = listed_rows("hook-preview-agy", &["antigravity-cli"]).await;
-    let entries = &row(&rows, "antigravity-cli").entries;
+async fn a_shared_file_row_previews_the_one_key_it_will_add_under_its_server_name() {
+    const FIXTURE: &str = "json-entry-shared-file";
+    for (instance_id, server) in [(None, "yagura"), (Some("dev"), "yagura-dev")] {
+        let placed = [(FIXTURE, fixture_profile_with_stub_command(FIXTURE))];
+        let rows = listed_rows_of("hook-preview-shared-file", &placed, instance_id).await;
+        let entries = &row(&rows, FIXTURE).entries;
 
-    assert_eq!(
-        entries.len(),
-        1,
-        "one top-level entry is written: {entries:?}"
-    );
-    let entry = &entries[0];
-    assert_eq!(entry.file, ".gemini/config/hooks.json");
-    assert_eq!(entry.name, "yagura");
-    let content: serde_json::Value =
-        serde_json::from_str(&entry.content).expect("the preview content is the entry's JSON");
-    assert!(
-        content.get("PreInvocation").is_some() && content.get("PostToolUse").is_some(),
-        "the preview must show the events the entry reports on: {content}"
-    );
-    assert!(
-        entry
-            .content
-            .contains("--hook antigravity-cli PreInvocation"),
-        "the preview must show the command the hook runs: {}",
-        entry.content
-    );
+        assert_eq!(
+            entries.len(),
+            1,
+            "{server}: one top-level entry is written: {entries:?}"
+        );
+        let entry = &entries[0];
+        assert_eq!(entry.file, ".example-cli/hooks.json", "{server}");
+        assert_eq!(entry.name, server, "the key is the server's own name");
+        let content: serde_json::Value =
+            serde_json::from_str(&entry.content).expect("the preview content is the entry's JSON");
+        assert!(
+            content.get("BeforeTurn").is_some() && content.get("AfterTool").is_some(),
+            "{server}: the preview must show the events the entry reports on: {content}"
+        );
+        assert!(
+            entry.content.contains(&format!(
+                "--for-instance {server} --hook {FIXTURE} BeforeTurn"
+            )),
+            "{server}: the preview must show the command the hook runs: {}",
+            entry.content
+        );
+    }
 }
 
 #[tokio::test]

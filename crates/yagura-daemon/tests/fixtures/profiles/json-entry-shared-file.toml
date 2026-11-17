@@ -1,0 +1,40 @@
+schema = 1
+display_name = "Json Entry Shared File"
+detection = "generic-shell"
+
+[command]
+default = ["example-cli"]
+
+[delivery]
+output = { context = '{"note":{text}}', take = '{"note":{text}}', wait = '{"note":{text}}', block = '{"decision":"block","reason":{text}}' }
+max_bytes = 10000
+wake = "none"
+
+[mcp_registration]
+add = ["mcp", "add", "{env_args}", "{server}", "--", "{bridge}", "--profile", "json-entry-shared-file"]
+remove = ["mcp", "remove", "{server}"]
+env_arg = ["--env={env}"]
+
+[mcp_registration.status]
+file = ".example-cli/mcp.json"
+format = "json"
+command = "/mcpServers/{server}/command"
+args_pointer = "/mcpServers/{server}/args"
+
+[mcp_registration.json_entry]
+file = ".example-cli/hooks.json"
+
+[mcp_registration.json_entry.entries."{server}"]
+BeforeTurn = [{ type = "command", command = "{daemon} --for-instance {server} --hook json-entry-shared-file BeforeTurn", timeout = "{hook_timeout}" }]
+SessionStart = [{ type = "command", command = "{daemon} --for-instance {server} --hook json-entry-shared-file SessionStart", timeout = "{hook_timeout}" }]
+AfterTool = [{ matcher = "*", hooks = [{ type = "command", command = "{daemon} --for-instance {server} --hook json-entry-shared-file AfterTool", timeout = "{hook_timeout}" }] }]
+Stop = [{ type = "command", command = "{daemon} --for-instance {server} --hook json-entry-shared-file Stop", timeout = "{hook_timeout}" }]
+
+[hook_timeout]
+default = 10
+
+[hook_events]
+BeforeTurn = { status = "running", deliver = "take" }
+SessionStart = { deliver = "context" }
+AfterTool = { status = "running" }
+Stop = { status = "waiting_input", deliver = "block" }

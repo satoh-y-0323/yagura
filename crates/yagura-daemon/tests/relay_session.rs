@@ -993,7 +993,7 @@ fn the_relay_reads_each_request_id_as_rmcp_does() {
 // Notifications before the first request
 // =====================================================================
 
-/// agy's opening: `server/discover`, then `notifications/roots/list_changed`
+/// A client that opens with `server/discover`, then `notifications/roots/list_changed`
 /// before any other request.
 #[tokio::test]
 async fn a_roots_list_changed_between_server_discover_and_the_first_request_keeps_the_session() {

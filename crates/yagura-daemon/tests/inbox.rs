@@ -856,13 +856,13 @@ fn every_door(form: OutputForm) -> DoorOutputs {
     DoorOutputs::all(&form)
 }
 
-const AGY_SHAPE: &str = r#"{"injectSteps":[{"systemMessage":{"systemMessage":{text}}}]}"#;
+const NESTED_JSON_SHAPE: &str = r#"{"injectSteps":[{"systemMessage":{"systemMessage":{text}}}]}"#;
 
 #[tokio::test]
 async fn a_json_form_embeds_the_text_as_one_escaped_json_string_substituted_once() {
     let (h, mut client) = start("inbox-i9", |config| {
         config.delivery = DeliverySpec {
-            output: every_door(OutputForm::Template(AGY_SHAPE.into())),
+            output: every_door(OutputForm::Template(NESTED_JSON_SHAPE.into())),
             ..DeliverySpec::default()
         };
     })
@@ -893,7 +893,7 @@ async fn a_json_form_prints_nothing_when_there_is_nothing_to_deliver() {
     let (h, mut client) = start("inbox-i9-empty", |config| {
         config.chat_intro = String::new();
         config.delivery = DeliverySpec {
-            output: every_door(OutputForm::Template(AGY_SHAPE.into())),
+            output: every_door(OutputForm::Template(NESTED_JSON_SHAPE.into())),
             ..DeliverySpec::default()
         };
     })

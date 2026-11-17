@@ -17,7 +17,7 @@
 use crate::common;
 
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -178,19 +178,26 @@ struct Setup {
 
 impl Setup {
     async fn start() -> Self {
-        Self::start_with(false).await
+        Self::start_with(None).await
     }
 
-    /// A window whose daemon reads the shipped profiles, so a hook names a CLI's own
-    /// profile as that CLI's registration does.
-    async fn start_with_shipped_profiles() -> Self {
-        Self::start_with(true).await
+    /// A window whose daemon reads the fixture profile `name` of
+    /// `tests/fixtures/profiles`, so a hook names that profile as its registration does.
+    async fn start_with_fixture_profile(name: &str) -> Self {
+        let file = format!("{name}.toml");
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/profiles")
+            .join(&file);
+        let profiles_dir = unique_temp_dir("hook-door-profiles");
+        std::fs::copy(&fixture, profiles_dir.join(&file))
+            .unwrap_or_else(|err| panic!("copy the fixture {}: {err}", fixture.display()));
+        Self::start_with(Some(profiles_dir)).await
     }
 
-    async fn start_with(shipped_profiles: bool) -> Self {
+    async fn start_with(profiles_dir: Option<PathBuf>) -> Self {
         let instance = unique_instance();
         let mut config = detection_config(&unique_temp_dir("hook-door"), approver_base_config());
-        config.bundled_profiles = shipped_profiles;
+        config.profiles_dir = profiles_dir;
         let h = Harness::start_on_instance(&instance, config).await;
         // An Unknown window is never pushed to, so the doors are measured on a window
         // whose transition to idle has been observed.
@@ -371,35 +378,46 @@ fn a_door_given_a_subagent_s_input_sends_only_a_running_or_waiting_for_approval_
     }
 }
 
-/// The strings anywhere in `value`.
-fn strings_in(value: &serde_json::Value) -> Vec<&str> {
+/// The string and the integer anywhere in `value`, as text.
+fn scalars_in(value: &serde_json::Value) -> Vec<String> {
     match value {
-        serde_json::Value::String(text) => vec![text.as_str()],
-        serde_json::Value::Array(items) => items.iter().flat_map(strings_in).collect(),
-        serde_json::Value::Object(fields) => fields.values().flat_map(strings_in).collect(),
+        serde_json::Value::String(text) => vec![text.clone()],
+        serde_json::Value::Number(number) => vec![number.to_string()],
+        serde_json::Value::Array(items) => items.iter().flat_map(scalars_in).collect(),
+        serde_json::Value::Object(fields) => fields.values().flat_map(scalars_in).collect(),
         _ => Vec::new(),
     }
 }
 
+/// The fixture whose stop is blocked only when the hook's input holds the string
+/// [`MATCHED_REASON`] at `/endReason` and the integer 0 at `/round`.
+const WHEN_FIXTURE: &str = "hook-when-string-and-integer";
+const MATCHED_REASON: &str = "NO_TOOL_CALL";
+
 /// A value a profile's condition compares is compared by the door: whatever the hook's
 /// input holds there, the daemon learns only whether it was the value the condition
-/// names. Measured on the Antigravity CLI's stop, whose condition names a string.
+/// names, for a string and for an integer alike.
 #[tokio::test]
 async fn a_compared_value_reaches_the_daemon_only_as_whether_it_matched() {
-    use crate::hook_events_door::{AGY_FIRST_STOP, Printed, relay_door};
+    use crate::hook_events_door::{Printed, relay_door};
 
-    let setup = Setup::start_with_shipped_profiles().await;
+    let setup = Setup::start_with_fixture_profile(WHEN_FIXTURE).await;
     setup
         .entry()
         .inbox()
         .deposit(Parcel::new("a", "PARCEL-FOR-THE-MAIN-SESSION"));
-    let args = ["--hook", "antigravity-cli", "Stop"];
-    let secret = "SECRET-TERMINATION-REASON-7f3a";
-    let other_stop = format!(r#"{{"terminationReason":"{secret}","executionNum":0}}"#);
-    // What the hook's input holds at the compared pointer, and whether the stop is blocked.
+    let args = ["--hook", WHEN_FIXTURE, "Stop"];
+    let secret_reason = "SECRET-END-REASON-7f3a";
+    let secret_round = "918273645";
+    let other_reason = format!(r#"{{"endReason":"{secret_reason}","round":0}}"#);
+    let other_round = format!(r#"{{"endReason":"{MATCHED_REASON}","round":{secret_round}}}"#);
+    let matched = format!(r#"{{"endReason":"{MATCHED_REASON}","round":0}}"#);
+    // What the hook's input holds, a value it holds at a compared pointer, and whether
+    // the stop is blocked.
     for (input, compared, blocked) in [
-        (other_stop.as_str(), secret, false),
-        (AGY_FIRST_STOP, "NO_TOOL_CALL", true),
+        (other_reason.as_str(), secret_reason, false),
+        (other_round.as_str(), secret_round, false),
+        (matched.as_str(), MATCHED_REASON, true),
     ] {
         let relayed = relay_door(
             &setup.h,
@@ -421,7 +439,7 @@ async fn a_compared_value_reaches_the_daemon_only_as_whether_it_matched() {
         );
         for frame in &relayed.sent {
             assert!(
-                !strings_in(frame).iter().any(|text| text.contains(compared)),
+                !scalars_in(frame).iter().any(|text| text.contains(compared)),
                 "{input}: the door must not send the value it compared; sent {frame}"
             );
         }

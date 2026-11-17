@@ -1,0 +1,49 @@
+schema = 1
+display_name = "Json Entry Shared File Wsl"
+detection = "generic-shell"
+
+[command]
+default = ["example-cli"]
+
+[delivery]
+output = { context = '{"note":{text}}', take = '{"note":{text}}', wait = '{"note":{text}}', block = '{"decision":"block","reason":{text}}' }
+max_bytes = 10000
+wake = "none"
+
+# The programs are placeholders: a test runs its own stand-in for each.
+[host_paths]
+convert = ["example-guest", "convert", "{path}"]
+read = ["example-guest", "read", "{file}"]
+replace = ["example-guest", "replace", "{file}"]
+absent_exit = 3
+
+[mcp_registration]
+group = "WSL"
+add = ["mcp", "add", "{env_args}", "{server}", "--", "{bridge}", "--profile", "json-entry-shared-file-wsl"]
+remove = ["mcp", "remove", "{server}"]
+env_arg = ["--env={env}"]
+env_forward = { name = "WSLENV", separator = ":" }
+
+[mcp_registration.status]
+file = ".example-cli/mcp.json"
+format = "json"
+command = "/mcpServers/{server}/command"
+args_pointer = "/mcpServers/{server}/args"
+
+[mcp_registration.json_entry]
+file = ".example-cli/hooks.json"
+
+[mcp_registration.json_entry.entries."{server}"]
+BeforeTurn = [{ type = "command", command = "{daemon} --for-instance {server} --hook json-entry-shared-file-wsl BeforeTurn", timeout = "{hook_timeout}" }]
+SessionStart = [{ type = "command", command = "{daemon} --for-instance {server} --hook json-entry-shared-file-wsl SessionStart", timeout = "{hook_timeout}" }]
+AfterTool = [{ matcher = "*", hooks = [{ type = "command", command = "{daemon} --for-instance {server} --hook json-entry-shared-file-wsl AfterTool", timeout = "{hook_timeout}" }] }]
+Stop = [{ type = "command", command = "{daemon} --for-instance {server} --hook json-entry-shared-file-wsl Stop", timeout = "{hook_timeout}" }]
+
+[hook_timeout]
+default = 10
+
+[hook_events]
+BeforeTurn = { status = "running", deliver = "take" }
+SessionStart = { deliver = "context" }
+AfterTool = { status = "running" }
+Stop = { status = "waiting_input", deliver = "block" }

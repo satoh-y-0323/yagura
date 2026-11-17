@@ -1,15 +1,16 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-//! Integration tests: registering the Antigravity CLI also writes yagura's
-//! status-report hooks into the user's `~/.gemini/config/hooks.json`.
+//! Integration tests: a registration that owns one top-level key of a JSON
+//! hooks file it shares with the user's own entries (`json_entry` keyed by
+//! `{server}`).
 //!
-//! The CLI takes no hooks at launch, so the registration owns one top-level
-//! entry, `yagura`, of that file: it is added by `Register`, taken out by
-//! `Remove`, read back by the status check, and rewritten to the current form
-//! when a window opens or the rows are listed while the key is there. Every case runs the shipped
-//! profile with its launch command swapped for the `mcp_cli_stub` fixture and
-//! `home_dir` at a temporary directory, so the user's own `~/.gemini` is never
-//! read or written.
+//! The registration owns the entry `yagura` of that file: it is added by
+//! `Register`, taken out by `Remove`, read back by the status check, and
+//! rewritten to the current form when a window opens or the rows are listed
+//! while the key is there. Every case runs a vendor-neutral fixture profile
+//! (`tests/fixtures/profiles/json-entry-shared-file*.toml`) with its launch
+//! command swapped for the `mcp_cli_stub` fixture and `home_dir` at a
+//! temporary directory, so no user's settings are ever read or written.
 
 use crate::common;
 
@@ -17,7 +18,6 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use common::docs::read_doc_verbatim;
 use common::{
     Harness, approver_base_config, empty_lookup, mcp_cli_stub_path, read_response,
     register_approver, registration_cwd_in, send, unique_temp_dir, write_profile,
@@ -33,10 +33,16 @@ use yagura_protocol::{
 };
 use yagura_test_support::ipc::Connection;
 
-const HOST_PROFILE: &str = "antigravity-cli";
-const WSL_PROFILE: &str = "wsl-antigravity-cli";
+/// The row run on the daemon's own host.
+const HOST_PROFILE: &str = "json-entry-shared-file";
+/// The row run in WSL, which converts paths and edits the files through file tools.
+const WSL_PROFILE: &str = "json-entry-shared-file-wsl";
 
-const HOOKS_FILE: &str = ".gemini/config/hooks.json";
+/// The identifier the fixture is placed under.
+const PLACED_ID: &str = "example-cli";
+
+const HOOKS_FILE: &str = ".example-cli/hooks.json";
+const MCP_FILE: &str = ".example-cli/mcp.json";
 
 /// What every door of the entry carries after the daemon path: the default instance's
 /// registration name, which the cases register under.
@@ -48,42 +54,10 @@ fn hook_call(profile: &str, event: &str) -> String {
     format!("{FOR_INSTANCE} --hook {profile} {event}")
 }
 
-/// The command the shipped `profile` registers for `event`, with `daemon` as
-/// the daemon: the door call itself, or for the WSL row the shell that collects
-/// the guest's lineage first and then calls it.
+/// The command the fixture `profile` registers for `event`, with `daemon` as the daemon.
 fn expected_call(profile: &str, daemon: &str, event: &str) -> String {
-    let call = format!("{daemon}{}", hook_call(profile, event));
-    if profile != WSL_PROFILE {
-        return call;
-    }
-    let root: toml::Table = read_doc_verbatim(&format!("../../profiles/{profile}.toml"))
-        .parse()
-        .expect("the shipped profile is TOML");
-    let handlers = &root["mcp_registration"]["json_entry"]["entries"]["{server}"][event][0];
-    let handler = handlers.get("hooks").map_or(handlers, |hooks| &hooks[0]);
-    let template = handler["command"].as_str().expect("a command template");
-    let rendered = template
-        .replace("{daemon}", daemon)
-        .replace("{server}", "yagura");
-    assert!(
-        rendered.contains(&call),
-        "{profile}/{event}: the shell calls the daemon's door: {rendered:?}"
-    );
-    rendered
+    format!("{daemon}{}", hook_call(profile, event))
 }
-
-/// The door call within `command`: for the WSL row, what its shell execs
-/// without the collected lineage that follows the call.
-fn door_call<'a>(profile: &str, command: &'a str) -> &'a str {
-    if profile != WSL_PROFILE {
-        return command;
-    }
-    let (_, call) = command
-        .rsplit_once("; exec ")
-        .unwrap_or_else(|| panic!("the WSL command execs the door: {command:?}"));
-    call.split(" --guest-root").next().unwrap_or(call)
-}
-const MCP_FILE: &str = ".gemini/config/mcp_config.json";
 
 /// How long a stubbed CLI stays alive when a case needs a live window: a
 /// window that has exited no longer has a detector to ask.
@@ -93,9 +67,9 @@ const WINDOW_ALIVE_MS: &str = "8000";
 /// never use these names, so they can be told apart by key alone.
 const YAGURA_KEYS: [&str; 11] = [
     "yagura",
-    "PreInvocation",
+    "BeforeTurn",
     "SessionStart",
-    "PostToolUse",
+    "AfterTool",
     "Stop",
     "matcher",
     "hooks",
@@ -106,7 +80,7 @@ const YAGURA_KEYS: [&str; 11] = [
 ];
 
 // =============================================================================
-// Fixture: the shipped profile with its launch command swapped for the stub
+// Fixture: the neutral profile with its launch command swapped for the stub
 // =============================================================================
 
 struct Layout {
@@ -173,7 +147,7 @@ impl Layout {
         let path = self.report_dir.join(REPORT_EXE_NAME);
         let path = path.to_str().expect("report path is UTF-8");
         if profile == WSL_PROFILE {
-            // The stub's `probe` stands in for `wslpath -u`.
+            // The stub's `probe` stands in for the path conversion tool.
             format!("/probed{}", path.replace('\\', "/"))
         } else {
             path.to_string()
@@ -195,7 +169,7 @@ fn str_array(items: &[&str]) -> toml::Value {
     )
 }
 
-/// The shipped `profile` with only the parts that would reach the real CLI
+/// The fixture `profile` with only the parts that would reach a real CLI
 /// replaced: the launch command, and for the WSL row the path conversion and file
 /// tools. `alive_ms` keeps every stub call (and so a launched window) alive
 /// that long before it does anything.
@@ -203,24 +177,25 @@ fn fixture_profile(profile: &str, layout: &Layout, alive_ms: Option<&str>) -> St
     let stub = mcp_cli_stub_path();
     let stub = stub.to_str().expect("stub path is UTF-8");
     let home = layout.home_dir.to_str().expect("home is UTF-8");
-    let mut root: toml::Table = read_doc_verbatim(&format!("../../profiles/{profile}.toml"))
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/profiles")
+        .join(format!("{profile}.toml"));
+    let mut root: toml::Table = std::fs::read_to_string(&fixture)
+        .unwrap_or_else(|err| panic!("read the fixture {}: {err}", fixture.display()))
         .parse()
-        .expect("the shipped profile is TOML");
+        .expect("the fixture profile is TOML");
     let mut command = toml::Table::new();
     command.insert("default".into(), str_array(&[stub]));
     root.insert("command".into(), toml::Value::Table(command));
 
     if profile == WSL_PROFILE {
-        root.get("mcp_registration")
-            .and_then(toml::Value::as_table)
-            .expect("the shipped profile carries a registration table");
-        let shipped_tools = root
+        let fixture_tools = root
             .get("host_paths")
             .and_then(toml::Value::as_table)
             .filter(|tools| tools.contains_key("read"))
             .expect("the WSL row edits its settings through file tools");
         let mut host_paths = toml::Table::new();
-        if let Some(absent_exit) = shipped_tools.get("absent_exit") {
+        if let Some(absent_exit) = fixture_tools.get("absent_exit") {
             host_paths.insert("absent_exit".into(), absent_exit.clone());
         }
         host_paths.insert("convert".into(), str_array(&[stub, "probe", "{path}"]));
@@ -265,7 +240,7 @@ fn is_file(path: &Path) -> bool {
 fn place_profile(profile: &str, layout: &Layout, alive_ms: Option<&str>) {
     write_profile(
         &layout.profiles_dir,
-        "agy",
+        PLACED_ID,
         &fixture_profile(profile, layout, alive_ms),
     );
 }
@@ -332,7 +307,7 @@ async fn run_action(
     send(
         client,
         &ClientMessage::RunMcpRegistration {
-            profile: "agy".to_string(),
+            profile: PLACED_ID.to_string(),
             action,
             request_id,
         },
@@ -461,23 +436,22 @@ fn assert_handler(handler: &Value, command: &str, context: &str) {
     );
 }
 
-/// The shape agy's file takes: one call of the profile's `--hook` door per event -- the
-/// running report and the inbox on a new call, the start-up context when a session starts, a
-/// running report after each tool, and the stop, whose block continues the turn. Nothing else
-/// is written: not PreToolUse, whose output agy requires to hold a decision.
+/// The shape the fixture's entry takes: one call of the profile's `--hook` door per event,
+/// as the profile's entry template writes them, the after-tool event wrapped in a matcher
+/// group. Nothing else is written.
 fn assert_yagura_entry(file: &Value, profile: &str, daemon: &str) {
     let entry = file
         .get("yagura")
         .unwrap_or_else(|| panic!("the file has a yagura entry: {file}"));
     assert_eq!(
         keys_of(entry),
-        set_of(&["PreInvocation", "PostToolUse", "SessionStart", "Stop"]),
+        set_of(&["BeforeTurn", "AfterTool", "SessionStart", "Stop"]),
         "the running events, the start-up door and the stop are used: {entry}"
     );
     let call = |event: &str| expected_call(profile, daemon, event);
-    let pre = entry["PreInvocation"].as_array().expect("an array");
+    let pre = entry["BeforeTurn"].as_array().expect("an array");
     assert_eq!(pre.len(), 1, "{entry}");
-    assert_handler(&pre[0], &call("PreInvocation"), "PreInvocation");
+    assert_handler(&pre[0], &call("BeforeTurn"), "BeforeTurn");
 
     let start = entry["SessionStart"].as_array().expect("an array");
     assert_eq!(start.len(), 1, "{entry}");
@@ -487,17 +461,17 @@ fn assert_yagura_entry(file: &Value, profile: &str, daemon: &str) {
     assert_eq!(stop.len(), 1, "{entry}");
     assert_handler(&stop[0], &call("Stop"), "Stop");
 
-    let post = entry["PostToolUse"].as_array().expect("an array");
+    let post = entry["AfterTool"].as_array().expect("an array");
     assert_eq!(post.len(), 1, "{entry}");
     assert_eq!(
         keys_of(&post[0]),
         set_of(&["matcher", "hooks"]),
-        "PostToolUse is wrapped in a matcher group: {entry}"
+        "AfterTool is wrapped in a matcher group: {entry}"
     );
     assert_eq!(post[0]["matcher"], "*", "{entry}");
     let handlers = post[0]["hooks"].as_array().expect("an array");
     assert_eq!(handlers.len(), 1, "{entry}");
-    assert_handler(&handlers[0], &call("PostToolUse"), "PostToolUse");
+    assert_handler(&handlers[0], &call("AfterTool"), "AfterTool");
 }
 
 fn write_value(layout: &Layout, value: &Value) {
@@ -561,12 +535,12 @@ async fn register_then_remove_case(profile: &str, tag: &str) {
 
 #[tokio::test]
 async fn registering_the_host_row_adds_only_its_entry_and_removing_takes_only_that_away() {
-    register_then_remove_case(HOST_PROFILE, "agy-hooks-host").await;
+    register_then_remove_case(HOST_PROFILE, "json-entry-hooks-host").await;
 }
 
 #[tokio::test]
 async fn registering_the_wsl_row_adds_only_its_entry_and_removing_takes_only_that_away() {
-    register_then_remove_case(WSL_PROFILE, "agy-hooks-wsl").await;
+    register_then_remove_case(WSL_PROFILE, "json-entry-hooks-wsl").await;
 }
 
 async fn creates_the_file_case(profile: &str, tag: &str) {
@@ -599,7 +573,7 @@ async fn creates_the_file_case(profile: &str, tag: &str) {
 
 #[tokio::test]
 async fn registering_the_host_row_creates_a_missing_hooks_file() {
-    creates_the_file_case(HOST_PROFILE, "agy-hooks-create-host").await;
+    creates_the_file_case(HOST_PROFILE, "json-entry-hooks-create-host").await;
 }
 
 /// The file holds commands a CLI will run, so a new one is the owner's alone.
@@ -608,8 +582,8 @@ async fn registering_the_host_row_creates_a_missing_hooks_file() {
 async fn a_newly_created_hooks_file_is_readable_and_writable_by_its_owner_only() {
     use std::os::unix::fs::PermissionsExt;
 
-    let layout = Layout::new("agy-hooks-create-mode");
-    let h = start("agy-hooks-create-mode", HOST_PROFILE, &layout).await;
+    let layout = Layout::new("json-entry-hooks-create-mode");
+    let h = start("json-entry-hooks-create-mode", HOST_PROFILE, &layout).await;
     let mut approver = approver_connection(&h).await;
 
     let (error, _, steps) = run_action(&mut approver, McpRegistrationAction::Register, 1).await;
@@ -624,14 +598,14 @@ async fn a_newly_created_hooks_file_is_readable_and_writable_by_its_owner_only()
 
 #[tokio::test]
 async fn registering_the_wsl_row_creates_a_missing_hooks_file() {
-    creates_the_file_case(WSL_PROFILE, "agy-hooks-create-wsl").await;
+    creates_the_file_case(WSL_PROFILE, "json-entry-hooks-create-wsl").await;
 }
 
 async fn replaces_a_stale_entry_case(profile: &str, tag: &str) {
     let layout = Layout::new(tag);
     let mut seed = parse(SEED_HOOKS);
     seed["yagura"] = json!({
-        "PreInvocation": [{"type": "command", "command": "/old/place/yagura-daemon", "timeout": 1}]
+        "BeforeTurn": [{"type": "command", "command": "/old/place/yagura-daemon", "timeout": 1}]
     });
     write_value(&layout, &seed);
     let h = start(tag, profile, &layout).await;
@@ -649,12 +623,12 @@ async fn replaces_a_stale_entry_case(profile: &str, tag: &str) {
 
 #[tokio::test]
 async fn registering_replaces_an_older_yagura_entry_of_the_host_row() {
-    replaces_a_stale_entry_case(HOST_PROFILE, "agy-hooks-stale-host").await;
+    replaces_a_stale_entry_case(HOST_PROFILE, "json-entry-hooks-stale-host").await;
 }
 
 #[tokio::test]
 async fn registering_replaces_an_older_yagura_entry_of_the_wsl_row() {
-    replaces_a_stale_entry_case(WSL_PROFILE, "agy-hooks-stale-wsl").await;
+    replaces_a_stale_entry_case(WSL_PROFILE, "json-entry-hooks-stale-wsl").await;
 }
 
 async fn broken_file_case(profile: &str, tag: &str) {
@@ -680,12 +654,12 @@ async fn broken_file_case(profile: &str, tag: &str) {
 
 #[tokio::test]
 async fn a_hooks_file_that_is_not_json_fails_the_host_registration_and_is_left_as_it_was() {
-    broken_file_case(HOST_PROFILE, "agy-hooks-broken-host").await;
+    broken_file_case(HOST_PROFILE, "json-entry-hooks-broken-host").await;
 }
 
 #[tokio::test]
 async fn a_hooks_file_that_is_not_json_fails_the_wsl_registration_and_is_left_as_it_was() {
-    broken_file_case(WSL_PROFILE, "agy-hooks-broken-wsl").await;
+    broken_file_case(WSL_PROFILE, "json-entry-hooks-broken-wsl").await;
 }
 
 // =============================================================================
@@ -695,8 +669,8 @@ async fn a_hooks_file_that_is_not_json_fails_the_wsl_registration_and_is_left_as
 #[tokio::test]
 async fn the_entry_runs_the_report_folders_daemon_by_an_absolute_path_free_of_shell_characters() {
     for (profile, tag) in [
-        (HOST_PROFILE, "agy-hooks-cmd-host"),
-        (WSL_PROFILE, "agy-hooks-cmd-wsl"),
+        (HOST_PROFILE, "json-entry-hooks-cmd-host"),
+        (WSL_PROFILE, "json-entry-hooks-cmd-wsl"),
     ] {
         let layout = Layout::new(tag);
         let h = start(tag, profile, &layout).await;
@@ -705,22 +679,18 @@ async fn the_entry_runs_the_report_folders_daemon_by_an_absolute_path_free_of_sh
         assert_eq!(error, None, "{profile}: {steps}");
 
         let file = layout.hooks_value();
-        let command = file["yagura"]["PreInvocation"][0]["command"]
+        let command = file["yagura"]["BeforeTurn"][0]["command"]
             .as_str()
             .expect("a command string")
             .to_string();
         assert_eq!(
             command,
-            layout.expected_command(profile, "PreInvocation"),
+            layout.expected_command(profile, "BeforeTurn"),
             "{profile}"
         );
-        let door = door_call(
-            profile,
-            file["yagura"]["SessionStart"][0]["command"]
-                .as_str()
-                .expect("a command string"),
-        );
-        let command = door_call(profile, &command).to_string();
+        let door = file["yagura"]["SessionStart"][0]["command"]
+            .as_str()
+            .expect("a command string");
         assert!(
             door.starts_with(command.split(" --").next().unwrap())
                 && !contains_cmd_metacharacter(door)
@@ -801,26 +771,20 @@ async fn state_follows_entry_case(profile: &str, tag: &str) {
             "the command points at another daemon",
             Box::new(|_, file| {
                 let other = "/elsewhere/yagura-daemon";
-                file["yagura"]["PreInvocation"][0]["command"] = json!(other);
-                file["yagura"]["PostToolUse"][0]["hooks"][0]["command"] = json!(other);
+                file["yagura"]["BeforeTurn"][0]["command"] = json!(other);
+                file["yagura"]["AfterTool"][0]["hooks"][0]["command"] = json!(other);
             }),
         ),
         (
-            "PreInvocation is missing",
+            "BeforeTurn is missing",
             Box::new(|_, file| {
-                file["yagura"]
-                    .as_object_mut()
-                    .unwrap()
-                    .remove("PreInvocation");
+                file["yagura"].as_object_mut().unwrap().remove("BeforeTurn");
             }),
         ),
         (
-            "PostToolUse is missing",
+            "AfterTool is missing",
             Box::new(|_, file| {
-                file["yagura"]
-                    .as_object_mut()
-                    .unwrap()
-                    .remove("PostToolUse");
+                file["yagura"].as_object_mut().unwrap().remove("AfterTool");
             }),
         ),
         (
@@ -833,10 +797,10 @@ async fn state_follows_entry_case(profile: &str, tag: &str) {
             }),
         ),
         (
-            "PreInvocation still holds the two handlers of the older form",
+            "BeforeTurn still holds the two handlers of the older form",
             Box::new(|_, file| {
-                let older = file["yagura"]["PreInvocation"][0].clone();
-                file["yagura"]["PreInvocation"]
+                let older = file["yagura"]["BeforeTurn"][0].clone();
+                file["yagura"]["BeforeTurn"]
                     .as_array_mut()
                     .unwrap()
                     .push(older);
@@ -852,7 +816,7 @@ async fn state_follows_entry_case(profile: &str, tag: &str) {
         (
             "only one of the two commands differs",
             Box::new(|_, file| {
-                file["yagura"]["PostToolUse"][0]["hooks"][0]["command"] =
+                file["yagura"]["AfterTool"][0]["hooks"][0]["command"] =
                     json!("/elsewhere/yagura-daemon");
             }),
         ),
@@ -893,12 +857,12 @@ async fn state_follows_entry_case(profile: &str, tag: &str) {
 
 #[tokio::test]
 async fn the_host_row_is_registered_while_its_hooks_entry_holds_or_the_listing_rewrites_it() {
-    state_follows_entry_case(HOST_PROFILE, "agy-state-host").await;
+    state_follows_entry_case(HOST_PROFILE, "json-entry-state-host").await;
 }
 
 #[tokio::test]
 async fn the_wsl_row_is_registered_while_its_hooks_entry_holds_or_the_listing_rewrites_it() {
-    state_follows_entry_case(WSL_PROFILE, "agy-state-wsl").await;
+    state_follows_entry_case(WSL_PROFILE, "json-entry-state-wsl").await;
 }
 
 async fn missing_hooks_file_case(profile: &str, tag: &str) {
@@ -923,17 +887,17 @@ async fn missing_hooks_file_case(profile: &str, tag: &str) {
 
 #[tokio::test]
 async fn the_host_row_differs_in_its_entry_once_the_hooks_file_is_gone() {
-    missing_hooks_file_case(HOST_PROFILE, "agy-missing-hooks-host").await;
+    missing_hooks_file_case(HOST_PROFILE, "json-entry-missing-hooks-host").await;
 }
 
 #[tokio::test]
 async fn the_wsl_row_differs_in_its_entry_once_the_read_tool_reports_the_hooks_file_absent() {
-    missing_hooks_file_case(WSL_PROFILE, "agy-missing-hooks-wsl").await;
+    missing_hooks_file_case(WSL_PROFILE, "json-entry-missing-hooks-wsl").await;
 }
 
 #[tokio::test]
 async fn without_a_report_folder_the_entry_cannot_be_written_and_the_row_differs_in_it() {
-    let tag = "agy-hooks-no-report-folder";
+    let tag = "json-entry-hooks-no-report-folder";
     let layout = Layout::new(tag);
     layout.write_hooks(SEED_HOOKS);
     let config = DaemonConfig {
@@ -964,7 +928,7 @@ async fn without_a_report_folder_the_entry_cannot_be_written_and_the_row_differs
 
 #[tokio::test]
 async fn a_report_folder_whose_path_holds_a_space_is_written_by_a_spaceless_name_or_refused() {
-    let tag = "agy-hooks-report-folder-space";
+    let tag = "json-entry-hooks-report-folder-space";
     let mut layout = Layout::new(tag);
     // A space would split the command a shell runs, and the CLI escapes any quotes.
     layout.report_dir = layout.home_dir.with_file_name("report folder").join("bin");
@@ -983,13 +947,13 @@ async fn a_report_folder_whose_path_holds_a_space_is_written_by_a_spaceless_name
                 error, None,
                 "a daemon with a spaceless name is registered: {steps}"
             );
-            let command = layout.hooks_value()["yagura"]["PreInvocation"][0]["command"]
+            let command = layout.hooks_value()["yagura"]["BeforeTurn"][0]["command"]
                 .as_str()
                 .expect("a command string")
                 .to_string();
             assert_eq!(
                 command,
-                format!("{spaceless}{}", hook_call(HOST_PROFILE, "PreInvocation"))
+                format!("{spaceless}{}", hook_call(HOST_PROFILE, "BeforeTurn"))
             );
             assert!(!spaceless.contains(' '), "{spaceless:?}");
             assert_eq!(
@@ -1019,7 +983,7 @@ async fn a_report_folder_whose_path_holds_a_space_is_written_by_a_spaceless_name
 
 #[tokio::test]
 async fn removing_fails_when_the_hooks_file_exists_but_cannot_be_read() {
-    let tag = "agy-hooks-remove-unreadable";
+    let tag = "json-entry-hooks-remove-unreadable";
     let layout = Layout::new(tag);
     layout.write_hooks(SEED_HOOKS);
     let h = start(tag, HOST_PROFILE, &layout).await;
@@ -1046,7 +1010,7 @@ async fn open_window(client: &mut Connection) -> String {
     send(
         client,
         &ClientMessage::OpenWindowFromProfile {
-            profile: "agy".to_string(),
+            profile: PLACED_ID.to_string(),
             cwd: None,
             name: None,
             model: None,
@@ -1106,7 +1070,7 @@ async fn expectation_follows_entry_case(profile: &str, tag: &str) {
     incomplete["yagura"]
         .as_object_mut()
         .unwrap()
-        .remove("PostToolUse");
+        .remove("AfterTool");
     write_value(&layout, &incomplete);
     assert!(
         window_keeps_hooks(&h, &mut client).await,
@@ -1140,13 +1104,13 @@ async fn expectation_follows_entry_case(profile: &str, tag: &str) {
 }
 
 #[tokio::test]
-async fn a_host_agy_window_is_expected_to_report_only_while_its_entry_is_complete_or_rewritten() {
-    expectation_follows_entry_case(HOST_PROFILE, "agy-expect-host").await;
+async fn a_host_window_is_expected_to_report_only_while_its_entry_is_complete_or_rewritten() {
+    expectation_follows_entry_case(HOST_PROFILE, "json-entry-expect-host").await;
 }
 
 #[tokio::test]
-async fn a_wsl_agy_window_is_expected_to_report_only_while_its_entry_is_complete_or_rewritten() {
-    expectation_follows_entry_case(WSL_PROFILE, "agy-expect-wsl").await;
+async fn a_wsl_window_is_expected_to_report_only_while_its_entry_is_complete_or_rewritten() {
+    expectation_follows_entry_case(WSL_PROFILE, "json-entry-expect-wsl").await;
 }
 
 /// Opens a window from the profile as placed now and tells whether its hooks reach it, from
@@ -1173,7 +1137,7 @@ fn older_form(registered_text: &str) -> String {
 #[tokio::test]
 async fn opening_a_window_rewrites_this_instances_out_of_date_entry_and_the_window_keeps_its_hooks()
 {
-    let tag = "agy-rewrite-open";
+    let tag = "json-entry-rewrite-open";
     let layout = Layout::new(tag);
     layout.write_hooks(SEED_HOOKS);
     let h = start(tag, HOST_PROFILE, &layout).await;
@@ -1203,7 +1167,7 @@ async fn opening_a_window_rewrites_this_instances_out_of_date_entry_and_the_wind
 
 #[tokio::test]
 async fn listing_rewrites_this_instances_out_of_date_entry_and_still_shows_a_bridge_that_differs() {
-    let tag = "agy-rewrite-list";
+    let tag = "json-entry-rewrite-list";
     let layout = Layout::new(tag);
     layout.write_hooks(SEED_HOOKS);
     let h = start(tag, HOST_PROFILE, &layout).await;

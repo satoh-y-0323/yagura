@@ -830,6 +830,16 @@ fn a_status_file_that_names_the_bridge_is_registered() {
         Platform::Windows,
     );
     assert_state(&derived, RegistrationState::Registered, "file match");
+
+    let moved = json!({ "mcpServers": { "yagura": { "command": r"D:\old\yagura-mcp.exe" } } });
+    let other = derive(
+        FILE_TABLE,
+        &exited(0, &moved.to_string(), ""),
+        BRIDGE,
+        Platform::Windows,
+    );
+    assert_state(&other, RegistrationState::Differs, "file other bridge");
+    assert_eq!(other.differs_in, strings(&["command"]));
 }
 
 #[test]

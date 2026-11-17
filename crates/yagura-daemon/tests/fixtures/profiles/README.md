@@ -39,3 +39,6 @@ directory and a shared directory would make every case depend on the others.
 | `invalid-launch-option-alias-key.toml` | An alias key outside the identifier character set (an uppercase letter). |
 | `invalid-launch-option-alias-value.toml` | An alias value breaking the launch option value rule (it carries a control character, written as an escape so the file stays ASCII). |
 | `invalid-launch-option-unknown-key.toml` | An unknown key inside a launch-option table, which the table refuses rather than ignores. |
+| `json-entry-shared-file.toml` | A registration that owns one top-level key, named after its server (`{server}`), of a JSON hooks file it shares with the user's own entries; each hook runs `{daemon}` through the `--hook` door. |
+| `json-entry-shared-file-wsl.toml` | The same shared-file entry on a row of the `WSL` group, which converts paths and reads and replaces the files through `[host_paths]` tools (placeholders a test swaps for its stand-in). |
+| `hook-when-string-and-integer.toml` | A stop whose `when` compares one string and one integer of the hook's input. |

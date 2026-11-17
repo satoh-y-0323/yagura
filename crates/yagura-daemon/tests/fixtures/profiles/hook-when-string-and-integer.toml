@@ -1,0 +1,14 @@
+schema = 1
+display_name = "Hook When String And Integer"
+detection = "generic-shell"
+
+[command]
+default = ["example-cli"]
+
+[delivery]
+output = { context = '{"note":{text}}', take = '{"note":{text}}', wait = '{"note":{text}}', block = '{"decision":"block","reason":{text}}' }
+max_bytes = 10000
+wake = "none"
+
+[hook_events]
+Stop = { status = "waiting_input", deliver = "block", when = { "/endReason" = "NO_TOOL_CALL", "/round" = 0 } }

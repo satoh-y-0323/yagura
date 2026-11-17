@@ -305,10 +305,17 @@ fn one_past_the_maximum_choice_count_fails_as_too_many_rather_than_being_truncat
 
 #[test]
 fn exit_code_127_in_a_wsl_shaped_argv_reads_as_the_final_argv_elements_name() {
-    let argv = strings(&["wsl", "-e", "bash", "-lic", "exec \"$0\" \"$@\"", "agy"]);
+    let argv = strings(&[
+        "wsl",
+        "-e",
+        "bash",
+        "-lic",
+        "exec \"$0\" \"$@\"",
+        "example-cli",
+    ]);
     let failure = failure_for_exit(Some(127), &argv);
     assert!(matches!(failure, ChoicesFailure::NotFound { .. }));
-    assert_eq!(failure.to_string(), "agy was not found");
+    assert_eq!(failure.to_string(), "example-cli was not found");
 }
 
 #[test]

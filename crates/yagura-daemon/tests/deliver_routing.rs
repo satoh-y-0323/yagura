@@ -413,7 +413,7 @@ const COMMAND_FLAGS: &[&str] = &[
     SESSION,
     "--emit",
 ];
-/// The hooks a CLI with no wake door runs (agy's shape).
+/// The hooks a CLI with no wake door runs (`wake = "none"`).
 const NONE_FLAGS: &[&str] = &["--context-first-turn", "--take", "--emit"];
 
 // --- what reached the CLI ---------------------------------------------------------------

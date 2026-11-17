@@ -153,6 +153,9 @@ const AGY_SETTINGS_FILE: &str = ".gemini/config/mcp_config.json";
 /// The settings file the settings-file edit targets.
 const CODEX_SETTINGS_FILE: &str = ".codex/config.toml";
 
+/// A home-relative file the WSL read tool is run on: the tool reads any file it is named.
+const READ_TOOL_FILE: &str = ".example-cli/settings.json";
+
 fn shipped_source(id: &str) -> String {
     read_doc_verbatim(&format!("../../profiles/{id}.toml"))
 }
@@ -348,6 +351,7 @@ fn host_rows_have_no_group_no_probe_and_no_file_tools() {
 
 #[test]
 fn wsl_rows_carry_the_group_the_path_probe_the_env_forward_and_the_read_tool() {
+    let mut with_file_tools = Vec::new();
     for (id, form, is_wsl) in SHIPPED_ROWS {
         if !*is_wsl {
             continue;
@@ -394,7 +398,7 @@ fn wsl_rows_carry_the_group_the_path_probe_the_env_forward_and_the_read_tool() {
             "{id}: the read tool's missing-file exit must be declared"
         );
         assert!(
-            spec.render_file_read(AGY_SETTINGS_FILE).is_some(),
+            spec.render_file_read(READ_TOOL_FILE).is_some(),
             "{id} must read files inside WSL with WSL's own tools"
         );
         assert_eq!(
@@ -403,7 +407,12 @@ fn wsl_rows_carry_the_group_the_path_probe_the_env_forward_and_the_read_tool() {
             "{id}: only the row that edits a settings file needs the replace tool"
         );
         assert_eq!(spec.toml_set().is_some(), form.status.edits_toml());
+        with_file_tools.push(*id);
     }
+    assert!(
+        !with_file_tools.is_empty(),
+        "at least one WSL row reads files, so the file tools are measured"
+    );
 }
 
 #[test]
@@ -889,7 +898,7 @@ async fn a_placed_profile_without_the_table_is_listed_with_the_shipped_table_and
     );
     write_profile(
         &profiles_dir,
-        "wsl-antigravity-cli",
+        "wsl-copilot-cli",
         &placed_profile_without_table("Placed Wsl Row"),
     );
     // Control: a placed profile no shipped profile shares an id with gets
@@ -975,16 +984,22 @@ async fn a_placed_profile_without_the_table_is_listed_with_the_shipped_table_and
         })
     );
 
-    let wsl = row_of(&rows, "wsl-antigravity-cli");
+    let wsl = row_of(&rows, "wsl-copilot-cli");
     assert_eq!(wsl.display_name, "Placed Wsl Row");
     assert_eq!(wsl.group.as_deref(), Some("WSL"));
-    let mut rendered = strings(&["mcp", "add", "yagura", "--"]);
-    rendered.extend(server_wrapper("wsl-antigravity-cli"));
-    rendered.extend(strings(&["{bridge}", "--profile", "wsl-antigravity-cli"]));
-    let rendered: Vec<&str> = rendered.iter().map(String::as_str).collect();
     assert_eq!(
         wsl.add.as_ref().map(|add| add.argv.clone()),
-        Some(placed_argv(&rendered))
+        Some(placed_argv(&[
+            "mcp",
+            "add",
+            "--timeout",
+            "86400000",
+            "yagura",
+            "--",
+            "{bridge}",
+            "--profile",
+            "wsl-copilot-cli"
+        ]))
     );
     assert_eq!(wsl.toml_set, None);
 
@@ -1665,7 +1680,7 @@ mod wsl_file_tools {
     use yagura_daemon::pty::{CaptureChildEnv, spawn_one_shot};
     use yagura_os::{CaptureLimits, CaptureOutcome};
 
-    use super::{AGY_SETTINGS_FILE, CODEX_SETTINGS_FILE, host_file_tools, shipped_spec};
+    use super::{CODEX_SETTINGS_FILE, READ_TOOL_FILE, host_file_tools, shipped_spec};
     use crate::common::unique_temp_dir;
 
     /// Far above a shell snippet's run time, so it only bounds a hang.
@@ -1722,18 +1737,17 @@ mod wsl_file_tools {
     }
 
     /// The WSL rows that carry file tools; a row that reads every state from
-    /// its CLI's own output has none.
+    /// its CLI's own output has none. Never empty, so a case over them measures something.
     fn wsl_ids() -> Vec<&'static str> {
-        super::SHIPPED_ROWS
+        let ids: Vec<&'static str> = super::SHIPPED_ROWS
             .iter()
             .filter(|(id, _, is_wsl)| {
-                *is_wsl
-                    && shipped_spec(id)
-                        .render_file_read(AGY_SETTINGS_FILE)
-                        .is_some()
+                *is_wsl && shipped_spec(id).render_file_read(READ_TOOL_FILE).is_some()
             })
             .map(|(id, _, _)| *id)
-            .collect()
+            .collect();
+        assert!(!ids.is_empty(), "at least one WSL row carries file tools");
+        ids
     }
 
     fn entries(dir: &Path) -> Vec<String> {
@@ -1758,7 +1772,7 @@ mod wsl_file_tools {
             let spec = shipped_spec(id);
             let home = unique_temp_dir("bundled-mcpreg-read");
             let argv = spec
-                .render_file_read(AGY_SETTINGS_FILE)
+                .render_file_read(READ_TOOL_FILE)
                 .expect("a WSL row carries a read tool");
 
             let missing = run_with_home(argv.clone(), &home, None).await;
@@ -1768,7 +1782,7 @@ mod wsl_file_tools {
                 "{id}: a missing file must be told apart from every other failure"
             );
 
-            let path = home.join(AGY_SETTINGS_FILE);
+            let path = home.join(READ_TOOL_FILE);
             std::fs::create_dir_all(path.parent().expect("parent")).expect("create dir");
             let content = b"{\"mcpServers\":{}}\n\xe2\x9c\x94 kept byte for byte\r\n";
             std::fs::write(&path, content).expect("write settings");

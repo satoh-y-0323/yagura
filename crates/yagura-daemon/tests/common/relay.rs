@@ -52,7 +52,7 @@ pub fn initialized_line() -> Value {
     json!({"jsonrpc": "2.0", "method": "notifications/initialized"})
 }
 
-/// The notification agy sends right after `server/discover`, before its first
+/// The notification a client may send right after `server/discover`, before its first
 /// other request.
 pub fn roots_list_changed_line() -> Value {
     json!({"jsonrpc": "2.0", "method": "notifications/roots/list_changed", "params": {}})
