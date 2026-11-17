@@ -142,8 +142,7 @@ The value must be one of:
 - The name of a custom theme defined in `[themes.*]`
 - An unknown name results in a warning and falls back to the built-in default
 
-When omitted, the built-in default is used (`dark` today; the choice is the `default_selection` of the palettes file built into yagura). When set to `"system"`, yagura will follow the OS color scheme preference at
-startup (but not update during execution; restart after changing OS theme to see the effect).
+When omitted, the built-in default is used (`system` today; the choice is the `default_selection` of the palettes file built into yagura). With `"system"`, yagura follows the OS color scheme preference, and switches when the OS preference changes.
 
 ### Vendor Assignments
 

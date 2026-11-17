@@ -5,19 +5,19 @@ import type { ThemeState, ThemeStoreDeps } from './theme-store';
 
 // The built-in default theme has one source: `default_selection` of the shared
 // palettes file. These tests replace that file and re-import the modules that
-// derive from it, because the file's own value (dark) would hide a place that
-// hard-codes dark.
+// derive from it, because the file's own value would hide a place that
+// hard-codes that value.
 const PALETTES_JSON = '../../../crates/yagura-protocol/built-in-palettes.json';
 
-type Selection = 'light' | 'system';
+type Selection = 'dark' | 'light' | 'system';
 
 const DARK = BUILT_IN_PALETTES.dark;
 const LIGHT = BUILT_IN_PALETTES.light;
 
 // The palette a default selection names, with `system` following the OS preference.
 function expectedPalette(selection: Selection, prefersDark: boolean): Record<string, string> {
-  if (selection === 'light') {
-    return LIGHT;
+  if (selection !== 'system') {
+    return selection === 'light' ? LIGHT : DARK;
   }
   return prefersDark ? DARK : LIGHT;
 }
@@ -74,7 +74,7 @@ afterEach(() => {
   vi.resetModules();
 });
 
-describe.each<Selection>(['light', 'system'])(
+describe.each<Selection>(['dark', 'light', 'system'])(
   'with default_selection %s in the palettes file',
   (selection) => {
     it('exposes the file’s default selection and the palette it names', async () => {
