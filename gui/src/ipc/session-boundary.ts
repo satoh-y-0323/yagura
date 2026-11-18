@@ -265,6 +265,18 @@ export interface StatusBoot {
   seq: number;
 }
 
+/**
+ * A task window's report to its owner (mirrors the Rust `TaskReportMark`).
+ * Ordered on its own key apart from the status pair: within one boot a larger
+ * `seq` is newer, and for the same `seq` `standing` only goes from true to false.
+ */
+export interface TaskReportMark {
+  /** Counts the window's reports within one daemon boot. */
+  seq: number;
+  /** Whether the report still stands: no new instruction, owner still alive. */
+  standing: boolean;
+}
+
 /** Payload of `session://status`. */
 export interface StatusPayload {
   /** The window whose status changed (protocol v2). */
@@ -283,6 +295,8 @@ export interface StatusPayload {
    * and from the wire -- when the core names none.
    */
   status_boot?: StatusBoot;
+  /** The window's report mark, omitted while the window has not reported this boot. */
+  task_report?: TaskReportMark;
 }
 
 const WINDOW_STATUS_VALUES: ReadonlySet<string> = new Set<WindowStatus>([
@@ -662,6 +676,8 @@ export interface WindowInfo {
    * as `mcp_connected`; a reader treats an absent count as nothing waiting.
    */
   queued_count?: number;
+  /** The window's report mark, as {@link StatusPayload.task_report}. */
+  task_report?: TaskReportMark;
 }
 
 const DAEMON_RECOVERY_STATUS_VALUES: ReadonlySet<string> = new Set<DaemonRecoveryStatus>([
@@ -1093,7 +1109,9 @@ export function narrowStatusPayload(value: unknown): StatusPayload {
   const status_rev = readOptionalGeneration(record, 'status_rev', context, 'refuse');
   const withRev = status_rev === null ? base : { ...base, status_rev };
   const status_boot = readOptionalStatusBoot(record, context, 'refuse');
-  return status_boot === null ? withRev : { ...withRev, status_boot };
+  const withBoot = status_boot === null ? withRev : { ...withRev, status_boot };
+  const task_report = readOptionalTaskReport(record, context, 'refuse');
+  return task_report === null ? withBoot : { ...withBoot, task_report };
 }
 
 /**
@@ -1594,7 +1612,9 @@ export function narrowWindowInfo(value: unknown, context = 'window_info'): Windo
           status_reports_missing: requireBoolean(record, 'status_reports_missing', context),
         };
   const queued_count = readOptionalInteger(record, 'queued_count', context);
-  return queued_count === null ? withReports : { ...withReports, queued_count };
+  const withQueued = queued_count === null ? withReports : { ...withReports, queued_count };
+  const task_report = readOptionalTaskReport(record, context, 'drop');
+  return task_report === null ? withQueued : { ...withQueued, task_report };
 }
 
 /**
@@ -2145,7 +2165,8 @@ export function readOptionalString(
  * alone, so one malformed entry never costs the window or the message it
  * belongs to. Shared by an out-of-vocabulary `unknown_reason`
  * ({@link readArmReason}) and a negative `status_rev`
- * ({@link readOptionalGeneration}): both are values that are present but
+ * ({@link readOptionalGeneration}), and a malformed `task_report`
+ * ({@link readOptionalTaskReport}): all are values that are present but
  * unusable, split the same way by route.
  */
 type FieldMismatchPolicy = 'refuse' | 'drop';
@@ -2309,4 +2330,37 @@ function readOptionalStatusBoot(
   const origin = nonNegativeGeneration(rawOrigin, `${bootContext}.origin`, onNegative);
   const seq = nonNegativeGeneration(rawSeq, `${bootContext}.seq`, onNegative);
   return origin === null || seq === null ? null : { origin, seq };
+}
+
+/**
+ * Reads the optional `task_report` mark. Unlike `status_boot`, every malformed
+ * shape follows `onMismatch`: the mark only narrows which windows count, so the
+ * list route loses nothing but that narrowing by dropping it.
+ *
+ * @throws {BoundaryError} when the mark is not a record holding a non-negative
+ * integer `seq` and a boolean `standing`, and the policy is `'refuse'`.
+ */
+function readOptionalTaskReport(
+  record: UntrustedRecord,
+  context: string,
+  onMismatch: FieldMismatchPolicy
+): TaskReportMark | null {
+  const value = readOwnField(record, 'task_report');
+  if (value === null || value === undefined) {
+    return null;
+  }
+  const path = `${context}.task_report`;
+  try {
+    const mark = requireRecord(value, path);
+    return {
+      seq: requireNonNegativeInteger(mark, 'seq', path),
+      standing: requireBoolean(mark, 'standing', path),
+    };
+  } catch (error) {
+    if (onMismatch === 'refuse' || !(error instanceof BoundaryError)) {
+      throw error;
+    }
+    console.warn(`${path}: dropped a mark it cannot read (${error.message})`);
+    return null;
+  }
 }

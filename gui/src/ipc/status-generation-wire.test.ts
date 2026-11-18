@@ -88,6 +88,49 @@ const DESKTOP_EVENT_BOOT_KEY = generationFieldName(
   'StatusBoot'
 );
 
+/** The key this boundary reads a task window's report mark under. */
+const TASK_REPORT_KEY = 'task_report';
+
+const WINDOW_RECORD_TASK_REPORT_KEY = generationFieldName(
+  protocolSource,
+  'pub struct WindowInfo {',
+  TASK_REPORT_KEY,
+  'TaskReportMark'
+);
+const STATUS_PUSH_TASK_REPORT_KEY = generationFieldName(
+  protocolSource,
+  '    StatusChanged {',
+  TASK_REPORT_KEY,
+  'TaskReportMark'
+);
+const DESKTOP_EVENT_TASK_REPORT_KEY = generationFieldName(
+  desktopEventsSource,
+  'pub struct StatusPayload {',
+  TASK_REPORT_KEY,
+  'TaskReportMark'
+);
+
+/** The one field of `rustType` the Rust `TaskReportMark` declares. */
+function markFieldName(rustType: string): string {
+  const body = itemBody(protocolSource, 'pub struct TaskReportMark {');
+  const shape = new RegExp(`^[ \\t]*pub +([A-Za-z_][A-Za-z0-9_]*) *: *${rustType} *,`, 'gm');
+  const names = [...body.matchAll(shape)].map((match) => match[1] ?? '');
+  if (names.length !== 1) {
+    throw new Error(
+      `expected exactly one ${rustType} field in TaskReportMark, found ${names.length}`
+    );
+  }
+  return names[0] ?? '';
+}
+
+const MARK_SEQ_KEY = markFieldName('u64');
+const MARK_STANDING_KEY = markFieldName('bool');
+
+/** A report mark spelled with the Rust field names. */
+function rustSpelledMark(seq: number, standing: boolean): Record<string, unknown> {
+  return { [MARK_SEQ_KEY]: seq, [MARK_STANDING_KEY]: standing };
+}
+
 describe('the three wire shapes name the status generation identically', () => {
   it('reads a non-empty source for each side (sanity check against a vacuous pass)', () => {
     expect(protocolSource.length).toBeGreaterThan(0);
@@ -107,6 +150,13 @@ describe('the three wire shapes name the status generation identically', () => {
     expect(new Set([WINDOW_RECORD_KEY, STATUS_PUSH_KEY, DESKTOP_EVENT_KEY]).size).toBe(1);
     expect(
       new Set([WINDOW_RECORD_BOOT_KEY, STATUS_PUSH_BOOT_KEY, DESKTOP_EVENT_BOOT_KEY]).size
+    ).toBe(1);
+    expect(
+      new Set([
+        WINDOW_RECORD_TASK_REPORT_KEY,
+        STATUS_PUSH_TASK_REPORT_KEY,
+        DESKTOP_EVENT_TASK_REPORT_KEY,
+      ]).size
     ).toBe(1);
   });
 });
@@ -149,6 +199,33 @@ describe('this boundary reads the generation under the key the Rust sources use'
     expect(payload.status_boot).toEqual({ origin: 7, seq: 3 });
   });
 
+  it('carries the report mark of each shape sent under the Rust key and field names', () => {
+    const desktop = narrowStatusPayload({
+      status: 'waiting_input',
+      window_id: WINDOW_ID,
+      [DESKTOP_EVENT_TASK_REPORT_KEY]: rustSpelledMark(2, true),
+    });
+    expect(desktop.task_report).toEqual({ seq: 2, standing: true });
+
+    const push = narrowStatusPayload({
+      status: 'waiting_input',
+      window_id: WINDOW_ID,
+      [STATUS_PUSH_TASK_REPORT_KEY]: rustSpelledMark(3, false),
+    });
+    expect(push.task_report).toEqual({ seq: 3, standing: false });
+
+    const record = narrowWindowInfo({
+      window_id: WINDOW_ID,
+      name: 'main',
+      vendor: null,
+      cwd: '/x',
+      status: 'waiting_input',
+      exit_code: null,
+      [WINDOW_RECORD_TASK_REPORT_KEY]: rustSpelledMark(1, true),
+    });
+    expect(record.task_report).toEqual({ seq: 1, standing: true });
+  });
+
   it('drops a generation sent under a key none of the Rust shapes uses', () => {
     const misspelled = `${WINDOW_RECORD_KEY}ision`;
     const misspelledBoot = `${WINDOW_RECORD_BOOT_KEY}ision`;
@@ -160,5 +237,12 @@ describe('this boundary reads the generation under the key the Rust sources use'
     });
     expect(Object.prototype.hasOwnProperty.call(payload, 'status_rev')).toBe(false);
     expect(Object.prototype.hasOwnProperty.call(payload, 'status_boot')).toBe(false);
+
+    const misspelledMark = narrowStatusPayload({
+      status: 'waiting_input',
+      window_id: WINDOW_ID,
+      [`${STATUS_PUSH_TASK_REPORT_KEY}s`]: rustSpelledMark(1, true),
+    });
+    expect(Object.prototype.hasOwnProperty.call(misspelledMark, 'task_report')).toBe(false);
   });
 });

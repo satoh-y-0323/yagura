@@ -9,7 +9,12 @@ import { describe, it, expect } from 'vitest';
 
 import type { DetectedStatusView, WindowStatus } from './ipc/session-boundary';
 import { STATUS_PRESENTATION } from './status-presentation';
-import { attentionCount, summarizeWindowStatuses, windowsNeedingYou } from './status-tone';
+import {
+  attentionCount,
+  needsYou,
+  summarizeWindowStatuses,
+  windowsNeedingYou,
+} from './status-tone';
 
 /**
  * Minimal shape `windowsNeedingYou` / `attentionCount` need from an entry: the
@@ -19,6 +24,7 @@ import { attentionCount, summarizeWindowStatuses, windowsNeedingYou } from './st
 interface Entry {
   detected: DetectedStatusView;
   id: string;
+  taskReport?: { seq: number; standing: boolean };
 }
 
 /** An entry holding `status`, with the reason arm the status allows. */
@@ -80,6 +86,55 @@ describe('windowsNeedingYou / attentionCount: membership in the waiting set', ()
     ];
 
     expect(windowsNeedingYou(entries).map((e) => e.id)).toEqual(['b', 'd']);
+  });
+});
+
+/** `entryOf` with the task report mark the daemon attached. */
+function reportedEntryOf(status: WindowStatus, id: string, standing: boolean): Entry {
+  return { ...entryOf(status, id), taskReport: { seq: 1, standing } };
+}
+
+describe('needsYou: a task window waiting on its owner after its report is not the turn of the user', () => {
+  it('leaves out a waiting_input window whose report still stands', () => {
+    expect(needsYou(reportedEntryOf('waiting_input', 'w', true))).toBe(false);
+  });
+
+  it('keeps in a waiting_approval window whose report stands, and a waiting_input one whose report no longer stands or that never reported', () => {
+    expect(needsYou(reportedEntryOf('waiting_approval', 'w', true))).toBe(true);
+    expect(needsYou(reportedEntryOf('waiting_input', 'w', false))).toBe(true);
+    expect(needsYou(entryOf('waiting_input', 'w'))).toBe(true);
+  });
+
+  it('agrees with the status table for every status that carries no standing report', () => {
+    for (const [status, expected] of Object.entries(EXPECTED_NEEDS_YOU) as [
+      WindowStatus,
+      boolean,
+    ][]) {
+      expect(needsYou(entryOf(status, 'w')), status).toBe(expected);
+      expect(needsYou(reportedEntryOf(status, 'w', false)), status).toBe(expected);
+    }
+    expect(needsYou(reportedEntryOf('unknown', 'w', true))).toBe(false);
+  });
+
+  it('narrows windowsNeedingYou, attentionCount and the group summary the same way', () => {
+    const entries: Entry[] = [
+      reportedEntryOf('waiting_input', 'standing', true),
+      reportedEntryOf('waiting_input', 'released', false),
+      entryOf('waiting_input', 'plain'),
+      reportedEntryOf('waiting_approval', 'approval', true),
+      entryOf('unknown', 'unknown'),
+    ];
+
+    expect(windowsNeedingYou(entries).map((e) => e.id)).toEqual(['released', 'plain', 'approval']);
+    expect(attentionCount(entries)).toBe(3);
+    expect(summarizeWindowStatuses(entries).count).toBe(3);
+
+    const onlyStanding = [reportedEntryOf('waiting_input', 'standing', true), entryOf('idle', 'i')];
+    expect(summarizeWindowStatuses(onlyStanding)).toEqual({
+      count: 0,
+      mark: 'waiting_input',
+      unknownOnly: false,
+    });
   });
 });
 

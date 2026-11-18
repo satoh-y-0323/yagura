@@ -13,7 +13,7 @@ import { writable, type Readable } from 'svelte/store';
 import { bringToFront, MIN_WINDOW_SIZE, type Rect, type Size } from '../layout/float-layout';
 import { tileRects } from '../layout/tile-layout';
 import { reorderTabs } from '../layout/tab-order';
-import type { DetectedStatusView, StatusBoot } from '../ipc/session-boundary';
+import type { DetectedStatusView, StatusBoot, TaskReportMark } from '../ipc/session-boundary';
 import type { WindowEventHandlers, WindowInfo } from '../ipc/session-client';
 
 /** Screen position of a window pane. */
@@ -80,6 +80,11 @@ export interface WindowEntry {
    * one does; see {@link queuedCountOf}.
    */
   queuedCount?: number;
+  /**
+   * The window's report mark, present only while the daemon has reported one
+   * this boot; merged on its own key by {@link withTaskReport}.
+   */
+  taskReport?: TaskReportMark;
   /** Presentation attributes; see {@link WindowDisplay}. */
   display: WindowDisplay;
 }
@@ -114,13 +119,15 @@ export interface WindowRegistry extends Readable<WindowRegistryState> {
    * Records a status change; `exited` removes the window. The pair replaces
    * the entry's whole `detected`, and is discarded when `(statusBoot,
    * statusRev)` names an observation older than the one the entry already
-   * holds.
+   * holds. `taskReport` is merged on its own key, whatever the pair's
+   * generation says; omitting it means the observation carries no mark.
    */
   setStatus: (
     windowId: string,
     detected: DetectedStatusView,
     statusRev: number | null,
-    statusBoot: StatusBoot | null
+    statusBoot: StatusBoot | null,
+    taskReport?: TaskReportMark
   ) => void;
   /** Routes this window's events to `handlers`. */
   registerWindowHandlers: (windowId: string, handlers: WindowEventHandlers) => void;
@@ -246,7 +253,7 @@ export function createWindowRegistry(): WindowRegistry {
       update((state) => withName(state, windowId, name));
     },
     closeWindow: removeWindow,
-    setStatus: (windowId, detected, statusRev, statusBoot) => {
+    setStatus: (windowId, detected, statusRev, statusBoot, taskReport) => {
       if (detected.status === 'exited') {
         removeWindow(windowId);
         return;
@@ -255,7 +262,12 @@ export function createWindowRegistry(): WindowRegistry {
         ...state,
         windows: state.windows.map((entry) =>
           entry.windowId === windowId
-            ? withObservedPair(entry, detected, statusRev, statusBoot)
+            ? withObservedPair(
+                withTaskReport(entry, statusBoot, taskReport),
+                detected,
+                statusRev,
+                statusBoot
+              )
             : entry
         ),
       }));
@@ -383,7 +395,11 @@ function toEntry(info: WindowInfo, zOrder: number): WindowEntry {
       restoreBounds: null,
     },
   };
-  return withQueuedCount(entry, queuedCountOf(info));
+  return withTaskReport(
+    withQueuedCount(entry, queuedCountOf(info)),
+    entry.statusBoot,
+    info.task_report
+  );
 }
 
 function withName(state: WindowRegistryState, windowId: string, name: string): WindowRegistryState {
@@ -426,6 +442,48 @@ function withObservedPair(
 }
 
 /**
+ * Merges an observation's report mark, on a key apart from the status pair. Must
+ * run before the pair moves `entry.statusBoot`: the boot it compares against is
+ * the one the held mark was observed in.
+ *
+ * Another boot (another origin, a later boot, or either side naming none) is
+ * taken whole, an absent mark clearing the one held. An earlier boot of the
+ * same origin is ignored. Within one boot an absent mark keeps the held one,
+ * and a mark replaces it only for a larger `seq`, or for the same `seq` when it
+ * no longer stands, so the order the routes arrive in never revives a mark.
+ */
+function withTaskReport(
+  entry: WindowEntry,
+  statusBoot: StatusBoot | null,
+  mark: TaskReportMark | undefined
+): WindowEntry {
+  const held = entry.statusBoot;
+  const sameOrigin = statusBoot !== null && held !== null && statusBoot.origin === held.origin;
+  if (sameOrigin && statusBoot.seq < held.seq) {
+    return entry;
+  }
+  const sameBoot = sameOrigin && statusBoot.seq === held.seq;
+  if (sameBoot) {
+    const current = entry.taskReport;
+    const replaces =
+      mark !== undefined &&
+      (current === undefined ||
+        mark.seq > current.seq ||
+        (mark.seq === current.seq && !mark.standing));
+    return replaces ? { ...entry, taskReport: mark } : entry;
+  }
+  if (mark !== undefined) {
+    return { ...entry, taskReport: mark };
+  }
+  if (entry.taskReport === undefined) {
+    return entry;
+  }
+  const cleared = { ...entry };
+  delete cleared.taskReport;
+  return cleared;
+}
+
+/**
  * Refreshes the fields a snapshot of an already-open window may carry anew.
  *
  * The display name, the room, the detection warning, the MCP connection and
@@ -442,7 +500,7 @@ function withSnapshot(state: WindowRegistryState, info: WindowInfo): WindowRegis
         ? withQueuedCount(
             {
               ...withObservedPair(
-                entry,
+                withTaskReport(entry, info.status_boot ?? null, info.task_report),
                 info.detected,
                 info.status_rev ?? null,
                 info.status_boot ?? null

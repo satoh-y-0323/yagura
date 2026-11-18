@@ -25,6 +25,7 @@ import {
   narrowChatMessages,
   narrowWindowOpenFailure,
   narrowWindowListPayload,
+  narrowStatusPayload,
 } from './session-boundary';
 
 /**
@@ -559,6 +560,101 @@ describe('narrowWindowInfo: the generation of the reported pair', () => {
   it('rejects a non-integer generation', () => {
     expect(() => narrowWindowInfo(windowInfoWire({ status_rev: 1.5 }))).toThrow(BoundaryError);
     expect(() => narrowWindowInfo(windowInfoWire({ status_rev: 'seven' }))).toThrow(BoundaryError);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// A task window's report mark (`task_report`) is read under the same split
+// as a negative generation: the status-change route refuses a mark it cannot
+// read, the window-list route drops the mark alone and keeps the window.
+// ---------------------------------------------------------------------------
+
+/** A well-formed `session://status` payload. */
+function statusPayloadWire(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return { window_id: WINDOW_ID, status: 'waiting_input', ...overrides };
+}
+
+/** Values of `task_report` that are present but are not a report mark. */
+const MALFORMED_TASK_REPORTS: readonly unknown[] = [
+  7,
+  'standing',
+  true,
+  { standing: true },
+  { seq: 1 },
+  { seq: 1.5, standing: true },
+  { seq: '1', standing: true },
+  { seq: -1, standing: true },
+  { seq: Number.MIN_SAFE_INTEGER, standing: false },
+  { seq: 1, standing: 'yes' },
+  { seq: 1, standing: 1 },
+];
+
+describe('the task report mark crosses this boundary only when present', () => {
+  it('carries a well-formed mark through unchanged on both routes, and adds none the wire omits', () => {
+    expect(
+      Object.prototype.hasOwnProperty.call(narrowStatusPayload(statusPayloadWire()), 'task_report')
+    ).toBe(false);
+    expect(
+      Object.prototype.hasOwnProperty.call(narrowWindowInfo(windowInfoWire()), 'task_report')
+    ).toBe(false);
+    for (const mark of [
+      { seq: 0, standing: false },
+      { seq: 1, standing: true },
+      { seq: 42, standing: false },
+    ]) {
+      expect(narrowStatusPayload(statusPayloadWire({ task_report: mark })).task_report).toEqual(
+        mark
+      );
+      expect(narrowWindowInfo(windowInfoWire({ task_report: mark })).task_report).toEqual(mark);
+    }
+  });
+});
+
+describe('narrowStatusPayload: refuses a status change whose task report mark it cannot read', () => {
+  it.each(MALFORMED_TASK_REPORTS.map((value) => [JSON.stringify(value), value]))(
+    'refuses task_report %s',
+    (_label, value) => {
+      expect(() => narrowStatusPayload(statusPayloadWire({ task_report: value }))).toThrow(
+        BoundaryError
+      );
+    }
+  );
+});
+
+describe('narrowWindowInfo: drops a task report mark it cannot read and keeps the window', () => {
+  it.each(MALFORMED_TASK_REPORTS.map((value) => [JSON.stringify(value), value]))(
+    'drops task_report %s alone, warning once',
+    (_label, value) => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+      try {
+        const info = narrowWindowInfo(
+          windowInfoWire({ status: 'waiting_input', status_rev: 3, task_report: value })
+        );
+        expect(Object.prototype.hasOwnProperty.call(info, 'task_report')).toBe(false);
+        expect(info.window_id).toBe(WINDOW_ID);
+        expect(info.detected).toEqual({ status: 'waiting_input' });
+        expect(info.status_rev).toBe(3);
+        expect(warn).toHaveBeenCalledTimes(1);
+      } finally {
+        warn.mockRestore();
+      }
+    }
+  );
+
+  it('keeps the mark of every other window of a list when one entry carries a malformed one', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      const list = narrowWindowInfoList([
+        windowInfoWire({ window_id: 'w-a', task_report: { seq: -1, standing: true } }),
+        windowInfoWire({ window_id: 'w-b', task_report: { seq: 2, standing: true } }),
+      ]);
+      expect(list.map((info) => info.window_id)).toEqual(['w-a', 'w-b']);
+      expect(Object.prototype.hasOwnProperty.call(list[0], 'task_report')).toBe(false);
+      expect(list[1]?.task_report).toEqual({ seq: 2, standing: true });
+      expect(warn).toHaveBeenCalledTimes(1);
+    } finally {
+      warn.mockRestore();
+    }
   });
 });
 

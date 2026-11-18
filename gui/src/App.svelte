@@ -2393,7 +2393,8 @@
             payload.window_id,
             payload.detected,
             payload.status_rev ?? null,
-            payload.status_boot ?? null
+            payload.status_boot ?? null,
+            payload.task_report
           );
         },
         onDaemonSpawnWarning: (payload) => {
