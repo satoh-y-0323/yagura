@@ -18,6 +18,7 @@
 
   const ITEM = '[role="menuitem"], [role="menuitemradio"]';
   const NAVIGABLE = `${ITEM}, [role="separator"], hr, select`;
+  const MENU_KEYS_ON_SELECT = new Set(['ArrowUp', 'ArrowDown', 'Home', 'End', 'Escape', 'Tab']);
 
   export let isOpen = false;
   /** Viewport-relative box the menu opens next to; a point is a zero-size box. */
@@ -121,9 +122,11 @@
     if (isImeKey(event)) {
       return;
     }
-    // A focused <select> keeps the arrows, Home and End for its own options.
+    // The menu keeps the arrows, Home and End even on a <select>: on Windows and
+    // Linux they would change its value while the user only walks the menu.
+    // Space or Alt+Down opens its list instead.
     const isOnSelect = event.target instanceof HTMLSelectElement;
-    if (isOnSelect && event.key !== 'Escape' && event.key !== 'Tab') {
+    if (isOnSelect && (event.altKey || !MENU_KEYS_ON_SELECT.has(event.key))) {
       return;
     }
     const elements = navigable();
