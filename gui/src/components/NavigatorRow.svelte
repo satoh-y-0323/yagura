@@ -14,6 +14,8 @@
 
   export let entry: WindowEntry;
   export let isCurrent: boolean;
+  /** The list's one Tab stop; the other rows are reached with the row keys. */
+  export let isTabStop: boolean;
   /** Minimized on the canvas: drawn faint, with the minimize mark. */
   export let isMinimized: boolean;
   /** Still listed by the Needs you filter although it no longer needs the user. */
@@ -51,6 +53,7 @@
     data-prominent={isProminent}
     data-minimized={isMinimized}
     data-dragging={isDragging}
+    tabindex={isTabStop ? 0 : -1}
     aria-current={isCurrent ? 'true' : undefined}
     aria-labelledby={nameId}
     aria-describedby={describedBy}

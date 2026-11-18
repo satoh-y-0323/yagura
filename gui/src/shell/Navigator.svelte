@@ -25,6 +25,7 @@
     moveWithinRoom,
     resolveDropIndex,
     rowKeyTarget,
+    rowTabStop,
     type RowBounds,
     type RowKey,
   } from '../sidebar/row-order';
@@ -96,6 +97,12 @@
   let drag: RowDrag | null = null;
   /** The row a drag just ended on, whose trailing click must not select it. */
   let draggedRowId: string | null = null;
+  /** The row a row key last moved to; it holds the Tab stop until the current window changes. */
+  let movedRowId: string | null = null;
+
+  function forgetMovedRow(_currentWindowId: string | null): void {
+    movedRowId = null;
+  }
 
   let viewButton: HTMLButtonElement | undefined;
   let isViewMenuOpen = false;
@@ -124,6 +131,9 @@
         )
       : visibleWindowOrder(groups, needsYouView)
   ).map((entry) => entry.windowId);
+  // Selecting a window hands the Tab stop back to the current window.
+  $: forgetMovedRow(currentWindowId);
+  $: tabStopId = rowTabStop(walkOrder, movedRowId ?? currentWindowId);
   $: menuEntry =
     rowMenu === null ? undefined : entries.find((entry) => entry.windowId === rowMenu?.windowId);
   $: if (rowMenu !== null && (menuEntry === undefined || !walkOrder.includes(rowMenu.windowId))) {
@@ -337,7 +347,9 @@
     }
     if (!event.shiftKey && isRowKey(event.key)) {
       event.preventDefault();
-      rowButton(rowKeyTarget(walkOrder, windowId, event.key))?.focus();
+      const target = rowKeyTarget(walkOrder, windowId, event.key);
+      movedRowId = target;
+      rowButton(target)?.focus();
     }
   }
 
@@ -537,6 +549,7 @@
               <NavigatorRow
                 {entry}
                 isCurrent={entry.windowId === currentWindowId}
+                isTabStop={entry.windowId === tabStopId}
                 isMinimized={isCanvas && entry.display.isMinimized}
                 isSettled={row.settled}
                 isAwaitingPermission={awaitingPermission.has(entry.windowId)}
@@ -559,6 +572,7 @@
               <NavigatorRow
                 {entry}
                 isCurrent={entry.windowId === currentWindowId}
+                isTabStop={entry.windowId === tabStopId}
                 isMinimized={isCanvas && entry.display.isMinimized}
                 isAwaitingPermission={awaitingPermission.has(entry.windowId)}
                 onSelect={selectRow}
@@ -629,6 +643,7 @@
                 <NavigatorRow
                   {entry}
                   isCurrent={entry.windowId === currentWindowId}
+                  isTabStop={entry.windowId === tabStopId}
                   isMinimized={isCanvas && entry.display.isMinimized}
                   isAwaitingPermission={awaitingPermission.has(entry.windowId)}
                   onSelect={selectRow}

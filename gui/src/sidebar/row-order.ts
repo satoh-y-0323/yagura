@@ -136,3 +136,15 @@ export function rowKeyTarget(ids: readonly string[], currentId: string, key: Row
             : Math.max(index - 1, 0);
   return ids[target] as string;
 }
+
+/**
+ * The one row that stays in the Tab order (WAI-ARIA roving tabindex: Tab enters
+ * the list once and the row keys move inside it). It is `currentId` when that
+ * row is visible, else the first visible row, or `null` when there are none.
+ */
+export function rowTabStop(ids: readonly string[], currentId: string | null): string | null {
+  if (currentId !== null && ids.includes(currentId)) {
+    return currentId;
+  }
+  return ids[0] ?? null;
+}

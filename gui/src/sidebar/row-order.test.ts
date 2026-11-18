@@ -248,3 +248,28 @@ describe('rowKeyTarget: where the row keys go in the list', () => {
     expect(rowKeyTarget(ids, 'w-b', 'End')).toBe('w-c');
   });
 });
+
+describe('rowTabStop: the one Tab stop of the list', () => {
+  const ids = ['w-a', 'w-b', 'w-c'];
+
+  it('stops on the current window when it is among the visible rows', async () => {
+    const { rowTabStop } = await rowOrder();
+    expect(rowTabStop(ids, 'w-b')).toBe('w-b');
+  });
+
+  it('falls back to the first visible row when the current window is not visible', async () => {
+    const { rowTabStop } = await rowOrder();
+    expect(rowTabStop(ids, 'w-hidden')).toBe('w-a');
+  });
+
+  it('falls back to the first visible row when there is no current window', async () => {
+    const { rowTabStop } = await rowOrder();
+    expect(rowTabStop(ids, null)).toBe('w-a');
+  });
+
+  it('is null when there are no rows', async () => {
+    const { rowTabStop } = await rowOrder();
+    expect(rowTabStop([], 'w-a')).toBeNull();
+    expect(rowTabStop([], null)).toBeNull();
+  });
+});
