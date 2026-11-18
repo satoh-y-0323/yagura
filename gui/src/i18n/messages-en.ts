@@ -348,7 +348,6 @@ export const messagesEn = {
     focusWindow: 'Click to bring to front',
     whyUnknown: 'Why is the status unknown?',
     dismissBanner: 'Dismiss this notice',
-    reorderTab: 'Drag to reorder',
     tileWindows: 'Tile windows',
     restoreAlreadyOpen: 'Already open',
     restoreNoteExecution: 'Running state and unsaved output are not restored.',
@@ -916,6 +915,5 @@ export const messagesEn = {
     theme: 'Theme',
     settings: 'Settings',
     windowMenu: 'Window menu',
-    windowTabs: 'Window tabs',
   },
 };

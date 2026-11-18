@@ -96,8 +96,8 @@ function harness(setup: Setup): Harness {
       maximize: (entry: Win): void => {
         calls.push(`maximize:${entry.windowId}`);
       },
-      focus: (entry: Win): void => {
-        calls.push(`focus:${entry.windowId}`);
+      goTo: (entry: Win): void => {
+        calls.push(`goTo:${entry.windowId}`);
       },
     },
     goToNextWindowNeedingYou: (): Win | null => {
@@ -137,8 +137,8 @@ const B = win('wb-p0d8qz', 2, 'room-b');
 const C = win('wc-m7t2rv', 3, 'room-c');
 
 const EXPECTED_CALLS: Readonly<Record<ActionId, readonly string[]>> = {
-  'focus-next-window': ['expand:room-c', `focus:${C.windowId}`, `terminal:${C.windowId}`],
-  'focus-previous-window': ['expand:room-a', `focus:${A.windowId}`, `terminal:${A.windowId}`],
+  'focus-next-window': ['expand:room-c', `goTo:${C.windowId}`, `terminal:${C.windowId}`],
+  'focus-previous-window': ['expand:room-a', `goTo:${A.windowId}`, `terminal:${A.windowId}`],
   'focus-next-attention': ['attention'],
   'open-window-form': ['open-form'],
   'close-window': [`close:${B.windowId}`],
@@ -168,23 +168,23 @@ describe('next and previous window', () => {
     const order = [A, C, B];
     const next = harness({ windows: [A, B, C], order, current: B });
     await next.run('focus-next-window');
-    expect(next.calls).toContain(`focus:${A.windowId}`);
+    expect(next.calls).toContain(`goTo:${A.windowId}`);
 
     const previous = harness({ windows: [A, B, C], order, current: B });
     await previous.run('focus-previous-window');
-    expect(previous.calls).toContain(`focus:${C.windowId}`);
+    expect(previous.calls).toContain(`goTo:${C.windowId}`);
   });
 
   it('wrap around at both ends', async () => {
     const top = win('wt-h1s5ld', 9, 'room-a');
     const next = harness({ windows: [A, C, top], order: [A, C, top], current: top });
     await next.run('focus-next-window');
-    expect(next.calls).toContain(`focus:${A.windowId}`);
+    expect(next.calls).toContain(`goTo:${A.windowId}`);
 
     const first = win('wf-q8n3bc', 9, 'room-a');
     const previous = harness({ windows: [first, A, C], order: [first, A, C], current: first });
     await previous.run('focus-previous-window');
-    expect(previous.calls).toContain(`focus:${C.windowId}`);
+    expect(previous.calls).toContain(`goTo:${C.windowId}`);
   });
 
   it('start from the ends when there is no current window, and bring a minimized target back', async () => {
@@ -194,7 +194,7 @@ describe('next and previous window', () => {
     await next.run('focus-next-window');
     expect(next.calls).toEqual([
       'expand:room-a',
-      `focus:${hiddenA.windowId}`,
+      `goTo:${hiddenA.windowId}`,
       `terminal:${hiddenA.windowId}`,
     ]);
 
@@ -202,7 +202,7 @@ describe('next and previous window', () => {
     await previous.run('focus-previous-window');
     expect(previous.calls).toEqual([
       'expand:room-c',
-      `focus:${hiddenC.windowId}`,
+      `goTo:${hiddenC.windowId}`,
       `terminal:${hiddenC.windowId}`,
     ]);
   });

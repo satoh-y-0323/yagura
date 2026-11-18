@@ -1,6 +1,6 @@
 /**
  * The single execution path for the window operations with a contract:
- * close / interrupt / rename / focus / minimize / maximize.
+ * close / interrupt / rename / goTo / minimize / maximize.
  * Move/resize are excluded on purpose: `FloatWindow` writes those
  * coordinate updates to the registry directly, without confirmation.
  *
@@ -58,26 +58,10 @@ export interface WindowActionsDeps {
    * pane-removal error never surfaces as a refused close.
    */
   removeWindow?: (windowId: string) => void;
-  /**
-   * Whether the app is currently in tab mode. Provided by
-   * `App.svelte` only; when absent, `focus`/`minimize` keep their float-window
-   * behaviour unconditionally, the same fail-safe pattern `confirmPort` uses.
-   */
-  isTabMode?: () => boolean;
-  /**
-   * Switches the visible tab to `windowId` — the 3-connect
-   * (`setWindowMinimized` -> `setWindowMaximized` -> `bringWindowToFront`).
-   * Provided by `App.svelte` only.
-   */
-  switchToTab?: (windowId: string) => void;
-  /**
-   * Resolves the tab that should become active once `windowId` is
-   * minimized, using the tab order; `null` when none
-   * remains. Provided by `App.svelte` only; `minimize` only consults it once
-   * it already knows it is in tab mode with a `switchToTab` to hand the
-   * successor to.
-   */
-  resolveTabSuccessor?: (windowId: string) => string | null;
+  /** Chooses the window Focus shows; the only thing `goTo` does in Focus. */
+  selectWindow: (windowId: string) => void;
+  /** The work mode as of now: Focus never writes the canvas placement. */
+  workMode: () => 'canvas' | 'focus';
 }
 
 /** The window operations exposed to the view. */
@@ -85,15 +69,15 @@ export interface WindowActions {
   close: (entry: WindowEntry) => Promise<void>;
   interrupt: (entry: WindowEntry) => Promise<void>;
   rename: (entry: WindowEntry, name: string) => Promise<void>;
-  focus: (entry: WindowEntry) => void;
+  /** The one way to a window: Focus chooses it, Canvas restores and raises it. */
+  goTo: (entry: WindowEntry) => void;
   minimize: (entry: WindowEntry) => void;
   maximize: (entry: WindowEntry) => void;
 }
 
 /** Builds a {@link WindowActions} bound to `deps`. */
 export function createWindowActions(deps: WindowActionsDeps): WindowActions {
-  const { registry, ipc, confirmPort, removeWindow, isTabMode, switchToTab, resolveTabSuccessor } =
-    deps;
+  const { registry, ipc, confirmPort, removeWindow, selectWindow, workMode } = deps;
 
   /**
    * Runs a destructive operation through `resolveConfirmTarget`'s decision:
@@ -144,13 +128,9 @@ export function createWindowActions(deps: WindowActionsDeps): WindowActions {
       const stored = await ipc.invokeRenameWindow(entry.windowId, name);
       registry.renameWindow(entry.windowId, stored);
     },
-    focus: (entry) => {
-      // In tab mode the same intent ("show me window X") switches tabs instead
-      // of raising a float window. Decided before the
-      // unminimize guard below because `switchToTab` restores the window itself,
-      // and running both would dispatch that mutation twice.
-      if ((isTabMode?.() ?? false) && switchToTab !== undefined) {
-        switchToTab(entry.windowId);
+    goTo: (entry) => {
+      if (workMode() === 'focus') {
+        selectWindow(entry.windowId);
         return;
       }
       if (entry.display.isMinimized) {
@@ -160,22 +140,6 @@ export function createWindowActions(deps: WindowActionsDeps): WindowActions {
     },
     minimize: (entry) => {
       registry.setWindowMinimized(entry.windowId, true);
-      // Minimizing the active tab hands the strip to its successor, or ends tab
-      // mode when none remains. `isMaximized` gates the branch
-      // because only the active tab owns the strip.
-      if (
-        entry.display.isMaximized &&
-        (isTabMode?.() ?? false) &&
-        switchToTab !== undefined &&
-        resolveTabSuccessor !== undefined
-      ) {
-        const successor = resolveTabSuccessor(entry.windowId);
-        if (successor === null) {
-          registry.setWindowMaximized(entry.windowId, false);
-        } else {
-          switchToTab(successor);
-        }
-      }
     },
     maximize: (entry) => {
       registry.setWindowMaximized(entry.windowId, !entry.display.isMaximized);

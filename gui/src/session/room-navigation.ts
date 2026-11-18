@@ -16,8 +16,8 @@ export interface RevealDeps<T> {
   groups: () => readonly RoomGroup<T>[];
   /** Opens a room without closing one that is already open. */
   expandRoom: (roomId: string) => void;
-  /** Brings a window to the front, un-minimizing or switching tabs as needed. */
-  focus: (entry: T) => void;
+  /** Goes to a window in the current work mode. */
+  goTo: (entry: T) => void;
   /** Asks for keyboard focus to move into a window's terminal. */
   focusTerminal: (windowId: string) => void;
 }
@@ -37,7 +37,7 @@ export function roomOfWindow<T extends RoomMember>(
 }
 
 /**
- * Brings `entry` on screen: opens its room, brings it to the front and moves
+ * Brings `entry` on screen: opens its room, goes to it and moves
  * keyboard focus into its terminal. The rooms are read at the time of the call.
  */
 export function revealWindow<T extends RoomMember>(deps: RevealDeps<T>, entry: T): void {
@@ -46,6 +46,6 @@ export function revealWindow<T extends RoomMember>(deps: RevealDeps<T>, entry: T
   if (roomId !== null) {
     deps.expandRoom(roomId);
   }
-  deps.focus(entry);
+  deps.goTo(entry);
   deps.focusTerminal(entry.windowId);
 }

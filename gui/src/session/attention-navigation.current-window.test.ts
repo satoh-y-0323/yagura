@@ -83,8 +83,8 @@ describe('goToNextWindowNeedingYou reports where it went', () => {
       focusTerminal: (windowId) => {
         calls.push(`terminal:${windowId}`);
       },
-      focus: (target) => {
-        calls.push(`focus:${target.windowId}`);
+      goTo: (target) => {
+        calls.push(`goTo:${target.windowId}`);
       },
     });
     return { navigation, calls, collapsedRooms };
@@ -104,7 +104,7 @@ describe('goToNextWindowNeedingYou reports where it went', () => {
     const landed: Entry | null = navigation.goToNextWindowNeedingYou();
 
     expect(landed).toBe(entries[3]);
-    expect(calls).toEqual(['expand:room-b', 'focus:b2', 'terminal:b2']);
+    expect(calls).toEqual(['expand:room-b', 'goTo:b2', 'terminal:b2']);
     expect(get(collapsedRooms).has('room-b')).toBe(false);
   });
 

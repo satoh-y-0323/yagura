@@ -4,7 +4,7 @@
  */
 import { describe, it, expect } from 'vitest';
 
-import { nextActiveTab, reorderTabs, resolveDropIndex, type TabBounds } from './tab-order';
+import { reorderTabs, resolveDropIndex, type TabBounds } from './tab-order';
 
 /** Three 100px-wide tabs laid out edge to edge; centres are 50 / 150 / 250. */
 const THREE_TABS: TabBounds[] = [
@@ -12,14 +12,6 @@ const THREE_TABS: TabBounds[] = [
   { windowId: 'w-b', left: 100, width: 100 },
   { windowId: 'w-c', left: 200, width: 100 },
 ];
-
-const ALL_ELIGIBLE = (): boolean => true;
-
-/** Eligibility stands in for "not minimized" in production. */
-function eligibleOnly(...windowIds: string[]): (windowId: string) => boolean {
-  const allowed = new Set(windowIds);
-  return (windowId) => allowed.has(windowId);
-}
 
 describe('reorderTabs: moves one tab within the order', () => {
   it('moves a tab to the front', () => {
@@ -118,41 +110,6 @@ describe('resolveDropIndex: maps a pointer position to a drop slot', () => {
   });
 });
 
-describe('nextActiveTab: picks the successor from the tab order', () => {
-  it('picks the tab that follows the removed one', () => {
-    expect(nextActiveTab(['w-a', 'w-b', 'w-c'], ALL_ELIGIBLE, 'w-a')).toBe('w-b');
-  });
-
-  it('picks the preceding tab when the removed one was last', () => {
-    expect(nextActiveTab(['w-a', 'w-b', 'w-c'], ALL_ELIGIBLE, 'w-c')).toBe('w-b');
-  });
-
-  it('follows the tab order rather than the order the windows were opened in', () => {
-    // The order a drag left behind: w-c was moved to the front.
-    expect(nextActiveTab(['w-c', 'w-a', 'w-b'], ALL_ELIGIBLE, 'w-c')).toBe('w-a');
-  });
-
-  it('skips a tab that is not eligible and takes the next eligible one', () => {
-    expect(nextActiveTab(['w-a', 'w-b', 'w-c'], eligibleOnly('w-c'), 'w-a')).toBe('w-c');
-  });
-
-  it('falls back to an eligible tab before the removed one', () => {
-    expect(nextActiveTab(['w-a', 'w-b', 'w-c'], eligibleOnly('w-a'), 'w-b')).toBe('w-a');
-  });
-
-  it('returns nothing when the removed tab was the only eligible one', () => {
-    expect(nextActiveTab(['w-a', 'w-b', 'w-c'], eligibleOnly('w-a'), 'w-a')).toBeNull();
-  });
-
-  it('returns nothing when no tab is eligible', () => {
-    expect(nextActiveTab(['w-a', 'w-b'], eligibleOnly(), 'w-a')).toBeNull();
-  });
-
-  it('returns nothing when the last tab is removed', () => {
-    expect(nextActiveTab(['w-a'], ALL_ELIGIBLE, 'w-a')).toBeNull();
-  });
-});
-
 describe('tab order edge cases', () => {
   it('has not passed a tab centre while the pointer is exactly on it', () => {
     expect(
@@ -161,16 +118,5 @@ describe('tab order edge cases', () => {
     expect(
       resolveDropIndex({ tabs: THREE_TABS, windowId: 'w-a', originX: 10, pointerX: 151 })
     ).toBe(1);
-  });
-
-  it('prefers the nearest eligible tab before the removed one over a farther one', () => {
-    expect(nextActiveTab(['w-a', 'w-b', 'w-c', 'w-d'], eligibleOnly('w-a', 'w-b'), 'w-d')).toBe(
-      'w-b'
-    );
-  });
-
-  it('answers from the front of the strip when the removed id is not in the order', () => {
-    expect(nextActiveTab(['w-a', 'w-b', 'w-c'], ALL_ELIGIBLE, 'w-x')).toBe('w-a');
-    expect(nextActiveTab(['w-a', 'w-b', 'w-c'], eligibleOnly('w-b', 'w-c'), 'w-x')).toBe('w-b');
   });
 });

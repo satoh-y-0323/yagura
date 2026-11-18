@@ -16,7 +16,7 @@ export interface ShortcutWindowActions<T> {
   minimize: (entry: T) => void;
   maximize: (entry: T) => void;
   /** Brings a window on screen in the current work mode. */
-  focus: (entry: T) => void;
+  goTo: (entry: T) => void;
 }
 
 /** What the runner reads and acts through; the view injects its own functions. */
@@ -57,7 +57,7 @@ export function createShortcutRunner<T extends RoomMember>(
   const reveal: RevealDeps<T> = {
     groups: deps.groups,
     expandRoom: deps.expandRoom,
-    focus: deps.actions.focus,
+    goTo: deps.actions.goTo,
     focusTerminal: deps.focusTerminal,
   };
 

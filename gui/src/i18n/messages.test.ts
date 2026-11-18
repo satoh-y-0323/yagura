@@ -183,7 +183,6 @@ export const dummyMessages: Messages = {
     focusWindow: 'DUMMY_focusWindow',
     whyUnknown: 'DUMMY_whyUnknown',
     dismissBanner: 'DUMMY_dismissBanner',
-    reorderTab: 'DUMMY_reorderTab',
     tileWindows: 'DUMMY_tileWindows',
     restoreAlreadyOpen: 'DUMMY_restoreAlreadyOpen',
     restoreNoteExecution: 'DUMMY_restoreNoteExecution',
@@ -434,7 +433,6 @@ export const dummyMessages: Messages = {
     theme: 'DUMMY_nav_theme',
     settings: 'DUMMY_nav_settings',
     windowMenu: 'DUMMY_nav_windowMenu',
-    windowTabs: 'DUMMY_nav_windowTabs',
   },
 
   /** The chat panel, its delivery chips, its halt banner and its badge. */

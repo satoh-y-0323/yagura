@@ -132,7 +132,7 @@
       event.button === 0
         ? { pointerId: event.pointerId, onControl: isPressOnControl(event.target) }
         : null;
-    actions.focus(entry);
+    actions.goTo(entry);
   }
 
   // Reported on release rather than on press: the browser's own focus handling
@@ -160,7 +160,7 @@
    */
   function raiseOnFocusIn(): void {
     if (!isCurrent) {
-      actions.focus(entry);
+      actions.goTo(entry);
     }
   }
 
@@ -212,9 +212,7 @@
        the application palette so a window never loses its outline.
        `display: contents` keeps the wrapper out of the layout. -->
   <div class="float-window__theme-scope" bind:this={themeScope}>
-    <!-- While the window is maximized its controls are drawn by the tab bar,
-         so drawing the frame bar as well would offer the same operations
-         twice. -->
+    <!-- The frame bar is not drawn while the window is maximized. -->
     {#if !entry.display.isMaximized}
       <div class="float-window__bar" role="presentation" use:pointerDrag={moveDrag}>
         <h2

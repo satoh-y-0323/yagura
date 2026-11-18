@@ -25,8 +25,8 @@ interface RevealDeps<T> {
   groups: () => readonly RoomGroup<T>[];
   /** Opens a room without closing one that is already open. */
   expandRoom: (roomId: string) => void;
-  /** Brings a window to the front, un-minimizing or switching tabs as needed. */
-  focus: (entry: T) => void;
+  /** Goes to a window in the current work mode. */
+  goTo: (entry: T) => void;
   /** Asks for keyboard focus to move into a window's terminal. */
   focusTerminal: (windowId: string) => void;
 }
@@ -70,7 +70,7 @@ function recorder(groups: RoomGroup<Win>[]): { deps: RevealDeps<Win>; calls: str
     deps: {
       groups: () => groups,
       expandRoom: (roomId) => calls.push(`expand:${roomId}`),
-      focus: (entry) => calls.push(`focus:${entry.windowId}`),
+      goTo: (entry) => calls.push(`goTo:${entry.windowId}`),
       focusTerminal: (windowId) => calls.push(`terminal:${windowId}`),
     },
   };
@@ -104,7 +104,7 @@ describe('revealWindow', () => {
     const { revealWindow } = roomNavigation();
     const { deps, calls } = recorder(GROUPS);
     revealWindow(deps, B2);
-    expect(calls).toEqual(['expand:room-b', 'focus:b2', 'terminal:b2']);
+    expect(calls).toEqual(['expand:room-b', 'goTo:b2', 'terminal:b2']);
   });
 
   it('reads the rooms at the time of the call, not when the dependencies were built', () => {
@@ -113,13 +113,13 @@ describe('revealWindow', () => {
     const { deps, calls } = recorder(live);
     live.push(group('room-c', [B1]));
     revealWindow(deps, B1);
-    expect(calls).toEqual(['expand:room-c', 'focus:b1', 'terminal:b1']);
+    expect(calls).toEqual(['expand:room-c', 'goTo:b1', 'terminal:b1']);
   });
 
   it('still brings forward a window no room holds, without expanding anything', () => {
     const { revealWindow } = roomNavigation();
     const { deps, calls } = recorder(GROUPS);
     revealWindow(deps, { windowId: 'loose' });
-    expect(calls).toEqual(['focus:loose', 'terminal:loose']);
+    expect(calls).toEqual(['goTo:loose', 'terminal:loose']);
   });
 });

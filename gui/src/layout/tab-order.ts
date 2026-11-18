@@ -2,7 +2,7 @@
  * Tab order arithmetic for the tab strip.
  *
  * The strip owns no ordering logic: it hands over ids and pointer coordinates
- * and reads back an order, a drop slot or a successor. Keeping that arithmetic
+ * and reads back an order or a drop slot. Keeping that arithmetic
  * here, free of DOM and store access, is what makes it testable in the `node`
  * test environment, where no component can be mounted.
  */
@@ -68,35 +68,4 @@ export function resolveDropIndex(query: TabDropQuery): number | null {
   }
   const others = tabs.filter((tab) => tab.windowId !== windowId);
   return others.filter((tab) => tab.left + tab.width / 2 < pointerX).length;
-}
-
-/**
- * Returns the tab to activate once `removedId` leaves the strip: the nearest
- * eligible tab after it, else the nearest eligible tab before it, else `null`.
- *
- * `null` means there is nothing left to show as a tab, which the caller reads
- * as "leave tab mode". Eligibility is supplied by the caller so this
- * stays independent of what makes a pane showable.
- *
- * `order` is the order *before* the removal: `removedId` is what locates the
- * neighbours, so a caller that has already dropped it can only be answered
- * from the front of the strip.
- */
-export function nextActiveTab(
-  order: readonly string[],
-  isEligible: (windowId: string) => boolean,
-  removedId: string
-): string | null {
-  const from = order.indexOf(removedId);
-  const start = from === -1 ? 0 : from;
-  const candidates = order.filter((id) => id !== removedId);
-  const after = candidates.slice(start).find((id) => isEligible(id));
-  if (after !== undefined) {
-    return after;
-  }
-  const before = candidates
-    .slice(0, start)
-    .reverse()
-    .find((id) => isEligible(id));
-  return before ?? null;
 }

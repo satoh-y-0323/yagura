@@ -36,7 +36,7 @@ interface AttentionNavigationDeps<T extends NavigableWindow> {
   /** The window the jump starts from: the current window of the work view. */
   current: () => { windowId: string } | null;
   expandRoom: (roomId: string) => void;
-  focus: (entry: T) => void;
+  goTo: (entry: T) => void;
   focusTerminal: (windowId: string) => void;
 }
 
@@ -144,7 +144,7 @@ function orderSnapshot(entries: readonly Entry[], collapsed: ReadonlySet<string>
 interface Harness {
   navigation: AttentionNavigation;
   collapsedRooms: CollapsedRooms;
-  /** Every `expand:<roomId>` / `focus:<windowId>` call, in the order they were made. */
+  /** Every `expand:<roomId>` / `goTo:<windowId>` call, in the order they were made. */
   calls: string[];
   focused: string[];
   currentEntries: () => readonly Entry[];
@@ -182,8 +182,8 @@ function harnessOf(
     focusTerminal: (windowId) => {
       calls.push(`terminal:${windowId}`);
     },
-    focus: (entry) => {
-      calls.push(`focus:${entry.windowId}`);
+    goTo: (entry) => {
+      calls.push(`goTo:${entry.windowId}`);
       focused.push(entry.windowId);
       // Models going to a window in Focus: it becomes the current window and
       // the placement is left alone.
@@ -312,7 +312,7 @@ describe('createAttentionNavigation: expanding and focusing', () => {
 
     harness.navigation.goToNextWindowNeedingYou();
 
-    expect(harness.calls).toEqual(['expand:room-b', 'focus:b2', 'terminal:b2']);
+    expect(harness.calls).toEqual(['expand:room-b', 'goTo:b2', 'terminal:b2']);
     expect(get(harness.collapsedRooms).has('room-b')).toBe(false);
   });
 

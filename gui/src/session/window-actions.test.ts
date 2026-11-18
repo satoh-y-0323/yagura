@@ -1,6 +1,6 @@
 /**
  * `window-actions.ts` is the single execution path for close / interrupt / rename /
- * focus / minimize / maximize; move and resize stay out because they are continuous,
+ * goTo / minimize / maximize; move and resize stay out because they are continuous,
  * confirmation-free coordinate updates `FloatWindow` writes to the registry directly.
  * Deps are injected at construction, and the confirm port is optional: without it,
  * destructive operations must not reach execution (fail-closed).
@@ -96,14 +96,7 @@ function makeRemoveWindow(): MockRemoveWindow {
   return vi.fn<(windowId: string) => void>();
 }
 
-/**
- * The tab-mode deps `focus` and `minimize` reuse. All three are optional and
- * fail-safe: without `isTabMode` or `switchToTab` both operations keep their
- * non-tab behaviour, and `resolveTabSuccessor` is consulted only in tab mode.
- */
-type MockSwitchToTab = Mock<(windowId: string) => void>;
-type MockIsTabMode = Mock<() => boolean>;
-type MockResolveTabSuccessor = Mock<(windowId: string) => string | null>;
+type MockSelectWindow = Mock<(windowId: string) => void>;
 
 function buildActions(
   overrides: {
@@ -111,31 +104,29 @@ function buildActions(
     ipc?: MockIpc;
     confirmPort?: ConfirmPort;
     removeWindow?: (windowId: string) => void;
-    isTabMode?: () => boolean;
-    switchToTab?: (windowId: string) => void;
-    resolveTabSuccessor?: (windowId: string) => string | null;
+    workMode?: 'canvas' | 'focus';
   } = {}
 ): {
   actions: WindowActions;
   registry: MockRegistry;
   ipc: MockIpc;
+  selectWindow: MockSelectWindow;
 } {
   const registry = overrides.registry ?? makeRegistry();
   const ipc = overrides.ipc ?? makeIpc();
+  const selectWindow: MockSelectWindow = vi.fn<(windowId: string) => void>();
+  const workMode = overrides.workMode ?? 'canvas';
   const actions = createWindowActions({
     registry,
     ipc,
+    selectWindow,
+    workMode: () => workMode,
     // exactOptionalPropertyTypes: passing `confirmPort: undefined` is a different
     // (rejected) shape from omitting the key entirely.
     ...(overrides.confirmPort !== undefined ? { confirmPort: overrides.confirmPort } : {}),
     ...(overrides.removeWindow !== undefined ? { removeWindow: overrides.removeWindow } : {}),
-    ...(overrides.isTabMode !== undefined ? { isTabMode: overrides.isTabMode } : {}),
-    ...(overrides.switchToTab !== undefined ? { switchToTab: overrides.switchToTab } : {}),
-    ...(overrides.resolveTabSuccessor !== undefined
-      ? { resolveTabSuccessor: overrides.resolveTabSuccessor }
-      : {}),
   });
-  return { actions, registry, ipc };
+  return { actions, registry, ipc, selectWindow };
 }
 
 beforeEach(() => {
@@ -469,11 +460,11 @@ describe('window-actions: rename needs no confirmation and propagates failures',
   });
 });
 
-describe('window-actions: focus brings the window to front and restores it if minimized', () => {
+describe('window-actions: goTo in Canvas brings the window to front and restores it if minimized', () => {
   it('brings a normal window to front by delegating to the registry, not recomputing zOrder', () => {
     const { actions, registry } = buildActions();
 
-    actions.focus(makeEntry({ status: 'running' }));
+    actions.goTo(makeEntry({ status: 'running' }));
 
     expect(registry.bringWindowToFront).toHaveBeenCalledTimes(1);
     expect(registry.bringWindowToFront).toHaveBeenCalledWith('w-1');
@@ -482,25 +473,39 @@ describe('window-actions: focus brings the window to front and restores it if mi
   it('does not touch the minimized flag for a window that is not minimized', () => {
     const { actions, registry } = buildActions();
 
-    actions.focus(makeEntry({ display: { ...makeEntry().display, isMinimized: false } }));
+    actions.goTo(makeEntry({ display: { ...makeEntry().display, isMinimized: false } }));
 
     expect(registry.setWindowMinimized).not.toHaveBeenCalled();
   });
 
-  it('restores a minimized window when it is focused', () => {
+  it('restores a minimized window and still brings it to front', () => {
     const { actions, registry } = buildActions();
 
-    actions.focus(makeEntry({ display: { ...makeEntry().display, isMinimized: true } }));
+    actions.goTo(makeEntry({ display: { ...makeEntry().display, isMinimized: true } }));
 
     expect(registry.setWindowMinimized).toHaveBeenCalledWith('w-1', false);
-  });
-
-  it('still brings a minimized window to front, not just restoring it', () => {
-    const { actions, registry } = buildActions();
-
-    actions.focus(makeEntry({ display: { ...makeEntry().display, isMinimized: true } }));
-
     expect(registry.bringWindowToFront).toHaveBeenCalledWith('w-1');
+  });
+});
+
+describe('window-actions: goTo in Focus only chooses the window and never changes the placement', () => {
+  const placed = (isMinimized: boolean, isMaximized: boolean): WindowEntry =>
+    makeEntry({ display: { ...makeEntry().display, isMinimized, isMaximized } });
+
+  it.each([
+    ['a plain window', placed(false, false)],
+    ['a minimized window', placed(true, false)],
+    ['a maximized window', placed(false, true)],
+  ])('selects %s through the shell and writes no placement', (_label, entry) => {
+    const { actions, registry, selectWindow } = buildActions({ workMode: 'focus' });
+
+    actions.goTo(entry);
+
+    expect(selectWindow).toHaveBeenCalledTimes(1);
+    expect(selectWindow).toHaveBeenCalledWith('w-1');
+    expect(registry.setWindowMinimized).not.toHaveBeenCalled();
+    expect(registry.setWindowMaximized).not.toHaveBeenCalled();
+    expect(registry.bringWindowToFront).not.toHaveBeenCalled();
   });
 });
 
@@ -575,233 +580,5 @@ describe('window-actions: a pane-removal failure is absorbed here, not left for 
     consoleSpies.forEach((spy) => {
       spy.mockRestore();
     });
-  });
-});
-
-describe('window-actions: focus switches tabs while in tab mode, instead of raising a float window', () => {
-  it('calls switchToTab(windowId) instead of bringWindowToFront when isTabMode() is true', () => {
-    const isTabMode: MockIsTabMode = vi.fn<() => boolean>().mockReturnValue(true);
-    const switchToTab: MockSwitchToTab = vi.fn<(windowId: string) => void>();
-    const { actions, registry } = buildActions({ isTabMode, switchToTab });
-
-    actions.focus(makeEntry({ status: 'running' }));
-
-    expect(switchToTab).toHaveBeenCalledWith('w-1');
-    expect(registry.bringWindowToFront).not.toHaveBeenCalled();
-  });
-
-  // `switchToTab` (`App.svelte`) already unminimizes, so focus's own guard must not
-  // also fire when it delegates — setWindowMinimized would be dispatched twice.
-  it('delegates directly to switchToTab for a minimized window in tab mode, without calling its own setWindowMinimized guard first (switchToTab owns the unminimize)', () => {
-    const isTabMode: MockIsTabMode = vi.fn<() => boolean>().mockReturnValue(true);
-    const switchToTab: MockSwitchToTab = vi.fn<(windowId: string) => void>();
-    const { actions, registry } = buildActions({ isTabMode, switchToTab });
-
-    actions.focus(makeEntry({ display: { ...makeEntry().display, isMinimized: true } }));
-
-    expect(switchToTab).toHaveBeenCalledWith('w-1');
-    expect(registry.setWindowMinimized).not.toHaveBeenCalled();
-  });
-
-  it('does not touch setWindowMinimized for a window that is not minimized, in tab mode', () => {
-    const isTabMode: MockIsTabMode = vi.fn<() => boolean>().mockReturnValue(true);
-    const switchToTab: MockSwitchToTab = vi.fn<(windowId: string) => void>();
-    const { actions, registry } = buildActions({ isTabMode, switchToTab });
-
-    actions.focus(makeEntry({ display: { ...makeEntry().display, isMinimized: false } }));
-
-    expect(registry.setWindowMinimized).not.toHaveBeenCalled();
-  });
-
-  it('keeps the existing behaviour when isTabMode() returns false, even with switchToTab supplied', () => {
-    const isTabMode: MockIsTabMode = vi.fn<() => boolean>().mockReturnValue(false);
-    const switchToTab: MockSwitchToTab = vi.fn<(windowId: string) => void>();
-    const { actions, registry } = buildActions({ isTabMode, switchToTab });
-
-    actions.focus(makeEntry({ status: 'running' }));
-
-    expect(switchToTab).not.toHaveBeenCalled();
-    expect(registry.bringWindowToFront).toHaveBeenCalledWith('w-1');
-  });
-
-  it('keeps the existing behaviour when isTabMode/switchToTab are not supplied at all (fail-safe)', () => {
-    const { actions, registry } = buildActions();
-
-    actions.focus(makeEntry({ status: 'running' }));
-
-    expect(registry.bringWindowToFront).toHaveBeenCalledWith('w-1');
-  });
-});
-
-describe('window-actions: minimize switches to the tab successor while in tab mode, or ends tab mode', () => {
-  it('always minimizes the window through the registry mutator first, tab mode or not', () => {
-    const isTabMode: MockIsTabMode = vi.fn<() => boolean>().mockReturnValue(true);
-    const switchToTab: MockSwitchToTab = vi.fn<(windowId: string) => void>();
-    const resolveTabSuccessor: MockResolveTabSuccessor = vi
-      .fn<(windowId: string) => string | null>()
-      .mockReturnValue('w-2');
-    const { actions, registry } = buildActions({ isTabMode, switchToTab, resolveTabSuccessor });
-
-    actions.minimize(makeEntry());
-
-    expect(registry.setWindowMinimized).toHaveBeenCalledWith('w-1', true);
-  });
-
-  // The tab-successor branch is only meaningful for the active (maximized) tab.
-  it('switches to the resolved successor when one remains, in tab mode', () => {
-    const isTabMode: MockIsTabMode = vi.fn<() => boolean>().mockReturnValue(true);
-    const switchToTab: MockSwitchToTab = vi.fn<(windowId: string) => void>();
-    const resolveTabSuccessor: MockResolveTabSuccessor = vi
-      .fn<(windowId: string) => string | null>()
-      .mockReturnValue('w-2');
-    const { actions, registry } = buildActions({ isTabMode, switchToTab, resolveTabSuccessor });
-
-    actions.minimize(makeEntry({ display: { ...makeEntry().display, isMaximized: true } }));
-
-    expect(resolveTabSuccessor).toHaveBeenCalledWith('w-1');
-    expect(switchToTab).toHaveBeenCalledWith('w-2');
-    expect(registry.setWindowMaximized).not.toHaveBeenCalled();
-  });
-
-  it('ends tab mode (setWindowMaximized(id, false)) when no successor remains', () => {
-    const isTabMode: MockIsTabMode = vi.fn<() => boolean>().mockReturnValue(true);
-    const switchToTab: MockSwitchToTab = vi.fn<(windowId: string) => void>();
-    const resolveTabSuccessor: MockResolveTabSuccessor = vi
-      .fn<(windowId: string) => string | null>()
-      .mockReturnValue(null);
-    const { actions, registry } = buildActions({ isTabMode, switchToTab, resolveTabSuccessor });
-
-    actions.minimize(makeEntry({ display: { ...makeEntry().display, isMaximized: true } }));
-
-    expect(switchToTab).not.toHaveBeenCalled();
-    expect(registry.setWindowMaximized).toHaveBeenCalledWith('w-1', false);
-  });
-
-  // entry.display.isMaximized gates the branch here, rather than relying on the UI
-  // wiring to call actions.minimize only for the active tab.
-  it('does not consult resolveTabSuccessor when entry.display.isMaximized is false, even in tab mode', () => {
-    const isTabMode: MockIsTabMode = vi.fn<() => boolean>().mockReturnValue(true);
-    const switchToTab: MockSwitchToTab = vi.fn<(windowId: string) => void>();
-    const resolveTabSuccessor: MockResolveTabSuccessor = vi
-      .fn<(windowId: string) => string | null>()
-      .mockReturnValue('w-2');
-    const { actions, registry } = buildActions({ isTabMode, switchToTab, resolveTabSuccessor });
-
-    actions.minimize(makeEntry({ display: { ...makeEntry().display, isMaximized: false } }));
-
-    expect(resolveTabSuccessor).not.toHaveBeenCalled();
-    expect(switchToTab).not.toHaveBeenCalled();
-    expect(registry.setWindowMaximized).not.toHaveBeenCalled();
-  });
-
-  it('still minimizes the window through the registry mutator even when the tab-successor branch is skipped (isMaximized: false)', () => {
-    const isTabMode: MockIsTabMode = vi.fn<() => boolean>().mockReturnValue(true);
-    const switchToTab: MockSwitchToTab = vi.fn<(windowId: string) => void>();
-    const resolveTabSuccessor: MockResolveTabSuccessor = vi
-      .fn<(windowId: string) => string | null>()
-      .mockReturnValue('w-2');
-    const { actions, registry } = buildActions({ isTabMode, switchToTab, resolveTabSuccessor });
-
-    actions.minimize(makeEntry({ display: { ...makeEntry().display, isMaximized: false } }));
-
-    expect(registry.setWindowMinimized).toHaveBeenCalledWith('w-1', true);
-  });
-
-  it('does not consult resolveTabSuccessor outside tab mode', () => {
-    const isTabMode: MockIsTabMode = vi.fn<() => boolean>().mockReturnValue(false);
-    const resolveTabSuccessor: MockResolveTabSuccessor =
-      vi.fn<(windowId: string) => string | null>();
-    const { actions, registry } = buildActions({ isTabMode, resolveTabSuccessor });
-
-    actions.minimize(makeEntry());
-
-    expect(resolveTabSuccessor).not.toHaveBeenCalled();
-    expect(registry.setWindowMaximized).not.toHaveBeenCalled();
-  });
-
-  it('keeps the existing behaviour (minimize only) when the tab-mode deps are not supplied at all (fail-safe)', () => {
-    const { actions, registry } = buildActions();
-
-    actions.minimize(makeEntry());
-
-    expect(registry.setWindowMinimized).toHaveBeenCalledWith('w-1', true);
-    expect(registry.setWindowMaximized).not.toHaveBeenCalled();
-    expect(registry.bringWindowToFront).not.toHaveBeenCalled();
-  });
-
-  it('does not re-stack the window (bringWindowToFront) when minimizing it, even in tab mode', () => {
-    const isTabMode: MockIsTabMode = vi.fn<() => boolean>().mockReturnValue(true);
-    const switchToTab: MockSwitchToTab = vi.fn<(windowId: string) => void>();
-    const resolveTabSuccessor: MockResolveTabSuccessor = vi
-      .fn<(windowId: string) => string | null>()
-      .mockReturnValue('w-2');
-    const { actions, registry } = buildActions({ isTabMode, switchToTab, resolveTabSuccessor });
-
-    actions.minimize(makeEntry());
-
-    expect(registry.bringWindowToFront).not.toHaveBeenCalled();
-  });
-});
-
-describe('window-actions: tab mode needs every dep it uses', () => {
-  const maximized = (): WindowEntry =>
-    makeEntry({ display: { ...makeEntry().display, isMaximized: true } });
-
-  it('raises the float window when switchToTab is supplied but isTabMode is not', () => {
-    const switchToTab: MockSwitchToTab = vi.fn<(windowId: string) => void>();
-    const { actions, registry } = buildActions({ switchToTab });
-
-    actions.focus(makeEntry());
-
-    expect(switchToTab).not.toHaveBeenCalled();
-    expect(registry.bringWindowToFront).toHaveBeenCalledWith('w-1');
-  });
-
-  it('raises the float window when isTabMode says yes but there is no switchToTab', () => {
-    const isTabMode: MockIsTabMode = vi.fn<() => boolean>().mockReturnValue(true);
-    const { actions, registry } = buildActions({ isTabMode });
-
-    actions.focus(makeEntry());
-
-    expect(registry.bringWindowToFront).toHaveBeenCalledWith('w-1');
-  });
-
-  it('only minimizes a maximized window when isTabMode is not supplied', () => {
-    const switchToTab: MockSwitchToTab = vi.fn<(windowId: string) => void>();
-    const resolveTabSuccessor: MockResolveTabSuccessor = vi
-      .fn<(windowId: string) => string | null>()
-      .mockReturnValue('w-2');
-    const { actions, registry } = buildActions({ switchToTab, resolveTabSuccessor });
-
-    actions.minimize(maximized());
-
-    expect(registry.setWindowMinimized).toHaveBeenCalledWith('w-1', true);
-    expect(resolveTabSuccessor).not.toHaveBeenCalled();
-    expect(switchToTab).not.toHaveBeenCalled();
-  });
-
-  it('only minimizes a maximized window in tab mode when there is no resolveTabSuccessor', () => {
-    const isTabMode: MockIsTabMode = vi.fn<() => boolean>().mockReturnValue(true);
-    const switchToTab: MockSwitchToTab = vi.fn<(windowId: string) => void>();
-    const { actions, registry } = buildActions({ isTabMode, switchToTab });
-
-    actions.minimize(maximized());
-
-    expect(registry.setWindowMinimized).toHaveBeenCalledWith('w-1', true);
-    expect(switchToTab).not.toHaveBeenCalled();
-    expect(registry.setWindowMaximized).not.toHaveBeenCalled();
-  });
-
-  it('only minimizes a maximized window in tab mode when there is no switchToTab', () => {
-    const isTabMode: MockIsTabMode = vi.fn<() => boolean>().mockReturnValue(true);
-    const resolveTabSuccessor: MockResolveTabSuccessor = vi
-      .fn<(windowId: string) => string | null>()
-      .mockReturnValue(null);
-    const { actions, registry } = buildActions({ isTabMode, resolveTabSuccessor });
-
-    actions.minimize(maximized());
-
-    expect(resolveTabSuccessor).not.toHaveBeenCalled();
-    expect(registry.setWindowMaximized).not.toHaveBeenCalled();
   });
 });

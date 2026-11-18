@@ -29,7 +29,6 @@
   import RestoreDialog from '../components/RestoreDialog.svelte';
   import SettingsPanel from '../components/SettingsPanel.svelte';
   import StatusPanel from '../components/StatusPanel.svelte';
-  import TabBar from '../components/TabBar.svelte';
   import TileIcon from '../components/TileIcon.svelte';
   import Tooltip from '../components/Tooltip.svelte';
   import { bodyEscapePanel } from '../components/panel-focus';
@@ -171,7 +170,6 @@
   import { createShortcutRunner } from '../keymap/shortcut-runner';
   import { cascadeRect, type Size } from '../layout/float-layout';
   import { clampSidebarWidth, createSidebarWidthStorage } from '../layout/sidebar-width';
-  import { nextActiveTab } from '../layout/tab-order';
   import { offeredProfiles } from '../profile/offered-profiles';
   import {
     createBrowserProfileMemoryDeps,
@@ -803,13 +801,6 @@
   // above: the statement would otherwise read what it assigns.
   $: void syncApprovalDisplay(isApprovalDialogOpen, approvalRequest);
 
-  // Tab mode: derived, not stored — "in tab mode" is exactly "some
-  // window is maximized" (the single-maximized-window invariant the registry
-  // already enforces), so there is no separate flag that could drift from it.
-  $: tabEntries = $registry.tabOrder
-    .map((windowId) => $registry.windows.find((entry) => entry.windowId === windowId))
-    .filter((entry): entry is WindowEntry => entry !== undefined);
-  $: activeTabEntry = $registry.windows.find((entry) => entry.display.isMaximized);
   $: workView = workViewOf($shell);
   // The window keyboard operations act on; derived so no second record of it can drift.
   $: current = currentWindowFor(workView, $registry.windows);
@@ -1975,55 +1966,13 @@
       });
   }
 
-  /** Whether some window is currently maximized: tab mode has no state of its own. */
-  function isTabMode(): boolean {
-    return get(registry).windows.some((entry) => entry.display.isMaximized);
-  }
-
-  /**
-   * Switches to a tab: maximizes `windowId` and raises it, in that order. Shared by the tab strip's click
-   * handler, `window-actions.focus`/`minimize` and the
-   * new-window-while-in-tab-mode case below.
-   *
-   * A minimized window is restored first, so clicking its dimmed tab brings it
-   * back instead of switching to an empty float area.
-   */
-  function switchToTab(windowId: string): void {
-    registry.setWindowMinimized(windowId, false);
-    registry.setWindowMaximized(windowId, true);
-    registry.bringWindowToFront(windowId);
-  }
-
-  /**
-   * A tab is a valid successor only while it is open and not minimized: a
-   * minimized tab would put the strip right back where the user just
-   * collapsed it from.
-   */
-  function isEligibleTabSuccessor(windowId: string): boolean {
-    const entry = get(registry).windows.find((candidate) => candidate.windowId === windowId);
-    return entry !== undefined && !entry.display.isMinimized;
-  }
-
-  /** Resolves the tab `window-actions.minimize` should switch to. */
-  function resolveTabSuccessor(windowId: string): string | null {
-    return nextActiveTab(get(registry).tabOrder, isEligibleTabSuccessor, windowId);
-  }
-
-  /** The tab strip's WindowControls acts on the active (maximized) window. */
-  function handleTabRename(): void {
-    if (activeTabEntry !== undefined) {
-      handleRenameWindow(activeTabEntry);
-    }
-  }
-
   const contractedActions = createWindowActions({
     registry,
     ipc: { invokeCloseWindow, invokeInterruptWindow, invokeRenameWindow },
     confirmPort,
     removeWindow: removeClosedWindow,
-    isTabMode,
-    switchToTab,
-    resolveTabSuccessor,
+    selectWindow,
+    workMode: () => get(shell).workMode,
   });
 
   // The view starts these operations without awaiting them, so a refusal has
@@ -2035,13 +1984,6 @@
   // and maximize do nothing: Focus never writes the canvas placement.
   const actions: WindowActions = {
     ...contractedActions,
-    focus: (entry) => {
-      if (isFocusMode()) {
-        selectWindow(entry.windowId);
-      } else {
-        contractedActions.focus(entry);
-      }
-    },
     close: (entry) => reportFailures(errors.closeWindowFailed, contractedActions.close(entry)),
     interrupt: (entry) =>
       reportFailures(errors.interruptWindowFailed, contractedActions.interrupt(entry)),
@@ -2067,7 +2009,7 @@
   const revealDeps: RevealDeps<WindowEntry> = {
     groups: sidebarGroups,
     expandRoom: collapsedRooms.expand,
-    focus: actions.focus,
+    goTo: actions.goTo,
     focusTerminal: focusTerminalOf,
   };
   const attentionNavigation = createAttentionNavigation({
@@ -3086,14 +3028,6 @@
     if (pane === undefined) {
       return;
     }
-    // Computed against the tab order from *before* the removal:
-    // nextActiveTab locates the neighbours of `windowId`,
-    // which only works while it is still in the order. `wasActiveTab` is
-    // read the same way, ahead of the registry update below that drops it.
-    const state = get(registry);
-    const wasActiveTab =
-      state.windows.find((entry) => entry.windowId === windowId)?.display.isMaximized ?? false;
-    const successor = nextActiveTab(state.tabOrder, isEligibleTabSuccessor, windowId);
     // The window leaves the render source (renderedPanes) before its pane is
     // torn down, so no flush can observe a windowId with no pane behind it.
     registry.closeWindow(windowId);
@@ -3104,16 +3038,6 @@
       next.delete(windowId);
       return next;
     });
-    // A non-active tab closing only removes its tab: the strip stays
-    // exactly as it was for every other tab, so this only acts when the
-    // window that just closed was the one the strip was showing.
-    if (wasActiveTab) {
-      if (successor === null) {
-        registry.setWindowMaximized(windowId, false);
-      } else {
-        switchToTab(successor);
-      }
-    }
   }
 
   /**
@@ -3169,14 +3093,10 @@
     // The pane is created from the window list, the same path the core's
     // poll takes, so opening twice cannot produce two panes for one window.
     await refreshWindowList();
-    // The user opened it, so it is what Focus shows next; on the canvas it joins
-    // the tab strip or is raised. Either way the keyboard follows it.
-    if (isFocusMode()) {
-      selectWindow(windowId);
-    } else if (isTabMode()) {
-      switchToTab(windowId);
-    } else {
-      registry.bringWindowToFront(windowId);
+    // The user opened it, so go to it and let the keyboard follow.
+    const openedEntry = get(registry).windows.find((entry) => entry.windowId === windowId);
+    if (openedEntry !== undefined) {
+      actions.goTo(openedEntry);
     }
     focusTerminalOf(windowId);
     // What opened is what the dialog offers next time; a profile launch also
@@ -3453,20 +3373,6 @@
     <div class="sidebar-resize" aria-hidden="true" use:pointerDrag={sidebarDrag}></div>
 
     <section class="main-content" bind:this={mainContentElement}>
-      {#if workView.mode === 'canvas' && activeTabEntry !== undefined}
-        <TabBar
-          entries={tabEntries}
-          activeEntry={activeTabEntry}
-          {actions}
-          {themeStore}
-          onRename={handleTabRename}
-          onSelectTab={(windowId: string) => {
-            switchToTab(windowId);
-            focusTerminalOf(windowId);
-          }}
-          onReorderTab={registry.moveTab}
-        />
-      {/if}
       <div class="float-area" use:trackFloatArea>
         {#if $registry.windows.length === 0}
           <div class="empty-main">

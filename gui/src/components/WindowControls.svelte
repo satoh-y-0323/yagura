@@ -2,7 +2,7 @@
   /**
    * The operation buttons of one window — the `⋯` menu anchor and the
    * interrupt / minimize / maximize / close row — with the menu they open
-   * Both the float window title bar and the tab bar mount this, so
+   * The float window title bar mounts this, so
    * the menu has exactly one owner and no caller ever holds its anchor.
    *
    * Each button carries `data-window-control`: focus left on one is not an
@@ -29,7 +29,7 @@
    * from the registry module: every button hands the entry straight to an
    * action, so the store stays out of this import graph.
    */
-  type ControlledWindow = Parameters<WindowActions['focus']>[0];
+  type ControlledWindow = Parameters<WindowActions['goTo']>[0];
 
   export let entry: ControlledWindow;
   export let actions: WindowActions;
