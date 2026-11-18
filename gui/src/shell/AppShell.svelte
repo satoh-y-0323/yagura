@@ -186,6 +186,7 @@
     type ModelChoicesEntry,
   } from '../profile/model-aliases-model';
   import * as approvalQueue from '../session/approval-queue';
+  import { isApprovalDialogAllowed } from '../session/modal-state';
   import { describeUntargeted } from '../session/approval-target';
   import type { WithdrawReason } from '../session/approval-types';
   import {
@@ -759,14 +760,14 @@
       : confirmCopy(confirmDialog.operation, confirmDialog.roomName);
 
   $: approvalRequest = approvalQueue.head(approvals);
-  // An approval never stacks on top of another modal: it waits in the queue
-  // until whatever the user already has open is closed.
   $: isApprovalDialogOpen =
     approvalRequest !== null &&
-    !isAddDialogOpen &&
-    !confirmDialog.isOpen &&
-    !renameDialog.isOpen &&
-    !isRestoreDialogOpen;
+    isApprovalDialogAllowed({
+      isAddDialogOpen,
+      isConfirmDialogOpen: confirmDialog.isOpen,
+      isRenameDialogOpen: renameDialog.isOpen,
+      isRestoreDialogOpen,
+    });
   $: isApprovalRequesterOpen = isRequesterWindowOpen(approvalRequest, $registry.windows);
   // Delegated to a function for the same reason as the folder-drop sync
   // above: the statement would otherwise read what it assigns.

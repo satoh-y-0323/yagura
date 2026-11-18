@@ -138,28 +138,12 @@ describe('ApprovalDialog.svelte: body display (full text, sanitized, no remainin
   });
 });
 
-describe('App.svelte: renders ApprovalDialog exactly once, gated on the other dialogs being closed', () => {
-  /**
-   * "Does not open while another modal is open" has to
-   * be derived from App's own dialog-open state, not re-declared: the four
-   * states that already gate the existing dialogs are isAddDialogOpen,
-   * confirmDialog.isOpen, renameDialog.isOpen and isRestoreDialogOpen (all
-   * present in App.svelte today, none of them owned by ApprovalDialog).
-   */
-  it("the isOpen expression passed to <ApprovalDialog> is derived from all four of the app's existing dialog-open states", () => {
+describe('AppShell.svelte: the approval gate goes through isApprovalDialogAllowed', () => {
+  it('the isOpen expression passed to <ApprovalDialog> calls isApprovalDialogAllowed(', () => {
     const tag = openingTag(appSource, '<ApprovalDialog');
     expect(tag).not.toBe('');
     const expression = boundExpression(tag, 'isOpen');
     expect(expression).not.toBe('');
-    const resolved = resolveConditionExpression(appSource, expression);
-
-    for (const identifier of [
-      'isAddDialogOpen',
-      'confirmDialog.isOpen',
-      'renameDialog.isOpen',
-      'isRestoreDialogOpen',
-    ]) {
-      expect(resolved).toContain(identifier);
-    }
+    expect(resolveConditionExpression(appSource, expression)).toContain('isApprovalDialogAllowed(');
   });
 });
