@@ -6,13 +6,13 @@
 //! stdout unmodified; `yagura-test-support` resolves its path and spawns it.
 
 use crate::common;
+use crate::common::bins::{echo_child_command, echo_child_path};
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 #[cfg(windows)]
 use yagura_test_support::paths::strip_extended_length_prefix;
-use yagura_test_support::process::{echo_child_command, echo_child_path};
 
 use yagura_daemon::{DaemonConfig, PtySession, WindowsShellSearch, resolve_shell};
 

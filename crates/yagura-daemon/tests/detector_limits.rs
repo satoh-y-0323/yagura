@@ -12,11 +12,11 @@
 //! The limit constants below are deliberate duplicates of the private ones in
 //! `definition.rs` and must be updated whenever those change.
 
+use crate::common::bins::{self, echo_child_path};
 use std::time::Duration;
 
 use tokio::time::sleep;
 use yagura_test_support::paths::{unique_detection_dir, write_definition};
-use yagura_test_support::process::echo_child_path;
 
 use yagura_daemon::DaemonConfig;
 use yagura_daemon::detector::definition::{DefinitionError, parse_definition};
@@ -267,10 +267,10 @@ async fn window_with_an_over_limit_definition_stays_unknown_and_others_are_unaff
         &within_limit_definition_with_marker("within-limit-def"),
     );
 
-    let registry = WindowRegistry::new(DaemonConfig {
+    let registry = WindowRegistry::new(bins::config_with_holder(DaemonConfig {
         detection_dir: Some(dir),
         ..DaemonConfig::default()
-    });
+    }));
 
     let rejected_id = registry
         .open(echo_request("over-limit-def"))

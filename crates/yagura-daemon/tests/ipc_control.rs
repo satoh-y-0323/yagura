@@ -22,6 +22,7 @@
 //!   an explicit empty string, which names no window (`window_not_found`).
 
 use crate::common;
+use crate::common::bins::{self, first_grandchild_command};
 
 use std::path::Path;
 use std::time::Duration;
@@ -30,20 +31,18 @@ use serde_json::json;
 use tokio::io::AsyncReadExt;
 use tokio::sync::broadcast::error::TryRecvError;
 
+use common::bins::{echo_child_path, env_probe_path};
 use common::relay::{RelayClient, hello, initialize_line, initialized_line, tool_call_line};
 use common::{
     CONTROL_DETECTION_NAME, Harness, READY_MARKER, VALID_TOKEN, approval_config,
-    approver_base_config as base_config, decide, echo_child_path, env_probe_path,
-    expect_approval_requested, expect_error, identify, let_every_clock_bound_run_out, policy,
-    query_status, read_frame, read_response, register_approver, send, unique_temp_dir,
-    wait_until_status,
+    approver_base_config as base_config, decide, expect_approval_requested, expect_error, identify,
+    let_every_clock_bound_run_out, policy, query_status, read_frame, read_response,
+    register_approver, send, unique_temp_dir, wait_until_status,
 };
 use yagura_test_support::HANG_GUARD;
 use yagura_test_support::ipc::Connection;
 use yagura_test_support::process::exit_with_code_command;
-use yagura_test_support::process::{
-    first_grandchild_command, process_is_running, wait_processes_gone,
-};
+use yagura_test_support::process::{process_is_running, wait_processes_gone};
 use yagura_test_support::relay_stdio::tool_call_error;
 
 use yagura_daemon::waiter::StatusAt;
@@ -290,10 +289,7 @@ async fn interrupt_window_writes_the_configured_bytes_to_a_profile_window_that_d
     common::write_profile(
         &profiles_dir,
         "plain-cli",
-        &yagura_test_support::process::profile_source(
-            "Plain CLI",
-            &yagura_test_support::process::echo_child_command(),
-        ),
+        &yagura_test_support::process::profile_source("Plain CLI", &bins::echo_child_command()),
     );
     let config = DaemonConfig {
         approval_policy: Some(policy(&["interrupt_window"])),
@@ -302,13 +298,7 @@ async fn interrupt_window_writes_the_configured_bytes_to_a_profile_window_that_d
         ..detection_config(&dir)
     };
     let h = Harness::start("interrupt-undeclared-profile", config).await;
-    let window_id = open_as_profile(
-        &h,
-        "plain-cli",
-        yagura_test_support::process::echo_child_command(),
-        false,
-    )
-    .await;
+    let window_id = open_as_profile(&h, "plain-cli", bins::echo_child_command(), false).await;
     h.write_input(&window_id, common::READY_MARKER).await;
     let mut client = h.connect().await;
     wait_until_status(&mut client, &window_id, WindowStatus::Idle).await;
@@ -347,7 +337,7 @@ async fn a_window_whose_profile_gives_an_ai_no_means_refuses_the_ai_and_takes_th
         &h,
         "codex-cli",
         vec![
-            common::hex_echo_path()
+            common::bins::hex_echo_path()
                 .to_str()
                 .expect("the hex_echo path is UTF-8")
                 .to_string(),
@@ -431,13 +421,7 @@ async fn interrupt_window_returns_status_unknown_even_when_the_tool_is_approved(
     // A profile's means (a hook for Grok Build, none for Codex CLI) is looked at only
     // after the window's status: an Unknown window is refused as Unknown either way.
     for profile in ["grok-build", "codex-cli"] {
-        let window_id = open_as_profile(
-            &h,
-            profile,
-            yagura_test_support::process::echo_child_command(),
-            false,
-        )
-        .await;
+        let window_id = open_as_profile(&h, profile, bins::echo_child_command(), false).await;
         assert_eq!(
             query_status(&mut client, &window_id).await,
             WindowStatus::Unknown,

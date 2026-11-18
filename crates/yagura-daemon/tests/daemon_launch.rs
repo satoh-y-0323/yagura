@@ -9,6 +9,7 @@
 //! detached start reports truthfully whether the daemon left the caller's job.
 
 use crate::common;
+use crate::common::bins::{env_probe_path, install_window_runtime};
 
 use std::path::PathBuf;
 use std::process::{Child, ExitStatus};
@@ -20,7 +21,7 @@ use yagura_protocol::{ClientMessage, DaemonMessage, MCP_BRIDGE_ENV};
 use yagura_test_support::HANG_GUARD;
 use yagura_test_support::ipc::{ReadOutcome, read_daemon_frame};
 use yagura_test_support::paths::strip_extended_length_prefix;
-use yagura_test_support::process::{env_probe_path, install_exe, install_window_runtime};
+use yagura_test_support::process::install_exe;
 
 #[cfg(windows)]
 const HOST: &str = "OpenConsole.exe";
@@ -468,13 +469,13 @@ mod detached {
     use std::ffi::OsStr;
     use std::time::{Duration, Instant};
 
+    use crate::common::bins::capture_child_path;
     use windows::Win32::Foundation::{BOOL, CloseHandle, HANDLE};
     use windows::Win32::System::JobObjects::IsProcessInJob;
     use windows::Win32::System::Threading::{
         GetCurrentProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_TERMINATE,
         TerminateProcess,
     };
-    use yagura_test_support::process::capture_child_path;
 
     use super::common;
 

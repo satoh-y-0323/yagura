@@ -25,6 +25,7 @@
 //! is deliberately unlikely to exist anywhere.
 
 use crate::common;
+use crate::common::bins::{argv_probe_profile_source, echo_child_command, echo_child_path};
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -52,9 +53,6 @@ use yagura_test_support::HANG_GUARD;
 use yagura_test_support::ipc::Connection;
 use yagura_test_support::paths::TempDir;
 use yagura_test_support::paths::strip_extended_length_prefix;
-use yagura_test_support::process::{
-    argv_probe_profile_source, echo_child_command, echo_child_path,
-};
 use yagura_test_support::relay_stdio::tool_call_error;
 
 // --- fixtures: profiles are written ad hoc, not read from a shared directory ----

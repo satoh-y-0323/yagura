@@ -17,6 +17,7 @@
 //! reach it and never a daemon of the user's.
 
 use crate::common;
+use crate::common::bins::{self, echo_child_command};
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -38,7 +39,7 @@ use yagura_protocol::{
 };
 use yagura_test_support::ipc::Connection;
 use yagura_test_support::process::{
-    COMPOSER_CONTINUATION_PREFIX, COMPOSER_MARKER, COMPOSER_SEPARATOR, echo_child_command,
+    COMPOSER_CONTINUATION_PREFIX, COMPOSER_MARKER, COMPOSER_SEPARATOR,
 };
 
 /// The detection definition every `hook_child` window is opened under.
@@ -76,10 +77,6 @@ static COUNTER: AtomicU32 = AtomicU32::new(0);
 
 fn hook_child_exe() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_hook_child"))
-}
-
-fn daemon_exe() -> PathBuf {
-    PathBuf::from(env!("CARGO_BIN_EXE_yagura-daemon"))
 }
 
 #[cfg(windows)]
@@ -175,7 +172,9 @@ impl Scene {
             .expect("the instance identifier must be valid");
         let endpoint = yagura_os::default_endpoint_owning(&user, &namespace);
 
-        let registry = Arc::new(WindowRegistry::new(config.clone()));
+        let registry = Arc::new(WindowRegistry::new(bins::config_with_holder(
+            config.clone(),
+        )));
         yagura_daemon::store::wire_into(&registry, Some(root.join("yagura.db")));
         let chat = {
             let config = config.clone();
@@ -250,7 +249,7 @@ impl Scene {
             timing.to_string(),
             "-".to_string(),
             "--daemon".to_string(),
-            daemon_exe().display().to_string(),
+            bins::daemon_exe().display().to_string(),
             "--instance".to_string(),
             self.instance.clone(),
             "--bases".to_string(),

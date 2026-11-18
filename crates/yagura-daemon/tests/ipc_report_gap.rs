@@ -13,14 +13,16 @@
 //! clock in `detector_report_gap.rs`.
 
 use crate::common;
+use crate::common::bins::ready_child_path;
 
 use std::path::{Path, PathBuf};
 
+use common::bins::mcp_cli_stub_path;
 use common::docs::read_doc_verbatim;
 use common::{
-    Harness, approver_base_config, call_list_windows, empty_lookup, mcp_cli_stub_path,
-    read_response, register_approver, registration_cwd_in, send, unique_temp_dir,
-    wait_until_status, write_profile,
+    Harness, approver_base_config, call_list_windows, empty_lookup, read_response,
+    register_approver, registration_cwd_in, send, unique_temp_dir, wait_until_status,
+    write_profile,
 };
 use yagura_daemon::DaemonConfig;
 use yagura_daemon::profile::ProfileOs;
@@ -29,7 +31,6 @@ use yagura_protocol::{
     WindowStatus,
 };
 use yagura_test_support::ipc::Connection;
-use yagura_test_support::process::ready_child_path;
 
 const RUNNING_MARKER: &str = "GAP-RUNNING";
 const DETECTION_NAME: &str = "gap-test";

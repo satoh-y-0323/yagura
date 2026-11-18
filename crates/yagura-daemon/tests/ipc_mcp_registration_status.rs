@@ -17,11 +17,11 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use common::bins::{echo_child_path, mcp_cli_stub_path};
 use common::{
-    Harness, McpCliStubFixture, approver_base_config, echo_child_path, expect_error, identify,
-    mcp_cli_stub_path, mcp_cli_stub_profile_source, mcp_cli_stub_profile_with_table,
-    mcp_cli_stub_toml_literal, read_response, register_approver, registration_cwd_in, send,
-    unique_temp_dir, write_profile,
+    Harness, McpCliStubFixture, approver_base_config, expect_error, identify,
+    mcp_cli_stub_profile_source, mcp_cli_stub_profile_with_table, mcp_cli_stub_toml_literal,
+    read_response, register_approver, registration_cwd_in, send, unique_temp_dir, write_profile,
 };
 use tracing_test::traced_test;
 use yagura_daemon::DaemonConfig;

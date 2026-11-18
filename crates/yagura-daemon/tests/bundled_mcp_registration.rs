@@ -17,10 +17,11 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use common::bins::mcp_cli_stub_path;
 use common::docs::read_doc_verbatim;
 use common::{
-    Harness, approver_base_config, empty_lookup, mcp_cli_stub_path, read_response,
-    register_approver, registration_cwd_in, send, unique_temp_dir, write_profile,
+    Harness, approver_base_config, empty_lookup, read_response, register_approver,
+    registration_cwd_in, send, unique_temp_dir, write_profile,
 };
 use serde_json::json;
 use yagura_daemon::DaemonConfig;

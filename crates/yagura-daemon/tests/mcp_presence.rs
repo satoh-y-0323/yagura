@@ -6,6 +6,7 @@
 //! answer carries. Driven through a real `Harness` over a real IPC endpoint.
 
 use crate::common;
+use crate::common::bins::{echo_child_command, ready_child_profile_source};
 
 use std::collections::BTreeSet;
 use std::path::Path;
@@ -25,9 +26,7 @@ use yagura_protocol::{
     WindowStatus,
 };
 use yagura_test_support::ipc::Connection;
-use yagura_test_support::process::{
-    echo_child_command, exit_with_code_command, ready_child_profile_source,
-};
+use yagura_test_support::process::exit_with_code_command;
 
 /// Well-formed, but not the token the harness injects into its windows.
 const WRONG_TOKEN: &str = "fedcba9876543210fedcba9876543210";

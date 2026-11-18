@@ -8,6 +8,7 @@
 //! the child's output is exact on every platform without a shell in the way.
 
 use crate::common;
+use crate::common::bins;
 
 use std::io::{Read, Write};
 use std::time::Duration;
@@ -220,9 +221,7 @@ async fn attaching_to_an_exited_window_keeps_its_size_and_still_draws_it() {
 #[tokio::test]
 async fn attaching_at_a_size_out_of_range_is_invalid_argument_and_changes_nothing() {
     let h = Harness::start("attach-snapshot-out-of-range", DaemonConfig::default()).await;
-    let window_id = h
-        .open(yagura_test_support::process::echo_child_command(), None)
-        .await;
+    let window_id = h.open(bins::echo_child_command(), None).await;
     let session = session(&h, &window_id);
     let size_before = session.size().await.unwrap();
     let too_large = yagura_protocol::MAX_WINDOW_DIMENSION + 1;
@@ -250,9 +249,7 @@ async fn attaching_at_a_size_out_of_range_is_invalid_argument_and_changes_nothin
 #[tokio::test]
 async fn a_burst_that_outruns_the_acknowledgements_ends_on_the_latest_screen() {
     let h = Harness::start("attach-snapshot-burst", DaemonConfig::default()).await;
-    let window_id = h
-        .open(yagura_test_support::process::echo_child_command(), None)
-        .await;
+    let window_id = h.open(bins::echo_child_command(), None).await;
     let mut view = ViewClient::attach_unacknowledged(h.connect().await, &window_id, None).await;
     let first = view.grid.last_seq.expect("the first frame completed");
 
@@ -282,12 +279,8 @@ async fn a_burst_that_outruns_the_acknowledgements_ends_on_the_latest_screen() {
 #[tokio::test]
 async fn a_failed_attach_leaves_both_connections_and_the_window_as_they_were() {
     let h = Harness::start("attach-snapshot-failed-attach", DaemonConfig::default()).await;
-    let held = h
-        .open(yagura_test_support::process::echo_child_command(), None)
-        .await;
-    let other = h
-        .open(yagura_test_support::process::echo_child_command(), None)
-        .await;
+    let held = h.open(bins::echo_child_command(), None).await;
+    let other = h.open(bins::echo_child_command(), None).await;
     let held_session = session(&h, &held);
     let size_before = held_session.size().await.unwrap();
 

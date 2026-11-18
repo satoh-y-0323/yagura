@@ -12,7 +12,8 @@
 
 use crate::common;
 
-use common::{Harness, assert_hex_echo_receives, hex_echo_path, hex_of};
+use common::bins::hex_echo_path;
+use common::{Harness, assert_hex_echo_receives, hex_of};
 use yagura_daemon::DaemonConfig;
 use yagura_protocol::{ClientMessage, Palette, TerminalSize};
 use yagura_test_support::view::ViewClient;

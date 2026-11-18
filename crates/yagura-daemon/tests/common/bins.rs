@@ -6,16 +6,12 @@
 //! directory Cargo uplifts every final artifact to, found through
 //! [`profile_dir`]. Nothing here follows the running test binary's own path,
 //! whose place inside the build directory Cargo does not promise.
-#![expect(
-    dead_code,
-    reason = "part of these helpers have no caller until the remaining tests move off yagura_test_support's lookups"
-)]
 
 use std::path::{Path, PathBuf};
 
 use yagura_daemon::DaemonConfig;
 use yagura_test_support::detection::CONTROL_READY_MARKER;
-use yagura_test_support::process::{composer_arguments, profile_source};
+use yagura_test_support::process::{composer_arguments, install_exe, profile_source};
 
 /// The profile directory every bin of the workspace is uplifted to: the one
 /// holding this package's `yagura-daemon`. Every path to another package's
@@ -107,6 +103,26 @@ pub fn daemon_exe() -> PathBuf {
     )
 }
 
+/// Copies into `dir` what a daemon installed there needs beside it to open a
+/// window: the holder and, on Unix, the watcher the holder starts beside
+/// itself, or on Windows the bundled pseudoconsole pair placed beside the
+/// built holder.
+///
+/// # Panics
+///
+/// Panics if one of them is not built, or if a copy fails.
+pub fn install_window_runtime(dir: &Path) {
+    let holder = holder_path();
+    let name = holder.file_name().expect("the holder path names a file");
+    install_exe(&holder, &dir.join(name));
+    #[cfg(unix)]
+    install_exe(&watcher_path(), &dir.join("yagura-watcher"));
+    #[cfg(windows)]
+    for pair in ["conpty.dll", "OpenConsole.exe"] {
+        install_exe(&holder.with_file_name(pair), &dir.join(pair));
+    }
+}
+
 /// `base` with the holder of [`holder_path`] when it names none. A holder the
 /// caller set is kept.
 ///
@@ -163,14 +179,6 @@ pub fn screen_load_child_path() -> PathBuf {
 
 pub fn mcp_cli_stub_path() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_mcp_cli_stub"))
-}
-
-pub fn hook_child_path() -> PathBuf {
-    PathBuf::from(env!("CARGO_BIN_EXE_hook_child"))
-}
-
-pub fn hold_pty_child_path() -> PathBuf {
-    PathBuf::from(env!("CARGO_BIN_EXE_hold_pty_child"))
 }
 
 /// `path` as one argv element.
@@ -260,12 +268,6 @@ pub fn first_grandchild_command(pid_file: &Path, child_lifetime_ms: u64) -> Vec<
 /// grandchild tick before the group is torn down at the child's exit.
 pub fn grandchild_command(tick_path: &str) -> Vec<String> {
     grandchild_command_with_child_lifetime(tick_path, 4)
-}
-
-/// [`grandchild_command`] with a direct child that outlives any wait of the
-/// test, for the `close_window` teardown route.
-pub fn surviving_grandchild_command(tick_path: &str) -> Vec<String> {
-    grandchild_command_with_child_lifetime(tick_path, 300)
 }
 
 /// `capture_child tick-grandchild`: the grandchild has no console window, so

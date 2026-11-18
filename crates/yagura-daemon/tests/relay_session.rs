@@ -11,6 +11,7 @@
 //! first request.
 
 use crate::common;
+use crate::common::bins;
 
 use rmcp::model::RequestId;
 use rmcp::transport::async_rw::DEFAULT_MAX_LINE_LENGTH;
@@ -31,7 +32,6 @@ use yagura_protocol::relay::{
     SUPPORTED_CONTRACTS, request_id,
 };
 use yagura_test_support::HANG_GUARD;
-use yagura_test_support::process;
 use yagura_test_support::relay_stdio::{rpc_error_word, tool_call_error};
 
 /// Well-formed, but not the token the harness gives its windows.
@@ -156,7 +156,7 @@ fn refused_kind(frame: &RelayFrame) -> RelayRefusedKind {
 #[tokio::test]
 async fn a_windows_fifth_relay_session_is_refused_as_limit_and_closed() {
     let h = Harness::start("relay-window-limit", config()).await;
-    let window_id = h.open(process::echo_child_command(), None).await;
+    let window_id = h.open(bins::echo_child_command(), None).await;
 
     let mut held = Vec::new();
     for _ in 0..SESSIONS_PER_WINDOW {
@@ -255,8 +255,8 @@ async fn a_contract_the_daemon_does_not_speak_is_refused_naming_its_contracts_an
 #[tokio::test]
 async fn a_relay_hello_with_a_wrong_token_marks_nothing_and_its_tool_answers_carry_the_warning() {
     let h = Harness::start("relay-wrong-token", config()).await;
-    let window_id = h.open(process::echo_child_command(), None).await;
-    let other = h.open(process::echo_child_command(), None).await;
+    let window_id = h.open(bins::echo_child_command(), None).await;
+    let other = h.open(bins::echo_child_command(), None).await;
 
     let (mut client, _) =
         RelayClient::welcomed(&h.endpoint, hello(Some((&window_id, WRONG_TOKEN)), None)).await;
@@ -326,7 +326,7 @@ async fn only_a_relay_declaring_the_windows_own_profile_claims_a_window_the_daem
     ];
     for (id, (what, hooks, declared, claimed)) in (1..).zip(cases) {
         let window_id = open_launched(&h, LAUNCHED_FROM, hooks, None).await;
-        let spare = h.open(process::echo_child_command(), None).await;
+        let spare = h.open(bins::echo_child_command(), None).await;
         let first = match declared {
             Some(profile) => hello_declaring(&window_id, VALID_TOKEN, profile),
             None => hello(Some((&window_id, VALID_TOKEN)), None),
@@ -551,7 +551,7 @@ async fn a_session_without_an_opening_enters_statelessly_through_server_discover
 async fn a_request_past_the_four_running_and_sixteen_waiting_is_answered_resource_exhausted() {
     let h = Harness::start("relay-request-limit", config()).await;
     // No detection: the window stays `Unknown`, which completes no wait.
-    let window_id = h.open(process::echo_child_command(), None).await;
+    let window_id = h.open(bins::echo_child_command(), None).await;
 
     for (what, lead, cancel_under_a_null_id, one_id) in [
         ("plain lines", "", false, false),
@@ -1051,10 +1051,10 @@ async fn a_session_opened_with_initialize_answers_tool_calls_and_declares_tools_
 /// Opens a parent window and a child it opened, and has the child report
 /// `summary` to the parent; returns the parent's and the child's ids.
 async fn report_to_parent(h: &Harness, summary: &str) -> (String, String) {
-    let parent = h.open(process::echo_child_command(), None).await;
+    let parent = h.open(bins::echo_child_command(), None).await;
     let mut as_parent = h.connect().await;
     common::identify(&mut as_parent, &parent).await;
-    let child = common::call_open_window(&mut as_parent, process::echo_child_command()).await;
+    let child = common::call_open_window(&mut as_parent, bins::echo_child_command()).await;
     let mut as_child = h.connect().await;
     common::identify(&mut as_child, &child).await;
     common::send(
@@ -1238,7 +1238,7 @@ async fn a_receipt_from_another_session_neither_releases_nor_removes_a_carried_r
     const MARK: &str = "RECEIPT-FOREIGN-2M7";
     let h = Harness::start("relay-receipt-foreign", config()).await;
     let (parent, _) = report_to_parent(&h, MARK).await;
-    let other_window = h.open(process::echo_child_command(), None).await;
+    let other_window = h.open(bins::echo_child_command(), None).await;
 
     let mut carrier = window_session(&h.endpoint, &parent).await;
     let took = take_reports(&mut carrier, 1, 0).await;
@@ -1410,10 +1410,10 @@ async fn a_tool_calls_arguments_and_result_stay_out_of_a_debug_daemon_log() {
         .await;
     let endpoint = sandbox.endpoint().to_string();
 
-    let parent = common::call_open_window(&mut daemon.client, process::echo_child_command()).await;
+    let parent = common::call_open_window(&mut daemon.client, bins::echo_child_command()).await;
     let mut as_parent = yagura_test_support::ipc::connect_with_retry(&endpoint).await;
     common::identify(&mut as_parent, &parent).await;
-    let child = common::call_open_window(&mut as_parent, process::echo_child_command()).await;
+    let child = common::call_open_window(&mut as_parent, bins::echo_child_command()).await;
 
     let mut child_session = window_session(&endpoint, &child).await;
     let sent = child_session

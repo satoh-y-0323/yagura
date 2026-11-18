@@ -6,25 +6,9 @@
 
 use crate::common;
 
-use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use yagura_daemon::{DaemonConfig, PtySession};
-
-fn load_child_path() -> PathBuf {
-    let mut dir = std::env::current_exe().expect("current_exe");
-    dir.pop();
-    if dir.file_name().and_then(|n| n.to_str()) == Some("deps") {
-        dir.pop();
-    }
-    dir.push(if cfg!(windows) {
-        "screen_load_child.exe"
-    } else {
-        "screen_load_child"
-    });
-    assert!(dir.exists(), "build the fixtures first: {}", dir.display());
-    dir
-}
 
 fn long_line() -> String {
     let segments: Vec<String> = (0..12)
@@ -53,7 +37,7 @@ async fn wait_for_text(session: &PtySession, needle: &str) {
 #[tokio::test]
 async fn a_long_line_reads_as_one_line_after_the_window_is_narrowed_and_widened() {
     let line = long_line();
-    let child = load_child_path();
+    let child = common::bins::screen_load_child_path();
     let session = common::spawn_session(
         &[child.to_str().unwrap(), "text", line.as_str()],
         &DaemonConfig::default(),

@@ -15,6 +15,7 @@
 //! directory, so it never reaches a running daemon of the user.
 
 use crate::common;
+use crate::common::bins;
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -33,10 +34,6 @@ const SKIP_IF_SUBAGENT: [&str; 2] = ["--skip-if", "/subagentType"];
 const LARGE_INPUT_BYTES: usize = 1024 * 1024;
 
 static COUNTER: AtomicU32 = AtomicU32::new(0);
-
-fn daemon_bin() -> PathBuf {
-    PathBuf::from(env!("CARGO_BIN_EXE_yagura-daemon"))
-}
 
 fn unique_instance() -> String {
     format!(
@@ -63,7 +60,7 @@ fn door_command(
     bases: &TempDir,
     window: Option<(&str, &str)>,
 ) -> Command {
-    let mut command = Command::new(daemon_bin());
+    let mut command = Command::new(bins::daemon_exe());
     command
         .args(args)
         .env("YAGURA_INSTANCE", instance)

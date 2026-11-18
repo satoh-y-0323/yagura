@@ -6,6 +6,7 @@
 //! in every neighbouring cell, so every cell is its own run.
 
 use crate::common;
+use crate::common::bins;
 
 use std::time::Duration;
 
@@ -41,10 +42,7 @@ async fn a_full_frame_over_the_byte_budget_arrives_in_parts_that_rebuild_the_scr
     let window_id = h
         .open(
             vec![
-                yagura_test_support::process::term_script_path()
-                    .to_str()
-                    .unwrap()
-                    .to_string(),
+                bins::term_script_path().to_str().unwrap().to_string(),
                 "attr-grid".to_string(),
                 side.to_string(),
                 side.to_string(),

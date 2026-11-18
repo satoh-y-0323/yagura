@@ -12,6 +12,7 @@
 //! on the process itself rather than on a reused pid.
 
 use crate::common;
+use crate::common::bins::{self, capture_child_path, holder_child_path};
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -19,14 +20,13 @@ use std::time::Duration;
 
 use common::real_daemon::{RunningDaemon, Sandbox};
 use yagura_daemon::detector::reading;
-use yagura_daemon::{DaemonConfig, OpenWindowRequest, WindowRegistry};
+use yagura_daemon::{OpenWindowRequest, WindowRegistry};
 use yagura_protocol::holder::read_holder_record;
 use yagura_protocol::{ClientMessage, DaemonMessage};
 use yagura_test_support::ipc::{ReadOutcome, read_daemon_frame};
-use yagura_test_support::process::{capture_child_path, holder_path};
 
 async fn open_window(command: Vec<String>) -> (Arc<WindowRegistry>, String) {
-    let registry = Arc::new(WindowRegistry::new(DaemonConfig::default()));
+    let registry = Arc::new(WindowRegistry::new(bins::default_config_with_holder()));
     let window_id = registry
         .open(OpenWindowRequest {
             command,
@@ -445,8 +445,7 @@ async fn library_host() {
     ) else {
         return;
     };
-    let command =
-        yagura_test_support::process::first_grandchild_command(Path::new(&pid_file), 600_000);
+    let command = bins::first_grandchild_command(Path::new(&pid_file), 600_000);
     let (registry, window_id) = open_window(command).await;
     std::fs::write(&out, format!("{window_id}\n")).unwrap();
     // Held until the test kills this process.
@@ -508,8 +507,7 @@ const FLOOD_BYTES: u64 = 4 * 1024 * 1024 + 64 * 1024;
 /// daemon acknowledges keep coming however many writes there are.
 #[tokio::test]
 async fn a_flood_in_small_writes_ends_with_its_marker_in_the_model_and_the_copy() {
-    let child =
-        holder_path().with_file_name(format!("holder_child{}", std::env::consts::EXE_SUFFIX));
+    let child = holder_child_path();
     let total = FLOOD_BYTES;
     let tmp = yagura_test_support::paths::TempDir::new("yagura-holder-window", "ack-flood");
     let count_file = tmp.path().join("count");

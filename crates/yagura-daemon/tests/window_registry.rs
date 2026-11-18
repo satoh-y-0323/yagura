@@ -8,6 +8,7 @@
 //! real vendor CLI.
 
 use crate::common;
+use crate::common::bins::{self, echo_child_path};
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -18,7 +19,6 @@ use yagura_test_support::HANG_GUARD;
 use yagura_test_support::paths::{
     strip_extended_length_prefix, unique_detection_dir, unique_temp_dir, write_definition,
 };
-use yagura_test_support::process::echo_child_path;
 
 use yagura_daemon::DaemonConfig;
 use yagura_daemon::window::{
@@ -117,7 +117,7 @@ fn assert_window_id_shape(id: &str) {
 
 #[tokio::test]
 async fn registry_open_assigns_distinct_window_ids_of_one_shape() {
-    let registry = WindowRegistry::new(DaemonConfig::default());
+    let registry = WindowRegistry::new(bins::default_config_with_holder());
     let id1 = registry
         .open(echo_request())
         .await
@@ -138,7 +138,7 @@ async fn registry_open_assigns_distinct_window_ids_of_one_shape() {
 
 #[tokio::test]
 async fn registry_concurrent_opens_never_produce_duplicate_ids() {
-    let registry = Arc::new(WindowRegistry::new(DaemonConfig::default()));
+    let registry = Arc::new(WindowRegistry::new(bins::default_config_with_holder()));
     let mut handles = Vec::new();
     for _ in 0..8 {
         let registry = registry.clone();
@@ -170,7 +170,7 @@ async fn registry_concurrent_opens_never_produce_duplicate_ids() {
 
 #[tokio::test]
 async fn registry_list_returns_insertion_order() {
-    let registry = WindowRegistry::new(DaemonConfig::default());
+    let registry = WindowRegistry::new(bins::default_config_with_holder());
     let id1 = registry
         .open(echo_request())
         .await
@@ -200,7 +200,7 @@ async fn registry_list_returns_insertion_order() {
 
 #[tokio::test]
 async fn registry_get_returns_window_entry_or_none() {
-    let registry = WindowRegistry::new(DaemonConfig::default());
+    let registry = WindowRegistry::new(bins::default_config_with_holder());
     let id = registry
         .open(echo_request())
         .await
@@ -224,7 +224,7 @@ async fn registry_get_returns_window_entry_or_none() {
 
 #[tokio::test]
 async fn registry_get_returns_none_for_a_nonce_less_legacy_id() {
-    let registry = WindowRegistry::new(DaemonConfig::default());
+    let registry = WindowRegistry::new(bins::default_config_with_holder());
     let id = registry
         .open(echo_request())
         .await
@@ -242,7 +242,7 @@ async fn registry_get_returns_none_for_a_nonce_less_legacy_id() {
 
 #[tokio::test]
 async fn registry_open_supplies_default_name_from_command_file_stem() {
-    let registry = WindowRegistry::new(DaemonConfig::default());
+    let registry = WindowRegistry::new(bins::default_config_with_holder());
     let id = registry
         .open(echo_request())
         .await
@@ -264,7 +264,7 @@ async fn registry_open_supplies_default_name_from_command_file_stem() {
 
 #[tokio::test]
 async fn registry_cwd_is_reflected_in_child_process_working_directory() {
-    let registry = WindowRegistry::new(DaemonConfig::default());
+    let registry = WindowRegistry::new(bins::default_config_with_holder());
     let target_dir =
         unique_detection_dir("yagura-test-registry", "child-pwd", "create temp cwd dir");
     let expected = strip_extended_length_prefix(
@@ -319,7 +319,7 @@ async fn registry_cwd_is_reflected_in_child_process_working_directory() {
 
 #[tokio::test]
 async fn registry_window_info_cwd_has_no_extended_length_prefix() {
-    let registry = WindowRegistry::new(DaemonConfig::default());
+    let registry = WindowRegistry::new(bins::default_config_with_holder());
     let target_dir =
         unique_detection_dir("yagura-test-registry", "info-cwd", "create temp cwd dir");
 
@@ -357,7 +357,7 @@ async fn registry_window_info_cwd_has_no_extended_length_prefix() {
 
 #[tokio::test]
 async fn registry_cwd_omitted_defaults_to_daemon_current_directory() {
-    let registry = WindowRegistry::new(DaemonConfig::default());
+    let registry = WindowRegistry::new(bins::default_config_with_holder());
     let id = registry
         .open(echo_request())
         .await
@@ -386,7 +386,7 @@ async fn registry_cwd_omitted_defaults_to_daemon_current_directory() {
 
 #[tokio::test]
 async fn registry_open_with_nonexistent_cwd_returns_invalid_argument_without_panicking() {
-    let registry = WindowRegistry::new(DaemonConfig::default());
+    let registry = WindowRegistry::new(bins::default_config_with_holder());
     let missing_cwd = common::guaranteed_nonexistent_exe_path();
 
     let result = registry
@@ -413,7 +413,7 @@ async fn registry_open_with_nonexistent_cwd_returns_invalid_argument_without_pan
 
 #[tokio::test]
 async fn registry_open_returns_spawn_failed_on_missing_command_without_panicking() {
-    let registry = WindowRegistry::new(DaemonConfig::default());
+    let registry = WindowRegistry::new(bins::default_config_with_holder());
     let missing_exe = common::guaranteed_nonexistent_exe_path()
         .to_str()
         .expect("nonexistent test path must be valid UTF-8")
@@ -438,7 +438,7 @@ async fn registry_open_returns_spawn_failed_on_missing_command_without_panicking
 
 #[tokio::test]
 async fn registry_detection_name_rejects_path_traversal() {
-    let registry = WindowRegistry::new(DaemonConfig::default());
+    let registry = WindowRegistry::new(bins::default_config_with_holder());
     let result = registry
         .open(OpenWindowRequest {
             command: vec![
@@ -465,7 +465,7 @@ async fn registry_detection_name_rejects_path_traversal() {
 
 #[tokio::test]
 async fn registry_detection_name_rejects_path_separator() {
-    let registry = WindowRegistry::new(DaemonConfig::default());
+    let registry = WindowRegistry::new(bins::default_config_with_holder());
     let result = registry
         .open(OpenWindowRequest {
             command: vec![
@@ -492,7 +492,7 @@ async fn registry_detection_name_rejects_path_separator() {
 
 #[tokio::test]
 async fn registry_detection_name_rejects_backslash() {
-    let registry = WindowRegistry::new(DaemonConfig::default());
+    let registry = WindowRegistry::new(bins::default_config_with_holder());
     let result = registry
         .open(OpenWindowRequest {
             command: vec![
@@ -519,7 +519,7 @@ async fn registry_detection_name_rejects_backslash() {
 
 #[tokio::test]
 async fn registry_detection_name_with_valid_syntax_is_accepted() {
-    let registry = WindowRegistry::new(DaemonConfig::default());
+    let registry = WindowRegistry::new(bins::default_config_with_holder());
     let result = registry
         .open(OpenWindowRequest {
             command: vec![
@@ -556,7 +556,7 @@ async fn registry_unknown_detection_definition_fails_safe_and_other_windows_unaf
         detection_dir: Some(dir),
         ..DaemonConfig::default()
     };
-    let registry = WindowRegistry::new(config);
+    let registry = WindowRegistry::new(bins::config_with_holder(config));
 
     let id1 = registry
         .open(OpenWindowRequest {
@@ -618,7 +618,7 @@ async fn registry_living_window_limit_rejects_open_until_a_window_exits() {
         max_windows: 1,
         ..DaemonConfig::default()
     };
-    let registry = WindowRegistry::new(config);
+    let registry = WindowRegistry::new(bins::config_with_holder(config));
 
     let id1 = registry
         .open(echo_request())
@@ -652,7 +652,7 @@ async fn registry_total_entry_count_evicts_oldest_unattached_exited_window() {
         max_windows: 1, // total cap = max_windows * 2 = 2
         ..DaemonConfig::default()
     };
-    let registry = WindowRegistry::new(config);
+    let registry = WindowRegistry::new(bins::config_with_holder(config));
 
     let id1 = registry
         .open(echo_request())
@@ -707,7 +707,7 @@ async fn registry_total_entry_count_rejects_open_when_all_exited_entries_are_att
         max_windows: 1, // total cap = 2
         ..DaemonConfig::default()
     };
-    let registry = WindowRegistry::new(config);
+    let registry = WindowRegistry::new(bins::config_with_holder(config));
 
     let id1 = registry
         .open(echo_request())
@@ -745,7 +745,7 @@ async fn registry_evicts_an_exited_window_once_its_attach_holder_let_go() {
         max_windows: 1, // total cap = 2
         ..DaemonConfig::default()
     };
-    let registry = WindowRegistry::new(config);
+    let registry = WindowRegistry::new(bins::config_with_holder(config));
 
     let id1 = registry
         .open(echo_request())
@@ -793,7 +793,7 @@ async fn registry_living_window_limit_rejects_exactly_one_of_two_concurrent_open
         max_windows: 1,
         ..DaemonConfig::default()
     };
-    let registry = WindowRegistry::new(config);
+    let registry = WindowRegistry::new(bins::config_with_holder(config));
 
     let (r1, r2) = tokio::join!(registry.open(echo_request()), registry.open(echo_request()));
     let results = [r1, r2];
@@ -835,7 +835,7 @@ async fn registry_total_entry_count_evicts_exactly_one_candidate_across_two_conc
         max_windows: 2, // total cap = max_windows * 2 = 4
         ..DaemonConfig::default()
     };
-    let registry = WindowRegistry::new(config);
+    let registry = WindowRegistry::new(bins::config_with_holder(config));
 
     // Three unattached Exited entries: with the total cap at 4, landing two
     // more windows on top of these three must evict exactly one of them.
@@ -891,7 +891,7 @@ async fn registry_total_entry_count_evicts_exactly_one_candidate_across_two_conc
 
 #[tokio::test]
 async fn registry_attach_slot_replacement_kicks_previous_holder() {
-    let registry = WindowRegistry::new(DaemonConfig::default());
+    let registry = WindowRegistry::new(bins::default_config_with_holder());
     let id = registry
         .open(echo_request())
         .await
@@ -912,7 +912,7 @@ async fn registry_attach_slot_replacement_kicks_previous_holder() {
 
 #[tokio::test]
 async fn registry_exited_window_status_is_fixed_and_detector_task_converges_to_stopped() {
-    let registry = WindowRegistry::new(DaemonConfig::default());
+    let registry = WindowRegistry::new(bins::default_config_with_holder());
     let id = registry
         .open(echo_request())
         .await
@@ -962,7 +962,7 @@ async fn registry_exited_window_status_is_fixed_and_detector_task_converges_to_s
 
 #[tokio::test]
 async fn registry_record_status_event_returns_false_after_exit() {
-    let registry = WindowRegistry::new(DaemonConfig::default());
+    let registry = WindowRegistry::new(bins::default_config_with_holder());
     let id = registry
         .open(echo_request())
         .await
@@ -986,7 +986,7 @@ async fn registry_record_status_event_returns_false_after_exit() {
 
 #[tokio::test]
 async fn registry_notify_resize_started_returns_true_while_alive_and_false_after_exit() {
-    let registry = WindowRegistry::new(DaemonConfig::default());
+    let registry = WindowRegistry::new(bins::default_config_with_holder());
     let id = registry
         .open(echo_request())
         .await
@@ -1010,7 +1010,7 @@ async fn registry_notify_resize_started_returns_true_while_alive_and_false_after
 
 #[tokio::test]
 async fn registry_terminate_all_exits_all_windows_with_observable_exit_codes() {
-    let registry = WindowRegistry::new(DaemonConfig::default());
+    let registry = WindowRegistry::new(bins::default_config_with_holder());
     let id1 = registry
         .open(echo_request())
         .await
@@ -1062,7 +1062,7 @@ fn room_of(list: &[WindowInfo], window_id: &str) -> RoomRef {
 
 #[tokio::test]
 async fn registry_list_gives_two_distinct_git_workspaces_distinct_room_ids() {
-    let registry = WindowRegistry::new(DaemonConfig::default());
+    let registry = WindowRegistry::new(bins::default_config_with_holder());
     let dir_a = git_workspace_dir("distinct-a");
     let dir_b = git_workspace_dir("distinct-b");
     let id_a = registry
@@ -1089,7 +1089,7 @@ async fn registry_list_gives_two_distinct_git_workspaces_distinct_room_ids() {
 
 #[tokio::test]
 async fn registry_list_gives_a_workspace_and_its_subdirectory_the_same_room_id() {
-    let registry = WindowRegistry::new(DaemonConfig::default());
+    let registry = WindowRegistry::new(bins::default_config_with_holder());
     let dir_top = git_workspace_dir("same-room-parent");
     let dir_sub = dir_top.join("child");
     std::fs::create_dir_all(&dir_sub).expect("create subdirectory of the workspace");
@@ -1119,7 +1119,7 @@ async fn registry_list_gives_a_workspace_and_its_subdirectory_the_same_room_id()
 
 #[tokio::test]
 async fn registry_list_gives_a_room_to_a_window_with_no_git_marker() {
-    let registry = WindowRegistry::new(DaemonConfig::default());
+    let registry = WindowRegistry::new(bins::default_config_with_holder());
     let dir = unique_temp_dir("yagura-test-registry-room", "no-git");
     let id = registry
         .open(echo_request_in(dir))
@@ -1143,7 +1143,7 @@ async fn registry_list_gives_a_room_to_a_window_with_no_git_marker() {
 
 #[tokio::test]
 async fn registry_list_names_a_colliding_leaf_with_its_parent_segment() {
-    let registry = WindowRegistry::new(DaemonConfig::default());
+    let registry = WindowRegistry::new(bins::default_config_with_holder());
     let dir_x = git_workspace_dir_named("collide-x", "x", "proj");
     let dir_y = git_workspace_dir_named("collide-y", "y", "proj");
 
@@ -1181,7 +1181,7 @@ async fn registry_list_names_a_colliding_leaf_with_its_parent_segment() {
 // Reads the registry's participant list directly to check a window's membership.
 #[allow(clippy::disallowed_methods)]
 async fn registry_list_room_id_matches_workspace_room_id_for_and_is_a_valid_token() {
-    let registry = WindowRegistry::new(DaemonConfig::default());
+    let registry = WindowRegistry::new(bins::default_config_with_holder());
     let dir = git_workspace_dir("id-matches");
     let id = registry
         .open(echo_request_in(dir))
@@ -1214,7 +1214,7 @@ async fn registry_list_room_id_matches_workspace_room_id_for_and_is_a_valid_toke
 
 #[tokio::test]
 async fn registry_list_keeps_matching_room_ids_for_two_living_windows_around_an_exited_one() {
-    let registry = WindowRegistry::new(DaemonConfig::default());
+    let registry = WindowRegistry::new(bins::default_config_with_holder());
     let dir_top = git_workspace_dir("sandwich-parent");
     let dir_sub = dir_top.join("child");
     std::fs::create_dir_all(&dir_sub).expect("create subdirectory of the workspace");
@@ -1282,7 +1282,7 @@ async fn registry_list_keeps_matching_room_ids_for_two_living_windows_around_an_
 
 #[tokio::test]
 async fn registry_list_gives_no_room_to_an_exited_window() {
-    let registry = WindowRegistry::new(DaemonConfig::default());
+    let registry = WindowRegistry::new(bins::default_config_with_holder());
     let id = registry
         .open(echo_request())
         .await

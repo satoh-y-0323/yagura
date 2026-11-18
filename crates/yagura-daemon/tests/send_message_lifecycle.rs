@@ -10,6 +10,7 @@
 //! drives a real `IpcServer`; the hang guards only bound a failure.
 
 use crate::common;
+use crate::common::bins;
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -58,7 +59,7 @@ pub(crate) async fn open_wait_window(
         .registry
         .open_with_extra_env(
             yagura_daemon::OpenWindowRequest {
-                command: yagura_test_support::process::echo_child_command(),
+                command: bins::echo_child_command(),
                 cwd: None,
                 name: None,
                 vendor: None,
@@ -107,7 +108,7 @@ pub(crate) async fn open_wake_window(
     h.registry
         .open_with_extra_env(
             yagura_daemon::OpenWindowRequest {
-                command: yagura_test_support::process::echo_child_command(),
+                command: bins::echo_child_command(),
                 cwd: None,
                 name: None,
                 vendor: None,
@@ -555,10 +556,7 @@ async fn send_message_to_a_window_without_doors_is_undelivered_no_delivery_and_w
     let h = Harness::start("send-message-no-doors", sending_config(&dir)).await;
     let mut client = h.connect().await;
     let window_id = h
-        .open(
-            yagura_test_support::process::echo_child_command(),
-            Some(CONTROL_DETECTION_NAME),
-        )
+        .open(bins::echo_child_command(), Some(CONTROL_DETECTION_NAME))
         .await;
     h.write_input(&window_id, READY_MARKER).await;
     wait_until_status(&mut client, &window_id, WindowStatus::Idle).await;

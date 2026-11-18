@@ -8,20 +8,19 @@
 //! the window is evicted.
 
 use crate::common;
+use crate::common::bins::{self, first_grandchild_command};
 
 use std::path::Path;
 use std::sync::Arc;
 
 use yagura_daemon::{DaemonConfig, OpenWindowRequest, WindowRegistry};
 use yagura_test_support::HANG_GUARD;
-use yagura_test_support::process::{
-    first_grandchild_command, process_is_running, wait_processes_gone,
-};
+use yagura_test_support::process::{process_is_running, wait_processes_gone};
 
 /// Opens a window on a fresh in-process registry. No `IpcServer` / named pipe is
 /// involved: every contract here is observable through the public registry API alone.
 async fn open_window(command: Vec<String>) -> (Arc<WindowRegistry>, String) {
-    let registry = Arc::new(WindowRegistry::new(DaemonConfig::default()));
+    let registry = Arc::new(WindowRegistry::new(bins::default_config_with_holder()));
     let window_id = registry
         .open(OpenWindowRequest {
             command,
@@ -56,7 +55,7 @@ async fn terminate_tree_stays_idempotent_after_the_child_exits_on_its_own() {
     let tick = dir.join("tick.txt");
     let tick_path = tick.to_str().expect("tick path must be valid UTF-8");
 
-    let (registry, window_id) = open_window(common::grandchild_command(tick_path)).await;
+    let (registry, window_id) = open_window(common::bins::grandchild_command(tick_path)).await;
     let entry = registry
         .get(&window_id)
         .expect("window must exist in registry");

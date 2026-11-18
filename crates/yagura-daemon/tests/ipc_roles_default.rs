@@ -8,6 +8,7 @@
 //! keep opening task windows directly whatever the built-in default becomes.
 
 use crate::common;
+use crate::common::bins::{self, argv_probe_profile_source, ready_child_profile_source};
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -24,7 +25,6 @@ use yagura_protocol::{
     ResolvedAssignment, RoleEntry,
 };
 use yagura_test_support::ipc::Connection;
-use yagura_test_support::process::{argv_probe_profile_source, ready_child_profile_source};
 
 const DEFAULT_PROFILE: &str = "default-profile";
 const DEFAULT_FLAG: &str = "--from-default";
@@ -118,9 +118,7 @@ async fn approver_connection(h: &Harness) -> Connection {
 
 async fn window_connection(h: &Harness) -> Connection {
     let mut client = h.connect().await;
-    let window_id = h
-        .open(yagura_test_support::process::echo_child_command(), None)
-        .await;
+    let window_id = h.open(bins::echo_child_command(), None).await;
     identify(&mut client, &window_id).await;
     client
 }

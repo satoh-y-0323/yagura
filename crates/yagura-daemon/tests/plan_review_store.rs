@@ -12,12 +12,12 @@
 //! those permits.
 
 use crate::common;
+use crate::common::bins::{self, echo_child_path};
 
 use std::path::{Path, PathBuf};
 
 use rusqlite::params;
 
-use yagura_daemon::DaemonConfig;
 use yagura_daemon::control::RequestOrigin;
 use yagura_daemon::plan::{Assignment, PlanSpec, TaskSpec, ValidatedPlan, validate_plan};
 use yagura_daemon::plan_permit::{self, ChangeKind, LockTable};
@@ -27,7 +27,6 @@ use yagura_daemon::plan_store::{
 use yagura_daemon::store;
 use yagura_daemon::window::{OpenWindowRequest, WindowRegistry};
 use yagura_protocol::ReportOutcome;
-use yagura_test_support::process::echo_child_path;
 
 /// The schema version every migration up to and including the snapshot-profile one
 /// reaches: the last version before the plan ledger learned about review state.
@@ -134,7 +133,7 @@ struct Fixture {
 async fn fixture(tag: &str) -> Fixture {
     let path = db_path(tag);
     let store = PlanStore::open(&path).expect("PlanStore::open must succeed");
-    let registry = WindowRegistry::new(DaemonConfig::default());
+    let registry = WindowRegistry::new(bins::default_config_with_holder());
     let owner = open_window(&registry).await;
     Fixture {
         store,

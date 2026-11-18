@@ -13,10 +13,12 @@
 //! implementation's to choose.
 
 use crate::common;
+use crate::common::bins;
 
 use std::path::PathBuf;
 
-use common::{echo_child_path, repo_detection_dir, write_profile};
+use common::bins::echo_child_path;
+use common::{repo_detection_dir, write_profile};
 
 use yagura_daemon::DaemonConfig;
 use yagura_daemon::detector::definition::{bundled_definition_names, is_valid_detection_name};
@@ -228,7 +230,7 @@ async fn a_window_opened_from_the_profile_with_the_absent_definition_stays_unkno
     )
     .expect("the profile naming an absent definition must still resolve into a launch");
 
-    let registry = WindowRegistry::new(fixture.config.clone());
+    let registry = WindowRegistry::new(bins::config_with_holder(fixture.config.clone()));
     let opened = registry
         .open(OpenWindowRequest {
             command: launch.argv,
@@ -348,7 +350,7 @@ async fn layer_zero_profile_and_window_state_the_missing_layer_instead_of_stayin
     )
     .expect("a profile naming a definition with no layer configured must still resolve");
 
-    let registry = WindowRegistry::new(fixture.config.clone());
+    let registry = WindowRegistry::new(bins::config_with_holder(fixture.config.clone()));
     let opened = registry
         .open(OpenWindowRequest {
             command: launch.argv,
@@ -476,7 +478,7 @@ async fn an_invalid_detection_name_is_reported_as_invalid_not_as_missing() {
     )
     .expect("parsing/resolving a profile does not itself validate the detection name");
 
-    let registry = WindowRegistry::new(fixture.config.clone());
+    let registry = WindowRegistry::new(bins::config_with_holder(fixture.config.clone()));
     let outcome = registry
         .open(OpenWindowRequest {
             command: launch.argv,
@@ -662,7 +664,7 @@ async fn layer_zero_and_an_invalid_name_together_report_the_invalid_name_not_the
     )
     .expect("parsing/resolving a profile does not itself validate the detection name");
 
-    let registry = WindowRegistry::new(fixture.config.clone());
+    let registry = WindowRegistry::new(bins::config_with_holder(fixture.config.clone()));
     let outcome = registry
         .open(OpenWindowRequest {
             command: launch.argv,

@@ -5,6 +5,7 @@
 //! cannot leave it with a lost screen.
 
 use crate::common;
+use crate::common::bins;
 
 use std::path::Path;
 use std::sync::Arc;
@@ -133,10 +134,7 @@ async fn detection_judges_the_screen_the_window_shows_after_a_burst_it_did_not_f
     let config = config_with(&dir, Some(TALL_BOTTOM_LINES), DaemonConfig::default());
     let h = Harness::start("shared-model-lag", config).await;
     let window_id = h
-        .open(
-            yagura_test_support::process::echo_child_command(),
-            Some(CONTROL_DETECTION_NAME),
-        )
+        .open(bins::echo_child_command(), Some(CONTROL_DETECTION_NAME))
         .await;
     resize_window(&h, &window_id, TALL_COLS, TALL_ROWS).await;
 
@@ -181,10 +179,7 @@ async fn detection_judges_the_same_tall_screen_when_nothing_lagged() {
     let config = config_with(&dir, Some(TALL_BOTTOM_LINES), DaemonConfig::default());
     let h = Harness::start("shared-model-no-lag", config).await;
     let window_id = h
-        .open(
-            yagura_test_support::process::echo_child_command(),
-            Some(CONTROL_DETECTION_NAME),
-        )
+        .open(bins::echo_child_command(), Some(CONTROL_DETECTION_NAME))
         .await;
     resize_window(&h, &window_id, TALL_COLS, TALL_ROWS).await;
 
@@ -230,14 +225,14 @@ async fn a_resize_notice_degrades_a_quiet_window_whose_screen_read_was_lost() {
         yagura_test_support::detection::idle_definition_toml(RULES_ONLY_DETECTION_NAME, "", ""),
     )
     .unwrap();
-    let registry = WindowRegistry::new(DaemonConfig {
+    let registry = WindowRegistry::new(bins::config_with_holder(DaemonConfig {
         detection_dir: Some(dir),
         detection_name: RULES_ONLY_DETECTION_NAME.to_string(),
         ..DaemonConfig::default()
-    });
+    }));
     let entry = registry
         .open(OpenWindowRequest {
-            command: yagura_test_support::process::echo_child_command(),
+            command: bins::echo_child_command(),
             cwd: None,
             name: None,
             vendor: None,

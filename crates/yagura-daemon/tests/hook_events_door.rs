@@ -16,6 +16,7 @@
 //! of the user.
 
 use crate::common;
+use crate::common::bins;
 
 use std::io::Write;
 use std::path::PathBuf;
@@ -70,10 +71,6 @@ const MARKED_DETECTION: &str = "hook-door-marked";
 
 static COUNTER: AtomicU32 = AtomicU32::new(0);
 
-fn daemon_bin() -> PathBuf {
-    PathBuf::from(env!("CARGO_BIN_EXE_yagura-daemon"))
-}
-
 pub(crate) fn unique_instance() -> String {
     format!(
         "hevt{:x}{}",
@@ -94,7 +91,7 @@ fn fixture_profile_source() -> String {
          {APPROVAL_EVENT} = {{ status = \"waiting_approval\" }}\n\
          {END_EVENT} = {{ status = \"waiting_input\", deliver = \"take\", \
          session = \"/session_id\" }}\n",
-        common::echo_child_path().display()
+        common::bins::echo_child_path().display()
     )
 }
 
@@ -106,7 +103,7 @@ fn event_form_profile_source() -> String {
          [delivery.output]\n\
          take = '{{\"hookSpecificOutput\":{{\"hookEventName\":{{event}},\"additionalContext\":{{text}}}}}}'\n\n\
          [hook_events]\nPostToolUse = {{ deliver = \"take\" }}\nUserPromptSubmit = {{ deliver = \"take\" }}\n",
-        common::echo_child_path().display()
+        common::bins::echo_child_path().display()
     )
 }
 
@@ -116,7 +113,7 @@ fn door_command(
     bases: &TempDir,
     window: Option<(&str, &str)>,
 ) -> Command {
-    let mut command = Command::new(daemon_bin());
+    let mut command = Command::new(bins::daemon_exe());
     command
         .args(args)
         .env("YAGURA_INSTANCE", instance)
@@ -247,11 +244,8 @@ impl Setup {
                 };
                 std::fs::write(detection_dir.join(format!("{name}.toml")), definition)
                     .expect("write the rule-less detection definition");
-                h.open_delivering(
-                    yagura_test_support::process::echo_child_command(),
-                    Some(name),
-                )
-                .await
+                h.open_delivering(bins::echo_child_command(), Some(name))
+                    .await
             }
             Screen::Ready => {
                 let mut client = h.connect().await;
@@ -639,7 +633,7 @@ pub(crate) async fn open_launched(
     h.registry
         .open_with_extra_env(
             yagura_daemon::OpenWindowRequest {
-                command: yagura_test_support::process::echo_child_command(),
+                command: bins::echo_child_command(),
                 cwd: None,
                 name: None,
                 vendor: None,
@@ -1137,7 +1131,7 @@ async fn a_windows_doors_are_named_the_time_its_cli_was_given_at_its_open() {
             "schema = 1\ndisplay_name = \"{ID}\"\n\n[command]\ndefault = ['{}']\n\n\
              [delivery]\noutput = '{{\"timeOut\":{{text}}}}'\n\n\
              [hook_events]\n{EVENT} = {{ status = \"running\", deliver = \"take\" }}\n\n{table}",
-            common::echo_child_path().display()
+            common::bins::echo_child_path().display()
         )
     };
     write_profile(
@@ -1148,9 +1142,7 @@ async fn a_windows_doors_are_named_the_time_its_cli_was_given_at_its_open() {
         ),
     );
     let window_id = open_from_profile(&h, ID).await;
-    let bare_id = h
-        .open(yagura_test_support::process::echo_child_command(), None)
-        .await;
+    let bare_id = h.open(bins::echo_child_command(), None).await;
     let context = serde_json::json!({ "kind": "context" });
     let hook = serde_json::json!({ "kind": "hook", "profile": ID, "name": EVENT });
     let named = |answer: &serde_json::Value| {
@@ -1771,7 +1763,7 @@ impl Turns {
             .registry
             .open_with_extra_env(
                 yagura_daemon::OpenWindowRequest {
-                    command: yagura_test_support::process::echo_child_command(),
+                    command: bins::echo_child_command(),
                     cwd: None,
                     name: None,
                     vendor: None,

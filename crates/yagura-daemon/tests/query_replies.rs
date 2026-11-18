@@ -10,7 +10,8 @@
 
 use crate::common;
 
-use common::{Harness, assert_hex_echo_receives, hex_echo_path, hex_of};
+use common::bins::hex_echo_path;
+use common::{Harness, assert_hex_echo_receives, hex_of};
 use yagura_daemon::DaemonConfig;
 
 const EMITTED_MARKER: &[u8] = b"QUERIES-EMITTED";

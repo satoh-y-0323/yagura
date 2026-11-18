@@ -14,6 +14,7 @@
 //! the `echo_child` and `yagura-holder` binaries are located next to the test
 //! executable.
 
+use crate::common::bins::{self, echo_child_command};
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -26,7 +27,6 @@ use yagura_daemon::{
 use yagura_os::{PeerAuth, PlatformIpc};
 use yagura_test_support::ipc::connect_with_retry;
 use yagura_test_support::paths::unique_temp_dir;
-use yagura_test_support::process::echo_child_command;
 
 use super::{McpSession, tool_reply};
 
@@ -70,7 +70,9 @@ async fn start_daemon() -> Daemon {
         tickets_path: Some(tickets_path),
         ..DaemonConfig::default()
     };
-    let registry = Arc::new(WindowRegistry::new(config.clone()));
+    let registry = Arc::new(WindowRegistry::new(bins::config_with_holder(
+        config.clone(),
+    )));
     let ledger = Arc::new(
         tokio::task::spawn_blocking({
             let config = config.clone();

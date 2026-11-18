@@ -10,19 +10,18 @@
 //! real vendor CLI.
 
 use crate::common;
+use crate::common::bins::{self, echo_child_path};
 
 use std::future::Future;
 use std::path::PathBuf;
 use std::pin::{Pin, pin};
 use std::task::{Context, Poll, Waker};
 
-use yagura_daemon::DaemonConfig;
 use yagura_daemon::control::RequestOrigin;
 use yagura_daemon::plan::{PlanSpec, TaskSpec, ValidatedPlan, validate_plan};
 use yagura_daemon::plan_permit::{self, ChangeKind, LockTable, PermitError};
 use yagura_daemon::plan_store::PlanStore;
 use yagura_daemon::window::{OpenWindowRequest, WindowRegistry};
-use yagura_test_support::process::echo_child_path;
 
 fn db_path(tag: &str) -> PathBuf {
     common::unique_temp_dir(tag).join("plan.db")
@@ -94,7 +93,7 @@ fn one_task_plan(task_id: &str) -> ValidatedPlan {
 /// against starts from.
 async fn store_registry_and_owned_plan(tag: &str) -> (PlanStore, WindowRegistry, String, String) {
     let mut store = PlanStore::open(&db_path(tag)).expect("PlanStore::open must succeed");
-    let registry = WindowRegistry::new(DaemonConfig::default());
+    let registry = WindowRegistry::new(bins::default_config_with_holder());
     let owner = open_window(&registry).await;
     let create_permit = plan_permit::issue_create(&RequestOrigin::Window(owner.clone()), &registry)
         .expect("a freshly opened window must be able to create a plan");
@@ -109,7 +108,7 @@ async fn store_registry_and_owned_plan(tag: &str) -> (PlanStore, WindowRegistry,
 
 #[tokio::test]
 async fn issuing_a_create_permit_requires_the_calling_window_to_be_alive() {
-    let registry = WindowRegistry::new(DaemonConfig::default());
+    let registry = WindowRegistry::new(bins::default_config_with_holder());
 
     let alive = open_window(&registry).await;
     assert!(
@@ -487,7 +486,7 @@ async fn read_authorization_admits_owner_bound_and_approver_but_not_out_of_range
 
 #[tokio::test]
 async fn approver_only_operations_reject_every_window_origin_even_for_a_nonexistent_plan() {
-    let registry = WindowRegistry::new(DaemonConfig::default());
+    let registry = WindowRegistry::new(bins::default_config_with_holder());
     let window = open_window(&registry).await;
     let store = PlanStore::open(&db_path("plan-permit-approver-only")).expect("PlanStore::open");
     let table = LockTable::new();

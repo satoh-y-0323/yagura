@@ -8,6 +8,7 @@
 //! profile declares no `launch_prompt` is refused before anything starts.
 
 use crate::common;
+use crate::common::bins::{echo_child_command, ready_child_profile_source_with_composer};
 
 use std::path::Path;
 use std::time::Duration;
@@ -26,7 +27,6 @@ use yagura_protocol::{
 };
 use yagura_test_support::detection::idle_definition_toml;
 use yagura_test_support::ipc::Connection;
-use yagura_test_support::process::{echo_child_command, ready_child_profile_source_with_composer};
 
 /// Definition stem whose windows reach `idle` but declare no composer.
 const SILENT: &str = "silent-shell";

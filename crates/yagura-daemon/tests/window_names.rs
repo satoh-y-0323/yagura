@@ -14,6 +14,7 @@
 //! keys, and an answer's `name` is read from its wire form.
 
 use crate::common;
+use crate::common::bins::{echo_child_command, ready_child_command};
 
 use std::path::Path;
 
@@ -34,9 +35,7 @@ use yagura_protocol::{
 };
 use yagura_test_support::detection::CONTROL_READY_MARKER;
 use yagura_test_support::ipc::Connection;
-use yagura_test_support::process::{
-    echo_child_command, exit_with_code_command, ready_child_command,
-};
+use yagura_test_support::process::exit_with_code_command;
 
 /// The wire key of an open request saying what to do when its name is taken.
 const ON_NAME_TAKEN: &str = "on_name_taken";

@@ -13,6 +13,7 @@
 //! to be installed on the machine running the suite.
 
 use crate::common;
+use crate::common::bins::{self, echo_child_path};
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -34,7 +35,6 @@ use yagura_protocol::{
 };
 use yagura_test_support::ipc::Connection;
 use yagura_test_support::paths::TempDir;
-use yagura_test_support::process::echo_child_path;
 
 // --- fixture profiles --------------------------------------------------------
 
@@ -329,9 +329,7 @@ async fn open_task_window_for_a_disabled_profile_is_profile_disabled_and_does_no
     );
 
     let mut owner = h.connect().await;
-    let owner_window = h
-        .open(yagura_test_support::process::echo_child_command(), None)
-        .await;
+    let owner_window = h.open(bins::echo_child_command(), None).await;
     identify(&mut owner, &owner_window).await;
 
     let plan = create_plan(
@@ -545,9 +543,7 @@ async fn create_plan_accepts_a_task_naming_a_disabled_profile() {
     .await;
 
     let mut owner = h.connect().await;
-    let owner_window = h
-        .open(yagura_test_support::process::echo_child_command(), None)
-        .await;
+    let owner_window = h.open(bins::echo_child_command(), None).await;
     identify(&mut owner, &owner_window).await;
     let plan = create_plan(
         &mut owner,
@@ -573,28 +569,6 @@ async fn create_plan_accepts_a_task_naming_a_disabled_profile() {
 // listing command, with an enabled control that does.
 // =============================================================================
 
-fn capture_child_path() -> PathBuf {
-    let mut dir =
-        std::env::current_exe().expect("current_exe should resolve for a running test binary");
-    dir.pop();
-    if dir.file_name().and_then(|name| name.to_str()) == Some("deps") {
-        dir.pop();
-    }
-    let name = if cfg!(windows) {
-        "capture_child.exe"
-    } else {
-        "capture_child"
-    };
-    dir.push(name);
-    assert!(
-        dir.exists(),
-        "the capture_child fixture binary is missing at {}: run `cargo build -p yagura-daemon \
-         --bin capture_child` first",
-        dir.display()
-    );
-    dir
-}
-
 /// A profile whose `[model.choices]` command touches `marker_path` at
 /// startup -- proof the listing command actually started -- switched off
 /// when `enabled` is `false`.
@@ -607,7 +581,7 @@ fn touch_profile_source(display_name: &str, marker_path: &Path, enabled: Option<
         "schema = 1\ndisplay_name = \"{display_name}\"\n{enabled_line}\n[command]\ndefault = \
          ['{}']\n\n[model]\nargs = [\"--tier\", \"{{value}}\"]\n\n[model.choices]\nargs = \
          [\"touch\", '{}', \"exit\", \"0\"]\nformat = \"lines\"\nseparator = \"\\t\"\n",
-        capture_child_path().display(),
+        bins::capture_child_path().display(),
         marker_path.display(),
     )
 }

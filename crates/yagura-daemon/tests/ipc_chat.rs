@@ -39,6 +39,7 @@
 //!   hands over.
 
 use crate::common;
+use crate::common::bins;
 
 use std::path::Path;
 use std::time::Duration;
@@ -112,7 +113,7 @@ async fn open_delivering(
 async fn open_unknown_participant(h: &Harness) -> String {
     open_delivering(
         h,
-        yagura_test_support::process::echo_child_command(),
+        bins::echo_child_command(),
         Some(CONTROL_DETECTION_NAME),
         None,
         None,
@@ -634,10 +635,7 @@ async fn a_window_excluded_by_name_is_unresolved_and_absent_from_the_roster() {
     let mut client = h.connect().await;
     let excluded_id = h.open_idle_window(&mut client).await;
     let poster_id = h
-        .open(
-            yagura_test_support::process::echo_child_command(),
-            Some(CONTROL_DETECTION_NAME),
-        )
+        .open(bins::echo_child_command(), Some(CONTROL_DETECTION_NAME))
         .await;
     // The poster is itself excluded too, but a poster's own request always
     // reaches the gate as its own window; participation is about roster
@@ -667,19 +665,9 @@ async fn a_window_opened_with_no_detection_argument_defaults_to_the_excluded_gen
     let h = Harness::start_with_chat("chat-g3-default", config).await;
     let mut client = h.connect().await;
 
-    let default_id = open_delivering(
-        &h,
-        yagura_test_support::process::echo_child_command(),
-        None,
-        None,
-        None,
-    )
-    .await;
+    let default_id = open_delivering(&h, bins::echo_child_command(), None, None, None).await;
     let poster_id = h
-        .open(
-            yagura_test_support::process::echo_child_command(),
-            Some(CONTROL_DETECTION_NAME),
-        )
+        .open(bins::echo_child_command(), Some(CONTROL_DETECTION_NAME))
         .await;
     identify(&mut client, &poster_id).await;
 
@@ -702,7 +690,7 @@ async fn a_definition_whose_stem_differs_from_its_declared_name_is_judged_by_the
 
     let stem_id = open_delivering(
         &h,
-        yagura_test_support::process::echo_child_command(),
+        bins::echo_child_command(),
         Some("weird-stem"),
         None,
         None,
@@ -746,19 +734,14 @@ async fn a_window_that_declares_delivery_takes_part_without_a_composer_and_one_t
     // Declares delivery, and its definition no composer.
     let silent_id = open_delivering(
         &h,
-        yagura_test_support::process::echo_child_command(),
+        bins::echo_child_command(),
         Some("g3-silent"),
         None,
         None,
     )
     .await;
     // Its definition declares a composer and a probe, and it was opened from a raw argv.
-    let drawn_id = h
-        .open(
-            yagura_test_support::process::echo_child_command(),
-            Some("g3-drawn"),
-        )
-        .await;
+    let drawn_id = h.open(bins::echo_child_command(), Some("g3-drawn")).await;
     let poster_id = h.open_idle_window(&mut client).await;
     identify(&mut client, &poster_id).await;
 
@@ -2250,7 +2233,7 @@ async fn open_identified_participant_in_cwd(
 ) -> String {
     let window_id = open_delivering(
         h,
-        yagura_test_support::process::echo_child_command(),
+        bins::echo_child_command(),
         Some(CONTROL_DETECTION_NAME),
         Some(cwd),
         None,
@@ -2433,7 +2416,7 @@ async fn broadcast_and_roster_are_scoped_to_the_posters_own_room() {
     let b_recipient_id = open_identified_participant_in_cwd(&h, &mut b_client, &second_dir).await;
     let b_poster_id = h
         .open_in_cwd(
-            yagura_test_support::process::echo_child_command(),
+            bins::echo_child_command(),
             Some(CONTROL_DETECTION_NAME),
             &second_dir,
         )
@@ -2861,7 +2844,7 @@ async fn a_send_chat_approval_request_shows_the_rooms_own_name_and_the_mentioned
     let _poster_id = open_identified_participant_in_cwd(&h, &mut poster_conn, &workspace).await;
     let _bob_id = open_delivering(
         &h,
-        yagura_test_support::process::echo_child_command(),
+        bins::echo_child_command(),
         None,
         Some(&workspace),
         Some("Bob"),

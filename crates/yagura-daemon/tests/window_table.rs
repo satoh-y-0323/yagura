@@ -11,6 +11,7 @@
 //! holding its id and one of the three states.
 
 use crate::common;
+use crate::common::bins::{self, echo_child_path};
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -24,7 +25,6 @@ use yagura_protocol::holder::{
 };
 use yagura_protocol::{ClientMessage, DaemonMessage, WINDOW_ID_ENV};
 use yagura_test_support::HANG_GUARD;
-use yagura_test_support::process::echo_child_path;
 
 use common::{Harness, policy, read_response, send};
 use yagura_daemon::DaemonConfig;
@@ -360,10 +360,12 @@ async fn a_windows_row_comes_before_its_child_follows_its_values_and_goes_with_i
         refused.is_err(),
         "a child that cannot be found must not open"
     );
-    let holderless = Arc::new(WindowRegistry::new(DaemonConfig {
-        holder_exe: Some(unreachable),
-        ..DaemonConfig::default()
-    }));
+    let holderless = Arc::new(WindowRegistry::new(bins::config_with_holder(
+        DaemonConfig {
+            holder_exe: Some(unreachable),
+            ..DaemonConfig::default()
+        },
+    )));
     store::wire_into(&holderless, Some(db.clone()));
     let refused = holderless
         .open(request(echo_command(), "wt-no-holder"))

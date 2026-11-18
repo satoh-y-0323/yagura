@@ -1,15 +1,15 @@
 #![allow(missing_docs, clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use crate::common;
+use crate::common::bins::{self, echo_child_path};
 
+use yagura_daemon::WindowRegistry;
 use yagura_daemon::window::RejectedArgument;
-use yagura_daemon::{DaemonConfig, WindowRegistry};
-use yagura_test_support::process::echo_child_path;
 
 /// Caller sends nonexistent cwd: argument is named.
 #[tokio::test]
 async fn rejected_argument_wire_identifies_caller_cwd_when_missing() {
-    let registry = WindowRegistry::new(DaemonConfig::default());
+    let registry = WindowRegistry::new(bins::default_config_with_holder());
     let missing_cwd = common::guaranteed_nonexistent_exe_path();
 
     let result = registry
@@ -43,7 +43,7 @@ async fn rejected_argument_wire_identifies_caller_cwd_when_missing() {
 /// Caller sends cwd that is not a directory: argument is named.
 #[tokio::test]
 async fn rejected_argument_wire_identifies_caller_cwd_when_not_directory() {
-    let registry = WindowRegistry::new(DaemonConfig::default());
+    let registry = WindowRegistry::new(bins::default_config_with_holder());
     let not_a_dir = echo_child_path();
 
     let result = registry
@@ -77,7 +77,7 @@ async fn rejected_argument_wire_identifies_caller_cwd_when_not_directory() {
 /// Empty command is rejected but does not name cwd.
 #[tokio::test]
 async fn rejected_argument_wire_omits_cwd_for_empty_command() {
-    let registry = WindowRegistry::new(DaemonConfig::default());
+    let registry = WindowRegistry::new(bins::default_config_with_holder());
 
     let result = registry
         .open(yagura_daemon::OpenWindowRequest {
@@ -104,7 +104,7 @@ async fn rejected_argument_wire_omits_cwd_for_empty_command() {
 /// Reason text contains the path.
 #[tokio::test]
 async fn rejected_argument_wire_includes_path_in_reason() {
-    let registry = WindowRegistry::new(DaemonConfig::default());
+    let registry = WindowRegistry::new(bins::default_config_with_holder());
     let missing_cwd = common::guaranteed_nonexistent_exe_path();
     let missing_str = missing_cwd.to_string_lossy().to_string();
 

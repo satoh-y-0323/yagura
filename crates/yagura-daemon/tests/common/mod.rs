@@ -403,13 +403,6 @@ pub fn second_workspace_dir(tag: &str) -> PathBuf {
     dir
 }
 
-/// Fixture for the natural-exit teardown route: a detached grandchild appending to
-/// `tick_path`, behind a direct child that exits on its own a few seconds later. See
-/// [`bins::grandchild_command`] for the argv shape.
-pub fn grandchild_command(tick_path: &str) -> Vec<String> {
-    bins::grandchild_command(tick_path)
-}
-
 /// A fixed command (not a real vendor CLI) whose direct child stays alive for roughly
 /// `ping_count - 1` seconds and then exits on its own, which is enough to reproduce a
 /// pseudoconsole host-process leak. See [`yagura_test_support::process::sleepy_command`].
@@ -1321,9 +1314,7 @@ impl Harness {
     /// Opens an `echo_child` window with no detection definition: its status
     /// is permanently `Unknown` (fail-safe rule).
     pub async fn open_unknown_window(&self) -> String {
-        let path = echo_child_path();
-        let path = path.to_str().expect("echo_child path must be valid UTF-8");
-        self.open_delivering(vec![path.to_string()], None).await
+        self.open_delivering(bins::echo_child_command(), None).await
     }
 
     /// Opens an `echo_child` window bound to [`CONTROL_DETECTION_NAME`], drives it to
@@ -1433,21 +1424,6 @@ pub async fn wait_until_no_connection_claims(registry: &WindowRegistry, window_i
         );
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
-}
-
-/// Path to the `echo_child` test-fixture binary.
-pub fn echo_child_path() -> PathBuf {
-    bins::echo_child_path()
-}
-
-/// Path to the `hex_echo` test-fixture binary.
-pub fn hex_echo_path() -> PathBuf {
-    bins::hex_echo_path()
-}
-
-/// Path to the `env_probe` test-fixture binary.
-pub fn env_probe_path() -> PathBuf {
-    bins::env_probe_path()
 }
 
 /// How much of a window's text [`window_text_now`] asks for.
@@ -2576,13 +2552,7 @@ pub fn expect_handoff_sent(msg: DaemonMessage) -> (String, bool, DeliveryState) 
     }
 }
 
-// --- mcp_cli_stub fixture path and profile document --------------------------
-
-/// Path to the `mcp_cli_stub` fixture binary (see `src/bin/mcp_cli_stub.rs`'s
-/// module doc for its argv and environment-variable contract).
-pub fn mcp_cli_stub_path() -> PathBuf {
-    bins::mcp_cli_stub_path()
-}
+// --- mcp_cli_stub profile documents -------------------------------------------
 
 /// The environment [`mcp_cli_stub_profile_source`] carries through the
 /// profile's `[env]` table into `mcp_cli_stub`'s own `MCP_CLI_STUB_*`
@@ -2676,9 +2646,9 @@ fn toml_basic(value: &str) -> String {
 ///
 /// # Panics
 ///
-/// Panics under the same conditions as [`mcp_cli_stub_path`].
+/// Panics if the fixture's path is not valid UTF-8.
 pub fn mcp_cli_stub_profile_source(display_name: &str, fixture: &McpCliStubFixture<'_>) -> String {
-    let stub_path = mcp_cli_stub_path();
+    let stub_path = bins::mcp_cli_stub_path();
     let stub_path = stub_path
         .to_str()
         .expect("mcp_cli_stub path must be valid UTF-8");
@@ -2739,9 +2709,9 @@ pub fn mcp_cli_stub_profile_source(display_name: &str, fixture: &McpCliStubFixtu
 ///
 /// # Panics
 ///
-/// Panics under the same conditions as [`mcp_cli_stub_path`].
+/// Panics if the fixture's path is not valid UTF-8.
 pub fn mcp_cli_stub_toml_literal() -> String {
-    let stub_path = mcp_cli_stub_path();
+    let stub_path = bins::mcp_cli_stub_path();
     toml_literal(
         stub_path
             .to_str()
@@ -2758,7 +2728,7 @@ pub fn mcp_cli_stub_toml_literal() -> String {
 ///
 /// # Panics
 ///
-/// Panics under the same conditions as [`mcp_cli_stub_path`].
+/// Panics if the fixture's path is not valid UTF-8.
 pub fn mcp_cli_stub_profile_with_table(
     display_name: &str,
     preamble: &str,

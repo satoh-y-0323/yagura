@@ -8,6 +8,7 @@
 //! that cannot be handed a request at launch is refused before anything starts.
 
 use crate::common;
+use crate::common::bins;
 
 use std::path::{Path, PathBuf};
 
@@ -82,7 +83,7 @@ async fn a_window_that_took_its_envelope_at_launch_stays_open_after_the_requeste
     .await;
     // Identified as a window of its own, so the daemon's having finished with
     // the requester's connection is observable.
-    let requester_window = h.open(process::echo_child_command(), None).await;
+    let requester_window = h.open(bins::echo_child_command(), None).await;
     let mut requester = h.connect().await;
     identify(&mut requester, &requester_window).await;
     let reply =
@@ -130,7 +131,7 @@ async fn a_profile_that_cannot_be_handed_a_request_at_launch_is_refused_before_a
     write_profile(
         &profiles_dir,
         "drawn",
-        &process::ready_child_profile_source_with_composer("Drawn", 0),
+        &bins::ready_child_profile_source_with_composer("Drawn", 0),
     );
 
     let h = Harness::start(
@@ -150,7 +151,7 @@ async fn a_profile_that_cannot_be_handed_a_request_at_launch_is_refused_before_a
     // Every open the registry starts takes the next open order in the window
     // table, a failed one included: an open started after the refusal is the
     // first, so the refusal started none, not even one still on its way.
-    let control = h.open(process::echo_child_command(), None).await;
+    let control = h.open(bins::echo_child_command(), None).await;
     assert_eq!(
         opened_seq(&db, &control),
         1,

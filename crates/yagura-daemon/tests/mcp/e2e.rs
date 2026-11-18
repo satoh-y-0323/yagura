@@ -40,6 +40,9 @@ use std::time::Duration;
 use tokio::io::AsyncWriteExt;
 use tokio::task::JoinHandle;
 
+use crate::common::bins::{
+    self, echo_child_command, echo_child_command_with_composer, first_grandchild_command,
+};
 use yagura_test_support::HANG_GUARD;
 use yagura_test_support::detection::{
     CONTROL_DETECTION_NAME, CONTROL_READY_LINE, composer_section_toml, idle_definition_toml,
@@ -50,8 +53,7 @@ use yagura_test_support::ipc::{
 };
 use yagura_test_support::paths::unique_temp_dir;
 use yagura_test_support::process::{
-    COMPOSER_MARKER, COMPOSER_SEPARATOR, echo_child_command, echo_child_command_with_composer,
-    first_grandchild_command, own_canonical_exe, process_is_running, wait_processes_gone,
+    COMPOSER_MARKER, COMPOSER_SEPARATOR, own_canonical_exe, process_is_running, wait_processes_gone,
 };
 use yagura_test_support::scan::contains_subsequence;
 
@@ -187,7 +189,9 @@ impl DaemonHarness {
             section.auto_approve.push("open_window".to_string());
         }
         config.approval_policy = Some(approved);
-        let registry = Arc::new(WindowRegistry::new(config.clone()));
+        let registry = Arc::new(WindowRegistry::new(bins::config_with_holder(
+            config.clone(),
+        )));
         let endpoint = unique_endpoint_name(FIXTURE_PREFIX, tag);
         let server = Arc::new(IpcServer::new(
             registry.clone(),
@@ -1628,8 +1632,7 @@ async fn send_handoff_puts_the_envelope_in_an_existing_windows_inbox_when_approv
 
 /// The `hook_child` fixture, next to the other fixtures of this test binary.
 fn hook_child_path() -> PathBuf {
-    yagura_test_support::process::argv_probe_path()
-        .with_file_name(format!("hook_child{}", std::env::consts::EXE_SUFFIX))
+    bins::argv_probe_path().with_file_name(format!("hook_child{}", std::env::consts::EXE_SUFFIX))
 }
 
 /// A `hook_child` profile handed a first request at launch as `--prompt <request>`,

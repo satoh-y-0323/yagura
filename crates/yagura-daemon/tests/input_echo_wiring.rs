@@ -14,6 +14,7 @@
 //! applying it there would make one test unreachable and another a tautology.
 
 use crate::common;
+use crate::common::bins;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -104,7 +105,7 @@ async fn control_origin_is_always_may_start_work() {
         ECHO_SUPPRESS_MS,
         RESIZE_IRRELEVANT_MS,
     );
-    let registry = Arc::new(WindowRegistry::new(config));
+    let registry = Arc::new(WindowRegistry::new(bins::config_with_holder(config)));
     let window_id = common::open_registry_window(&registry, common::views::script_argv(), None)
         .await
         .window_id;
@@ -314,7 +315,7 @@ async fn suppressed_interactive_echo_keeps_confirmed_idle() {
     let dir = detection_dir("w1");
     write_definition(&dir, "w1-def", &time_both_with_prompt_rule_def());
     let config = detection_config(&dir, "w1-def", ECHO_SUPPRESS_MS, RESIZE_IRRELEVANT_MS);
-    let registry = Arc::new(WindowRegistry::new(config));
+    let registry = Arc::new(WindowRegistry::new(bins::config_with_holder(config)));
 
     let entry = open_echo_entry(&registry).await;
 
@@ -358,7 +359,7 @@ async fn disarmed_interactive_echo_reaches_running() {
     let dir = detection_dir("w2");
     write_definition(&dir, "w2-def", &time_both_with_prompt_rule_def());
     let config = detection_config(&dir, "w2-def", ECHO_DISARM_MS, RESIZE_IRRELEVANT_MS);
-    let registry = Arc::new(WindowRegistry::new(config));
+    let registry = Arc::new(WindowRegistry::new(bins::config_with_holder(config)));
 
     let entry = open_echo_entry(&registry).await;
 
@@ -387,7 +388,7 @@ async fn suppressed_message_body_without_a_terminator_keeps_confirmed_idle() {
     let dir = detection_dir("w6");
     write_definition(&dir, "w6-def", &time_both_with_prompt_rule_def());
     let config = detection_config(&dir, "w6-def", ECHO_SUPPRESS_MS, RESIZE_IRRELEVANT_MS);
-    let registry = Arc::new(WindowRegistry::new(config));
+    let registry = Arc::new(WindowRegistry::new(bins::config_with_holder(config)));
 
     let entry = open_echo_entry(&registry).await;
 
@@ -431,7 +432,7 @@ async fn message_write_containing_carriage_return_reaches_running() {
     let dir = detection_dir("w7");
     write_definition(&dir, "w7-def", &time_both_with_prompt_rule_def());
     let config = detection_config(&dir, "w7-def", ECHO_SUPPRESS_MS, RESIZE_IRRELEVANT_MS);
-    let registry = Arc::new(WindowRegistry::new(config));
+    let registry = Arc::new(WindowRegistry::new(bins::config_with_holder(config)));
 
     let entry = open_echo_entry(&registry).await;
 
@@ -455,7 +456,7 @@ async fn running_survives_suppressed_interactive_keystrokes_past_after_ms() {
     let dir = detection_dir("w5");
     write_definition(&dir, "w5-def", &time_both_no_rule_def());
     let config = detection_config(&dir, "w5-def", ECHO_SUPPRESS_MS, RESIZE_IRRELEVANT_MS);
-    let registry = Arc::new(WindowRegistry::new(config));
+    let registry = Arc::new(WindowRegistry::new(bins::config_with_holder(config)));
 
     let entry = open_echo_entry(&registry).await;
 
@@ -507,7 +508,7 @@ async fn resize_w1_suppressed_redraw_output_keeps_confirmed_idle() {
     let dir = detection_dir("resize-w1");
     write_definition(&dir, "resize-w1-def", &time_both_with_prompt_rule_def());
     let config = detection_config(&dir, "resize-w1-def", ECHO_SUPPRESS_MS, RESIZE_SUPPRESS_MS);
-    let registry = Arc::new(WindowRegistry::new(config));
+    let registry = Arc::new(WindowRegistry::new(bins::config_with_holder(config)));
 
     let entry = open_echo_entry(&registry).await;
 
@@ -560,7 +561,7 @@ async fn resize_w2_disarmed_redraw_output_reaches_running() {
     let dir = detection_dir("resize-w2");
     write_definition(&dir, "resize-w2-def", &time_both_with_prompt_rule_def());
     let config = detection_config(&dir, "resize-w2-def", ECHO_SUPPRESS_MS, RESIZE_DISARM_MS);
-    let registry = Arc::new(WindowRegistry::new(config));
+    let registry = Arc::new(WindowRegistry::new(bins::config_with_holder(config)));
 
     let entry = open_echo_entry(&registry).await;
 

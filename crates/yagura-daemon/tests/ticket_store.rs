@@ -9,13 +9,13 @@
 //! for who gets which permit.
 
 use crate::common;
+use crate::common::bins::{self, echo_child_path};
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use rusqlite::params;
 
-use yagura_daemon::DaemonConfig;
 use yagura_daemon::control::RequestOrigin;
 use yagura_daemon::ticket::{TicketConfig, TicketField, TicketState};
 use yagura_daemon::ticket_permit::{self, TicketReadPermit, TicketWritePermit};
@@ -25,7 +25,6 @@ use yagura_daemon::ticket_store::{
 };
 use yagura_daemon::window::{OpenWindowRequest, RequestedCwd, WindowRegistry};
 use yagura_protocol::{MilestoneInfo, TicketInfo, TicketSummary};
-use yagura_test_support::process::echo_child_path;
 
 fn db_path(tag: &str) -> PathBuf {
     common::unique_temp_dir(tag).join("ticket.db")
@@ -169,7 +168,7 @@ fn milestone(name: &str, position: i64) -> MilestoneInfo {
 async fn numbers_start_at_one_per_workspace_and_a_subdirectory_shares_its_repository() {
     let path = db_path("ticket-store-numbering");
     let mut store = TicketStore::open(&path).expect("open store");
-    let registry = WindowRegistry::new(DaemonConfig::default());
+    let registry = WindowRegistry::new(bins::default_config_with_holder());
     let repo_a = repo_dir("ticket-store-numbering-a");
     let sub_a = repo_a.join("crates").join("inner");
     std::fs::create_dir_all(&sub_a).expect("create a subdirectory");
@@ -232,7 +231,7 @@ async fn numbers_start_at_one_per_workspace_and_a_subdirectory_shares_its_reposi
 async fn the_same_path_as_a_directory_and_as_a_repository_are_two_workspaces() {
     let path = db_path("ticket-store-kind");
     let mut store = TicketStore::open(&path).expect("open store");
-    let registry = WindowRegistry::new(DaemonConfig::default());
+    let registry = WindowRegistry::new(bins::default_config_with_holder());
     let config = board_config();
     let dir = common::unique_temp_dir("ticket-store-kind-dir");
 
@@ -266,7 +265,7 @@ async fn the_same_path_as_a_directory_and_as_a_repository_are_two_workspaces() {
 async fn reading_an_empty_workspace_returns_nothing_and_creates_no_workspace() {
     let path = db_path("ticket-store-read-only");
     let store = TicketStore::open(&path).expect("open store");
-    let registry = WindowRegistry::new(DaemonConfig::default());
+    let registry = WindowRegistry::new(bins::default_config_with_holder());
     let reader = writer_in(&registry, &repo_dir("ticket-store-read-only-repo")).await;
 
     let listing = store
@@ -295,7 +294,7 @@ async fn reading_an_empty_workspace_returns_nothing_and_creates_no_workspace() {
 async fn a_ticket_without_a_state_starts_in_the_configs_first_state() {
     let path = db_path("ticket-store-default-state");
     let mut store = TicketStore::open(&path).expect("open store");
-    let registry = WindowRegistry::new(DaemonConfig::default());
+    let registry = WindowRegistry::new(bins::default_config_with_holder());
     let w = writer_in(&registry, &repo_dir("ticket-store-default-state-repo")).await;
 
     let created = store
@@ -311,7 +310,7 @@ async fn a_ticket_without_a_state_starts_in_the_configs_first_state() {
 async fn creating_into_a_state_with_an_empty_required_field_is_refused_and_writes_nothing() {
     let path = db_path("ticket-store-create-gate");
     let mut store = TicketStore::open(&path).expect("open store");
-    let registry = WindowRegistry::new(DaemonConfig::default());
+    let registry = WindowRegistry::new(bins::default_config_with_holder());
     let w = writer_in(&registry, &repo_dir("ticket-store-create-gate-repo")).await;
     let config = board_config();
 
@@ -361,7 +360,7 @@ async fn creating_into_a_state_with_an_empty_required_field_is_refused_and_write
 async fn an_update_is_gated_on_the_fields_after_the_change() {
     let path = db_path("ticket-store-update-gate");
     let mut store = TicketStore::open(&path).expect("open store");
-    let registry = WindowRegistry::new(DaemonConfig::default());
+    let registry = WindowRegistry::new(bins::default_config_with_holder());
     let w = writer_in(&registry, &repo_dir("ticket-store-update-gate-repo")).await;
     let config = board_config();
     store
@@ -447,7 +446,7 @@ async fn an_update_is_gated_on_the_fields_after_the_change() {
 async fn title_body_and_milestone_updates_do_not_consult_the_required_fields() {
     let path = db_path("ticket-store-update-no-gate");
     let mut store = TicketStore::open(&path).expect("open store");
-    let registry = WindowRegistry::new(DaemonConfig::default());
+    let registry = WindowRegistry::new(bins::default_config_with_holder());
     let w = writer_in(&registry, &repo_dir("ticket-store-update-no-gate-repo")).await;
 
     // The ticket enters on-hold while on-hold requires nothing; the user then adds a
@@ -501,7 +500,7 @@ async fn title_body_and_milestone_updates_do_not_consult_the_required_fields() {
 async fn a_state_or_field_the_config_does_not_declare_is_refused() {
     let path = db_path("ticket-store-unknown-names");
     let mut store = TicketStore::open(&path).expect("open store");
-    let registry = WindowRegistry::new(DaemonConfig::default());
+    let registry = WindowRegistry::new(bins::default_config_with_holder());
     let w = writer_in(&registry, &repo_dir("ticket-store-unknown-names-repo")).await;
     let config = board_config();
 
@@ -576,7 +575,7 @@ fn assert_unchanged(store: &TicketStore, read: &TicketReadPermit, before: &Ticke
 async fn results_are_appended_in_order_and_timed_by_the_store() {
     let path = db_path("ticket-store-results");
     let mut store = TicketStore::open(&path).expect("open store");
-    let registry = WindowRegistry::new(DaemonConfig::default());
+    let registry = WindowRegistry::new(bins::default_config_with_holder());
     let w = writer_in(&registry, &repo_dir("ticket-store-results-repo")).await;
     store
         .create_ticket(&w.write, &board_config(), &new_ticket("t"))
@@ -619,7 +618,7 @@ async fn results_are_appended_in_order_and_timed_by_the_store() {
 async fn a_workspace_holds_at_most_ten_thousand_tickets() {
     let path = db_path("ticket-store-ticket-limit");
     let mut store = TicketStore::open(&path).expect("open store");
-    let registry = WindowRegistry::new(DaemonConfig::default());
+    let registry = WindowRegistry::new(bins::default_config_with_holder());
     let w = writer_in(&registry, &repo_dir("ticket-store-ticket-limit-repo")).await;
     let config = board_config();
     let first = store
@@ -666,7 +665,7 @@ async fn a_workspace_holds_at_most_ten_thousand_tickets() {
 async fn a_ticket_holds_at_most_256_results() {
     let path = db_path("ticket-store-result-limit");
     let mut store = TicketStore::open(&path).expect("open store");
-    let registry = WindowRegistry::new(DaemonConfig::default());
+    let registry = WindowRegistry::new(bins::default_config_with_holder());
     let w = writer_in(&registry, &repo_dir("ticket-store-result-limit-repo")).await;
     let created = store
         .create_ticket(&w.write, &board_config(), &new_ticket("t"))
@@ -711,7 +710,7 @@ async fn a_ticket_holds_at_most_256_results() {
 async fn a_workspace_holds_at_most_64_milestones() {
     let path = db_path("ticket-store-milestone-limit");
     let mut store = TicketStore::open(&path).expect("open store");
-    let registry = WindowRegistry::new(DaemonConfig::default());
+    let registry = WindowRegistry::new(bins::default_config_with_holder());
     let w = writer_in(&registry, &repo_dir("ticket-store-milestone-limit-repo")).await;
     let first = store
         .set_milestone(&w.write, &milestone("m0", 0))
@@ -755,7 +754,7 @@ async fn a_workspace_holds_at_most_64_milestones() {
 async fn at_most_256_workspaces_exist_and_a_further_new_one_is_refused() {
     let path = db_path("ticket-store-workspace-limit");
     let mut store = TicketStore::open(&path).expect("open store");
-    let registry = WindowRegistry::new(DaemonConfig::default());
+    let registry = WindowRegistry::new(bins::default_config_with_holder());
     let config = board_config();
     let w = writer_in(&registry, &repo_dir("ticket-store-workspace-limit-a")).await;
     store
@@ -806,7 +805,7 @@ async fn at_most_256_workspaces_exist_and_a_further_new_one_is_refused() {
 async fn the_listing_filters_orders_by_milestone_then_number_and_reports_truncation() {
     let path = db_path("ticket-store-listing");
     let mut store = TicketStore::open(&path).expect("open store");
-    let registry = WindowRegistry::new(DaemonConfig::default());
+    let registry = WindowRegistry::new(bins::default_config_with_holder());
     let w = writer_in(&registry, &repo_dir("ticket-store-listing-repo")).await;
     let config = board_config();
 
@@ -912,7 +911,7 @@ async fn the_listing_filters_orders_by_milestone_then_number_and_reports_truncat
 async fn a_ticket_may_only_name_a_milestone_of_its_own_workspace() {
     let path = db_path("ticket-store-milestones");
     let mut store = TicketStore::open(&path).expect("open store");
-    let registry = WindowRegistry::new(DaemonConfig::default());
+    let registry = WindowRegistry::new(bins::default_config_with_holder());
     let config = board_config();
     let a = writer_in(&registry, &repo_dir("ticket-store-milestones-a")).await;
     let b = writer_in(&registry, &repo_dir("ticket-store-milestones-b")).await;
@@ -1003,7 +1002,7 @@ async fn a_ticket_may_only_name_a_milestone_of_its_own_workspace() {
 async fn a_ticket_in_a_state_the_config_dropped_is_still_read_as_stored() {
     let path = db_path("ticket-store-dropped-state");
     let mut store = TicketStore::open(&path).expect("open store");
-    let registry = WindowRegistry::new(DaemonConfig::default());
+    let registry = WindowRegistry::new(bins::default_config_with_holder());
     let w = writer_in(&registry, &repo_dir("ticket-store-dropped-state-repo")).await;
 
     let with_review = TicketConfig {

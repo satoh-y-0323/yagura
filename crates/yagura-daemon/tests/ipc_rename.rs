@@ -14,6 +14,7 @@
 //! read back from storage, not a pass-through of the request.
 
 use crate::common;
+use crate::common::bins::echo_child_path;
 
 use std::sync::Arc;
 
@@ -21,7 +22,6 @@ use yagura_test_support::ipc::{
     Connection, connect_with_retry, read_status_skipping_message, send_client_message,
     unique_endpoint_name,
 };
-use yagura_test_support::process::echo_child_path;
 
 use yagura_daemon::{IpcServer, WindowRegistry};
 use yagura_protocol::{ClientMessage, DaemonMessage, WINDOW_NAME_MAX_BYTES};

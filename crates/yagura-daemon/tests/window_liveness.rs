@@ -9,13 +9,13 @@
 //! vendor CLI.
 
 use crate::common;
+use crate::common::bins::{self, echo_child_path};
 
 use std::path::PathBuf;
 
 use yagura_test_support::paths::{strip_extended_length_prefix, unique_temp_dir};
-use yagura_test_support::process::{echo_child_path, exit_with_code_command};
+use yagura_test_support::process::exit_with_code_command;
 
-use yagura_daemon::DaemonConfig;
 use yagura_daemon::window::{OpenWindowRequest, RequestedCwd, WindowLiveness, WindowRegistry};
 
 /// The minimal `OpenWindowRequest` most tests need: spawn echo_child with all
@@ -61,7 +61,7 @@ fn self_exiting_request() -> OpenWindowRequest {
 
 #[tokio::test]
 async fn a_window_with_a_running_child_is_alive_and_carries_its_open_time_cwd() {
-    let registry = WindowRegistry::new(DaemonConfig::default());
+    let registry = WindowRegistry::new(bins::default_config_with_holder());
     let dir = unique_temp_dir("yagura-test-window-liveness", "alive");
     let expected_cwd =
         strip_extended_length_prefix(&dir.canonicalize().expect("temp dir must canonicalize"))
@@ -90,7 +90,7 @@ async fn a_window_with_a_running_child_is_alive_and_carries_its_open_time_cwd() 
 
 #[tokio::test]
 async fn a_window_whose_child_exited_on_its_own_is_not_alive_but_stays_registered() {
-    let registry = WindowRegistry::new(DaemonConfig::default());
+    let registry = WindowRegistry::new(bins::default_config_with_holder());
 
     let window_id = registry
         .open(self_exiting_request())
@@ -112,7 +112,7 @@ async fn a_window_whose_child_exited_on_its_own_is_not_alive_but_stays_registere
 
 #[tokio::test]
 async fn a_window_id_that_was_never_opened_is_not_found() {
-    let registry = WindowRegistry::new(DaemonConfig::default());
+    let registry = WindowRegistry::new(bins::default_config_with_holder());
 
     assert!(
         matches!(

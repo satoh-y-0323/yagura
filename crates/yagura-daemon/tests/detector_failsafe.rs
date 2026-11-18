@@ -9,6 +9,7 @@
 //! `ScreenIntegrity` type itself is contracted in `tests/detector_failsafe_api.rs`.
 
 use crate::common;
+use crate::common::bins;
 
 use common::ScreenFeed;
 use std::time::Duration;
@@ -280,7 +281,7 @@ async fn next_status(statuses: &mut mpsc::UnboundedReceiver<ConfirmedStatus>) ->
 /// left at whatever status it held when the driver stopped reporting.
 #[tokio::test]
 async fn a_window_whose_detection_driver_dies_is_reported_unknown() {
-    let registry = WindowRegistry::new(DaemonConfig::default());
+    let registry = WindowRegistry::new(bins::default_config_with_holder());
     let window_id = common::open_echo_window(&registry, None).await.window_id;
     let entry = registry
         .get(&window_id)
@@ -313,7 +314,7 @@ async fn a_window_whose_detection_driver_dies_is_reported_unknown() {
 /// ends without `close_window`: the exit is a mechanical fact, not a detector verdict.
 #[tokio::test]
 async fn a_window_whose_detection_driver_died_reports_exited_once_its_process_ends() {
-    let registry = WindowRegistry::new(DaemonConfig::default());
+    let registry = WindowRegistry::new(bins::default_config_with_holder());
     let window_id = common::open_echo_window(&registry, None).await.window_id;
     let entry = registry
         .get(&window_id)

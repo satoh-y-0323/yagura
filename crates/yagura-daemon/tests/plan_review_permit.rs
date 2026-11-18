@@ -9,18 +9,18 @@
 //! approver-only licence.
 
 use crate::common;
+use crate::common::bins::{self, echo_child_path};
 
 use std::path::{Path, PathBuf};
 
 use rusqlite::params;
 
-use yagura_daemon::DaemonConfig;
 use yagura_daemon::control::RequestOrigin;
 use yagura_daemon::plan::{PlanSpec, TaskSpec, ValidatedPlan, validate_plan};
 use yagura_daemon::plan_permit::{self, ChangeKind, LockTable, PermitError};
 use yagura_daemon::plan_store::{PlanReview, PlanStore};
 use yagura_daemon::window::{OpenWindowRequest, WindowRegistry};
-use yagura_test_support::process::{echo_child_path, sleepy_command};
+use yagura_test_support::process::sleepy_command;
 
 fn db_path(tag: &str) -> PathBuf {
     common::unique_temp_dir(tag).join("plan.db")
@@ -145,7 +145,7 @@ fn bind_directly(path: &Path, plan_id: &str, window_id: &str) {
 #[tokio::test]
 async fn a_pending_plans_alive_owner_cannot_open_a_task_window() {
     let mut store = PlanStore::open(&db_path("plan-review-permit-pending")).unwrap();
-    let registry = WindowRegistry::new(DaemonConfig::default());
+    let registry = WindowRegistry::new(bins::default_config_with_holder());
     let table = LockTable::new();
     let owner = open_window(&registry).await;
 
@@ -186,7 +186,7 @@ async fn a_pending_plans_alive_owner_cannot_open_a_task_window() {
 #[tokio::test]
 async fn an_approved_or_unreviewed_plans_alive_owner_can_open_a_task_window() {
     let mut store = PlanStore::open(&db_path("plan-review-permit-open")).unwrap();
-    let registry = WindowRegistry::new(DaemonConfig::default());
+    let registry = WindowRegistry::new(bins::default_config_with_holder());
     let table = LockTable::new();
     let owner = open_window(&registry).await;
 
@@ -218,7 +218,7 @@ async fn a_window_that_could_not_open_a_task_anyway_gets_the_same_refusal_whethe
  {
     let path = db_path("plan-review-permit-relation");
     let mut store = PlanStore::open(&path).unwrap();
-    let registry = WindowRegistry::new(DaemonConfig::default());
+    let registry = WindowRegistry::new(bins::default_config_with_holder());
     let table = LockTable::new();
 
     let owner = open_window(&registry).await;
@@ -303,7 +303,7 @@ async fn a_window_that_could_not_open_a_task_anyway_gets_the_same_refusal_whethe
 #[tokio::test]
 async fn approving_and_marking_seen_are_licensed_only_for_the_approver() {
     let mut store = PlanStore::open(&db_path("plan-review-permit-approver")).unwrap();
-    let registry = WindowRegistry::new(DaemonConfig::default());
+    let registry = WindowRegistry::new(bins::default_config_with_holder());
     let table = LockTable::new();
     let owner = open_window(&registry).await;
     let pending = create(&mut store, &registry, &owner, Some(PlanReview::Pending));

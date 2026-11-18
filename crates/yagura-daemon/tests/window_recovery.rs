@@ -13,6 +13,7 @@
 //! Each case runs real daemon processes one after the other in one sandbox instance.
 
 use crate::common;
+use crate::common::bins::{self, echo_child_path, holder_child_path, relay_path, term_script_path};
 
 use std::collections::BTreeSet;
 use std::ffi::OsStr;
@@ -36,8 +37,7 @@ use yagura_protocol::{
 use yagura_test_support::HANG_GUARD;
 use yagura_test_support::ipc::{Connection, connect_with_retry};
 use yagura_test_support::process::{
-    COMPOSER_CONTINUATION_PREFIX, COMPOSER_MARKER, COMPOSER_SEPARATOR, echo_child_path,
-    holder_path, relay_path, term_script_path,
+    COMPOSER_CONTINUATION_PREFIX, COMPOSER_MARKER, COMPOSER_SEPARATOR,
 };
 use yagura_test_support::relay_stdio::RelayProcess;
 
@@ -50,8 +50,7 @@ const DA1: &[u8] = b"\x1b[c";
 const DA1_REPLY: &[u8] = b"\x1b[?1;2c";
 
 fn holder_child() -> String {
-    holder_path()
-        .with_file_name(format!("holder_child{}", std::env::consts::EXE_SUFFIX))
+    holder_child_path()
         .to_str()
         .expect("holder_child path must be UTF-8")
         .to_owned()
@@ -1712,7 +1711,7 @@ async fn a_window_whose_row_cannot_be_written_is_refused_before_its_holder_start
         )
         .await;
     let open = ClientMessage::OpenWindow {
-        command: yagura_test_support::process::echo_child_command(),
+        command: bins::echo_child_command(),
         cwd: None,
         name: None,
         vendor: None,
@@ -1777,11 +1776,7 @@ async fn report_from(sandbox: &Sandbox, child: &str, summary: &str) -> Option<St
 async fn opened_by(sandbox: &Sandbox, opener: &str, profile: Option<&str>) -> String {
     let mut as_opener = connect(sandbox).await;
     common::identify_declaring(&mut as_opener, opener, profile).await;
-    common::call_open_window(
-        &mut as_opener,
-        yagura_test_support::process::echo_child_command(),
-    )
-    .await
+    common::call_open_window(&mut as_opener, bins::echo_child_command()).await
 }
 
 /// The `(seq, summary)` of each report the store keeps for `window_id`, by place.
@@ -1881,11 +1876,7 @@ async fn a_window_rebuilt_from_its_launch_record_numbers_its_reports_on_and_is_n
     );
 
     // Another window numbered for the first time.
-    let other_parent = common::call_open_window(
-        &mut next.client,
-        yagura_test_support::process::echo_child_command(),
-    )
-    .await;
+    let other_parent = common::call_open_window(&mut next.client, bins::echo_child_command()).await;
     let other_child = opened_by(&sandbox, &other_parent, None).await;
     assert_eq!(
         report_from(&sandbox, &other_child, "OTHER-REPORT")
@@ -3965,9 +3956,7 @@ async fn a_guest_window_makes_its_overlay_through_its_door_as_a_direct_one_would
     )
     .unwrap();
     let probe = vec![
-        yagura_test_support::process::env_probe_path()
-            .display()
-            .to_string(),
+        bins::env_probe_path().display().to_string(),
         OVERLAY_VAR.to_string(),
     ];
     let convert = unchanged_convert();

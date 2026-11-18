@@ -8,6 +8,7 @@
 //! measured in `ipc_report_notice.rs`, not here.
 
 use crate::common;
+use crate::common::bins::{echo_child_command, ready_child_profile_source};
 
 use std::path::{Path, PathBuf};
 
@@ -34,7 +35,6 @@ use yagura_protocol::{
 use yagura_test_support::detection::CONTROL_READY_LINE;
 use yagura_test_support::ipc::Connection;
 use yagura_test_support::paths::TempDir;
-use yagura_test_support::process::{echo_child_command, ready_child_profile_source};
 
 // --- config builders ---------------------------------------------------------
 

@@ -9,6 +9,7 @@
 //! the cursor, and that a small change costs a small frame.
 
 use crate::common;
+use crate::common::bins;
 
 use std::collections::BTreeSet;
 
@@ -414,10 +415,7 @@ async fn attr_grid_cells_carry_the_colors_listed_by_hand() {
     let window_id = h
         .open(
             vec![
-                yagura_test_support::process::term_script_path()
-                    .to_str()
-                    .unwrap()
-                    .to_string(),
+                bins::term_script_path().to_str().unwrap().to_string(),
                 "attr-grid".to_string(),
                 size.cols.to_string(),
                 size.rows.to_string(),

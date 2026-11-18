@@ -17,6 +17,7 @@
 //! `ipc_approval_live.rs` documents.
 
 use crate::common;
+use crate::common::bins::ready_child_profile_source;
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -35,7 +36,6 @@ use yagura_protocol::{
     PlaybookState, ToolAutoApprove,
 };
 use yagura_test_support::ipc::Connection;
-use yagura_test_support::process::ready_child_profile_source;
 
 const NO_AUTO_APPROVE_PLAYBOOK: &str = "[approval]\nauto_approve = []\n";
 

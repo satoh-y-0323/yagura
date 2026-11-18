@@ -14,10 +14,11 @@ use crate::common;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use common::bins::mcp_cli_stub_path;
 use common::{
     Harness, approver_base_config, call_send_handoff_from_profile, empty_lookup,
-    expect_handoff_sent, handoff_profile_config, launch_args_logged_in, mcp_cli_stub_path, policy,
-    read_response, registration_dirs, send, write_profile,
+    expect_handoff_sent, handoff_profile_config, launch_args_logged_in, policy, read_response,
+    registration_dirs, send, write_profile,
 };
 use yagura_daemon::DaemonConfig;
 use yagura_daemon::profile::{ModelChoicesPlan, ProfileOs, parse_profile, resolve_model_choices};

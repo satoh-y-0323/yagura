@@ -20,6 +20,7 @@
 //! the Unix socket path, never the default instance's, so there is
 //! structurally nobody there to shut down.
 
+use crate::common::bins;
 use std::ffi::{OsStr, OsString};
 use std::path::PathBuf;
 use std::process::Command;
@@ -183,12 +184,6 @@ const SCOPED_INSTANCE_ID: &str = "scopedverify";
 /// exit code.
 const STORE_OVERRIDE_REJECTION_WORDING: &str = "cannot be combined with a named instance";
 
-/// Path of the `yagura-daemon` binary this test run itself just built (in the target
-/// tree this crate's tests run under), never an installed or separately running copy.
-fn daemon_bin() -> PathBuf {
-    PathBuf::from(env!("CARGO_BIN_EXE_yagura-daemon"))
-}
-
 /// A `YAGURA_STORE_DB` value pointing inside a throwaway temp directory. Never opened by
 /// this test: `--shutdown` / `--emit-status` must reject before the store-conflict check
 /// would even format this path, let alone touch it.
@@ -201,7 +196,7 @@ fn shutdown_is_not_refused_for_a_store_override_with_a_named_instance() {
     let tree = TempDir::new("yagura-cli-test", "daemon-shutdown-store-override");
     let store_override = scoped_store_override_path(&tree);
 
-    let output = Command::new(daemon_bin())
+    let output = Command::new(bins::daemon_exe())
         .arg("--shutdown")
         .env("YAGURA_INSTANCE", SCOPED_INSTANCE_ID)
         .env("YAGURA_STORE_DB", &store_override)
@@ -226,7 +221,7 @@ fn emit_status_is_not_refused_for_a_store_override_with_a_named_instance() {
     let tree = TempDir::new("yagura-cli-test", "daemon-emit-status-store-override");
     let store_override = scoped_store_override_path(&tree);
 
-    let output = Command::new(daemon_bin())
+    let output = Command::new(bins::daemon_exe())
         .args(["--emit-status", "idle"])
         .env("YAGURA_INSTANCE", SCOPED_INSTANCE_ID)
         .env("YAGURA_STORE_DB", &store_override)

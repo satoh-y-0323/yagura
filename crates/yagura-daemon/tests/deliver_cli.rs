@@ -14,6 +14,7 @@
 //! points the data, state and config base directories into a temporary directory.
 
 use crate::common;
+use crate::common::bins;
 
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -25,18 +26,13 @@ use yagura_daemon::DaemonConfig;
 use yagura_daemon::inbox::Parcel;
 use yagura_test_support::paths::TempDir;
 
-use common::{
-    Harness, VALID_TOKEN, approver_base_config, detection_config, echo_child_path, unique_temp_dir,
-};
+use common::bins::echo_child_path;
+use common::{Harness, VALID_TOKEN, approver_base_config, detection_config, unique_temp_dir};
 
 const WINDOW_ID_VAR: &str = "YAGURA_WINDOW_ID";
 const STATUS_TOKEN_VAR: &str = "YAGURA_STATUS_TOKEN";
 
 static COUNTER: AtomicU32 = AtomicU32::new(0);
-
-fn daemon_bin() -> PathBuf {
-    PathBuf::from(env!("CARGO_BIN_EXE_yagura-daemon"))
-}
 
 struct Setup {
     h: Harness,
@@ -117,7 +113,7 @@ fn door_command(
     window_id: Option<&str>,
     token: Option<&str>,
 ) -> Command {
-    let mut command = Command::new(daemon_bin());
+    let mut command = Command::new(bins::daemon_exe());
     command
         .args(args)
         .env("YAGURA_INSTANCE", instance)

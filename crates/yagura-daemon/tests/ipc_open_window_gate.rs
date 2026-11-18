@@ -9,6 +9,7 @@
 //! whether a window exists at each point.
 
 use crate::common;
+use crate::common::bins::{echo_child_command, ready_child_profile_source};
 
 use std::path::Path;
 
@@ -25,7 +26,6 @@ use yagura_protocol::{
 };
 use yagura_test_support::ipc::Connection;
 use yagura_test_support::paths::TempDir;
-use yagura_test_support::process::{echo_child_command, ready_child_profile_source};
 
 const PROFILE_ID: &str = "gate-profile";
 

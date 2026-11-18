@@ -12,8 +12,9 @@
 //! the way is the Unix-only launcher that puts one grandchild outside the
 //! capture's process group.
 
+use crate::common::bins::capture_child_path;
 use std::ffi::OsString;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::{Duration, Instant};
 
 use yagura_daemon::child_env::ChildBaseEnv;
@@ -24,43 +25,6 @@ use yagura_test_support::paths::TempDir;
 #[cfg(unix)]
 use yagura_test_support::process::wait_until_file_grows;
 use yagura_test_support::process::{process_is_running, wait_processes_gone_blocking};
-
-/// Path to the fixture binary `name` that belongs to the test binary
-/// currently running.
-///
-/// `cargo test` places a test binary in `target/{profile}/deps/`, while a
-/// plain bin target lands in `target/{profile}/`, so the search steps up one
-/// extra level when the parent directory is `deps`.
-///
-/// # Panics
-///
-/// Panics if the running executable's own path cannot be resolved, or if the
-/// fixture binary is not present next to it -- build it with
-/// `cargo build -p yagura-daemon --bin <name>` first.
-fn fixture_path(name: &str) -> PathBuf {
-    let mut dir =
-        std::env::current_exe().expect("current_exe should resolve for a running test binary");
-    dir.pop();
-    if dir.file_name().and_then(|n| n.to_str()) == Some("deps") {
-        dir.pop();
-    }
-    dir.push(if cfg!(windows) {
-        format!("{name}.exe")
-    } else {
-        name.to_string()
-    });
-    assert!(
-        dir.exists(),
-        "the {name} fixture binary is missing at {}: run `cargo build -p yagura-daemon --bin \
-         {name}` first",
-        dir.display()
-    );
-    dir
-}
-
-fn capture_child_path() -> PathBuf {
-    fixture_path("capture_child")
-}
 
 /// The argv for a window running `capture_child`: its own path followed by
 /// `mode_args` verbatim, with no shell wrapping.
@@ -1511,7 +1475,7 @@ fn arguments_with_quoting_hazards_reach_the_child_unchanged() {
         "backslash before quote \\\" end",
     ];
     let mut argv = vec![
-        fixture_path("argv_probe")
+        crate::common::bins::argv_probe_path()
             .to_str()
             .expect("argv_probe path must be valid UTF-8")
             .to_string(),

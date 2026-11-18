@@ -16,6 +16,7 @@
 //! verifies against.
 
 use crate::common;
+use crate::common::bins;
 
 use std::path::Path;
 use std::sync::Arc;
@@ -227,7 +228,8 @@ fn debug_output_does_not_leak_the_token_value() {
 
 #[tokio::test]
 async fn window_verify_status_token_accepts_the_configured_override() {
-    let registry = WindowRegistry::new(token_override_config(KNOWN_TOKEN));
+    let registry =
+        WindowRegistry::new(bins::config_with_holder(token_override_config(KNOWN_TOKEN)));
     let entry = open_long_lived_window(&registry).await;
     assert!(
         entry.verify_status_token(KNOWN_TOKEN),
@@ -238,7 +240,8 @@ async fn window_verify_status_token_accepts_the_configured_override() {
 
 #[tokio::test]
 async fn window_verify_status_token_rejects_a_value_other_than_the_configured_override() {
-    let registry = WindowRegistry::new(token_override_config(KNOWN_TOKEN));
+    let registry =
+        WindowRegistry::new(bins::config_with_holder(token_override_config(KNOWN_TOKEN)));
     let entry = open_long_lived_window(&registry).await;
     assert!(
         !entry.verify_status_token(OTHER_TOKEN),
@@ -291,7 +294,8 @@ async fn registry_open_injects_the_status_token_that_verify_status_token_accepts
         "echo $YAGURA_STATUS_TOKEN".to_string(),
     ];
 
-    let registry = WindowRegistry::new(token_override_config(KNOWN_TOKEN));
+    let registry =
+        WindowRegistry::new(bins::config_with_holder(token_override_config(KNOWN_TOKEN)));
     let window_id = registry
         .open(OpenWindowRequest {
             command,
@@ -345,7 +349,8 @@ async fn registry_open_injects_the_window_id_alongside_the_status_token() {
         "echo $YAGURA_STATUS_TOKEN $YAGURA_WINDOW_ID".to_string(),
     ];
 
-    let registry = WindowRegistry::new(token_override_config(KNOWN_TOKEN));
+    let registry =
+        WindowRegistry::new(bins::config_with_holder(token_override_config(KNOWN_TOKEN)));
     let window_id = registry
         .open(OpenWindowRequest {
             command,

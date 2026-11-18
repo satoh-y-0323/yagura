@@ -6,7 +6,8 @@
 
 use crate::common;
 
-use common::{Harness, attach, expect_error, hex_echo_path, read_response, send};
+use common::bins::hex_echo_path;
+use common::{Harness, attach, expect_error, read_response, send};
 use yagura_daemon::DaemonConfig;
 use yagura_protocol::{ClientMessage, check_input_bounds};
 

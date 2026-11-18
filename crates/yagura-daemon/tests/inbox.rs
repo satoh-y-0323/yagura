@@ -9,6 +9,7 @@
 //! fills it over IPC. Parcels are read back only through the doors, as a hook does.
 
 use crate::common;
+use crate::common::bins;
 
 use std::path::Path;
 use std::time::Duration;
@@ -29,10 +30,11 @@ use crate::hooks_injection::{credentials_folder_of, until_gone};
 use crate::send_message_lifecycle::{
     open_wake_window, outcome_of, register_wait, send_queued, state_of, wake_file_of, withdraw,
 };
+use common::bins::echo_child_path;
 use common::{
     CONTROL_DETECTION_NAME, Harness, READY_MARKER, VALID_TOKEN, approver_base_config, call_door,
-    detection_config, echo_child_path, expect_delivery, expect_error, query_status,
-    unique_temp_dir, wait_until_status,
+    detection_config, expect_delivery, expect_error, query_status, unique_temp_dir,
+    wait_until_status,
 };
 
 fn config(tag: &str, tweak: impl FnOnce(&mut DaemonConfig)) -> DaemonConfig {
@@ -74,7 +76,7 @@ pub(crate) async fn delivering_window(
         .registry
         .open_with_extra_env(
             OpenWindowRequest {
-                command: yagura_test_support::process::echo_child_command(),
+                command: bins::echo_child_command(),
                 cwd: None,
                 name: None,
                 vendor: None,

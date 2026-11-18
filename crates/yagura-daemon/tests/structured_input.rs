@@ -9,9 +9,10 @@
 
 use crate::common;
 
+use common::bins::hex_echo_path;
 use common::{
-    Harness, assert_hex_echo_receives, attach, contains_subsequence, expect_error, hex_echo_path,
-    hex_of, output_after_marker, read_response, send, wait_until_model_shows,
+    Harness, assert_hex_echo_receives, attach, contains_subsequence, expect_error, hex_of,
+    output_after_marker, read_response, send, wait_until_model_shows,
 };
 use yagura_daemon::DaemonConfig;
 use yagura_protocol::{

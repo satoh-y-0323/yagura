@@ -201,10 +201,9 @@ pub fn unique_suffix() -> String {
 /// [`sweep_dead_runs`] removes it with the run directory (use [`TempDir`] to
 /// remove it on drop instead).
 ///
-/// The path must not contain whitespace: [`crate::process::grandchild_command`]
-/// interpolates a path from such a directory into a command line the child
-/// re-parses internally (`cmd.exe`, `/bin/sh -c`), where a quoted path cannot
-/// be re-quoted safely.
+/// The path must not contain whitespace: the Unix grandchild fixture embeds a
+/// path from such a directory into a command line the child re-parses
+/// internally (`/bin/sh -c`), where a quoted path cannot be re-quoted safely.
 ///
 /// # Panics
 ///

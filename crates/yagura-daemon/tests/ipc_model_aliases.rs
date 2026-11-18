@@ -27,32 +27,7 @@ use yagura_protocol::{
 use yagura_test_support::HANG_GUARD;
 use yagura_test_support::ipc::Connection;
 
-// --- the capture_child fixture binary ---------------------------------------
-
-/// Path to the `capture_child` fixture binary next to this test binary. See
-/// `tests/one_shot_capture.rs` for the same resolution, duplicated here
-/// because integration-test binaries cannot import each other's items.
-fn capture_child_path() -> PathBuf {
-    let mut dir =
-        std::env::current_exe().expect("current_exe should resolve for a running test binary");
-    dir.pop();
-    if dir.file_name().and_then(|n| n.to_str()) == Some("deps") {
-        dir.pop();
-    }
-    let name = if cfg!(windows) {
-        "capture_child.exe"
-    } else {
-        "capture_child"
-    };
-    dir.push(name);
-    assert!(
-        dir.exists(),
-        "the capture_child fixture binary is missing at {}: run `cargo build -p yagura-daemon \
-         --bin capture_child` first",
-        dir.display()
-    );
-    dir
-}
+use common::bins::capture_child_path;
 
 // --- configuration ------------------------------------------------------------
 

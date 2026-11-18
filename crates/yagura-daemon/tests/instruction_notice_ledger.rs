@@ -24,17 +24,16 @@
 //! and `tests/report_ledger.rs`.
 
 use crate::common;
+use crate::common::bins::{self, echo_child_path};
 
 use std::path::PathBuf;
 
-use yagura_daemon::DaemonConfig;
 use yagura_daemon::control::RequestOrigin;
 use yagura_daemon::plan::{PlanSpec, TaskSpec, ValidatedPlan, validate_plan};
 use yagura_daemon::plan_permit::{self, ChangeKind, LockTable, PermitError};
 use yagura_daemon::plan_store::PlanStore;
 use yagura_daemon::window::{OpenWindowRequest, WindowRegistry};
 use yagura_protocol::InstructionNoticeState;
-use yagura_test_support::process::echo_child_path;
 
 fn db_path(tag: &str) -> PathBuf {
     common::unique_temp_dir(tag).join("plan.db")
@@ -117,7 +116,7 @@ async fn store_registry_owner_and_bound_reporter(
     tag: &str,
 ) -> (PlanStore, WindowRegistry, String, String, String) {
     let mut store = PlanStore::open(&db_path(tag)).expect("PlanStore::open must succeed");
-    let registry = WindowRegistry::new(DaemonConfig::default());
+    let registry = WindowRegistry::new(bins::default_config_with_holder());
     let owner = open_window(&registry).await;
     let create_permit = plan_permit::issue_create(&RequestOrigin::Window(owner.clone()), &registry)
         .expect("a freshly opened window must be able to create a plan");
@@ -222,7 +221,7 @@ async fn writing_an_instruction_notice_state_updates_only_the_targeted_tasks_col
 async fn binding_a_task_sets_its_instruction_notice_to_pending_only_when_it_carries_one() {
     let mut store =
         PlanStore::open(&db_path("notice-ledger-bind-pending")).expect("PlanStore::open");
-    let registry = WindowRegistry::new(DaemonConfig::default());
+    let registry = WindowRegistry::new(bins::default_config_with_holder());
     let owner = open_window(&registry).await;
     let create_permit = plan_permit::issue_create(&RequestOrigin::Window(owner.clone()), &registry)
         .expect("the owner must be able to create a plan");
@@ -500,7 +499,7 @@ async fn replacing_tasks_clears_a_survivors_instruction_notice_state_when_the_in
 #[tokio::test]
 async fn opening_as_a_new_boot_turns_a_pending_instruction_notice_into_window_closed() {
     let path = db_path("notice-ledger-new-boot");
-    let registry = WindowRegistry::new(DaemonConfig::default());
+    let registry = WindowRegistry::new(bins::default_config_with_holder());
     let owner = open_window(&registry).await;
     let reporter = open_window(&registry).await;
 

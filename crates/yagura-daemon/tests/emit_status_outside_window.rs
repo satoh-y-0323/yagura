@@ -13,7 +13,7 @@
 //! data, state and config base directories into a temporary directory, so the
 //! instance directories it creates never land in the user's real profile.
 
-use std::path::PathBuf;
+use crate::common::bins;
 use std::process::{Command, Output, Stdio};
 use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -22,10 +22,6 @@ use yagura_test_support::paths::TempDir;
 
 const WINDOW_ID_VAR: &str = "YAGURA_WINDOW_ID";
 const STATUS_TOKEN_VAR: &str = "YAGURA_STATUS_TOKEN";
-
-fn daemon_bin() -> PathBuf {
-    PathBuf::from(env!("CARGO_BIN_EXE_yagura-daemon"))
-}
 
 /// Runs `--emit-status running` with exactly the given window variables set; the test
 /// process's own values (it may itself run inside a yagura window) are never inherited.
@@ -38,7 +34,7 @@ fn emit_status(window_id: Option<&str>, token: Option<&str>) -> Output {
     );
     let _endpoint = InstanceEndpoint::new(&instance);
     let bases = TempDir::new("yagura-emit", "bases");
-    let mut command = Command::new(daemon_bin());
+    let mut command = Command::new(bins::daemon_exe());
     command
         .args(["--emit-status", "running", "--source", "hook"])
         .env("YAGURA_INSTANCE", &instance)
@@ -142,7 +138,7 @@ fn launch_overlay(extra: &[&str], window_id: Option<&str>, token: Option<&str>) 
     );
     let _endpoint = InstanceEndpoint::new(&instance);
     let bases = TempDir::new("yagura-emit", "overlay-bases");
-    let mut command = Command::new(daemon_bin());
+    let mut command = Command::new(bins::daemon_exe());
     command
         .arg("--launch-overlay")
         .args(extra)

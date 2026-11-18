@@ -15,6 +15,7 @@
 //! self-exiting command via a launch profile, never a real vendor CLI.
 
 use crate::common;
+use crate::common::bins::{self, argv_probe_profile_source, ready_child_profile_source};
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -30,9 +31,7 @@ use yagura_protocol::{
     TaskAssignment,
 };
 use yagura_test_support::ipc::Connection;
-use yagura_test_support::process::{
-    argv_probe_profile_source, exit_with_code_command, ready_child_profile_source,
-};
+use yagura_test_support::process::exit_with_code_command;
 
 // --- fixture profiles ----------------------------------------------------
 
@@ -143,9 +142,7 @@ fn task_with_role(task_id: &str, role: &str) -> PlanTaskSpec {
 // --- connection helpers ------------------------------------------------
 
 async fn open_and_identify(h: &Harness, client: &mut Connection) -> String {
-    let window_id = h
-        .open(yagura_test_support::process::echo_child_command(), None)
-        .await;
+    let window_id = h.open(bins::echo_child_command(), None).await;
     identify(client, &window_id).await;
     window_id
 }

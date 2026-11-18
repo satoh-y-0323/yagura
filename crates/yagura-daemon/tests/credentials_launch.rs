@@ -14,6 +14,7 @@
 //! never reached.
 
 use crate::common;
+use crate::common::bins::{self, argv_probe_path, env_probe_path};
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -23,8 +24,7 @@ use common::real_daemon::{RunningDaemon, Sandbox, daemon_bin};
 use common::{VALID_TOKEN, launch_args_logged_in, read_response, send};
 use yagura_protocol::{ClientMessage, DaemonMessage, Declaration, WindowStatus};
 use yagura_test_support::process::{
-    COMPOSER_CONTINUATION_PREFIX, COMPOSER_MARKER, COMPOSER_SEPARATOR, argv_probe_path,
-    env_probe_path,
+    COMPOSER_CONTINUATION_PREFIX, COMPOSER_MARKER, COMPOSER_SEPARATOR,
 };
 
 const WINDOW_ID_VAR: &str = yagura_protocol::WINDOW_ID_ENV;
@@ -542,7 +542,7 @@ fn top_level(tree: &[PathBuf]) -> Vec<&PathBuf> {
 /// holder and, on Windows, the pseudoconsole pair.
 fn install_daemon_with_bridge(sandbox: &Sandbox) -> PathBuf {
     let dir = sandbox.tree.make_dir("install");
-    yagura_test_support::process::install_window_runtime(&dir);
+    bins::install_window_runtime(&dir);
     let suffix = std::env::consts::EXE_SUFFIX;
     let bin = dir.join(format!("yagura-daemon{suffix}"));
     yagura_test_support::process::install_exe(&daemon_bin(), &bin);
@@ -724,9 +724,7 @@ pub(crate) fn shipped_with_command(
 /// daemon's paths as they are would.
 pub(crate) fn unchanged_convert() -> Vec<String> {
     vec![
-        yagura_test_support::process::capture_child_path()
-            .display()
-            .to_string(),
+        bins::capture_child_path().display().to_string(),
         "echo".to_string(),
         "0".to_string(),
         "{path}".to_string(),

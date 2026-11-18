@@ -21,7 +21,7 @@ use yagura_os::{CaptureEnv, CaptureLimits, CaptureOutcome};
 
 fn stub_argv(mode_args: &[&str]) -> Vec<String> {
     let mut argv = vec![
-        common::mcp_cli_stub_path()
+        common::bins::mcp_cli_stub_path()
             .to_str()
             .expect("mcp_cli_stub path must be valid UTF-8")
             .to_string(),

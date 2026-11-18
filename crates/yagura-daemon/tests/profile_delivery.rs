@@ -17,6 +17,7 @@
 //! this binary.
 
 use crate::common;
+use crate::common::bins::argv_probe_path;
 
 use std::path::{Path, PathBuf};
 
@@ -34,7 +35,6 @@ use yagura_daemon::window::{CliInjection, InjectionKind, WindowProvenance};
 use yagura_os::program::ProgramLookup;
 use yagura_protocol::{DeliveryStream, ProfileGuidance, ProfileUnavailableKind};
 use yagura_test_support::paths::TempDir;
-use yagura_test_support::process::argv_probe_path;
 
 // --- fixtures ---------------------------------------------------------------
 

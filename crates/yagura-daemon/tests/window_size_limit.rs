@@ -7,6 +7,7 @@
 //! `PtySession::resize`; `open_window` carries no size.
 
 use crate::common;
+use crate::common::bins;
 
 use common::{Harness, read_response, send};
 use yagura_daemon::DaemonConfig;
@@ -24,9 +25,7 @@ const TOO_LARGE: [(u16, u16); 4] = [
 ];
 
 async fn attached_echo_window(h: &Harness) -> (yagura_test_support::ipc::Connection, String) {
-    let window_id = h
-        .open(yagura_test_support::process::echo_child_command(), None)
-        .await;
+    let window_id = h.open(bins::echo_child_command(), None).await;
     let mut client = h.connect().await;
     send(
         &mut client,
@@ -88,7 +87,7 @@ async fn resize_over_ipc_to_exactly_the_limit_is_accepted() {
 #[tokio::test]
 async fn pty_session_resize_beyond_the_limit_fails_and_changes_nothing() {
     let config = DaemonConfig::default();
-    let child = common::echo_child_path();
+    let child = common::bins::echo_child_path();
     let session = common::spawn_session(&[child.to_str().unwrap()], &config)
         .await
         .expect("spawn echo_child");
@@ -106,7 +105,7 @@ async fn pty_session_resize_beyond_the_limit_fails_and_changes_nothing() {
 #[tokio::test]
 async fn pty_session_resize_to_exactly_the_limit_succeeds() {
     let config = DaemonConfig::default();
-    let child = common::echo_child_path();
+    let child = common::bins::echo_child_path();
     let session = common::spawn_session(&[child.to_str().unwrap()], &config)
         .await
         .expect("spawn echo_child");

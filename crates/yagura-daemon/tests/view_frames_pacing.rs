@@ -12,6 +12,7 @@
 //! a synchronized update holding the view included.
 
 use crate::common;
+use crate::common::bins;
 
 use common::Harness;
 use common::views::{
@@ -316,10 +317,7 @@ async fn a_synchronized_update_that_grows_past_the_byte_bound_is_shown_without_e
     let window_id = h
         .open(
             vec![
-                yagura_test_support::process::term_script_path()
-                    .to_str()
-                    .unwrap()
-                    .to_string(),
+                bins::term_script_path().to_str().unwrap().to_string(),
                 "sync-flood".to_string(),
                 (1024 * 1024).to_string(),
             ],

@@ -9,6 +9,7 @@
 //! `IpcServer` pair purely through the IPC wire protocol.
 
 use crate::common;
+use crate::common::bins;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -250,7 +251,9 @@ async fn pty_output_pattern_match_reaches_attached_client_as_status_changed() {
     let dir = detection_dir("pattern-match");
     write_definition(&dir, "wiring-test", WIRING_TEST_DEFINITION);
     let config = detection_config(&dir, "wiring-test");
-    let registry = Arc::new(WindowRegistry::new(config.clone()));
+    let registry = Arc::new(WindowRegistry::new(bins::config_with_holder(
+        config.clone(),
+    )));
     let window_id = open_echo_window_id(&registry, Some("wiring-test")).await;
     let pipe_name = unique_endpoint_name("yagura-test", "detector-pattern-match");
     let server = Arc::new(IpcServer::new(
@@ -283,7 +286,9 @@ async fn status_event_reaches_attached_client_as_status_changed() {
     let dir = detection_dir("status-event");
     write_definition(&dir, "status-event-test", STATUS_EVENT_TEST_DEFINITION);
     let config = detection_config(&dir, "status-event-test");
-    let registry = Arc::new(WindowRegistry::new(config.clone()));
+    let registry = Arc::new(WindowRegistry::new(bins::config_with_holder(
+        config.clone(),
+    )));
     let window_id = open_echo_window_id(&registry, Some("status-event-test")).await;
     let pipe_name = unique_endpoint_name("yagura-test", "detector-status-event");
     let server = Arc::new(IpcServer::new(
@@ -318,7 +323,9 @@ async fn status_event_reaches_attached_client_as_status_changed() {
 #[tokio::test]
 async fn child_exit_reaches_attached_client_as_status_changed_exited() {
     let config = base_config();
-    let registry = Arc::new(WindowRegistry::new(config.clone()));
+    let registry = Arc::new(WindowRegistry::new(bins::config_with_holder(
+        config.clone(),
+    )));
     let delayed_exit_command = if cfg!(windows) {
         vec![
             "cmd.exe".to_string(),
@@ -371,7 +378,9 @@ async fn child_exit_reaches_attached_client_as_status_changed_exited() {
 #[tokio::test]
 async fn status_event_rejects_invalid_source() {
     let config = base_config();
-    let registry = Arc::new(WindowRegistry::new(config.clone()));
+    let registry = Arc::new(WindowRegistry::new(bins::config_with_holder(
+        config.clone(),
+    )));
     // The target window is resolved before the source is judged, so this event
     // needs a real window to be attributed to.
     let window_id = open_echo_window_id(&registry, None).await;
@@ -438,7 +447,9 @@ async fn status_changed_is_not_sent_to_unattached_connection() {
     let dir = detection_dir("unattached");
     write_definition(&dir, "wiring-test", WIRING_TEST_DEFINITION);
     let config = detection_config(&dir, "wiring-test");
-    let registry = Arc::new(WindowRegistry::new(config.clone()));
+    let registry = Arc::new(WindowRegistry::new(bins::config_with_holder(
+        config.clone(),
+    )));
     let window_id = open_echo_window_id(&registry, Some("wiring-test")).await;
     let pipe_name = unique_endpoint_name("yagura-test", "detector-unattached");
     let server = Arc::new(IpcServer::new(
@@ -486,7 +497,9 @@ async fn status_changed_is_not_sent_to_unattached_connection() {
 #[tokio::test]
 async fn attach_immediately_sends_current_status_as_status_changed() {
     let config = base_config();
-    let registry = Arc::new(WindowRegistry::new(config.clone()));
+    let registry = Arc::new(WindowRegistry::new(bins::config_with_holder(
+        config.clone(),
+    )));
     let window_id = open_echo_window_id(&registry, None).await;
     let pipe_name = unique_endpoint_name("yagura-test", "detector-attach-initial");
     let server = Arc::new(IpcServer::new(
@@ -518,7 +531,9 @@ async fn resize_then_output_still_reaches_status_changed() {
     let dir = detection_dir("resize");
     write_definition(&dir, "resize-test", RESIZE_TEST_DEFINITION);
     let config = detection_config(&dir, "resize-test");
-    let registry = Arc::new(WindowRegistry::new(config.clone()));
+    let registry = Arc::new(WindowRegistry::new(bins::config_with_holder(
+        config.clone(),
+    )));
     let window_id = open_echo_window_id(&registry, Some("resize-test")).await;
     let pipe_name = unique_endpoint_name("yagura-test", "detector-resize");
     let server = Arc::new(IpcServer::new(
@@ -555,7 +570,9 @@ async fn assert_selected_definition_status(
     expected: WindowStatus,
 ) {
     let config = detection_config(dir, detection_name);
-    let registry = Arc::new(WindowRegistry::new(config.clone()));
+    let registry = Arc::new(WindowRegistry::new(bins::config_with_holder(
+        config.clone(),
+    )));
     let window_id = open_echo_window_id(&registry, Some(detection_name)).await;
     let pipe_name =
         unique_endpoint_name("yagura-test", &format!("detector-select-{detection_name}"));
@@ -609,7 +626,9 @@ async fn invalid_detection_name_keeps_engine_unknown_and_daemon_alive() {
         detection_name: "../escape".to_string(),
         ..base_config()
     };
-    let registry = Arc::new(WindowRegistry::new(config.clone()));
+    let registry = Arc::new(WindowRegistry::new(bins::config_with_holder(
+        config.clone(),
+    )));
     let window_id = open_echo_window_id(&registry, None).await;
     let pipe_name = unique_endpoint_name("yagura-test", "detector-invalid-name");
     let server = Arc::new(IpcServer::new(
@@ -659,7 +678,9 @@ async fn missing_selected_definition_file_falls_back_to_unknown_and_keeps_daemon
     // A detection_name from the valid charset whose .toml file is never created.
     let dir = detection_dir("missing-def");
     let config = detection_config(&dir, "missing-def");
-    let registry = Arc::new(WindowRegistry::new(config.clone()));
+    let registry = Arc::new(WindowRegistry::new(bins::config_with_holder(
+        config.clone(),
+    )));
     let window_id = open_echo_window_id(&registry, Some("missing-def")).await;
     let pipe_name = unique_endpoint_name("yagura-test", "detector-missing-def");
     let server = Arc::new(IpcServer::new(
@@ -694,7 +715,9 @@ async fn malformed_selected_definition_file_falls_back_to_unknown_and_keeps_daem
     let dir = detection_dir("malformed-def");
     write_definition(&dir, "broken", MALFORMED_DEFINITION);
     let config = detection_config(&dir, "broken");
-    let registry = Arc::new(WindowRegistry::new(config.clone()));
+    let registry = Arc::new(WindowRegistry::new(bins::config_with_holder(
+        config.clone(),
+    )));
     let window_id = open_echo_window_id(&registry, Some("broken")).await;
     let pipe_name = unique_endpoint_name("yagura-test", "detector-malformed-def");
     let server = Arc::new(IpcServer::new(

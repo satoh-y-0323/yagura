@@ -11,6 +11,7 @@
 //! leaves the table's `answers` beside its credentials file, with its wake path.
 
 use crate::common;
+use crate::common::bins::{argv_probe_path, argv_probe_profile_source, ready_child_path};
 
 use std::path::{Path, PathBuf};
 
@@ -23,7 +24,6 @@ use yagura_daemon::profile::ProfileOs;
 use yagura_protocol::{ClientMessage, DaemonMessage};
 use yagura_test_support::ipc::Connection;
 use yagura_test_support::paths::TempDir;
-use yagura_test_support::process::{argv_probe_path, argv_probe_profile_source, ready_child_path};
 
 const HOOKS_JSON: &str = "{\"hooks\":{\"Stop\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"yagura-daemon --emit-status waiting_input --source claude-code\"}]}]}}";
 
@@ -489,7 +489,7 @@ const CONVERTED_HOOKS_PATH: &str = "/converted/hooks-settings.json";
 /// subcommand, plus the `[env]` that makes it print `CONVERTED_HOOKS_PATH`
 /// and exit with `exit_code`.
 fn converting_tables(exit_code: i32) -> String {
-    let stub = common::mcp_cli_stub_path();
+    let stub = common::bins::mcp_cli_stub_path();
     format!(
         "\n[host_paths]\nconvert = ['{}', \"probe\", \"{{path}}\"]\n\n\
          [env]\nMCP_CLI_STUB_PROBE_OUTPUT = \"{CONVERTED_HOOKS_PATH}\"\n\
@@ -780,7 +780,7 @@ pub(crate) fn wake_profile(
             host_paths.push((
                 "state_base",
                 strings(&[
-                    common::mcp_cli_stub_path().display().to_string(),
+                    common::bins::mcp_cli_stub_path().display().to_string(),
                     "probe".to_string(),
                     "state".to_string(),
                 ]),

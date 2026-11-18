@@ -15,6 +15,7 @@
 //! separate contract, and this file only measures the ledger.
 
 use crate::common;
+use crate::common::bins::{echo_child_command, ready_child_profile_source};
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -31,7 +32,6 @@ use yagura_protocol::{
     TASK_INSTRUCTION_MAX_BYTES,
 };
 use yagura_test_support::ipc::Connection;
-use yagura_test_support::process::{echo_child_command, ready_child_profile_source};
 
 // --- fixtures ----------------------------------------------------------
 

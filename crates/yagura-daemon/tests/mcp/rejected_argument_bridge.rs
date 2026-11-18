@@ -101,7 +101,9 @@ mod real_daemon {
             }),
             ..DaemonConfig::default()
         };
-        let registry = Arc::new(WindowRegistry::new(config.clone()));
+        let registry = Arc::new(WindowRegistry::new(
+            crate::common::bins::config_with_holder(config.clone()),
+        ));
         let endpoint = unique_endpoint_name("yagura-mcp-rejected-arg", "cwd");
         let server = Arc::new(IpcServer::new(
             registry.clone(),

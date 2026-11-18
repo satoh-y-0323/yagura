@@ -16,6 +16,7 @@
 //! so does not depend on this test process's own environment.
 
 use crate::common;
+use crate::common::bins::{self, argv_probe_path, argv_probe_profile_source, env_probe_path};
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -31,7 +32,6 @@ use yagura_daemon::store;
 use yagura_protocol::{ClientMessage, DaemonMessage, DeliveryState, PlanInfo, PlanTaskSpec};
 use yagura_test_support::ipc::Connection;
 use yagura_test_support::paths::TempDir;
-use yagura_test_support::process::{argv_probe_path, argv_probe_profile_source, env_probe_path};
 
 // --- fixtures --------------------------------------------------------------
 
@@ -643,9 +643,7 @@ async fn open_task_window_carries_the_same_mcp_injection_into_the_childs_argv() 
     let (h, _locks) = Harness::start_with_ledger("mcp-inject-task-window", config).await;
 
     let mut owner = h.connect().await;
-    let owner_window_id = h
-        .open(yagura_test_support::process::echo_child_command(), None)
-        .await;
+    let owner_window_id = h.open(bins::echo_child_command(), None).await;
     identify(&mut owner, &owner_window_id).await;
 
     let plan = create_plan_ok(
@@ -812,11 +810,7 @@ async fn open_window_from_profile_with_launch_options_persists_profile_model_and
         )
         .await,
     );
-    let _raw_window_id = call_open_window(
-        &mut client,
-        yagura_test_support::process::echo_child_command(),
-    )
-    .await;
+    let _raw_window_id = call_open_window(&mut client, bins::echo_child_command()).await;
 
     let rows = common::store_fixtures::wait_for_window_rows(
         &db_path,
@@ -1038,7 +1032,7 @@ async fn open_window_from_profile_renders_bridge_json_from_the_host_paths_conver
         "{ENV_REFS_TABLE}\n[host_paths]\nconvert = ['{}', \"probe\", \"{{path}}\"]\n\n\
          [env]\nMCP_CLI_STUB_PROBE_OUTPUT = \"{CONVERTED_BRIDGE_PATH}\"\n\
          MCP_CLI_STUB_PROBE_EXIT_CODE = \"0\"\n",
-        common::mcp_cli_stub_path().display()
+        common::bins::mcp_cli_stub_path().display()
     );
     write_profile(
         &profiles_dir,
@@ -1062,7 +1056,7 @@ async fn open_window_from_profile_renders_bridge_json_from_the_host_paths_conver
 /// bridge, the holder and, on Windows, the pseudoconsole pair.
 fn install_daemon_with_bridge(sandbox: &common::real_daemon::Sandbox) -> PathBuf {
     let dir = sandbox.tree.make_dir("install");
-    yagura_test_support::process::install_window_runtime(&dir);
+    bins::install_window_runtime(&dir);
     let suffix = std::env::consts::EXE_SUFFIX;
     let bin = dir.join(format!("yagura-daemon{suffix}"));
     yagura_test_support::process::install_exe(&common::real_daemon::daemon_bin(), &bin);

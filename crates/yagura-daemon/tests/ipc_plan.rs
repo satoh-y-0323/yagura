@@ -15,6 +15,7 @@
 //! command, never a real vendor CLI.
 
 use crate::common;
+use crate::common::bins::echo_child_path;
 
 use std::path::Path;
 use std::sync::Arc;
@@ -28,7 +29,7 @@ use yagura_daemon::plan;
 use yagura_daemon::plan_permit::LockTable;
 use yagura_protocol::{ClientMessage, DaemonMessage, PlanInfo, PlanSummary, PlanTaskSpec};
 use yagura_test_support::ipc::Connection;
-use yagura_test_support::process::{echo_child_path, exit_with_code_command};
+use yagura_test_support::process::exit_with_code_command;
 
 // --- fixtures ----------------------------------------------------------
 

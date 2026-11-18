@@ -16,6 +16,7 @@
 //! the same wait; the hang guards only bound a failure.
 
 use crate::common;
+use crate::common::bins;
 
 use std::path::Path;
 
@@ -29,7 +30,6 @@ use common::{
 use yagura_daemon::DaemonConfig;
 use yagura_protocol::{ClientMessage, DaemonMessage, ReportOutcome, WindowStatus, WithdrawReason};
 use yagura_test_support::ipc::Connection;
-use yagura_test_support::process;
 
 use yagura_test_support::HANG_GUARD;
 
@@ -202,9 +202,7 @@ async fn stage(tag: &str, requests: Option<&str>) -> (Stage, Connection) {
     let mut observer = h.connect().await;
 
     write_requester_definition(&dir, "requester", requests);
-    let requester_window = h
-        .open(process::echo_child_command(), Some("requester"))
-        .await;
+    let requester_window = h.open(bins::echo_child_command(), Some("requester")).await;
     h.write_input(&requester_window, format!("{WAITING_INPUT}\r\n").as_bytes())
         .await;
     wait_until_status(&mut observer, &requester_window, WindowStatus::WaitingInput).await;
@@ -233,7 +231,7 @@ async fn start_wait_for_report(stage: &Stage, requester: &mut Connection) -> Str
     send(
         requester,
         &ClientMessage::OpenWindow {
-            command: process::echo_child_command(),
+            command: bins::echo_child_command(),
             cwd: None,
             name: None,
             vendor: None,
@@ -575,7 +573,7 @@ async fn an_open_window_waiting_for_an_approver_is_withdrawn_when_its_requester_
     send(
         &mut requester,
         &ClientMessage::OpenWindow {
-            command: process::echo_child_command(),
+            command: bins::echo_child_command(),
             cwd: None,
             name: None,
             vendor: None,
@@ -623,9 +621,7 @@ async fn an_ais_interrupt_by_key_ends_what_the_requester_was_waiting_for() {
     let h = Harness::start("interrupt-key-requests", config).await;
     let mut observer = h.connect().await;
     write_requester_definition(&dir, "requester", None);
-    let requester_window = h
-        .open(process::echo_child_command(), Some("requester"))
-        .await;
+    let requester_window = h.open(bins::echo_child_command(), Some("requester")).await;
     h.write_input(&requester_window, format!("{WAITING_INPUT}\r\n").as_bytes())
         .await;
     wait_until_status(&mut observer, &requester_window, WindowStatus::WaitingInput).await;

@@ -8,6 +8,7 @@
 //! wording that crosses the process boundary towards clients stays pinned.
 
 use crate::common;
+use crate::common::bins;
 
 use yagura_test_support::paths::{TempDir, write_definition};
 
@@ -73,11 +74,11 @@ async fn open_reports_exclusive_mode_reports_not_found_instead_of_the_raw_read_f
     let tmp = TempDir::new("yg", "exclusive");
     let dir = tmp.path().to_path_buf();
 
-    let registry = WindowRegistry::new(DaemonConfig {
+    let registry = WindowRegistry::new(bins::config_with_holder(DaemonConfig {
         detection_dir: Some(dir.clone()),
         bundled_definitions: false,
         ..DaemonConfig::default()
-    });
+    }));
 
     let opened = common::open_echo_window(&registry, None).await;
 
@@ -127,11 +128,11 @@ async fn open_reports_an_unscannable_directory_as_unconfirmed_rather_than_not_fo
     let unreadable = root.path().join("does-not-exist");
     let name = "unscannable-missing-everywhere";
 
-    let registry = WindowRegistry::new(DaemonConfig {
+    let registry = WindowRegistry::new(bins::config_with_holder(DaemonConfig {
         detection_dir: Some(unreadable.clone()),
         bundled_definitions: false,
         ..DaemonConfig::default()
-    });
+    }));
 
     let opened = common::open_echo_window(&registry, Some(name)).await;
 
@@ -175,12 +176,12 @@ async fn open_reports_overlay_mode_reports_the_name_and_both_layers() {
     let dir = TempDir::new("yg", "overlay");
     let name = "overlay-absent";
 
-    let registry = WindowRegistry::new(DaemonConfig {
+    let registry = WindowRegistry::new(bins::config_with_holder(DaemonConfig {
         detection_dir: Some(dir.path().to_path_buf()),
         bundled_definitions: true,
         detection_name: name.to_string(),
         ..DaemonConfig::default()
-    });
+    }));
 
     let opened = common::open_echo_window(&registry, None).await;
 
@@ -218,10 +219,10 @@ async fn open_reports_explicit_detection_path_failed_to_load_when_the_named_toml
     let dir = tree.make_dir("repo/detection");
     let name = "missing-def";
 
-    let registry = WindowRegistry::new(DaemonConfig {
+    let registry = WindowRegistry::new(bins::config_with_holder(DaemonConfig {
         detection_dir: Some(dir),
         ..DaemonConfig::default()
-    });
+    }));
 
     let opened = common::open_echo_window(&registry, Some(name)).await;
 
@@ -246,10 +247,10 @@ async fn open_reports_explicit_detection_path_failed_to_load_when_the_toml_does_
     std::fs::write(dir.join(format!("{name}.toml")), "this is not [ valid toml")
         .expect("write the unparseable definition file");
 
-    let registry = WindowRegistry::new(DaemonConfig {
+    let registry = WindowRegistry::new(bins::config_with_holder(DaemonConfig {
         detection_dir: Some(dir),
         ..DaemonConfig::default()
-    });
+    }));
 
     let opened = common::open_echo_window(&registry, Some(name)).await;
 
@@ -271,11 +272,11 @@ async fn open_reports_defensive_invalid_default_detection_name() {
     let tree = TempDir::new("yagura-cli-test", "invalid-default-name");
     let dir = tree.make_dir("repo/detection");
 
-    let registry = WindowRegistry::new(DaemonConfig {
+    let registry = WindowRegistry::new(bins::config_with_holder(DaemonConfig {
         detection_dir: Some(dir),
         detection_name: "..".to_string(),
         ..DaemonConfig::default()
-    });
+    }));
 
     let opened = common::open_echo_window(&registry, None).await;
 
@@ -297,10 +298,10 @@ async fn open_reports_no_warning_with_an_explicit_valid_detection_name() {
     let name = "explicit-def";
     write_definition(&dir, name, &definition_toml(name));
 
-    let registry = WindowRegistry::new(DaemonConfig {
+    let registry = WindowRegistry::new(bins::config_with_holder(DaemonConfig {
         detection_dir: Some(dir),
         ..DaemonConfig::default()
-    });
+    }));
 
     let opened = common::open_echo_window(&registry, Some(name)).await;
 
@@ -318,10 +319,10 @@ async fn open_reports_no_warning_with_the_default_detection_name() {
     let dir = tree.make_dir("repo/detection");
     write_definition(&dir, "generic-shell", &definition_toml("generic-shell"));
 
-    let registry = WindowRegistry::new(DaemonConfig {
+    let registry = WindowRegistry::new(bins::config_with_holder(DaemonConfig {
         detection_dir: Some(dir),
         ..DaemonConfig::default()
-    });
+    }));
 
     let opened = common::open_echo_window(&registry, None).await;
 
@@ -357,10 +358,10 @@ async fn open_reports_a_sanitized_single_line_warning_for_an_unparseable_definit
     std::fs::write(dir.join(format!("{name}.toml")), broken)
         .expect("write the unparseable definition file");
 
-    let registry = WindowRegistry::new(DaemonConfig {
+    let registry = WindowRegistry::new(bins::config_with_holder(DaemonConfig {
         detection_dir: Some(dir),
         ..DaemonConfig::default()
-    });
+    }));
 
     let opened = common::open_echo_window(&registry, Some(name)).await;
 
@@ -437,10 +438,10 @@ region = "bottom"
     std::fs::write(dir.join(format!("{name}.toml")), contents)
         .expect("write the invalid-pattern definition file");
 
-    let registry = WindowRegistry::new(DaemonConfig {
+    let registry = WindowRegistry::new(bins::config_with_holder(DaemonConfig {
         detection_dir: Some(dir),
         ..DaemonConfig::default()
-    });
+    }));
 
     let opened = common::open_echo_window(&registry, Some(name)).await;
 

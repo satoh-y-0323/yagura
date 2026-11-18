@@ -6,16 +6,16 @@
 //! what is measured is what a permit lets a caller reach.
 
 use crate::common;
+use crate::common::bins::{self, echo_child_path};
 
 use std::path::{Path, PathBuf};
 
-use yagura_daemon::DaemonConfig;
 use yagura_daemon::control::RequestOrigin;
 use yagura_daemon::ticket::{TicketConfig, TicketState};
 use yagura_daemon::ticket_permit::{self, TicketPermitError};
 use yagura_daemon::ticket_store::{NewTicket, TicketQuery, TicketStore};
 use yagura_daemon::window::{OpenWindowRequest, RequestedCwd, WindowRegistry};
-use yagura_test_support::process::{echo_child_path, sleepy_command};
+use yagura_test_support::process::sleepy_command;
 
 fn db_path(tag: &str) -> PathBuf {
     common::unique_temp_dir(tag).join("ticket.db")
@@ -91,7 +91,7 @@ fn new_ticket(title: &str) -> NewTicket {
 
 #[tokio::test]
 async fn only_an_alive_window_gets_a_write_permit_and_it_writes_its_own_workspace() {
-    let registry = WindowRegistry::new(DaemonConfig::default());
+    let registry = WindowRegistry::new(bins::default_config_with_holder());
     let repo = repo_dir("ticket-permit-write");
     let mut store = TicketStore::open(&db_path("ticket-permit-write-db")).expect("open store");
 
@@ -141,7 +141,7 @@ async fn only_an_alive_window_gets_a_write_permit_and_it_writes_its_own_workspac
 
 #[tokio::test]
 async fn an_external_connection_gets_no_ticket_permit_at_all() {
-    let registry = WindowRegistry::new(DaemonConfig::default());
+    let registry = WindowRegistry::new(bins::default_config_with_holder());
     assert!(matches!(
         ticket_permit::issue_write(&RequestOrigin::External, &registry),
         Err(TicketPermitError::AuthFailed)
@@ -162,7 +162,7 @@ async fn an_external_connection_gets_no_ticket_permit_at_all() {
 
 #[tokio::test]
 async fn an_approver_reads_any_named_workspace_but_never_writes() {
-    let registry = WindowRegistry::new(DaemonConfig::default());
+    let registry = WindowRegistry::new(bins::default_config_with_holder());
     let mut store = TicketStore::open(&db_path("ticket-permit-approver-db")).expect("open store");
     let repo_a = repo_dir("ticket-permit-approver-a");
     let repo_b = repo_dir("ticket-permit-approver-b");
@@ -222,7 +222,7 @@ async fn an_approver_reads_any_named_workspace_but_never_writes() {
 
 #[tokio::test]
 async fn a_window_reads_only_its_own_workspace_and_cannot_name_another() {
-    let registry = WindowRegistry::new(DaemonConfig::default());
+    let registry = WindowRegistry::new(bins::default_config_with_holder());
     let repo = repo_dir("ticket-permit-window-read");
     let window = open_window_in(&registry, &repo).await;
 

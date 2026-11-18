@@ -9,6 +9,7 @@
 //! file in this suite uses.
 
 use crate::common;
+use crate::common::bins::echo_child_command;
 
 use std::time::Duration;
 
@@ -21,7 +22,6 @@ use yagura_daemon::DaemonConfig;
 use yagura_daemon::detector::layers::LayerError;
 use yagura_protocol::{ClientMessage, DaemonMessage, UnknownReason, WindowStatus};
 use yagura_test_support::ipc::{Connection, ReadOutcome, read_daemon_frame, send_client_message};
-use yagura_test_support::process::echo_child_command;
 
 /// Six lines of plain text, none containing common::control_definition's `CTRL-READY`
 /// marker, long enough to scroll a prior `CTRL-READY` line out of the

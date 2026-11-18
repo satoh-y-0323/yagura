@@ -12,6 +12,7 @@
 //! real vendor CLI, never a running daemon.
 
 use crate::common;
+use crate::common::bins::{echo_child_command, ready_child_profile_source};
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -28,7 +29,6 @@ use yagura_protocol::{
     PlanTaskInfo, PlanTaskSpec, ReviewMark, TaskAssignment,
 };
 use yagura_test_support::ipc::Connection;
-use yagura_test_support::process::{echo_child_command, ready_child_profile_source};
 
 /// The fixed marker every plan notice starts with.
 const PLAN_NOTICE_MARKER: &str = "[yagura plan]";

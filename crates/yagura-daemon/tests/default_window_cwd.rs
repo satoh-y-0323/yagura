@@ -15,6 +15,7 @@
 //! `tests/window_registry.rs` -- keeps resolving to the daemon's current
 //! directory unless a caller sets the field explicitly.
 
+use crate::common::bins::{self, echo_child_path};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
@@ -22,7 +23,6 @@ use yagura_daemon::DaemonConfig;
 use yagura_daemon::config::resolve_default_window_cwd;
 use yagura_daemon::window::{OpenWindowRequest, RequestedCwd, WindowRegistry};
 use yagura_test_support::paths::{strip_extended_length_prefix, unique_temp_dir};
-use yagura_test_support::process::echo_child_path;
 
 fn exists_paths_among(paths: Vec<&Path>) -> impl Fn(&Path) -> bool + use<> {
     let owned: Vec<PathBuf> = paths.into_iter().map(Path::to_path_buf).collect();
@@ -115,7 +115,7 @@ async fn open_window_without_a_cwd_uses_the_configured_default_when_one_is_set()
         default_window_cwd: Some(default_dir),
         ..DaemonConfig::default()
     };
-    let registry = WindowRegistry::new(config);
+    let registry = WindowRegistry::new(bins::config_with_holder(config));
 
     let id = registry
         .open(echo_request())
@@ -180,7 +180,7 @@ async fn a_window_child_runs_in_the_cwd_the_window_was_opened_with() {
     let report_dir = unique_temp_dir("default-window-cwd", "child-cwd-report");
     std::fs::create_dir_all(&report_dir).expect("create the report directory");
     let report = report_dir.join("cwd.txt");
-    let registry = WindowRegistry::new(DaemonConfig::default());
+    let registry = WindowRegistry::new(bins::default_config_with_holder());
 
     registry
         .open(OpenWindowRequest {

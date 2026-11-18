@@ -12,12 +12,12 @@
 //! the virtual clock keeps the timeout and hold paths deterministic, and the
 //! assertions check elapsed virtual time instead of racing wall-clock sleeps.
 
+use crate::common::bins::{self, echo_child_path};
 use std::time::Duration;
 
 use tokio::sync::watch;
 use tokio::time::Instant;
 use yagura_test_support::paths::{unique_detection_dir, write_definition};
-use yagura_test_support::process::echo_child_path;
 
 use yagura_daemon::DaemonConfig;
 use yagura_daemon::handoff::READY_STATUSES;
@@ -416,7 +416,7 @@ region = "bottom"
 
 #[tokio::test]
 async fn window_entry_watch_status_exposes_the_current_status() {
-    let registry = WindowRegistry::new(DaemonConfig::default());
+    let registry = WindowRegistry::new(bins::default_config_with_holder());
     let id = registry
         .open(echo_request(None))
         .await
@@ -446,7 +446,7 @@ async fn window_entry_watch_status_observes_a_status_transition() {
         detection_dir: Some(dir),
         ..DaemonConfig::default()
     };
-    let registry = WindowRegistry::new(config);
+    let registry = WindowRegistry::new(bins::config_with_holder(config));
     let id = registry
         .open(echo_request(Some("waiter-watch")))
         .await
@@ -483,7 +483,7 @@ async fn window_entry_watch_status_observes_a_status_transition() {
 
 #[tokio::test]
 async fn window_entry_terminate_tree_makes_the_child_converge_to_exited() {
-    let registry = WindowRegistry::new(DaemonConfig::default());
+    let registry = WindowRegistry::new(bins::default_config_with_holder());
     let id = registry
         .open(echo_request(None))
         .await

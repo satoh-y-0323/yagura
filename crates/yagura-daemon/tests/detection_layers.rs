@@ -6,6 +6,7 @@
 //! eventually carries a resolution failure to a client.
 
 use crate::common;
+use crate::common::bins;
 
 use yagura_daemon::detector::definition::{
     bundled_definition_names, bundled_definition_source, parse_definition,
@@ -517,12 +518,12 @@ async fn open_reports_a_directory_parse_failure_verbatim_even_with_bundled_overl
     let name = a_bundled_name();
     write_definition(&dir, name, MALFORMED_TOML);
 
-    let registry = WindowRegistry::new(DaemonConfig {
+    let registry = WindowRegistry::new(bins::config_with_holder(DaemonConfig {
         detection_dir: Some(dir),
         bundled_definitions: true,
         detection_name: name.to_string(),
         ..DaemonConfig::default()
-    });
+    }));
 
     let opened = common::open_echo_window(&registry, None).await;
 
@@ -546,11 +547,11 @@ async fn open_reports_not_found_naming_the_directory_when_neither_layer_has_the_
     let name = "layers-l6-missing-everywhere";
     assert!(!bundled_definition_names().contains(&name));
 
-    let registry = WindowRegistry::new(DaemonConfig {
+    let registry = WindowRegistry::new(bins::config_with_holder(DaemonConfig {
         detection_dir: Some(dir.clone()),
         bundled_definitions: true,
         ..DaemonConfig::default()
-    });
+    }));
 
     let opened = common::open_echo_window(&registry, Some(name)).await;
 
@@ -566,7 +567,7 @@ async fn open_reports_not_found_naming_the_directory_when_neither_layer_has_the_
 
 #[tokio::test]
 async fn open_reports_the_missing_layer_when_neither_layer_is_configured() {
-    let registry = WindowRegistry::new(DaemonConfig::default());
+    let registry = WindowRegistry::new(bins::default_config_with_holder());
 
     let opened = common::open_echo_window(&registry, None).await;
 

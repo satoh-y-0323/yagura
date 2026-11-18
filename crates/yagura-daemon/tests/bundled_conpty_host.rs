@@ -11,6 +11,7 @@
 //! take one lock so no other window opens inside that diff.
 
 use crate::common;
+use crate::common::bins;
 
 use std::path::Path;
 use std::sync::Arc;
@@ -23,7 +24,7 @@ static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 const BUNDLED_HOST_IMAGE: &str = "OpenConsole.exe";
 
 async fn open_window(command: Vec<String>) -> (Arc<WindowRegistry>, String) {
-    let registry = Arc::new(WindowRegistry::new(DaemonConfig::default()));
+    let registry = Arc::new(WindowRegistry::new(bins::default_config_with_holder()));
     let window_id = registry
         .open(OpenWindowRequest {
             command,
@@ -165,12 +166,12 @@ async fn a_window_whose_program_cannot_start_leaves_no_pseudoconsole_host_behind
     // A holder of its own: the other tests of this binary open windows whose hosts start
     // beside the shared holder.
     let holder_dir = common::unique_temp_dir("conpty-host-no-start");
-    yagura_test_support::process::install_window_runtime(&holder_dir);
+    bins::install_window_runtime(&holder_dir);
     let before = bundled_hosts_in(&holder_dir);
-    let registry = WindowRegistry::new(DaemonConfig {
+    let registry = WindowRegistry::new(bins::config_with_holder(DaemonConfig {
         holder_exe: Some(holder_dir.join(yagura_daemon::holder_host::holder_file_name())),
         ..DaemonConfig::default()
-    });
+    }));
     let missing = common::guaranteed_nonexistent_exe_path();
 
     let opened = registry

@@ -10,6 +10,7 @@
 //! bare `.git` marker; children are `echo_child`, never a real vendor CLI.
 
 use crate::common;
+use crate::common::bins::echo_child_path;
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -26,7 +27,6 @@ use yagura_protocol::{
     TicketSummary, TicketWorkspaceInfo,
 };
 use yagura_test_support::ipc::Connection;
-use yagura_test_support::process::echo_child_path;
 
 // --- fixtures ----------------------------------------------------------
 

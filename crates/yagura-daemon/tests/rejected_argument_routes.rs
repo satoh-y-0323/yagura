@@ -6,6 +6,7 @@
 //! because an omitted key and a `null` one decode to the same `Option::None`.
 
 use crate::common;
+use crate::common::bins::echo_child_path;
 
 use std::path::Path;
 
@@ -19,7 +20,6 @@ use common::{
 use yagura_protocol::ClientMessage;
 use yagura_test_support::ipc::Connection;
 use yagura_test_support::paths::TempDir;
-use yagura_test_support::process::echo_child_path;
 
 /// The key an error frame carries to name the argument it rejected.
 const ARGUMENT_KEY: &str = "rejected_argument";

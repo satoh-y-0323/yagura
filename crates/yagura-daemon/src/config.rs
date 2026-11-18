@@ -398,10 +398,9 @@ pub struct DaemonConfig {
     /// this bound: a shorter one leaves such windows without a wake file too.
     pub mcp_listing_timeout: Duration,
 
-    /// The `yagura-holder` executable every window is kept by. The daemon
-    /// binary sets the one beside it; the default is beside the running
-    /// executable, or above Cargo's `deps` directory for a test binary (see
-    /// [`yagura_os::sibling_executable_dir`]). `None` opens no window.
+    /// The `yagura-holder` executable every window is kept by. `None` (the
+    /// default) opens no window; the daemon binary sets the holder shipped
+    /// beside itself.
     pub holder_exe: Option<PathBuf>,
 
     /// Where the windows' holders keep their files and whom they let in. The
@@ -429,13 +428,6 @@ pub struct DaemonConfig {
     /// only).
     #[cfg(feature = "fault-injection")]
     pub faults: crate::fault_point::FaultPoints,
-}
-
-/// The holder beside the running executable, under the rule for a test
-/// binary (see [`DaemonConfig::holder_exe`]).
-fn default_holder_exe() -> Option<PathBuf> {
-    let exe = std::env::current_exe().ok()?;
-    Some(yagura_os::sibling_executable_dir(&exe).join(crate::holder_host::holder_file_name()))
 }
 
 /// A configuration value whose contents must never reach a `Debug` rendering.
@@ -706,7 +698,7 @@ impl Default for DaemonConfig {
             mcp_registration_max_output_bytes: DEFAULT_MCP_REGISTRATION_MAX_OUTPUT_BYTES,
             mcp_registration_status_max_concurrent: DEFAULT_MCP_REGISTRATION_STATUS_MAX_CONCURRENT,
             mcp_listing_timeout: Duration::from_secs(DEFAULT_MCP_LISTING_TIMEOUT_SECS),
-            holder_exe: default_holder_exe(),
+            holder_exe: None,
             holder_place: None,
             status_boot: None,
             #[cfg(feature = "fault-injection")]

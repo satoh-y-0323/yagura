@@ -826,7 +826,7 @@ async fn probe_env(
     var_name: &str,
     expected: &str,
 ) {
-    let probe = common::env_probe_path();
+    let probe = common::bins::env_probe_path();
     let probe_str = probe.to_str().expect("env_probe path must be valid UTF-8");
     let session =
         common::spawn_session_in_env(&[probe_str, var_name], None::<&Path>, extra_env, config)

@@ -13,9 +13,10 @@
 
 use crate::common;
 
+use common::bins::hex_echo_path;
 use common::{
-    Harness, assert_hex_echo_receives, contains_subsequence, hex_echo_path, hex_of,
-    output_after_marker, read_message, send,
+    Harness, assert_hex_echo_receives, contains_subsequence, hex_of, output_after_marker,
+    read_message, send,
 };
 use tokio::io::AsyncWriteExt;
 use yagura_daemon::{DaemonConfig, OpenWindowRequest};

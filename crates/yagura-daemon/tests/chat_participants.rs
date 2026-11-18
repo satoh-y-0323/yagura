@@ -11,6 +11,7 @@
 //! (a rename) makes it twice: one stale push can answer the first, never both.
 
 use crate::common;
+use crate::common::bins;
 
 use std::collections::HashSet;
 use std::path::Path;
@@ -40,7 +41,7 @@ async fn start(tag: &str, dir: &Path) -> Harness {
 /// Opens a window that takes part in chat (its profile declares `[delivery]`).
 async fn open_participant(h: &Harness, cwd: Option<&Path>) -> String {
     h.open_delivering_in(
-        yagura_test_support::process::echo_child_command(),
+        bins::echo_child_command(),
         Some(CONTROL_DETECTION_NAME),
         cwd,
     )

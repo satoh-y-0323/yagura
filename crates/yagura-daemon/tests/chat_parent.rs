@@ -10,6 +10,7 @@
 //! default chat intro's wording.
 
 use crate::common;
+use crate::common::bins::{echo_child_command, ready_child_profile_source};
 
 use std::path::{Path, PathBuf};
 
@@ -20,7 +21,6 @@ use common::{
 use yagura_daemon::{DaemonConfig, OpenWindowRequest};
 use yagura_protocol::{ClientMessage, DaemonMessage, PlanInfo, PlanTaskSpec};
 use yagura_test_support::ipc::Connection;
-use yagura_test_support::process::{echo_child_command, ready_child_profile_source};
 
 // --- config builders ---------------------------------------------------------
 

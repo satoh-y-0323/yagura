@@ -14,6 +14,7 @@
 //! positive control under the same conditions.
 
 use crate::common;
+use crate::common::bins::ready_child_profile_source;
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -33,7 +34,7 @@ use yagura_protocol::{
 };
 use yagura_test_support::ipc::Connection;
 use yagura_test_support::paths::TempDir;
-use yagura_test_support::process::{profile_source, ready_child_profile_source};
+use yagura_test_support::process::profile_source;
 
 const NO_AUTO_APPROVE_PLAYBOOK: &str = "[approval]\nauto_approve = []\n";
 

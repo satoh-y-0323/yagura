@@ -5,6 +5,7 @@
 //! concurrently and without depending on a real shell.
 
 use crate::common;
+use crate::common::bins::echo_child_path;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -19,7 +20,6 @@ use yagura_test_support::ipc::{
     Connection, ReadOutcome, connect_with_retry, read_status_skipping_message, send_client_message,
     unique_endpoint_name,
 };
-use yagura_test_support::process::echo_child_path;
 
 use yagura_daemon::{DaemonConfig, IpcServer, WindowRegistry};
 use yagura_os::{IpcTransport, PeerAuth, PlatformIpc};

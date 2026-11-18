@@ -14,19 +14,18 @@
 //! existing per-version schema fixtures they extend.
 
 use crate::common;
+use crate::common::bins::{self, echo_child_path};
 
 use std::path::PathBuf;
 
 use rusqlite::params;
 
-use yagura_daemon::DaemonConfig;
 use yagura_daemon::control::RequestOrigin;
 use yagura_daemon::plan::{Assignment, PlanSpec, TaskSpec, ValidatedPlan, validate_plan};
 use yagura_daemon::plan_permit::{self, ChangeKind, LockTable};
 use yagura_daemon::plan_store::{PlanStore, PlanStoreError, ResourceLimitKind};
 use yagura_daemon::store;
 use yagura_daemon::window::{OpenWindowRequest, WindowRegistry};
-use yagura_test_support::process::echo_child_path;
 
 fn db_path(tag: &str) -> PathBuf {
     common::unique_temp_dir(tag).join("plan.db")
@@ -118,7 +117,7 @@ fn two_task_plan() -> ValidatedPlan {
 async fn create_get_list_and_delete_round_trip_a_plan() {
     let path = db_path("plan-store-crud");
     let mut store = PlanStore::open(&path).expect("PlanStore::open must succeed");
-    let registry = WindowRegistry::new(DaemonConfig::default());
+    let registry = WindowRegistry::new(bins::default_config_with_holder());
     let owner = open_window(&registry).await;
     let owner_cwd = registry
         .get(&owner)
@@ -304,7 +303,7 @@ async fn create_get_list_and_delete_round_trip_a_plan() {
 #[tokio::test]
 async fn opening_as_a_new_boot_clears_owner_and_window_bindings_but_keeps_everything_else() {
     let path = db_path("plan-store-new-boot");
-    let registry = WindowRegistry::new(DaemonConfig::default());
+    let registry = WindowRegistry::new(bins::default_config_with_holder());
     let owner = open_window(&registry).await;
     let bound = open_window(&registry).await;
 
@@ -358,7 +357,7 @@ async fn opening_as_a_new_boot_clears_owner_and_window_bindings_but_keeps_everyt
 async fn replacing_tasks_carries_over_surviving_state_and_drops_the_rest() {
     let path = db_path("plan-store-replace");
     let mut store = PlanStore::open(&path).expect("PlanStore::open must succeed");
-    let registry = WindowRegistry::new(DaemonConfig::default());
+    let registry = WindowRegistry::new(bins::default_config_with_holder());
     let owner = open_window(&registry).await;
     let bound = open_window(&registry).await;
 
@@ -512,7 +511,7 @@ async fn replacing_tasks_carries_over_surviving_state_and_drops_the_rest() {
 async fn overrides_owner_and_window_bindings_round_trip_and_stay_scoped_to_their_own_plan() {
     let path = db_path("plan-store-roundtrip");
     let mut store = PlanStore::open(&path).expect("PlanStore::open must succeed");
-    let registry = WindowRegistry::new(DaemonConfig::default());
+    let registry = WindowRegistry::new(bins::default_config_with_holder());
     let owner_a = open_window(&registry).await;
     let owner_b = open_window(&registry).await;
 
@@ -613,7 +612,7 @@ async fn overrides_owner_and_window_bindings_round_trip_and_stay_scoped_to_their
 #[tokio::test]
 async fn reopening_the_same_file_without_a_new_boot_preserves_owner_and_window_bindings() {
     let path = db_path("plan-store-plain-reopen");
-    let registry = WindowRegistry::new(DaemonConfig::default());
+    let registry = WindowRegistry::new(bins::default_config_with_holder());
     let owner = open_window(&registry).await;
     let bound = open_window(&registry).await;
 
@@ -667,7 +666,7 @@ async fn reopening_the_same_file_without_a_new_boot_preserves_owner_and_window_b
 async fn plan_creation_is_bounded_overall_and_per_owner_window() {
     let path = db_path("plan-store-limits");
     let mut store = PlanStore::open(&path).expect("PlanStore::open must succeed");
-    let registry = WindowRegistry::new(DaemonConfig::default());
+    let registry = WindowRegistry::new(bins::default_config_with_holder());
 
     // Four owners, each filling its own 16-plan cap: 4 x 16 = 64, the overall cap,
     // reached exactly as the fourth owner's cap is reached.

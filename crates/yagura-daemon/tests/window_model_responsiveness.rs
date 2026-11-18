@@ -9,8 +9,7 @@
 //! one thread stops the case instead of passing on a spare worker.
 
 use crate::common;
-
-use std::path::PathBuf;
+use crate::common::bins;
 
 use common::{Harness, read_response, run_on_own_runtime, send};
 use yagura_daemon::{DaemonConfig, PtySession};
@@ -24,24 +23,9 @@ const FLOOD_ROWS: u16 = 100;
 /// How many reads must get their turn while the flood runs.
 const READS_DURING_FLOOD: usize = 5;
 
-fn load_child_path() -> PathBuf {
-    let mut dir = std::env::current_exe().expect("current_exe");
-    dir.pop();
-    if dir.file_name().and_then(|n| n.to_str()) == Some("deps") {
-        dir.pop();
-    }
-    dir.push(if cfg!(windows) {
-        "screen_load_child.exe"
-    } else {
-        "screen_load_child"
-    });
-    assert!(dir.exists(), "build the fixtures first: {}", dir.display());
-    dir
-}
-
 fn load_command(mode: &str) -> Vec<String> {
     vec![
-        load_child_path().to_str().unwrap().to_string(),
+        bins::screen_load_child_path().to_str().unwrap().to_string(),
         mode.to_string(),
     ]
 }
@@ -93,18 +77,8 @@ fn reads_get_their_turn_while_the_child_floods_repeat_requests() {
 /// its model's work once the window has opened: it sends no copy, answers no
 /// read of its text and settles nothing after that.
 fn stalled_model_config() -> DaemonConfig {
-    let shipped = DaemonConfig::default()
-        .holder_exe
-        .expect("the test binary has a holder beside it");
-    let holder_exe =
-        shipped.with_file_name(format!("holder_fault{}", std::env::consts::EXE_SUFFIX));
-    assert!(
-        holder_exe.exists(),
-        "build the holder's binaries first: {}",
-        holder_exe.display()
-    );
     DaemonConfig {
-        holder_exe: Some(holder_exe),
+        holder_exe: Some(bins::holder_fault_path()),
         holder_fault: Some(HolderFault::StallModel),
         ..DaemonConfig::default()
     }
@@ -115,12 +89,8 @@ fn stalled_model_config() -> DaemonConfig {
 /// the list of windows.
 async fn the_daemon_answers_while_a_holder_does_not() {
     let h = Harness::start("model-responsiveness", stalled_model_config()).await;
-    let stalled_id = h
-        .open(yagura_test_support::process::echo_child_command(), None)
-        .await;
-    let other_id = h
-        .open(yagura_test_support::process::echo_child_command(), None)
-        .await;
+    let stalled_id = h.open(bins::echo_child_command(), None).await;
+    let other_id = h.open(bins::echo_child_command(), None).await;
 
     let mut stalled_client = h.connect().await;
     send(

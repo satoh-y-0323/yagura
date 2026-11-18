@@ -10,6 +10,7 @@
 //! daemon binds a named instance reserved for its case. The hang guards only
 //! bound a failure.
 
+use crate::common::bins::{self, echo_child_command};
 use std::ffi::OsStr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -24,7 +25,7 @@ use yagura_os::{IpcTransport, PeerAuth, PlatformIpc};
 use yagura_protocol::WindowStatus;
 use yagura_test_support::detection::{CONTROL_READY_LINE, idle_definition_toml};
 use yagura_test_support::paths::unique_temp_dir;
-use yagura_test_support::process::{echo_child_command, own_canonical_exe};
+use yagura_test_support::process::own_canonical_exe;
 use yagura_test_support::scan::contains_subsequence;
 
 use super::{McpSession, tool_reply};
@@ -121,7 +122,9 @@ impl Daemon {
         let dir = unique_temp_dir(FIXTURE_PREFIX, instance_id);
         let config = daemon_config(&dir);
         let (_ipc, listener, endpoint, user_id) = bind_instance(instance_id).await;
-        let registry = Arc::new(WindowRegistry::new(config.clone()));
+        let registry = Arc::new(WindowRegistry::new(bins::config_with_holder(
+            config.clone(),
+        )));
         let server = Arc::new(IpcServer::new(registry.clone(), endpoint.clone(), config));
         let server_task = tokio::spawn(server.run_with_listener(listener, user_id));
         Self {

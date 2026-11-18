@@ -4,6 +4,7 @@
 //! per-window attach, window lifecycle management and the `window_id` addition.
 
 use crate::common;
+use crate::common::bins::{echo_child_command, echo_child_path};
 
 use std::path::Path;
 use std::time::Duration;
@@ -14,7 +15,6 @@ use yagura_test_support::ipc::{
     Connection, ReadOutcome, read_status_skipping_message, send_client_message,
 };
 use yagura_test_support::paths::TempDir;
-use yagura_test_support::process::{echo_child_command, echo_child_path};
 
 use yagura_daemon::DaemonConfig;
 use yagura_daemon::detector::definition::bundled_definition_names;

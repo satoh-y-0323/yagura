@@ -14,6 +14,7 @@
 //! points the data, state and config base directories into a temporary directory.
 
 use crate::common;
+use crate::common::bins;
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
@@ -74,7 +75,7 @@ impl Setup {
 
     /// Runs `--credentials <path> --deliver-take` with neither window variable inherited.
     async fn take_with(&self, credentials: &Path) -> Output {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_yagura-daemon"));
+        let mut command = Command::new(bins::daemon_exe());
         command
             .arg("--credentials")
             .arg(credentials)

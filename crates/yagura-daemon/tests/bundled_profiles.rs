@@ -1072,7 +1072,7 @@ async fn the_daemon_names_each_hook_door_the_time_its_registration_gives_the_cli
             id,
             &format!(
                 "[command]\ndefault = ['{}']\n",
-                common::echo_child_path().display()
+                common::bins::echo_child_path().display()
             ),
         );
         let window_id = open_from_profile(&h, id).await;

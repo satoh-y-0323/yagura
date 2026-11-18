@@ -21,18 +21,18 @@
 //! `tests/plan_permit.rs`.
 
 use crate::common;
+use crate::common::bins::{self, echo_child_path};
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use yagura_daemon::DaemonConfig;
 use yagura_daemon::control::RequestOrigin;
 use yagura_daemon::plan::{PlanSpec, TaskSpec, ValidatedPlan, validate_plan};
 use yagura_daemon::plan_permit::{self, ChangeKind, LockTable, PermitError};
 use yagura_daemon::plan_store::PlanStore;
 use yagura_daemon::window::{OpenWindowRequest, WindowRegistry};
 use yagura_protocol::ReportOutcome;
-use yagura_test_support::process::{echo_child_path, sleepy_command};
+use yagura_test_support::process::sleepy_command;
 
 fn db_path(tag: &str) -> PathBuf {
     common::unique_temp_dir(tag).join("plan.db")
@@ -146,7 +146,7 @@ async fn store_registry_owner_and_bound_reporter(
     tag: &str,
 ) -> (PlanStore, WindowRegistry, String, String, String) {
     let mut store = PlanStore::open(&db_path(tag)).expect("PlanStore::open must succeed");
-    let registry = WindowRegistry::new(DaemonConfig::default());
+    let registry = WindowRegistry::new(bins::default_config_with_holder());
     let owner = open_window(&registry).await;
     let create_permit = plan_permit::issue_create(&RequestOrigin::Window(owner.clone()), &registry)
         .expect("a freshly opened window must be able to create a plan");
@@ -555,7 +555,7 @@ async fn replacing_tasks_carries_over_a_survivors_report_and_drops_the_rest() {
 #[tokio::test]
 async fn opening_as_a_new_boot_keeps_a_tasks_report_even_though_its_binding_is_cleared() {
     let path = db_path("report-ledger-new-boot");
-    let registry = WindowRegistry::new(DaemonConfig::default());
+    let registry = WindowRegistry::new(bins::default_config_with_holder());
     let owner = open_window(&registry).await;
     let reporter = open_window(&registry).await;
 
@@ -774,7 +774,7 @@ async fn report_authorization_rejects_external_and_approver_origins() {
 async fn parent_derivation_follows_the_owners_liveness_and_nomination() {
     let path = db_path("report-ledger-parent");
     let mut store = PlanStore::open(&path).expect("PlanStore::open must succeed");
-    let registry = WindowRegistry::new(DaemonConfig::default());
+    let registry = WindowRegistry::new(bins::default_config_with_holder());
     let owner = open_window(&registry).await;
 
     let create_permit = plan_permit::issue_create(&RequestOrigin::Window(owner.clone()), &registry)

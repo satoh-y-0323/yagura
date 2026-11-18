@@ -13,6 +13,7 @@
 //! Each case runs real daemon processes one after the other in one sandbox instance.
 
 use crate::common;
+use crate::common::bins::holder_child_path;
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
@@ -29,7 +30,6 @@ use yagura_protocol::holder::read_holder_record;
 use yagura_protocol::{ClientMessage, DaemonMessage, ReportOutcome, WindowInfo, WindowStatus};
 use yagura_test_support::HANG_GUARD;
 use yagura_test_support::ipc::{Connection, connect_with_retry};
-use yagura_test_support::process::holder_path;
 
 /// A profile whose window takes parcels through its doors and leaves no wait registered,
 /// so nothing is ever pushed out of its inbox.
@@ -39,8 +39,7 @@ const PROFILE: &str = "deliver";
 const REPORT_NOTICE_MARK: &str = "[yagura report]";
 
 fn write_delivering_profile(sandbox: &Sandbox) {
-    let child = holder_path()
-        .with_file_name(format!("holder_child{}", std::env::consts::EXE_SUFFIX))
+    let child = holder_child_path()
         .to_str()
         .expect("holder_child path must be UTF-8")
         .to_owned();
@@ -84,8 +83,7 @@ const CHAT_PROFILE: &str = "deliver-chat";
 fn write_chat_profile(sandbox: &Sandbox) -> PathBuf {
     let detections = sandbox.tree.make_dir("persist-detections");
     common::write_control_definition(&detections);
-    let child = holder_path()
-        .with_file_name(format!("holder_child{}", std::env::consts::EXE_SUFFIX))
+    let child = holder_child_path()
         .to_str()
         .expect("holder_child path must be UTF-8")
         .to_owned();

@@ -416,19 +416,6 @@ pub fn spawn_detached_process(
     }
 }
 
-/// The directory the executables shipped beside `exe` are in: `exe`'s own
-/// directory, or the build output directory above it when that is a Cargo
-/// `deps` directory (where `cargo test` puts a test binary). Empty when `exe`
-/// has no parent.
-#[must_use]
-pub fn sibling_executable_dir(exe: &Path) -> PathBuf {
-    let mut dir = exe.parent().map(Path::to_path_buf).unwrap_or_default();
-    if dir.file_name().and_then(OsStr::to_str) == Some("deps") {
-        dir.pop();
-    }
-    dir
-}
-
 /// Asks for `pid` to be force-terminated once `grace` has elapsed, unless
 /// `gate` has seen the child reaped by then.
 ///

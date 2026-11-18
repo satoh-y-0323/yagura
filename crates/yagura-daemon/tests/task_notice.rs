@@ -8,6 +8,7 @@
 //! it was started with and every byte typed into it.
 
 use crate::common;
+use crate::common::bins;
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -214,9 +215,7 @@ fn task(task_id: &str, profile: &str, instruction: Option<&str>) -> PlanTaskSpec
 /// window as `owner_window`, and the ledger refuses an unidentified
 /// connection outright).
 async fn open_and_identify(h: &Harness, client: &mut Connection) -> String {
-    let window_id = h
-        .open(yagura_test_support::process::echo_child_command(), None)
-        .await;
+    let window_id = h.open(bins::echo_child_command(), None).await;
     identify(client, &window_id).await;
     window_id
 }

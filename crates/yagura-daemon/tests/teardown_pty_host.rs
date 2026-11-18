@@ -8,17 +8,18 @@
 //! teardown.
 
 use crate::common;
+use crate::common::bins;
 
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use yagura_daemon::{DaemonConfig, OpenWindowRequest, WindowRegistry};
+use yagura_daemon::{OpenWindowRequest, WindowRegistry};
 
 static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 async fn open_window(command: Vec<String>) -> (Arc<WindowRegistry>, String) {
-    let registry = Arc::new(WindowRegistry::new(DaemonConfig::default()));
+    let registry = Arc::new(WindowRegistry::new(bins::default_config_with_holder()));
     let window_id = registry
         .open(OpenWindowRequest {
             command,
@@ -123,7 +124,7 @@ async fn close_window_during_an_output_flood_reaps_host_child_and_grandchild() {
     let tick_path = tmp.path().join("tick.log");
 
     let command = vec![
-        yagura_test_support::process::capture_child_path()
+        bins::capture_child_path()
             .to_str()
             .expect("capture_child path must be valid UTF-8")
             .to_string(),
