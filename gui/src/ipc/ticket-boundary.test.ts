@@ -13,6 +13,7 @@ import { describe, it, expect } from 'vitest';
 import {
   MAX_DISPLAY_FIELD_CHARS,
   formatApprovalBody,
+  formatPathForDisplay,
   sanitizeForDisplay,
 } from '../display/untrusted-text';
 import {
@@ -340,19 +341,21 @@ describe('the one-line fields of a ticket', () => {
     expect(shown.title).toBe(`${'x'.repeat(MAX_DISPLAY_FIELD_CHARS)}…`);
   });
 
-  it('strips control characters from a workspace path', () => {
+  it('writes out control characters and invisible characters in a workspace path', () => {
     const shown = displayTicketWorkspace({
       workspace_id: 1,
       kind: 'git',
       path: 'C:\\re\u0000po\n',
     });
-    expect(shown.path).toBe('C:\\repo');
+    expect(shown.path).toBe('C:\\re\\u{0000}po\\u{000A}');
+    const joined = displayTicketWorkspace({ workspace_id: 1, kind: 'git', path: 'C:\\pro\u200Cj' });
+    expect(joined.path).toBe('C:\\pro\\u{200C}j');
   });
 
-  it('writes out a bidirectional control in a workspace path the way an approval body does', () => {
+  it('writes out a bidirectional control in a workspace path the way every path is shown', () => {
     const path = 'C:\\work\\\u202Egpj.exe';
     const shown = displayTicketWorkspace({ workspace_id: 1, kind: 'git', path });
-    expect(shown.path).toBe(formatApprovalBody(path));
+    expect(shown.path).toBe(formatPathForDisplay(path));
     expect(shown.path).toBe('C:\\work\\\\u{202E}gpj.exe');
   });
 });

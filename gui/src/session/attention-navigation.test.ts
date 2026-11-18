@@ -74,7 +74,8 @@ function attentionNavigationModule(): AttentionNavigationModule {
 interface Entry {
   windowId: string;
   cwd: string;
-  room: { roomId: string; name: string } | null;
+  displayCwd: string;
+  room: { roomId: string; name: string; displayName: string } | null;
   detected: DetectedStatusView;
   display: { isMinimized: boolean; zOrder: number };
 }
@@ -106,7 +107,8 @@ function makeEntry(windowId: string, roomId: string, status: WindowStatus, zOrde
   return {
     windowId,
     cwd: `C:\\Users\\dev\\${roomId}`,
-    room: { roomId, name: roomId },
+    displayCwd: `C:\\Users\\dev\\${roomId}`,
+    room: { roomId, name: roomId, displayName: roomId },
     detected: status === 'unknown' ? { status, reason: null } : { status },
     display: { isMinimized: false, zOrder },
   };

@@ -99,6 +99,15 @@ describe('splitForMiddleEllipsis - counts graphemes, so combined characters are 
     });
   });
 
+  it('a written-out character counts as one grapheme and is never cut', () => {
+    // 20 letters, the escape, then 4 letters: 25 graphemes, the tail starts 3 letters before the escape.
+    const name = `${'a'.repeat(20)}\\u{200B}gura`;
+    expect(splitForMiddleEllipsis(name)).toEqual({
+      head: 'a'.repeat(17),
+      tail: 'aaa\\u{200B}gura',
+    });
+  });
+
   it('17 skin-toned emoji split into 9 and 8 whole emoji', () => {
     const name = THUMBS_UP_DARK.repeat(17);
     expect(splitForMiddleEllipsis(name)).toEqual({

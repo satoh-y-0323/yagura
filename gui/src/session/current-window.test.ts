@@ -327,7 +327,8 @@ describe('neighborWindow: stepping through the given order', () => {
 
 interface SidebarEntry extends PlacedWindow {
   cwd: string;
-  room: { roomId: string; name: string } | null;
+  displayCwd: string;
+  room: { roomId: string; name: string; displayName: string } | null;
   detected: DetectedStatusView;
 }
 
@@ -335,7 +336,8 @@ function sidebarEntry(windowId: string, roomId: string, placement: Placement): S
   return {
     ...placed(windowId, placement),
     cwd: `C:\\Users\\dev\\${roomId}`,
-    room: { roomId, name: roomId },
+    displayCwd: `C:\\Users\\dev\\${roomId}`,
+    room: { roomId, name: roomId, displayName: roomId },
     detected: { status: 'running' },
   };
 }

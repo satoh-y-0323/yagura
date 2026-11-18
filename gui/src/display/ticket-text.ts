@@ -3,7 +3,7 @@
  * by a person, so every part of it is drawn through these functions.
  */
 import type { TicketSummary, TicketWorkspace } from '../ipc/ticket-boundary';
-import { formatMultilineText, sanitizeForDisplay } from './untrusted-text';
+import { formatMultilineText, formatPathForDisplay, sanitizeForDisplay } from './untrusted-text';
 
 /**
  * Longest ticket body or result kept for display, in code points. The daemon
@@ -47,23 +47,16 @@ export function displayTicketSummary(summary: TicketSummary): TicketSummaryDispl
   };
 }
 
-const NO_KEPT_CONTROLS: ReadonlySet<string> = new Set();
-
 /**
- * A workspace row with its kind and path through `sanitizeForDisplay`. The
- * path also has its bidirectional controls written out, as an approval body
- * does, so a reordered path cannot pass for another repository.
+ * A workspace row with its kind through `sanitizeForDisplay` and its path
+ * through `formatPathForDisplay`, so a path with hidden characters can pass
+ * neither for another repository nor for a reordered one.
  * @param workspace the workspace to display
  */
 export function displayTicketWorkspace(workspace: TicketWorkspace): TicketWorkspace {
   return {
     workspace_id: workspace.workspace_id,
     kind: sanitizeForDisplay(workspace.kind),
-    // Already capped by `sanitizeForDisplay`, so it is not cut a second time.
-    path: formatMultilineText(
-      sanitizeForDisplay(workspace.path),
-      Number.POSITIVE_INFINITY,
-      NO_KEPT_CONTROLS
-    ),
+    path: formatPathForDisplay(workspace.path),
   };
 }

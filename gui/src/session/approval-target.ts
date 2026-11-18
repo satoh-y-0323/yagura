@@ -2,7 +2,7 @@
  * What an approval request with no target window is addressed to, as the
  * approval dialog and the "expired unseen" banner both name it.
  */
-import { sanitizeForDisplay } from '../display/untrusted-text';
+import { formatPathForDisplay } from '../display/untrusted-text';
 import type { ApprovalRequest } from '../ipc/session-boundary';
 import { dialogs } from '../ui-messages';
 
@@ -16,7 +16,7 @@ const CHAT_TOOLS: ReadonlySet<string> = new Set(['send_chat', 'broadcast_chat'])
  */
 export function describeUntargeted(request: ApprovalRequest): string {
   if (request.room !== undefined) {
-    return dialogs.describeApprovalRoom(sanitizeForDisplay(request.room.name));
+    return dialogs.describeApprovalRoom(formatPathForDisplay(request.room.name));
   }
   // Every other untargeted request (open_window, a handoff that opens a
   // window from a profile) is approved before its window exists.

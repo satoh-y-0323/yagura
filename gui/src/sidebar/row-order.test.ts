@@ -145,14 +145,14 @@ describe('resolveDropIndex: maps a pointer position to a drop slot', () => {
 });
 
 describe('moveWithinRoom: Move up / Move down reorder a room one step', () => {
-  const roomA = { roomId: 'room-a', name: 'Room A' };
-  const roomB = { roomId: 'room-b', name: 'Room B' };
+  const roomA = { roomId: 'room-a', name: 'Room A', displayName: 'Room A' };
+  const roomB = { roomId: 'room-b', name: 'Room B', displayName: 'Room B' };
   const entries = [
-    { windowId: 'a1', cwd: 'c', room: roomA, display: { isMinimized: false } },
-    { windowId: 'b1', cwd: 'c', room: roomB, display: { isMinimized: false } },
-    { windowId: 'a2', cwd: 'c', room: roomA, display: { isMinimized: false } },
-    { windowId: 'b2', cwd: 'c', room: roomB, display: { isMinimized: false } },
-    { windowId: 'a3', cwd: 'c', room: roomA, display: { isMinimized: false } },
+    { windowId: 'a1', cwd: 'c', displayCwd: 'c', room: roomA, display: { isMinimized: false } },
+    { windowId: 'b1', cwd: 'c', displayCwd: 'c', room: roomB, display: { isMinimized: false } },
+    { windowId: 'a2', cwd: 'c', displayCwd: 'c', room: roomA, display: { isMinimized: false } },
+    { windowId: 'b2', cwd: 'c', displayCwd: 'c', room: roomB, display: { isMinimized: false } },
+    { windowId: 'a3', cwd: 'c', displayCwd: 'c', room: roomA, display: { isMinimized: false } },
   ];
   // Room A reads a1, a2, a3 and room B reads b1, b2 once grouped; the two rooms interleave here.
   const tabOrder = ['a1', 'b1', 'a2', 'b2', 'a3'];

@@ -4,6 +4,7 @@
  * inside a column, what a ticket-changed push reads again, and when the plans
  * panel counts as showing the plan board.
  */
+import { formatPathForDisplay } from '../display/untrusted-text';
 import type { TicketListQuery } from '../ipc/ticket-client';
 import type {
   TicketChanged,
@@ -132,12 +133,14 @@ export function planBoardBecameVisible(previous: PlansPanelView, next: PlansPane
 }
 
 /**
- * The name shown for a workspace: the last segment of its path.
- * @param path the workspace's path, already prepared for display
+ * The name shown for a workspace, ready to draw: the last segment of its raw
+ * path through `formatPathForDisplay`, as a room name is shown. The segment
+ * is taken first, since a written-out character starts with a backslash.
+ * @param path the workspace's path as the daemon sent it
  */
 export function ticketWorkspaceName(path: string): string {
   const segments = path.split(/[\\/]/).filter((segment) => segment !== '');
-  return segments[segments.length - 1] ?? path;
+  return formatPathForDisplay(segments[segments.length - 1] ?? path);
 }
 
 function showsPlanBoard(view: PlansPanelView): boolean {

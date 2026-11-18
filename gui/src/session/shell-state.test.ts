@@ -85,6 +85,7 @@ interface ShellStateModule {
   ) => ShellEvent[];
   workViewOf: (state: ShellState) => WorkView;
   readWorkMode: (storage: { getItem: (key: string) => string | null }) => WorkMode;
+  writeWorkMode: (storage: Pick<Storage, 'setItem'>, mode: WorkMode) => void;
   firstWindowAtStartup: <T extends StartupWindow>(
     order: readonly T[],
     canvasCurrent: T | null
@@ -200,6 +201,24 @@ describe('readWorkMode: the saved work mode', () => {
       expect(readWorkMode(storageHolding(value))).toBe('focus');
     }
   );
+
+  it('reads back the mode writeWorkMode saved under yagura.work-mode', () => {
+    const { readWorkMode, writeWorkMode } = shellStateModule();
+    const saved = new Map<string, string>();
+    const storage = {
+      getItem: (key: string): string | null => saved.get(key) ?? null,
+      setItem: (key: string, value: string): void => {
+        saved.set(key, value);
+      },
+    };
+
+    writeWorkMode(storage, 'canvas');
+    expect(readWorkMode(storage)).toBe('canvas');
+    expect([...saved.keys()]).toEqual(['yagura.work-mode']);
+
+    writeWorkMode(storage, 'focus');
+    expect(readWorkMode(storage)).toBe('focus');
+  });
 });
 
 interface Win extends StartupWindow {

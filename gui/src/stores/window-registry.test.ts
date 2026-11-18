@@ -7,6 +7,7 @@ import { describe, it, expect, vi } from 'vitest';
 import { get } from 'svelte/store';
 
 import { createWindowRegistry } from './window-registry';
+import { MAX_DISPLAY_FIELD_CHARS } from '../display/untrusted-text';
 import { resolveMessages } from '../i18n/messages';
 import type { WindowRegistry } from './window-registry';
 import type { DetectedStatusView, UnknownReason } from '../ipc/session-boundary';
@@ -104,13 +105,15 @@ describe('createWindowRegistry: renameWindow', () => {
     registry.openWindow(makeWindowInfo({ window_id: 'w-a', name: 'claude' }));
     registry.openWindow(makeWindowInfo({ window_id: 'w-b', name: 'codex' }));
 
-    registry.renameWindow('w-a', 'renamed-a');
+    registry.renameWindow('w-a', 'renamed\u202E-a\u0007');
 
     const state = get(registry);
     const a = state.windows.find((w) => w.windowId === 'w-a');
     const b = state.windows.find((w) => w.windowId === 'w-b');
-    expect(a?.name).toBe('renamed-a');
+    expect(a?.name).toBe('renamed\u202E-a\u0007');
+    expect(a?.displayName).toBe('renamed-a');
     expect(b?.name).toBe('codex');
+    expect(b?.displayName).toBe('codex');
   });
 
   it('changes only the name, not order or status', () => {
@@ -176,14 +179,18 @@ function openedEntry(
   return {
     windowId,
     name,
+    displayName: name,
     vendor: 'claude-code',
+    displayVendor: 'claude-code',
     cwd: 'C:\\Users\\dev\\project',
+    displayCwd: 'C:\\Users\\dev\\project',
     detected: { status: 'running' },
     statusRev: null,
     statusBoot: null,
     exitCode: null,
-    room,
+    room: room === null ? null : { ...room, displayName: room.name },
     detectionWarning: null,
+    displayDetectionWarning: null,
     mcpConnected: null,
     statusReportsMissing: null,
     display: {
@@ -246,6 +253,41 @@ describe('createWindowRegistry: the room a window belongs to', () => {
     registry.openWindow(makeWindowInfo({ window_id: 'w-a' }));
 
     expect(get(registry).windows).toEqual([openedEntry('w-a', 'claude', null)]);
+  });
+});
+
+describe('createWindowRegistry: what the view draws of a newly opened window', () => {
+  it('keeps the daemon values raw, strips what hides in a label and writes it out of a place', () => {
+    const registry = createWindowRegistry();
+    const rawCwd = `C:\\work\\\u202E${'a'.repeat(MAX_DISPLAY_FIELD_CHARS)}`;
+
+    registry.openWindow(
+      makeWindowInfo({
+        window_id: 'w-a',
+        name: 'cl\u202Eaude\u0007',
+        vendor: 'claude\u2066-code\u0085',
+        cwd: rawCwd,
+        room: { room_id: 'r-alpha', name: 'ya\u200Bgura\uFEFF' },
+        detection_warning: 'the profile\u2028 did not\u001b resolve',
+      })
+    );
+    registry.openWindow(makeWindowInfo({ window_id: 'w-b', vendor: null }));
+
+    const a = entryOf(registry, 'w-a');
+    expect(a?.name).toBe('cl\u202Eaude\u0007');
+    expect(a?.displayName).toBe('claude');
+    expect(a?.vendor).toBe('claude\u2066-code\u0085');
+    expect(a?.displayVendor).toBe('claude-code');
+    expect(a?.cwd).toBe(rawCwd);
+    expect(a?.displayCwd).toBe(`C:\\work\\\\u{202E}${'a'.repeat(MAX_DISPLAY_FIELD_CHARS - 9)}…`);
+    expect(a?.room).toEqual({
+      roomId: 'r-alpha',
+      name: 'ya\u200Bgura\uFEFF',
+      displayName: 'ya\\u{200B}gura\\u{FEFF}',
+    });
+    expect(a?.detectionWarning).toBe('the profile\u2028 did not\u001b resolve');
+    expect(a?.displayDetectionWarning).toBe('the profile did not resolve');
+    expect(entryOf(registry, 'w-b')?.displayVendor).toBeNull();
   });
 });
 
@@ -742,18 +784,24 @@ describe('createWindowRegistry: an older generation costs the pair alone', () =>
     registry.openWindow(
       makeWindowInfo({
         window_id: 'w-a',
-        name: 'renamed',
+        name: 're\u2067named\u0000',
         detected: unknownPair('screen_lost'),
-        room: { room_id: 'r-beta', name: 'other' },
-        detection_warning: 'second warning',
+        room: { room_id: 'r-beta', name: 'oth\u202Der\u2060' },
+        detection_warning: 'second\u200F warning\u009b',
         status_rev: 2,
       })
     );
 
     const entry = entryOf(registry, 'w-a');
-    expect(entry?.name).toBe('renamed');
-    expect(entry?.room).toEqual({ roomId: 'r-beta', name: 'other' });
-    expect(entry?.detectionWarning).toBe('second warning');
+    expect(entry?.name).toBe('re\u2067named\u0000');
+    expect(entry?.displayName).toBe('renamed');
+    expect(entry?.room).toEqual({
+      roomId: 'r-beta',
+      name: 'oth\u202Der\u2060',
+      displayName: 'oth\\u{202D}er\\u{2060}',
+    });
+    expect(entry?.detectionWarning).toBe('second\u200F warning\u009b');
+    expect(entry?.displayDetectionWarning).toBe('second warning');
     expect(entry?.detected).toEqual({ status: 'waiting_input' });
   });
 

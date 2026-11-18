@@ -2244,7 +2244,7 @@
   function observeWindowList(): void {
     const listed: OrderedWindow[] = windowsInDisplayOrder(sidebarGroups()).map((entry) => ({
       windowId: entry.windowId,
-      name: entry.name,
+      name: entry.displayName,
       exitCode: entry.exitCode,
     }));
     const events = [

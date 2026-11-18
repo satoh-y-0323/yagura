@@ -52,11 +52,11 @@ function listed(
   name: string,
   status: 'running' | 'idle' | 'exited'
 ): BoardWindow {
-  return { windowId, name, detected: { status } };
+  return { windowId, displayName: name, detected: { status } };
 }
 
 function unknownWindow(windowId: string, name: string): BoardWindow {
-  return { windowId, name, detected: { status: 'unknown', reason: null } };
+  return { windowId, displayName: name, detected: { status: 'unknown', reason: null } };
 }
 
 const CLAUDE: TaskAssignment = { profile: 'claude', model: 'opus', effort: 'high' };
@@ -202,7 +202,7 @@ describe('the plan owner', () => {
     expect(planOwner(plan(), windows)).toEqual({
       kind: 'live',
       windowId: 'w-owner',
-      name: 'planner',
+      displayName: 'planner',
       detected: { status: 'running' },
     });
   });
@@ -240,7 +240,7 @@ describe('the plan owner', () => {
     expect(back).toEqual({
       kind: 'live',
       windowId: 'w-owner',
-      name: 'renamed',
+      displayName: 'renamed',
       detected: { status: 'idle' },
     });
     expect(detail).toEqual(before);
@@ -277,7 +277,7 @@ describe('the window bound to a task card', () => {
     expect(cardWindow('w-task', windows)).toEqual({
       kind: 'live',
       windowId: 'w-task',
-      name: 'implementer',
+      displayName: 'implementer',
       detected: { status: 'running' },
     });
   });
@@ -309,7 +309,7 @@ describe('the window bound to a task card', () => {
     expect(cards.map((card) => card.window)).toEqual([
       { kind: 'none' },
       { kind: 'none' },
-      { kind: 'live', windowId: 'w-c', name: 'third', detected: { status: 'idle' } },
+      { kind: 'live', windowId: 'w-c', displayName: 'third', detected: { status: 'idle' } },
     ]);
   });
 
@@ -437,9 +437,9 @@ describe('owner candidates come from the window list', () => {
     ];
 
     expect(ownerCandidates(detail, windows)).toEqual([
-      { windowId: 'w-second', name: 'second' },
-      { windowId: 'w-first', name: 'first' },
-      { windowId: 'w-third', name: 'third' },
+      { windowId: 'w-second', displayName: 'second' },
+      { windowId: 'w-first', displayName: 'first' },
+      { windowId: 'w-third', displayName: 'third' },
     ]);
   });
 
@@ -447,10 +447,12 @@ describe('owner candidates come from the window list', () => {
     const before = [listed('w-first', 'first', 'running')];
     const after = [...before, listed('w-new', 'newcomer', 'running')];
 
-    expect(ownerCandidates(detail, before)).toEqual([{ windowId: 'w-first', name: 'first' }]);
+    expect(ownerCandidates(detail, before)).toEqual([
+      { windowId: 'w-first', displayName: 'first' },
+    ]);
     expect(ownerCandidates(detail, after)).toEqual([
-      { windowId: 'w-first', name: 'first' },
-      { windowId: 'w-new', name: 'newcomer' },
+      { windowId: 'w-first', displayName: 'first' },
+      { windowId: 'w-new', displayName: 'newcomer' },
     ]);
   });
 
@@ -462,9 +464,9 @@ describe('owner candidates come from the window list', () => {
         listed('w-first', 'first', 'exited'),
         listed('w-second', 'second', 'running'),
       ])
-    ).toEqual([{ windowId: 'w-second', name: 'second' }]);
+    ).toEqual([{ windowId: 'w-second', displayName: 'second' }]);
     expect(ownerCandidates(detail, before.slice(0, 1))).toEqual([
-      { windowId: 'w-first', name: 'first' },
+      { windowId: 'w-first', displayName: 'first' },
     ]);
   });
 
@@ -494,14 +496,16 @@ describe('the window registry feeds the board directly', () => {
     const openList: WindowEntry[] = get(registry).windows;
     expect(planOwner(detail, openList).kind).toBe('live');
     expect(ownerCandidates(detail, openList)).toEqual([
-      { windowId: 'w-owner', name: 'planner' },
-      { windowId: 'w-helper', name: 'helper' },
+      { windowId: 'w-owner', displayName: 'planner' },
+      { windowId: 'w-helper', displayName: 'helper' },
     ]);
 
     registry.setStatus('w-owner', { status: 'exited' }, null, null);
     const afterExit: WindowEntry[] = get(registry).windows;
     expect(planOwner(detail, afterExit)).toEqual({ kind: 'none' });
-    expect(ownerCandidates(detail, afterExit)).toEqual([{ windowId: 'w-helper', name: 'helper' }]);
+    expect(ownerCandidates(detail, afterExit)).toEqual([
+      { windowId: 'w-helper', displayName: 'helper' },
+    ]);
   });
 });
 

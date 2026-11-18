@@ -31,14 +31,18 @@ function makeEntry(overrides: Partial<WindowEntry> & { status?: WindowStatus } =
   return {
     windowId: 'w-1',
     name: 'w-1',
+    displayName: 'w-1',
     vendor: null,
+    displayVendor: null,
     cwd: 'C:\\Users\\dev\\project',
+    displayCwd: 'C:\\Users\\dev\\project',
     detected: status === 'unknown' ? { status, reason: null } : { status },
     statusRev: null,
     statusBoot: null,
     exitCode: null,
     room: null,
     detectionWarning: null,
+    displayDetectionWarning: null,
     mcpConnected: null,
     statusReportsMissing: null,
     display: {

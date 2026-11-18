@@ -8,6 +8,7 @@ import { describe, it, expect, vi, afterEach } from 'vitest';
 
 import {
   formatApprovalBody,
+  formatPathForDisplay,
   MAX_DISPLAY_FIELD_CHARS,
   sanitizeForDisplay,
 } from '../display/untrusted-text';
@@ -682,9 +683,74 @@ describe('the restore candidates', () => {
   });
 });
 
+/**
+ * Characters a path or an approval body writes out: the label set the daemon
+ * refuses, plus every default ignorable code point (ZWNJ and ZWJ included).
+ */
+const HIDDEN_WRITTEN_OUT = [
+  '\u00AD',
+  '\u034F',
+  '\u061C',
+  '\u115F',
+  '\u180E',
+  '\u200B',
+  '\u200C',
+  '\u200D',
+  '\u200E',
+  '\u200F',
+  '\u2028',
+  '\u2029',
+  '\u202A',
+  '\u202B',
+  '\u202C',
+  '\u202D',
+  '\u202E',
+  '\u2060',
+  '\u2061',
+  '\u2064',
+  '\u2066',
+  '\u2067',
+  '\u2068',
+  '\u2069',
+  '\u206A',
+  '\u3164',
+  '\uFE0F',
+  '\uFEFF',
+  '\u{E0041}',
+];
+
+function escapeOf(char: string): string {
+  const hex = (char.codePointAt(0) ?? 0).toString(16).toUpperCase().padStart(4, '0');
+  return `\\u{${hex}}`;
+}
+
 describe('sanitizeForDisplay', () => {
-  it('strips control characters and keeps everything else', () => {
+  it('strips control characters and the characters a label may not hold, and keeps everything else', () => {
     expect(sanitizeForDisplay('a\u0000b\u007fc\u009fd\ne')).toBe('abcde');
+    // The set the daemon refuses in a label (`is_forbidden_label_char`).
+    const forbidden = [
+      '\u061c',
+      '\u2028',
+      '\u2029',
+      '\u200B',
+      '\u200E',
+      '\u200F',
+      '\u2060',
+      '\uFEFF',
+      '\u202A',
+      '\u202B',
+      '\u202C',
+      '\u202D',
+      '\u202E',
+      '\u2066',
+      '\u2067',
+      '\u2068',
+      '\u2069',
+    ];
+    for (const char of forbidden) {
+      expect(sanitizeForDisplay(`exe.${char}txt`)).toBe('exe.txt');
+    }
+    expect(sanitizeForDisplay('a\u200Cb\u200Dc')).toBe('a\u200Cb\u200Dc');
   });
 
   it('keeps a text of exactly the limit whole', () => {
@@ -717,24 +783,9 @@ describe('formatApprovalBody', () => {
     );
   });
 
-  it('writes each bidirectional control out so the line reads as it is stored', () => {
-    const controls = [
-      '\u061C',
-      '\u200E',
-      '\u200F',
-      '\u202A',
-      '\u202B',
-      '\u202C',
-      '\u202D',
-      '\u202E',
-      '\u2066',
-      '\u2067',
-      '\u2068',
-      '\u2069',
-    ];
-    for (const control of controls) {
-      const hex = (control.codePointAt(0) ?? 0).toString(16).toUpperCase().padStart(4, '0');
-      expect(formatApprovalBody(`cmd ${control}txt.exe`)).toBe(`cmd \\u{${hex}}txt.exe`);
+  it('writes each hidden character out so the line reads as it is stored', () => {
+    for (const hidden of HIDDEN_WRITTEN_OUT) {
+      expect(formatApprovalBody(`cmd ${hidden}txt.exe`)).toBe(`cmd ${escapeOf(hidden)}txt.exe`);
     }
   });
 
@@ -749,5 +800,17 @@ describe('formatApprovalBody', () => {
 
   it('keeps an empty body empty', () => {
     expect(formatApprovalBody('')).toBe('');
+  });
+});
+
+describe('formatPathForDisplay', () => {
+  it('writes every hidden character and line break out, and cuts before escaping', () => {
+    for (const hidden of HIDDEN_WRITTEN_OUT) {
+      expect(formatPathForDisplay(`C:\\work\\a${hidden}b`)).toBe(`C:\\work\\a${escapeOf(hidden)}b`);
+    }
+    expect(formatPathForDisplay('C:\\re\u0000po\n\t')).toBe('C:\\re\\u{0000}po\\u{000A}\\u{0009}');
+    expect(formatPathForDisplay('C:\\work\\yagura')).toBe('C:\\work\\yagura');
+    const shown = formatPathForDisplay(`${'a'.repeat(MAX_DISPLAY_FIELD_CHARS - 1)}\u202Etail`);
+    expect(shown).toBe(`${'a'.repeat(MAX_DISPLAY_FIELD_CHARS - 1)}\\u{202E}…`);
   });
 });

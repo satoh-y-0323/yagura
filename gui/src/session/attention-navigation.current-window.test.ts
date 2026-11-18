@@ -15,7 +15,8 @@ import { createAttentionNavigation, nextWindowNeedingYou } from './attention-nav
 interface Entry {
   windowId: string;
   cwd: string;
-  room: { roomId: string; name: string } | null;
+  displayCwd: string;
+  room: { roomId: string; name: string; displayName: string } | null;
   detected: DetectedStatusView;
   display: { zOrder: number; isMinimized: boolean; isMaximized: boolean };
 }
@@ -34,7 +35,8 @@ function entry(windowId: string, placement: Placement): Entry {
   return {
     windowId,
     cwd: `C:\\Users\\dev\\${roomId}`,
-    room: { roomId, name: roomId },
+    displayCwd: `C:\\Users\\dev\\${roomId}`,
+    room: { roomId, name: roomId, displayName: roomId },
     detected: { status },
     display: {
       zOrder: placement.z,

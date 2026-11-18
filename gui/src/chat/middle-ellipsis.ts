@@ -23,18 +23,30 @@ function createGraphemeSegmenter(): GraphemeSegmenter | null {
 // Older WebKit lacks Intl.Segmenter; code points still keep surrogate pairs whole there.
 const segmenter = createGraphemeSegmenter();
 
-function graphemes(text: string): string[] {
+function segmentGraphemes(text: string): string[] {
   if (segmenter === null) {
     return Array.from(text);
   }
   return Array.from(segmenter.segment(text), (part) => part.segment);
 }
 
+// The form `formatPathForDisplay` (`untrusted-text.ts`) writes a hidden character out in.
+const WRITTEN_OUT_CHAR = /(\\u\{[0-9A-F]{4,6}\})/;
+
+// A written-out character stands for one character, so it is one grapheme: cut
+// inside, its tail would read as other text.
+function graphemes(text: string): string[] {
+  return text
+    .split(WRITTEN_OUT_CHAR)
+    .flatMap((part, index) => (index % 2 === 1 ? [part] : segmentGraphemes(part)));
+}
+
 /**
  * Splits a name for an ellipsis in the middle: `head` shrinks behind the
  * ellipsis while `tail` stays visible. Names of more than 16 graphemes keep
  * their last 8 graphemes as `tail`; shorter names come back whole in `head`.
- * `head + tail` always equals `name`, and a grapheme is never split.
+ * `head + tail` always equals `name`, and neither a grapheme nor a
+ * written-out character (`\u{200B}`) is ever split; the latter counts as one.
  */
 export function splitForMiddleEllipsis(name: string): { head: string; tail: string } {
   const parts = graphemes(name);

@@ -12,9 +12,10 @@ import { groupByRoom } from './room-groups';
 interface Entry {
   windowId: string;
   cwd: string;
+  displayCwd: string;
   detected: DetectedStatusView;
   taskReport?: TaskReportMark;
-  room: { roomId: string; name: string } | null;
+  room: { roomId: string; name: string; displayName: string } | null;
   display: { isMinimized: boolean };
 }
 
@@ -22,6 +23,7 @@ function makeEntry(windowId: string, status: WindowStatus, overrides: Partial<En
   return {
     windowId,
     cwd: 'C:\\work',
+    displayCwd: 'C:\\work',
     detected: status === 'unknown' ? { status, reason: null } : { status },
     room: null,
     display: { isMinimized: false },
@@ -39,8 +41,8 @@ function groupsOf(entries: readonly Entry[], order = entries.map((entry) => entr
   return groupByRoom(entries, new Set(), order);
 }
 
-const ROOM_A = { roomId: 'room-a', name: 'Room A' };
-const ROOM_B = { roomId: 'room-b', name: 'Room B' };
+const ROOM_A = { roomId: 'room-a', name: 'Room A', displayName: 'Room A' };
+const ROOM_B = { roomId: 'room-b', name: 'Room B', displayName: 'Room B' };
 
 describe('nextNeedsYouView: rebuilding on a user operation', () => {
   it('lists the windows that need you in the sidebar order, room by room', async () => {

@@ -24,6 +24,9 @@ describe('describeUntargeted', () => {
     const named = request({ room: { room_id: 'main', name: 'Main' } });
 
     expect(describeUntargeted(named)).toBe(dialogs.describeApprovalRoom('Main'));
+    // A room's name is the last name of a path, so a reordering control is written out.
+    const reordered = request({ room: { room_id: 'r', name: 'ya\u202Egura' } });
+    expect(describeUntargeted(reordered)).toBe(dialogs.describeApprovalRoom('ya\\u{202E}gura'));
   });
 
   it('names a new window for a request to open one', () => {

@@ -12,6 +12,7 @@ import { writable, type Readable } from 'svelte/store';
 
 import { bringToFront, MIN_WINDOW_SIZE, type Rect, type Size } from '../layout/float-layout';
 import { tileRects } from '../layout/tile-layout';
+import { formatPathForDisplay, sanitizeForDisplay } from '../display/untrusted-text';
 import { reorderTabs } from '../sidebar/row-order';
 import type { DetectedStatusView, StatusBoot, TaskReportMark } from '../ipc/session-boundary';
 import type { WindowEventHandlers, WindowInfo } from '../ipc/session-client';
@@ -44,12 +45,18 @@ export interface WindowDisplay {
 export interface WindowEntry {
   /** Opaque window id assigned by the daemon. */
   windowId: string;
-  /** Display name of the window. */
+  /** Name of the window as the daemon sent it; for operations, never drawn. */
   name: string;
+  /** `name` prepared for display; the only form a view draws. */
+  displayName: string;
   /** Vendor identifier, `null` when the window is not attributed to one. */
   vendor: string | null;
-  /** Absolute working directory of the child process. */
+  /** `vendor` prepared for display, `null` when `vendor` is. */
+  displayVendor: string | null;
+  /** Absolute working directory of the child process, as sent; never drawn. */
   cwd: string;
+  /** `cwd` prepared for display. */
+  displayCwd: string;
   /** Last known status of the child process, with the reason it is `'unknown'`. */
   detected: DetectedStatusView;
   /**
@@ -61,10 +68,15 @@ export interface WindowEntry {
   statusBoot: StatusBoot | null;
   /** Exit code once the child has exited, `null` otherwise. */
   exitCode: number | null;
-  /** The room the window belongs to, `null` when the daemon reported none. */
-  room: { roomId: string; name: string } | null;
+  /**
+   * The room the window belongs to, `null` when the daemon reported none.
+   * `displayName` is `name` prepared for display.
+   */
+  room: { roomId: string; name: string; displayName: string } | null;
   /** Detection-load warning describing a definition that failed to load, `null` when there is none. */
   detectionWarning: string | null;
+  /** `detectionWarning` prepared for display. */
+  displayDetectionWarning: string | null;
   /**
    * Whether the window's child is currently connected to the daemon over
    * MCP, `null` while the daemon has reported nothing about it.
@@ -367,23 +379,50 @@ function withQueuedCount(entry: WindowEntry, count: number | null): WindowEntry 
   return cleared;
 }
 
-/** The wire's room, in the view's naming; `null` when the snapshot carries none. */
-function roomOf(info: WindowInfo): { roomId: string; name: string } | null {
-  return info.room === undefined ? null : { roomId: info.room.room_id, name: info.room.name };
+/** `text` prepared for display, `null` staying `null`. */
+function displayOrNull(text: string | null): string | null {
+  return text === null ? null : sanitizeForDisplay(text);
+}
+
+/**
+ * The raw fields a snapshot can change and the display forms derived from
+ * them. The one place untrusted text is prepared for the view.
+ */
+function snapshotFields(
+  info: WindowInfo
+): Pick<
+  WindowEntry,
+  'name' | 'displayName' | 'room' | 'detectionWarning' | 'displayDetectionWarning'
+> {
+  const detectionWarning = info.detection_warning ?? null;
+  return {
+    name: info.name,
+    displayName: sanitizeForDisplay(info.name),
+    room:
+      info.room === undefined
+        ? null
+        : {
+            roomId: info.room.room_id,
+            name: info.room.name,
+            displayName: formatPathForDisplay(info.room.name),
+          },
+    detectionWarning,
+    displayDetectionWarning: displayOrNull(detectionWarning),
+  };
 }
 
 function toEntry(info: WindowInfo, zOrder: number): WindowEntry {
   const entry: WindowEntry = {
     windowId: info.window_id,
-    name: info.name,
+    ...snapshotFields(info),
     vendor: info.vendor,
+    displayVendor: displayOrNull(info.vendor),
     cwd: info.cwd,
+    displayCwd: formatPathForDisplay(info.cwd),
     detected: info.detected,
     statusRev: info.status_rev ?? null,
     statusBoot: info.status_boot ?? null,
     exitCode: info.exit_code,
-    room: roomOf(info),
-    detectionWarning: info.detection_warning ?? null,
     mcpConnected: info.mcp_connected ?? null,
     statusReportsMissing: info.status_reports_missing ?? null,
     display: {
@@ -406,7 +445,9 @@ function withName(state: WindowRegistryState, windowId: string, name: string): W
   return {
     ...state,
     windows: state.windows.map((entry) =>
-      entry.windowId === windowId ? { ...entry, name } : entry
+      entry.windowId === windowId
+        ? { ...entry, name, displayName: sanitizeForDisplay(name) }
+        : entry
     ),
   };
 }
@@ -505,9 +546,7 @@ function withSnapshot(state: WindowRegistryState, info: WindowInfo): WindowRegis
                 info.status_rev ?? null,
                 info.status_boot ?? null
               ),
-              name: info.name,
-              room: roomOf(info),
-              detectionWarning: info.detection_warning ?? null,
+              ...snapshotFields(info),
               mcpConnected: info.mcp_connected ?? null,
               statusReportsMissing: info.status_reports_missing ?? null,
             },

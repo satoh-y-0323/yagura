@@ -188,7 +188,7 @@
           aria-pressed={owner !== null &&
             owner.kind === 'live' &&
             owner.windowId === candidate.windowId}
-          on:click={() => void assignOwner(candidate.windowId)}>{candidate.name}</button
+          on:click={() => void assignOwner(candidate.windowId)}>{candidate.displayName}</button
         >
       {:else}
         <span class="plan-board__muted">{hints.noWindows}</span>
@@ -239,7 +239,7 @@
                 {/if}
                 {#if card.window.kind === 'live'}
                   <div class="plan-card__window">
-                    {card.window.name} · {describeStatus(card.window.detected.status)}
+                    {card.window.displayName} · {describeStatus(card.window.detected.status)}
                   </div>
                 {:else if card.task.window_id !== null}
                   <div class="plan-card__window plan-board__muted">—</div>

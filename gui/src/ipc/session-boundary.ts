@@ -7,7 +7,7 @@
  * is accepted as `unknown` and validated here; no other module has to trust
  * the boundary.
  */
-import { sanitizeForDisplay } from '../display/untrusted-text';
+import { formatPathForDisplay, sanitizeForDisplay } from '../display/untrusted-text';
 import { parseLayoutJson, type LayoutV1 } from '../session/restore-model';
 import type { ApprovalRequesterKind, WithdrawReason } from '../session/approval-types';
 import type {
@@ -1813,7 +1813,7 @@ function tryNarrowRestoreCandidate(value: unknown): RestoreEntry | null {
     detection,
     layout: readCandidateLayout(record),
     displayCommand: sanitizeForDisplay(command.join(' ')),
-    displayCwd: sanitizeForDisplay(cwd),
+    displayCwd: formatPathForDisplay(cwd),
     displayName: sanitizeForDisplay(name),
     displayVendor: vendor === null ? null : sanitizeForDisplay(vendor),
     displayDetection: detection === null ? null : sanitizeForDisplay(detection),

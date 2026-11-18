@@ -858,13 +858,16 @@ pub enum WindowNameError {
     },
 }
 
-/// Characters that may not appear in a window display label.
+/// Characters that may not appear in a window display label, nor (apart from
+/// the line breaks and tabs each check allows) in the text checks built on
+/// this set: handoff, message, chat and multi-line text.
 ///
 /// These either break single-line rendering (controls, newlines, line and
 /// paragraph separators), let a label reorder the text around it and
 /// impersonate another window (bidirectional embeddings, overrides, isolates
-/// and marks), or occupy no width at all, so that two different labels render
-/// identically (zero-width space, word joiner, byte-order mark).
+/// and the implicit marks LRM, RLM and ALM), or occupy no width at all, so
+/// that two different labels render identically (zero-width space, word
+/// joiner, byte-order mark).
 ///
 /// U+200C (ZWNJ) and U+200D (ZWJ) are *not* forbidden even though they are
 /// equally invisible: they select which glyph is rendered,
@@ -883,6 +886,8 @@ fn is_forbidden_label_char(ch: char) -> bool {
         // Zero-width space and the bidirectional marks (U+200C ZWNJ and
         // U+200D ZWJ sit between them and stay allowed).
         | '\u{200B}' | '\u{200E}' | '\u{200F}'
+        // Arabic letter mark, the implicit mark of the same kind as RLM.
+        | '\u{061C}'
         // Word joiner and byte-order mark / zero-width no-break space.
         | '\u{2060}' | '\u{FEFF}'
         // Bidirectional embeddings / overrides and isolates.

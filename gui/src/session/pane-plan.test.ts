@@ -48,14 +48,18 @@ function makeEntry(windowId: string): WindowEntry {
   return {
     windowId,
     name: windowId,
+    displayName: windowId,
     vendor: null,
+    displayVendor: null,
     cwd: '/home/user/project',
+    displayCwd: '/home/user/project',
     detected: { status: 'running' },
     statusRev: null,
     statusBoot: null,
     exitCode: null,
     room: null,
     detectionWarning: null,
+    displayDetectionWarning: null,
     mcpConnected: null,
     statusReportsMissing: null,
     display: {

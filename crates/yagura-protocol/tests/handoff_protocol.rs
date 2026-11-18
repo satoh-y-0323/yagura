@@ -371,6 +371,7 @@ fn forbidden_text_chars() -> Vec<char> {
     chars.push('\n');
     chars.push('\u{202E}'); // RIGHT-TO-LEFT OVERRIDE
     chars.push('\u{2066}'); // LEFT-TO-RIGHT ISOLATE
+    chars.push('\u{061C}'); // ARABIC LETTER MARK
     chars.push('\u{200B}'); // ZERO WIDTH SPACE
     chars.push('\u{2028}'); // LINE SEPARATOR
     chars.push('\u{2029}'); // PARAGRAPH SEPARATOR

@@ -91,7 +91,7 @@
 
   $: rect = resolveRect(entry.display, area);
   $: notice = describePaneNotice($sessionStore.phase);
-  $: unknownExplanation = describeUnknownExplanation(entry.detected, entry.detectionWarning);
+  $: unknownExplanation = describeUnknownExplanation(entry.detected, entry.displayDetectionWarning);
 
   // The scope element only exists once the window is in the DOM, so the
   // palette is bound from `onMount` rather than at initialization.
@@ -217,9 +217,9 @@
       <div class="float-window__bar" role="presentation" use:pointerDrag={moveDrag}>
         <h2
           class="float-window__title"
-          use:tooltip={{ text: entry.name, announcedElsewhere: true }}
+          use:tooltip={{ text: entry.displayName, announcedElsewhere: true }}
         >
-          {entry.name}
+          {entry.displayName}
         </h2>
         <McpMark mcpConnected={entry.mcpConnected} />
         <StatusReportMark statusReportsMissing={entry.statusReportsMissing} />

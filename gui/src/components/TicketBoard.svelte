@@ -36,8 +36,7 @@
   const ALL_MILESTONES = '';
 
   function workspaceOption(workspace: TicketWorkspace): string {
-    const shown = displayTicketWorkspace(workspace);
-    return `${ticketWorkspaceName(shown.path)} · ${shown.path}`;
+    return `${ticketWorkspaceName(workspace.path)} · ${displayTicketWorkspace(workspace).path}`;
   }
 
   function milestoneOption(milestone: TicketMilestone): string {

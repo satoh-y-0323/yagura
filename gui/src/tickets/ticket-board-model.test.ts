@@ -15,7 +15,12 @@ import type {
   TicketSummary,
 } from '../ipc/ticket-boundary';
 
-import { buildTicketBoard, ticketColumnQueries, ticketReloadFor } from './ticket-board-model';
+import {
+  buildTicketBoard,
+  ticketColumnQueries,
+  ticketReloadFor,
+  ticketWorkspaceName,
+} from './ticket-board-model';
 
 function summary(number: number, state: string, milestone: string | null = null): TicketSummary {
   return {
@@ -247,5 +252,13 @@ describe('ticketReloadFor', () => {
       workspaces: true,
       board: false,
     });
+  });
+});
+
+describe('ticketWorkspaceName', () => {
+  it('takes the last name of the raw path, then writes out what hides in it', () => {
+    expect(ticketWorkspaceName('C:\\src\\ya\u202Egura')).toBe('ya\\u{202E}gura');
+    expect(ticketWorkspaceName('/home/dev/ya\u200Bgura/')).toBe('ya\\u{200B}gura');
+    expect(ticketWorkspaceName('C:\\src\\yagura')).toBe('yagura');
   });
 });

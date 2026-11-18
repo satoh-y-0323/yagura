@@ -11,14 +11,15 @@
  */
 interface RoomMember {
   cwd: string;
-  room: { roomId: string; name: string } | null;
+  displayCwd: string;
+  room: { roomId: string; displayName: string } | null;
 }
 
 /** One room's windows, with the counts its heading shows. */
 export interface RoomGroup<T> {
   /** Identifier of the room, or the working directory when it has no room. */
   roomId: string;
-  /** Display name of the room, or the working directory when it has no room. */
+  /** Display name of the room, or the displayed working directory when it has no room. */
   name: string;
   /** The room's windows, ordered by their position in `tabOrder` (absent ids last). */
   entries: T[];
@@ -35,7 +36,7 @@ function roomIdOf(entry: RoomMember): string {
 }
 
 function roomNameOf(entry: RoomMember): string {
-  return entry.room?.name ?? entry.cwd;
+  return entry.room?.displayName ?? entry.displayCwd;
 }
 
 /** `windowId`'s position in `tabOrder`, or `tabOrder.length` when absent (total order). */

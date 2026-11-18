@@ -322,6 +322,14 @@ export function readWorkMode(storage: { getItem: (key: string) => string | null 
 }
 
 /**
+ * Saves the work mode where {@link readWorkMode} reads it. Does not guard
+ * against a failing `setItem`; the caller passes a guarded storage.
+ */
+export function writeWorkMode(storage: Pick<Storage, 'setItem'>, mode: WorkMode): void {
+  storage.setItem(WORK_MODE_KEY, mode);
+}
+
+/**
  * The window Focus shows when the app starts: the window needing the user that
  * ranks first (the sidebar order breaks a tie), else the canvas's current
  * window, else the top of the sidebar.

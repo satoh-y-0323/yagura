@@ -22,11 +22,12 @@ import { plans } from '../ui-messages';
 import type { WindowEntry } from '../stores/window-registry';
 
 /** The least of a window-list entry the board needs to read. */
-export type BoardWindow = Pick<WindowEntry, 'windowId' | 'name' | 'detected'>;
+export type BoardWindow = Pick<WindowEntry, 'windowId' | 'displayName' | 'detected'>;
 
 /** A window a plan names, resolved against the window list. */
 export type BoardWindowState =
-  { kind: 'live'; windowId: string; name: string; detected: DetectedStatusView } | { kind: 'none' };
+  | { kind: 'live'; windowId: string; displayName: string; detected: DetectedStatusView }
+  | { kind: 'none' };
 
 /** One task, laid out with the window state of the window it names. */
 export interface TaskCard {
@@ -101,7 +102,12 @@ export function resolveBoardWindow(
   const entry = liveEntry(windows, windowId);
   return entry === null
     ? { kind: 'none' }
-    : { kind: 'live', windowId: entry.windowId, name: entry.name, detected: entry.detected };
+    : {
+        kind: 'live',
+        windowId: entry.windowId,
+        displayName: entry.displayName,
+        detected: entry.detected,
+      };
 }
 
 /** The plan's owner, as the board shows it. */
@@ -211,10 +217,10 @@ export function assignmentFromEditor(fields: EditorFields): TaskAssignment {
 export function ownerCandidates(
   _plan: PlanInfo,
   windows: readonly BoardWindow[]
-): { windowId: string; name: string }[] {
+): { windowId: string; displayName: string }[] {
   return windows
     .filter((window) => isWindowLive(windows, window.windowId))
-    .map((window) => ({ windowId: window.windowId, name: window.name }));
+    .map((window) => ({ windowId: window.windowId, displayName: window.displayName }));
 }
 
 /**

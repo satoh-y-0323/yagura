@@ -898,6 +898,9 @@ describe('narrowRestoreCandidateList', () => {
       MAX_DISPLAY_FIELD_CHARS + 1
     );
     expect(entries[0]?.displayCwd).not.toBe(longCwd);
+    const [reordered] = narrowRestoreCandidateList([candidate({ cwd: 'C:\\work\\\u202Egpj' })]);
+    expect(reordered?.cwd).toBe('C:\\work\\\u202Egpj');
+    expect(reordered?.displayCwd).toBe('C:\\work\\\\u{202E}gpj');
   });
 });
 

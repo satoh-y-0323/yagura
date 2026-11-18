@@ -198,8 +198,9 @@ changed task marks (see [Confirming a plan](plans.md#confirming-a-plan)) are cle
 Board tab is shown.
 
 Text from tickets is drawn as plain text, with control characters and characters that could
-reorder or hide text made visible. A workspace's path is shown with its control characters removed
-and the characters that could reorder it made visible.
+reorder or hide text made visible. A workspace's path, and the name taken from it, are shown with
+every control character (line breaks included), every character that could reorder them and every
+invisible character made visible, written as `\u{202E}`, so two paths never look alike.
 
 ## Moving a repository
 

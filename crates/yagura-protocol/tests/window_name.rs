@@ -20,7 +20,8 @@ use yagura_protocol::{
 
 /// Invisible characters that carry no glyph-shaping role and are therefore
 /// rejected: two labels differing only by one of these render identically.
-const INVISIBLE_FORBIDDEN: [char; 5] = [
+const INVISIBLE_FORBIDDEN: [char; 6] = [
+    '\u{061C}', // ARABIC LETTER MARK
     '\u{200B}', // ZERO WIDTH SPACE
     '\u{200E}', // LEFT-TO-RIGHT MARK
     '\u{200F}', // RIGHT-TO-LEFT MARK
