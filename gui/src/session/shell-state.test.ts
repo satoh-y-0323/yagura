@@ -14,21 +14,56 @@ type WorkMode = 'focus' | 'canvas';
 
 type WorkView = { mode: 'canvas' } | { mode: 'focus'; focusedWindowId: string | null };
 
+/** A window as the sidebar listed it; the order the sidebar showed is what a next window is read from. */
+interface OrderedWindow {
+  windowId: string;
+  name: string;
+  exitCode: number | null;
+}
+
+interface ExitedCard {
+  windowId: string;
+  name: string;
+  exitCode: number | null;
+  next: string | null;
+  nextWindowId: string | null;
+}
+
 interface ShellState {
   workMode: WorkMode;
   focusedWindowId: string | null;
+  closingHere: ReadonlySet<string>;
+  exitedCard: ExitedCard | null;
+  pendingExitCodes: ReadonlyMap<string, number>;
 }
+
+type WindowGoneEvent = {
+  type: 'windowGone';
+  windowId: string;
+  orderBefore: readonly OrderedWindow[];
+  exitCode: number | null;
+};
 
 type ShellEvent =
   | { type: 'enterFocus'; canvasCurrent: { windowId: string } | null }
   | { type: 'enterCanvas' }
-  | { type: 'select'; windowId: string };
+  | { type: 'select'; windowId: string }
+  | { type: 'closeRequested'; windowId: string }
+  | { type: 'closeFailed'; windowId: string }
+  | WindowGoneEvent
+  | { type: 'exitCodeReceived'; windowId: string; exitCode: number }
+  | { type: 'openedByUser'; windowId: string }
+  | { type: 'windowsAppeared'; windowIds: readonly string[] }
+  | { type: 'exitedCardGoTo' };
 
-type ShellEffect = { type: 'bringToFront'; windowId: string };
+type ShellEffect =
+  { type: 'bringToFront'; windowId: string } | { type: 'focusTerminal'; windowId: string };
 
 interface ShellStep {
   state: ShellState;
   effects: readonly ShellEffect[];
+  /** Set only for `windowGone`: whether this GUI closed the window. */
+  goneByUser?: boolean;
 }
 
 interface StartupWindow {
@@ -40,6 +75,14 @@ interface StartupWindow {
 interface ShellStateModule {
   initialShellState: (workMode: WorkMode) => ShellState;
   reduceShell: (state: ShellState, event: ShellEvent) => ShellStep;
+  diffGoneWindows: (
+    previous: readonly OrderedWindow[],
+    current: readonly OrderedWindow[]
+  ) => WindowGoneEvent[];
+  diffAppearedWindows: (
+    previous: readonly OrderedWindow[],
+    current: readonly OrderedWindow[]
+  ) => ShellEvent[];
   workViewOf: (state: ShellState) => WorkView;
   readWorkMode: (storage: { getItem: (key: string) => string | null }) => WorkMode;
   firstWindowAtStartup: <T extends StartupWindow>(
@@ -220,5 +263,457 @@ describe('firstWindowAtStartup: the window Focus shows when the app starts', () 
     const { firstWindowAtStartup } = shellStateModule();
 
     expect(firstWindowAtStartup([], null)).toBeNull();
+  });
+});
+
+function ordered(windowId: string, exitCode: number | null = null): OrderedWindow {
+  return { windowId, name: `name-${windowId}`, exitCode };
+}
+
+const ORDER_ABC = [ordered('a'), ordered('b'), ordered('c')];
+
+/** A Focus state showing `windowId`, with `closing` already asked to close. */
+function focusShowingWhileClosing(windowId: string, closing: readonly string[]): ShellState {
+  const { reduceShell } = shellStateModule();
+  return closing.reduce(
+    (state, id) => reduceShell(state, { type: 'closeRequested', windowId: id }).state,
+    focusShowing(windowId)
+  );
+}
+
+function gone(
+  windowId: string,
+  orderBefore: readonly OrderedWindow[],
+  exitCode: number | null = null
+): WindowGoneEvent {
+  return { type: 'windowGone', windowId, orderBefore, exitCode };
+}
+
+/** Runs the events through the reducer, collecting the effects and each `goneByUser`. */
+function replay(
+  start: ShellState,
+  events: readonly ShellEvent[]
+): { state: ShellState; effects: ShellEffect[]; goneByUser: boolean[] } {
+  const { reduceShell } = shellStateModule();
+  let state = start;
+  const effects: ShellEffect[] = [];
+  const goneByUser: boolean[] = [];
+  for (const event of events) {
+    const step = reduceShell(state, event);
+    state = step.state;
+    effects.push(...step.effects);
+    if (step.goneByUser !== undefined) {
+      goneByUser.push(step.goneByUser);
+    }
+  }
+  return { state, effects, goneByUser };
+}
+
+/** What the shell sends the reducer as the window list changes from one snapshot to the next. */
+function goneEventsAcross(snapshots: readonly (readonly OrderedWindow[])[]): WindowGoneEvent[] {
+  const { diffGoneWindows } = shellStateModule();
+  const events: WindowGoneEvent[] = [];
+  for (let i = 1; i < snapshots.length; i += 1) {
+    events.push(...diffGoneWindows(snapshots[i - 1] ?? [], snapshots[i] ?? []));
+  }
+  return events;
+}
+
+describe('reduceShell: closing a window from this GUI', () => {
+  it('remembers the window from the request to close it, and forgets it when the close fails', () => {
+    const { initialShellState, reduceShell } = shellStateModule();
+
+    const asked = reduceShell(initialShellState('focus'), {
+      type: 'closeRequested',
+      windowId: 'w-a',
+    });
+    const failed = reduceShell(asked.state, { type: 'closeFailed', windowId: 'w-a' });
+
+    expect(asked.state.closingHere.has('w-a')).toBe(true);
+    expect(failed.state.closingHere.has('w-a')).toBe(false);
+  });
+});
+
+describe('diffGoneWindows: the windows that left the list since the last one', () => {
+  it('reports each vanished window once, with the order the sidebar showed before and its exit code', () => {
+    const { diffGoneWindows } = shellStateModule();
+    const before = [ordered('a'), ordered('b', 3), ordered('c')];
+
+    const events = diffGoneWindows(before, [ordered('a'), ordered('c')]);
+
+    expect(events).toEqual([gone('b', before, 3)]);
+  });
+
+  it('reports nothing for windows still listed or never listed before', () => {
+    const { diffGoneWindows } = shellStateModule();
+
+    const events = diffGoneWindows(ORDER_ABC, [...ORDER_ABC, ordered('new')]);
+
+    expect(events).toEqual([]);
+  });
+
+  it('reports nothing the second time the same list is seen', () => {
+    const { diffGoneWindows } = shellStateModule();
+    const afterClose = [ordered('a'), ordered('c')];
+
+    const first = diffGoneWindows(ORDER_ABC, afterClose);
+    const second = diffGoneWindows(afterClose, afterClose);
+
+    expect(first).toHaveLength(1);
+    expect(second).toEqual([]);
+  });
+});
+
+describe('reduceShell: a window vanished while Focus shows it', () => {
+  it('after this GUI closed it, shows the window after it and moves the keyboard to its terminal', () => {
+    const { reduceShell } = shellStateModule();
+    const before = focusShowingWhileClosing('b', ['b']);
+
+    const step = reduceShell(before, gone('b', ORDER_ABC));
+
+    expect(step.state.focusedWindowId).toBe('c');
+    expect(step.state.exitedCard).toBeNull();
+    expect(step.state.closingHere.has('b')).toBe(false);
+    expect(step.effects).toEqual([{ type: 'focusTerminal', windowId: 'c' }]);
+    expect(step.goneByUser).toBe(true);
+  });
+
+  it('after this GUI closed the last window of the order, shows the one before it', () => {
+    const { reduceShell } = shellStateModule();
+
+    const step = reduceShell(focusShowingWhileClosing('c', ['c']), gone('c', ORDER_ABC));
+
+    expect(step.state.focusedWindowId).toBe('b');
+    expect(step.effects).toEqual([{ type: 'focusTerminal', windowId: 'b' }]);
+  });
+
+  it('after this GUI closed the only window, shows no window and moves nothing', () => {
+    const { reduceShell } = shellStateModule();
+    const only = [ordered('a')];
+
+    const step = reduceShell(focusShowingWhileClosing('a', ['a']), gone('a', only));
+
+    expect(step.state.focusedWindowId).toBeNull();
+    expect(step.state.exitedCard).toBeNull();
+    expect(step.effects).toEqual([]);
+  });
+
+  it('when it ended on its own, keeps showing it, leaves a card and moves the keyboard nowhere', () => {
+    const { reduceShell } = shellStateModule();
+
+    const step = reduceShell(focusShowing('b'), gone('b', ORDER_ABC, 2));
+
+    expect(step.state.focusedWindowId).toBe('b');
+    expect(step.state.exitedCard).toMatchObject({
+      windowId: 'b',
+      name: 'name-b',
+      exitCode: 2,
+      next: 'name-c',
+      nextWindowId: 'c',
+    });
+    expect(step.effects).toEqual([]);
+    expect(step.goneByUser).toBe(false);
+  });
+
+  it('names the window before it on the card when the one that ended was last, and none when it was alone', () => {
+    const { reduceShell } = shellStateModule();
+
+    const last = reduceShell(focusShowing('c'), gone('c', ORDER_ABC));
+    const alone = reduceShell(focusShowing('a'), gone('a', [ordered('a')]));
+
+    expect(last.state.exitedCard).toMatchObject({ next: 'name-b', nextWindowId: 'b' });
+    expect(alone.state.exitedCard).toMatchObject({ next: null, nextWindowId: null });
+  });
+
+  it('writes the exit code onto the card when it arrives after the card', () => {
+    const { reduceShell } = shellStateModule();
+    const carded = reduceShell(focusShowing('b'), gone('b', ORDER_ABC)).state;
+
+    const late = reduceShell(carded, { type: 'exitCodeReceived', windowId: 'b', exitCode: 7 });
+    const other = reduceShell(carded, { type: 'exitCodeReceived', windowId: 'c', exitCode: 7 });
+
+    expect(carded.exitedCard?.exitCode).toBeNull();
+    expect(late.state.exitedCard?.exitCode).toBe(7);
+    expect(other.state.exitedCard?.exitCode).toBeNull();
+  });
+
+  it('leaves no card and no move when the window that vanished was not the one shown', () => {
+    const { reduceShell } = shellStateModule();
+    const before = focusShowingWhileClosing('a', ['b']);
+
+    const closed = reduceShell(before, gone('b', ORDER_ABC));
+    const ended = reduceShell(focusShowing('a'), gone('c', ORDER_ABC));
+
+    expect(closed.state.focusedWindowId).toBe('a');
+    expect(closed.state.exitedCard).toBeNull();
+    expect(closed.state.closingHere.has('b')).toBe(false);
+    expect(closed.effects).toEqual([]);
+    expect(closed.goneByUser).toBe(true);
+    expect(ended.state.focusedWindowId).toBe('a');
+    expect(ended.state.exitedCard).toBeNull();
+    expect(ended.goneByUser).toBe(false);
+  });
+
+  it('on the canvas changes neither the window nor the placement', () => {
+    const { initialShellState, reduceShell } = shellStateModule();
+    const before = reduceShell(initialShellState('canvas'), {
+      type: 'closeRequested',
+      windowId: 'b',
+    }).state;
+
+    const step = reduceShell(before, gone('b', ORDER_ABC));
+
+    expect(step.state.workMode).toBe('canvas');
+    expect(step.state.focusedWindowId).toBeNull();
+    expect(step.state.exitedCard).toBeNull();
+    expect(step.state.closingHere.has('b')).toBe(false);
+    expect(step.effects).toEqual([]);
+  });
+
+  it('treats a close that failed and then a window that ended on its own as ended on its own', () => {
+    const closeFailedThenEnded: ShellEvent[] = [
+      { type: 'closeRequested', windowId: 'b' },
+      { type: 'closeFailed', windowId: 'b' },
+      gone('b', ORDER_ABC, 1),
+    ];
+
+    const result = replay(focusShowing('b'), closeFailedThenEnded);
+
+    expect(result.goneByUser).toEqual([false]);
+    expect(result.state.focusedWindowId).toBe('b');
+    expect(result.state.exitedCard).not.toBeNull();
+    expect(result.effects).toEqual([]);
+  });
+});
+
+describe('the verdict on who closed a window does not depend on which news arrives first', () => {
+  const afterClose = [ordered('a'), ordered('c')];
+
+  it('is one verdict whether the exit push or the close reply removes the window first', () => {
+    const request: ShellEvent = { type: 'closeRequested', windowId: 'b' };
+    // Both the push and the reply remove the window; the second removal leaves the list as it is.
+    const pushFirst = replay(focusShowing('b'), [
+      request,
+      ...goneEventsAcross([ORDER_ABC, afterClose, afterClose]),
+    ]);
+    const replyFirst = replay(focusShowing('b'), [
+      request,
+      ...goneEventsAcross([ORDER_ABC, afterClose]),
+    ]);
+
+    expect(pushFirst.goneByUser).toEqual([true]);
+    expect(pushFirst).toEqual(replyFirst);
+    expect(pushFirst.state.focusedWindowId).toBe('c');
+  });
+
+  it('gives the same card whether the exit code came with the vanishing or after it', () => {
+    const { reduceShell } = shellStateModule();
+    const withCode = reduceShell(focusShowing('b'), gone('b', ORDER_ABC, 9)).state;
+    const early = reduceShell(focusShowing('b'), gone('b', ORDER_ABC)).state;
+    const afterwards = reduceShell(early, {
+      type: 'exitCodeReceived',
+      windowId: 'b',
+      exitCode: 9,
+    }).state;
+
+    expect(afterwards.exitedCard).toEqual(withCode.exitedCard);
+  });
+});
+
+describe('reduceShell: a window appeared', () => {
+  it('goes to a window this GUI opened and moves the keyboard to its terminal', () => {
+    const { reduceShell } = shellStateModule();
+
+    const step = reduceShell(focusShowing('a'), { type: 'openedByUser', windowId: 'n' });
+
+    expect(step.state.focusedWindowId).toBe('n');
+    expect(step.effects).toEqual([{ type: 'focusTerminal', windowId: 'n' }]);
+  });
+
+  it('keeps showing the current window when windows appear from anywhere else, and moves nothing', () => {
+    const { reduceShell } = shellStateModule();
+    const before = focusShowing('a');
+
+    const step = reduceShell(before, { type: 'windowsAppeared', windowIds: ['x', 'y'] });
+
+    expect(step.state).toEqual(before);
+    expect(step.effects).toEqual([]);
+  });
+
+  it('shows the first of them when there was no window to show, still without moving the keyboard', () => {
+    const { initialShellState, reduceShell } = shellStateModule();
+
+    const step = reduceShell(initialShellState('focus'), {
+      type: 'windowsAppeared',
+      windowIds: ['x', 'y'],
+    });
+
+    expect(step.state.focusedWindowId).toBe('x');
+    expect(step.effects).toEqual([]);
+  });
+
+  it('does not leave the card of an ended window for a window that appeared on its own', () => {
+    const { reduceShell } = shellStateModule();
+    const carded = reduceShell(focusShowing('b'), gone('b', ORDER_ABC)).state;
+
+    const step = reduceShell(carded, { type: 'windowsAppeared', windowIds: ['x'] });
+
+    expect(step.state.focusedWindowId).toBe('b');
+    expect(step.state.exitedCard).toEqual(carded.exitedCard);
+    expect(step.effects).toEqual([]);
+  });
+});
+
+describe('reduceShell: the card of an ended window', () => {
+  it('goes to the window named on the card, moves the keyboard to it and clears the card', () => {
+    const { reduceShell } = shellStateModule();
+    const carded = reduceShell(focusShowing('b'), gone('b', ORDER_ABC)).state;
+
+    const step = reduceShell(carded, { type: 'exitedCardGoTo' });
+
+    expect(step.state.focusedWindowId).toBe('c');
+    expect(step.state.exitedCard).toBeNull();
+    expect(step.effects).toEqual([{ type: 'focusTerminal', windowId: 'c' }]);
+  });
+
+  it('is cleared when the user chooses another window by another way', () => {
+    const { reduceShell } = shellStateModule();
+    const carded = reduceShell(focusShowing('b'), gone('b', ORDER_ABC)).state;
+
+    const step = reduceShell(carded, { type: 'select', windowId: 'a' });
+
+    expect(step.state.focusedWindowId).toBe('a');
+    expect(step.state.exitedCard).toBeNull();
+  });
+});
+
+describe('diffGoneWindows: several windows leaving in the same observation', () => {
+  const four = [ordered('a'), ordered('b'), ordered('c'), ordered('d')];
+  const afterBoth = [ordered('a'), ordered('d')];
+
+  it('reads each one against the order that holds it and the windows still listed, not the others that left', () => {
+    const { diffGoneWindows } = shellStateModule();
+
+    const events = diffGoneWindows(four, afterBoth);
+
+    expect(events.map((event) => event.windowId)).toEqual(['b', 'c']);
+    expect(events.map((event) => event.orderBefore.map((entry) => entry.windowId))).toEqual([
+      ['a', 'b', 'd'],
+      ['a', 'c', 'd'],
+    ]);
+  });
+
+  it('moves on to the window after the one closed that is still listed, else the one before', () => {
+    const closedBoth: ShellEvent[] = [
+      { type: 'closeRequested', windowId: 'b' },
+      { type: 'closeRequested', windowId: 'c' },
+    ];
+    const gonesFromFour = goneEventsAcross([four, afterBoth]);
+
+    const showingB = replay(focusShowing('b'), [...closedBoth, ...gonesFromFour]);
+    const showingC = replay(focusShowing('c'), [...closedBoth, ...gonesFromFour]);
+    const tail = replay(focusShowing('c'), [
+      ...closedBoth,
+      ...goneEventsAcross([ORDER_ABC, [ordered('a')]]).filter((event) => event.windowId === 'c'),
+    ]);
+
+    expect(showingB.state.focusedWindowId).toBe('d');
+    expect(showingB.effects).toEqual([{ type: 'focusTerminal', windowId: 'd' }]);
+    expect(showingC.state.focusedWindowId).toBe('d');
+    expect(tail.state.focusedWindowId).toBe('a');
+    expect(tail.effects).toEqual([{ type: 'focusTerminal', windowId: 'a' }]);
+  });
+});
+
+describe('diffAppearedWindows: the windows that joined the list since the last one', () => {
+  it('reports the new windows together, in the list order, and none that were listed before', () => {
+    const { diffAppearedWindows } = shellStateModule();
+
+    const events = diffAppearedWindows(
+      [ordered('a'), ordered('b')],
+      [ordered('a'), ordered('x'), ordered('b'), ordered('y')]
+    );
+
+    expect(events).toEqual([{ type: 'windowsAppeared', windowIds: ['x', 'y'] }]);
+  });
+
+  it('reports nothing when no window joined, including when some only left', () => {
+    const { diffAppearedWindows } = shellStateModule();
+
+    expect(diffAppearedWindows(ORDER_ABC, ORDER_ABC)).toEqual([]);
+    expect(diffAppearedWindows(ORDER_ABC, [ordered('a')])).toEqual([]);
+  });
+});
+
+describe('reduceShell: an exit code heard before its window left the list', () => {
+  it('shows it on the card the window leaves, and prefers the code the list carried', () => {
+    const { reduceShell } = shellStateModule();
+    const heard = reduceShell(focusShowing('b'), {
+      type: 'exitCodeReceived',
+      windowId: 'b',
+      exitCode: 5,
+    }).state;
+
+    const fromHeard = reduceShell(heard, gone('b', ORDER_ABC));
+    const fromList = reduceShell(heard, gone('b', ORDER_ABC, 9));
+
+    expect(fromHeard.state.exitedCard?.exitCode).toBe(5);
+    expect(fromList.state.exitedCard?.exitCode).toBe(9);
+  });
+
+  it('is forgotten once the window has left the list', () => {
+    const { reduceShell } = shellStateModule();
+    const heard = reduceShell(focusShowing('a'), {
+      type: 'exitCodeReceived',
+      windowId: 'b',
+      exitCode: 5,
+    }).state;
+
+    const after = reduceShell(heard, gone('b', ORDER_ABC));
+
+    expect(heard.pendingExitCodes.get('b')).toBe(5);
+    expect(after.state.pendingExitCodes.has('b')).toBe(false);
+  });
+});
+
+describe('reduceShell: the card of an ended window when the window it offers also leaves', () => {
+  it('offers the window next to that one instead, and keeps the offer when another window leaves', () => {
+    const { reduceShell } = shellStateModule();
+    const carded = reduceShell(focusShowing('b'), gone('b', ORDER_ABC)).state;
+
+    const unrelated = reduceShell(carded, gone('z', [ordered('z'), ordered('a'), ordered('c')]));
+    const offered = reduceShell(carded, gone('c', [ordered('a'), ordered('c')]));
+    const taken = reduceShell(offered.state, { type: 'exitedCardGoTo' });
+
+    expect(unrelated.state.exitedCard).toMatchObject({ next: 'name-c', nextWindowId: 'c' });
+    expect(offered.state.exitedCard).toMatchObject({ next: 'name-a', nextWindowId: 'a' });
+    expect(offered.state.focusedWindowId).toBe('b');
+    expect(taken.state.focusedWindowId).toBe('a');
+    expect(taken.effects).toEqual([{ type: 'focusTerminal', windowId: 'a' }]);
+  });
+
+  it('offers nothing when no window is left to offer', () => {
+    const { reduceShell } = shellStateModule();
+    const carded = reduceShell(focusShowing('b'), gone('b', [ordered('b'), ordered('c')])).state;
+
+    const offered = reduceShell(carded, gone('c', [ordered('c')]));
+    const pressed = reduceShell(offered.state, { type: 'exitedCardGoTo' });
+
+    expect(offered.state.exitedCard).toMatchObject({ next: null, nextWindowId: null });
+    expect(pressed.state).toEqual(offered.state);
+    expect(pressed.effects).toEqual([]);
+  });
+});
+
+describe('reduceShell: going to the canvas while a card is shown', () => {
+  it('drops the card and asks to bring nothing forward, for the window has left the list', () => {
+    const { reduceShell } = shellStateModule();
+    const carded = reduceShell(focusShowing('b'), gone('b', ORDER_ABC)).state;
+
+    const step = reduceShell(carded, { type: 'enterCanvas' });
+
+    expect(step.state.workMode).toBe('canvas');
+    expect(step.state.exitedCard).toBeNull();
+    expect(step.effects).toEqual([]);
   });
 });

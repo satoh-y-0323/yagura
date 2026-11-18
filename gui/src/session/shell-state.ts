@@ -1,7 +1,8 @@
 /**
  * The work area's state and the decisions over it, as pure functions: the work
- * mode, the window Focus shows, and the window Focus starts on. Held in memory
- * only; the work mode alone is read from injected storage.
+ * mode, the window Focus shows, the window Focus starts on, and what follows
+ * when a window leaves or joins the list. Held in memory only; the work mode
+ * alone is read from injected storage.
  */
 
 import { STATUS_PRESENTATION } from '../status-presentation';
@@ -10,45 +11,222 @@ import type { WorkMode, WorkView } from './current-window';
 
 const WORK_MODE_KEY = 'yagura.work-mode';
 
+/** A window as the sidebar listed it, in the sidebar's order. */
+export interface OrderedWindow {
+  windowId: string;
+  name: string;
+  exitCode: number | null;
+}
+
+/** The card Focus shows in place of a window that ended without this GUI closing it. */
+export interface ExitedCard {
+  windowId: string;
+  name: string;
+  /** `null` until the exit code is known. */
+  exitCode: number | null;
+  /** The name of the window the card offers to go to. */
+  next: string | null;
+  nextWindowId: string | null;
+}
+
 /** What the work area holds besides the canvas placement. */
 export interface ShellState {
   workMode: WorkMode;
   /** The window Focus shows; ignored on the canvas, which reads the placement. */
   focusedWindowId: string | null;
+  /** The windows this GUI asked the daemon to close that have not left the list yet. */
+  closingHere: ReadonlySet<string>;
+  exitedCard: ExitedCard | null;
+  /** Exit codes heard before their window left the list, so an early code is not lost. */
+  pendingExitCodes: ReadonlyMap<string, number>;
 }
 
-/** What the user did to the work area. */
+/** One window that left the list, with the order it is read against. */
+export interface WindowGoneEvent {
+  type: 'windowGone';
+  windowId: string;
+  /** The sidebar order before it left, holding it and the windows still listed. */
+  orderBefore: readonly OrderedWindow[];
+  exitCode: number | null;
+}
+
+/** What happened to the work area: the user's choices and the window list's changes. */
 export type ShellEvent =
   /** Chooses the window Focus shows. */
   | { type: 'select'; windowId: string }
   /** Switches from Canvas to Focus, which starts on the canvas's current window. */
   | { type: 'enterFocus'; canvasCurrent: { windowId: string } | null }
   /** Switches from Focus to Canvas. */
-  | { type: 'enterCanvas' };
+  | { type: 'enterCanvas' }
+  /** This GUI is about to ask the daemon to close the window. */
+  | { type: 'closeRequested'; windowId: string }
+  /** The close this GUI asked for did not go through. */
+  | { type: 'closeFailed'; windowId: string }
+  | WindowGoneEvent
+  | { type: 'exitCodeReceived'; windowId: string; exitCode: number }
+  /** The user opened the window from this GUI. */
+  | { type: 'openedByUser'; windowId: string }
+  /** Windows appeared any other way: another client, the daemon, or a reopening. */
+  | { type: 'windowsAppeared'; windowIds: readonly string[] }
+  /** The user pressed the button on the card of an ended window. */
+  | { type: 'exitedCardGoTo' };
 
-/** What the view carries out after a step; the reducer touches no placement itself. */
-export type ShellEffect = { type: 'bringToFront'; windowId: string };
+/**
+ * What the view carries out after a step; the reducer touches no placement
+ * itself. Keyboard focus moves only through `focusTerminal`.
+ */
+export type ShellEffect =
+  { type: 'bringToFront'; windowId: string } | { type: 'focusTerminal'; windowId: string };
 
 /** The state after one event, and the effects it asks for. */
 export interface ShellStep {
   state: ShellState;
   effects: readonly ShellEffect[];
+  /** Set only for `windowGone`: whether this GUI closed the window. */
+  goneByUser?: boolean;
 }
 
 /** The state before any window has been chosen. */
 export function initialShellState(workMode: WorkMode): ShellState {
-  return { workMode, focusedWindowId: null };
+  return {
+    workMode,
+    focusedWindowId: null,
+    closingHere: new Set(),
+    exitedCard: null,
+    pendingExitCodes: new Map(),
+  };
+}
+
+/**
+ * One `windowGone` for each window in `previous` that `current` no longer
+ * lists. Each event's order leaves out the other windows that left with it, so
+ * a next window read from it is one still listed.
+ */
+export function diffGoneWindows(
+  previous: readonly OrderedWindow[],
+  current: readonly OrderedWindow[]
+): WindowGoneEvent[] {
+  const listed = new Set(current.map((entry) => entry.windowId));
+  const goneIds = new Set(
+    previous.filter((entry) => !listed.has(entry.windowId)).map((entry) => entry.windowId)
+  );
+  return previous
+    .filter((entry) => goneIds.has(entry.windowId))
+    .map((entry) => ({
+      type: 'windowGone',
+      windowId: entry.windowId,
+      orderBefore: previous.filter(
+        (other) => other.windowId === entry.windowId || !goneIds.has(other.windowId)
+      ),
+      exitCode: entry.exitCode,
+    }));
+}
+
+/** The `windowsAppeared` event for the windows `current` lists and `previous` did not. */
+export function diffAppearedWindows(
+  previous: readonly OrderedWindow[],
+  current: readonly OrderedWindow[]
+): ShellEvent[] {
+  const known = new Set(previous.map((entry) => entry.windowId));
+  const windowIds = current
+    .filter((entry) => !known.has(entry.windowId))
+    .map((entry) => entry.windowId);
+  return windowIds.length === 0 ? [] : [{ type: 'windowsAppeared', windowIds }];
+}
+
+/** The window after `windowId` in `order`, else the one before it; never wraps around. */
+function adjacentWindow(order: readonly OrderedWindow[], windowId: string): OrderedWindow | null {
+  const index = order.findIndex((entry) => entry.windowId === windowId);
+  if (index === -1) {
+    return null;
+  }
+  return order[index + 1] ?? order[index - 1] ?? null;
+}
+
+function withoutMember(set: ReadonlySet<string>, member: string): ReadonlySet<string> {
+  if (!set.has(member)) {
+    return set;
+  }
+  const next = new Set(set);
+  next.delete(member);
+  return next;
+}
+
+function withoutKey(map: ReadonlyMap<string, number>, key: string): ReadonlyMap<string, number> {
+  if (!map.has(key)) {
+    return map;
+  }
+  const next = new Map(map);
+  next.delete(key);
+  return next;
+}
+
+/** Keeps the card's button off a window that has since left the list as well. */
+function retargetCard(card: ExitedCard | null, event: WindowGoneEvent): ExitedCard | null {
+  if (card === null || card.nextWindowId !== event.windowId) {
+    return card;
+  }
+  const next = adjacentWindow(event.orderBefore, event.windowId);
+  return { ...card, next: next?.name ?? null, nextWindowId: next?.windowId ?? null };
+}
+
+/**
+ * The one place that decides who closed a window: this GUI did when it asked
+ * to before the window left the list, whichever news removed it first. Only a
+ * window this GUI closed moves Focus and the keyboard on; one that ended
+ * otherwise leaves a card, so keys being typed never reach another window.
+ */
+function reduceWindowGone(state: ShellState, event: WindowGoneEvent): ShellStep {
+  const goneByUser = state.closingHere.has(event.windowId);
+  const exitCode = event.exitCode ?? state.pendingExitCodes.get(event.windowId) ?? null;
+  const base: ShellState = {
+    ...state,
+    closingHere: withoutMember(state.closingHere, event.windowId),
+    pendingExitCodes: withoutKey(state.pendingExitCodes, event.windowId),
+    exitedCard: retargetCard(state.exitedCard, event),
+  };
+  if (state.workMode !== 'focus' || state.focusedWindowId !== event.windowId) {
+    return { state: base, effects: [], goneByUser };
+  }
+  const next = adjacentWindow(event.orderBefore, event.windowId);
+  if (goneByUser) {
+    return {
+      state: { ...base, focusedWindowId: next?.windowId ?? null, exitedCard: null },
+      effects: next === null ? [] : [{ type: 'focusTerminal', windowId: next.windowId }],
+      goneByUser,
+    };
+  }
+  const name =
+    event.orderBefore.find((entry) => entry.windowId === event.windowId)?.name ?? event.windowId;
+  return {
+    state: {
+      ...base,
+      exitedCard: {
+        windowId: event.windowId,
+        name,
+        exitCode,
+        next: next?.name ?? null,
+        nextWindowId: next?.windowId ?? null,
+      },
+    },
+    effects: [],
+    goneByUser,
+  };
 }
 
 /**
  * Applies one event. Choosing a window in Focus and entering Focus never ask
  * for a placement change, so the saved layout stays as the canvas left it;
- * leaving Focus asks to bring its window to the front of the canvas.
+ * leaving Focus asks to bring its window to the front of the canvas. Only the
+ * user's own acts ask to move the keyboard.
  */
 export function reduceShell(state: ShellState, event: ShellEvent): ShellStep {
   switch (event.type) {
     case 'select':
-      return { state: { ...state, focusedWindowId: event.windowId }, effects: [] };
+      return {
+        state: { ...state, focusedWindowId: event.windowId, exitedCard: null },
+        effects: [],
+      };
     case 'enterFocus':
       if (state.workMode === 'focus') {
         return { state, effects: [] };
@@ -65,11 +243,68 @@ export function reduceShell(state: ShellState, event: ShellEvent): ShellStep {
       if (state.workMode === 'canvas') {
         return { state, effects: [] };
       }
+      // A carded window has left the list, so there is nothing to bring forward.
+      const shown = state.exitedCard === null ? state.focusedWindowId : null;
       const effects: ShellEffect[] =
-        state.focusedWindowId === null
-          ? []
-          : [{ type: 'bringToFront', windowId: state.focusedWindowId }];
-      return { state: { ...state, workMode: 'canvas' }, effects };
+        shown === null ? [] : [{ type: 'bringToFront', windowId: shown }];
+      return { state: { ...state, workMode: 'canvas', exitedCard: null }, effects };
+    }
+    case 'closeRequested':
+      return {
+        state: { ...state, closingHere: new Set(state.closingHere).add(event.windowId) },
+        effects: [],
+      };
+    case 'closeFailed':
+      return {
+        state: { ...state, closingHere: withoutMember(state.closingHere, event.windowId) },
+        effects: [],
+      };
+    case 'windowGone':
+      return reduceWindowGone(state, event);
+    case 'exitCodeReceived':
+      if (state.exitedCard?.windowId === event.windowId) {
+        return {
+          state: { ...state, exitedCard: { ...state.exitedCard, exitCode: event.exitCode } },
+          effects: [],
+        };
+      }
+      return {
+        state: {
+          ...state,
+          pendingExitCodes: new Map(state.pendingExitCodes).set(event.windowId, event.exitCode),
+        },
+        effects: [],
+      };
+    case 'openedByUser':
+      if (state.workMode === 'canvas') {
+        return {
+          state,
+          effects: [
+            { type: 'bringToFront', windowId: event.windowId },
+            { type: 'focusTerminal', windowId: event.windowId },
+          ],
+        };
+      }
+      return {
+        state: { ...state, focusedWindowId: event.windowId, exitedCard: null },
+        effects: [{ type: 'focusTerminal', windowId: event.windowId }],
+      };
+    case 'windowsAppeared': {
+      const first = event.windowIds[0];
+      if (state.workMode !== 'focus' || state.focusedWindowId !== null || first === undefined) {
+        return { state, effects: [] };
+      }
+      return { state: { ...state, focusedWindowId: first }, effects: [] };
+    }
+    case 'exitedCardGoTo': {
+      const target = state.exitedCard?.nextWindowId ?? null;
+      if (target === null) {
+        return { state, effects: [] };
+      }
+      return {
+        state: { ...state, focusedWindowId: target, exitedCard: null },
+        effects: [{ type: 'focusTerminal', windowId: target }],
+      };
     }
   }
 }

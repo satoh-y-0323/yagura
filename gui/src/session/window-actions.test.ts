@@ -105,6 +105,8 @@ function buildActions(
     confirmPort?: ConfirmPort;
     removeWindow?: (windowId: string) => void;
     workMode?: 'canvas' | 'focus';
+    closeRequested?: (windowId: string) => void;
+    closeFailed?: (windowId: string) => void;
   } = {}
 ): {
   actions: WindowActions;
@@ -125,6 +127,8 @@ function buildActions(
     // (rejected) shape from omitting the key entirely.
     ...(overrides.confirmPort !== undefined ? { confirmPort: overrides.confirmPort } : {}),
     ...(overrides.removeWindow !== undefined ? { removeWindow: overrides.removeWindow } : {}),
+    ...(overrides.closeRequested !== undefined ? { closeRequested: overrides.closeRequested } : {}),
+    ...(overrides.closeFailed !== undefined ? { closeFailed: overrides.closeFailed } : {}),
   });
   return { actions, registry, ipc, selectWindow };
 }
@@ -580,5 +584,90 @@ describe('window-actions: a pane-removal failure is absorbed here, not left for 
     consoleSpies.forEach((spy) => {
       spy.mockRestore();
     });
+  });
+});
+
+describe('window-actions: close tells the shell state who is closing the window', () => {
+  it('says so after the confirmation and before the close reaches the daemon', async () => {
+    const calls: string[] = [];
+    const ipc = makeIpc();
+    ipc.invokeCloseWindow.mockImplementation(() => {
+      calls.push('invokeCloseWindow');
+      return Promise.resolve('closed');
+    });
+    const confirmPort = vi.fn<ConfirmPort>().mockImplementation(() => {
+      calls.push('confirm');
+      return Promise.resolve(true);
+    });
+    const closeFailed = vi.fn<(windowId: string) => void>();
+    const { actions } = buildActions({
+      ipc,
+      confirmPort,
+      closeRequested: (windowId) => calls.push(`closeRequested:${windowId}`),
+      closeFailed,
+    });
+
+    await actions.close(makeEntry({ status: 'running' }));
+
+    expect(calls).toEqual(['confirm', 'closeRequested:w-1', 'invokeCloseWindow']);
+    expect(closeFailed).not.toHaveBeenCalled();
+  });
+
+  it('takes the window back out when the daemon refuses the close, and still rejects', async () => {
+    const ipc = makeIpc();
+    ipc.invokeCloseWindow.mockRejectedValue(new Error('daemon refused the close'));
+    const closeRequested = vi.fn<(windowId: string) => void>();
+    const closeFailed = vi.fn<(windowId: string) => void>();
+    const { actions } = buildActions({
+      ipc,
+      confirmPort: approvingConfirmPort(),
+      closeRequested,
+      closeFailed,
+    });
+
+    await expect(actions.close(makeEntry({ status: 'running' }))).rejects.toThrow(
+      'daemon refused the close'
+    );
+
+    expect(closeRequested).toHaveBeenCalledWith('w-1');
+    expect(closeFailed).toHaveBeenCalledTimes(1);
+    expect(closeFailed).toHaveBeenCalledWith('w-1');
+  });
+
+  it('says nothing when the user declines the confirmation', async () => {
+    const closeRequested = vi.fn<(windowId: string) => void>();
+    const closeFailed = vi.fn<(windowId: string) => void>();
+    const { actions, ipc } = buildActions({
+      confirmPort: vi.fn<ConfirmPort>().mockResolvedValue(false),
+      closeRequested,
+      closeFailed,
+    });
+
+    await actions.close(makeEntry({ status: 'running' }));
+
+    expect(ipc.invokeCloseWindow).not.toHaveBeenCalled();
+    expect(closeRequested).not.toHaveBeenCalled();
+    expect(closeFailed).not.toHaveBeenCalled();
+  });
+
+  it('says nothing when the close is not allowed', async () => {
+    vi.mocked(confirmTargetModule.resolveConfirmTarget).mockReturnValueOnce({
+      allowed: false,
+      requiresConfirmation: false,
+      reason: 'unknown',
+    });
+    const closeRequested = vi.fn<(windowId: string) => void>();
+    const closeFailed = vi.fn<(windowId: string) => void>();
+    const { actions, ipc } = buildActions({
+      confirmPort: approvingConfirmPort(),
+      closeRequested,
+      closeFailed,
+    });
+
+    await actions.close(makeEntry({ status: 'running' }));
+
+    expect(ipc.invokeCloseWindow).not.toHaveBeenCalled();
+    expect(closeRequested).not.toHaveBeenCalled();
+    expect(closeFailed).not.toHaveBeenCalled();
   });
 });

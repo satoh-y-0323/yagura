@@ -58,6 +58,13 @@ export interface WindowActionsDeps {
    * pane-removal error never surfaces as a refused close.
    */
   removeWindow?: (windowId: string) => void;
+  /**
+   * Told before the close is sent, so the window that then leaves the list is
+   * known to be one this GUI closed, whichever news removes it first.
+   */
+  closeRequested?: (windowId: string) => void;
+  /** Told when sending the close failed, which takes the window back out. */
+  closeFailed?: (windowId: string) => void;
   /** Chooses the window Focus shows; the only thing `goTo` does in Focus. */
   selectWindow: (windowId: string) => void;
   /** The work mode as of now: Focus never writes the canvas placement. */
@@ -77,7 +84,16 @@ export interface WindowActions {
 
 /** Builds a {@link WindowActions} bound to `deps`. */
 export function createWindowActions(deps: WindowActionsDeps): WindowActions {
-  const { registry, ipc, confirmPort, removeWindow, selectWindow, workMode } = deps;
+  const {
+    registry,
+    ipc,
+    confirmPort,
+    removeWindow,
+    closeRequested,
+    closeFailed,
+    selectWindow,
+    workMode,
+  } = deps;
 
   /**
    * Runs a destructive operation through `resolveConfirmTarget`'s decision:
@@ -109,7 +125,13 @@ export function createWindowActions(deps: WindowActionsDeps): WindowActions {
   return {
     close: (entry) =>
       runDestructive(entry, 'close', async () => {
-        await ipc.invokeCloseWindow(entry.windowId);
+        closeRequested?.(entry.windowId);
+        try {
+          await ipc.invokeCloseWindow(entry.windowId);
+        } catch (refused) {
+          closeFailed?.(entry.windowId);
+          throw refused;
+        }
         // A refused close (above) must still reject; a pane-removal failure
         // (here) must not, so it is caught separately rather than letting
         // both share the same try/catch.

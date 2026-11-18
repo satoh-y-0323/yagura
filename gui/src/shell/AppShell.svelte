@@ -235,11 +235,15 @@
   import { createAttentionNavigation } from '../session/attention-navigation';
   import { currentWindowFor, isWindowVisibleFor } from '../session/current-window';
   import {
+    diffAppearedWindows,
+    diffGoneWindows,
     firstWindowAtStartup,
     initialShellState,
     readWorkMode,
     reduceShell,
     workViewOf,
+    type OrderedWindow,
+    type ShellEvent,
     type ShellState,
   } from '../session/shell-state';
   import { createGuardedLocalStorage } from '../storage/guarded-storage';
@@ -675,8 +679,40 @@
     )
   );
 
+  /**
+   * Runs one event through the shell reducer and carries out what it asks for.
+   * The keyboard moves only when the reducer says so: the window list changing
+   * on its own never moves it.
+   */
+  function dispatchShell(event: ShellEvent): void {
+    const step = reduceShell(get(shell), event);
+    shell.set(step.state);
+    for (const effect of step.effects) {
+      switch (effect.type) {
+        case 'bringToFront': {
+          const entry = get(registry).windows.find((e) => e.windowId === effect.windowId);
+          if (entry !== undefined) {
+            actions.goTo(entry);
+          }
+          break;
+        }
+        case 'focusTerminal':
+          focusTerminalOf(effect.windowId);
+          break;
+      }
+    }
+  }
+
   function selectWindow(windowId: string): void {
-    shell.update((state) => reduceShell(state, { type: 'select', windowId }).state);
+    dispatchShell({ type: 'select', windowId });
+  }
+
+  /** Passes on an exit code of a window the view still lists or shows a card for. */
+  function reportExitCode(windowId: string, exitCode: number): void {
+    const isListed = get(registry).windows.some((entry) => entry.windowId === windowId);
+    if (isListed || get(shell).exitedCard?.windowId === windowId) {
+      dispatchShell({ type: 'exitCodeReceived', windowId, exitCode });
+    }
   }
 
   function isFocusMode(): boolean {
@@ -1971,6 +2007,12 @@
     ipc: { invokeCloseWindow, invokeInterruptWindow, invokeRenameWindow },
     confirmPort,
     removeWindow: removeClosedWindow,
+    closeRequested: (windowId) => {
+      dispatchShell({ type: 'closeRequested', windowId });
+    },
+    closeFailed: (windowId) => {
+      dispatchShell({ type: 'closeFailed', windowId });
+    },
     selectWindow,
     workMode: () => get(shell).workMode,
   });
@@ -2194,6 +2236,29 @@
     return groupByRoom(get(registry).windows, get(collapsedRooms), get(registry).tabOrder);
   }
 
+  // The sidebar order as of the last registry change: the order a vanished
+  // window's next window is read from. Which windows left or joined is the
+  // shell-state diff's call, not this view's.
+  let listedBefore: OrderedWindow[] = [];
+
+  function observeWindowList(): void {
+    const listed: OrderedWindow[] = windowsInDisplayOrder(sidebarGroups()).map((entry) => ({
+      windowId: entry.windowId,
+      name: entry.name,
+      exitCode: entry.exitCode,
+    }));
+    const events = [
+      ...diffGoneWindows(listedBefore, listed),
+      ...diffAppearedWindows(listedBefore, listed),
+    ];
+    listedBefore = listed;
+    for (const event of events) {
+      dispatchShell(event);
+    }
+  }
+
+  const unsubscribeListObservation = registry.subscribe(observeWindowList);
+
   const runShortcut = createShortcutRunner<WindowEntry>({
     current: currentWindowNow,
     workMode: () => get(shell).workMode,
@@ -2353,6 +2418,7 @@
   }
 
   onDestroy(() => {
+    unsubscribeListObservation();
     unbindAppPalette();
     stopDefaultPaletteSync?.();
     stopLayoutSync();
@@ -2888,6 +2954,11 @@
    * evicted, so keeping them would re-open panes the view has already dropped.
    */
   async function applyWindowList(windows: WindowInfo[]): Promise<void> {
+    for (const info of windows) {
+      if (info.detected.status === 'exited' && info.exit_code !== null) {
+        reportExitCode(info.window_id, info.exit_code);
+      }
+    }
     const liveWindows = windows.filter((info) => info.detected.status !== 'exited');
     for (const info of liveWindows) {
       registry.openWindow(info);
@@ -3019,7 +3090,14 @@
     const controller = new SessionController(windowId, sessionStore);
     // eslint-disable-next-line svelte/prefer-svelte-reactivity -- store snapshot swap: a fresh Map is republished through the writable, so runes-based SvelteMap reactivity does not apply
     panes.update((current) => new Map(current).set(windowId, { controller, sessionStore }));
-    registry.registerWindowHandlers(windowId, controller.eventHandlers());
+    const handlers = controller.eventHandlers();
+    registry.registerWindowHandlers(windowId, {
+      ...handlers,
+      onExit: (payload) => {
+        handlers.onExit(payload);
+        reportExitCode(windowId, payload.exit_code);
+      },
+    });
     await tick();
   }
 
@@ -3094,11 +3172,9 @@
     // poll takes, so opening twice cannot produce two panes for one window.
     await refreshWindowList();
     // The user opened it, so go to it and let the keyboard follow.
-    const openedEntry = get(registry).windows.find((entry) => entry.windowId === windowId);
-    if (openedEntry !== undefined) {
-      actions.goTo(openedEntry);
+    if (get(registry).windows.some((entry) => entry.windowId === windowId)) {
+      dispatchShell({ type: 'openedByUser', windowId });
     }
-    focusTerminalOf(windowId);
     // What opened is what the dialog offers next time; a profile launch also
     // remembers the model/effort it used, keyed by that profile id, so
     // reopening the same profile offers them again. A Custom launch does not
