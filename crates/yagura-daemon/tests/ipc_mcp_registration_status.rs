@@ -996,8 +996,9 @@ async fn a_missing_executable_and_an_exit_127_are_not_installed() {
 }
 
 #[tokio::test]
-async fn unreadable_output_and_a_timeout_are_unknown_with_a_fixed_reason() {
-    let layout = Layout::new("mcpreg-unknown");
+async fn unreadable_output_is_unknown_with_a_fixed_reason() {
+    // The default time limit applies: the child finishes, so only its output decides.
+    let layout = Layout::new("mcpreg-unreadable");
     let bridge = layout.bridge_str();
     seed_registry(&layout.state_dir, &[("yagura", &bridge, &[])]);
     let fixture = McpCliStubFixture {
@@ -1008,21 +1009,18 @@ async fn unreadable_output_and_a_timeout_are_unknown_with_a_fixed_reason() {
         home_dir: Some(layout.home_dir.as_path()),
     };
     let broken_source = format!(
-        "{}MCP_CLI_STUB_FAIL_SUBCOMMAND = 'get'\nMCP_CLI_STUB_FAIL_EXIT_CODE = '0'\n\
-         MCP_CLI_STUB_FAIL_STDOUT = '{{not json'\n",
+        "{}MCP_CLI_STUB_FAIL_SUBCOMMAND = 'get'
+MCP_CLI_STUB_FAIL_EXIT_CODE = '0'
+         MCP_CLI_STUB_FAIL_STDOUT = '{{not json'
+",
         mcp_cli_stub_profile_source("Juliet", &fixture)
     );
     write_profile(&layout.profiles_dir, "juliet", &broken_source);
-    write_profile(
-        &layout.profiles_dir,
-        "kilo",
-        &lines_profile(&layout, "Kilo", &[("MCP_CLI_STUB_DELAY_MS", "4000")]),
-    );
-    let config = DaemonConfig {
-        mcp_registration_timeout: Duration::from_secs(1),
-        ..registration_config(&layout, Some(layout.bridge.clone()))
-    };
-    let h = Harness::start("mcpreg-unknown", config).await;
+    let h = Harness::start(
+        "mcpreg-unreadable",
+        registration_config(&layout, Some(layout.bridge.clone())),
+    )
+    .await;
     let mut approver = approver_connection(&h).await;
 
     let (_, statuses) = list_and_collect(&mut approver, 17).await;
@@ -1042,6 +1040,27 @@ async fn unreadable_output_and_a_timeout_are_unknown_with_a_fixed_reason() {
         )
         .reason
     );
+}
+
+#[tokio::test]
+async fn a_timeout_is_unknown_with_a_fixed_reason() {
+    // The child outlives the 1 s limit by a wide margin, so no load can let it finish first.
+    let layout = Layout::new("mcpreg-timeout");
+    let bridge = layout.bridge_str();
+    seed_registry(&layout.state_dir, &[("yagura", &bridge, &[])]);
+    write_profile(
+        &layout.profiles_dir,
+        "kilo",
+        &lines_profile(&layout, "Kilo", &[("MCP_CLI_STUB_DELAY_MS", "4000")]),
+    );
+    let config = DaemonConfig {
+        mcp_registration_timeout: Duration::from_secs(1),
+        ..registration_config(&layout, Some(layout.bridge.clone()))
+    };
+    let h = Harness::start("mcpreg-timeout", config).await;
+    let mut approver = approver_connection(&h).await;
+
+    let (_, statuses) = list_and_collect(&mut approver, 17).await;
 
     let slow = status_of(&statuses, "kilo");
     assert_eq!(slow.state, McpRegistrationState::Unknown);
