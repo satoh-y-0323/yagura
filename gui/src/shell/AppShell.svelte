@@ -93,6 +93,7 @@
     invokeRenameWindow,
     invokeSendChat,
     invokeSetAutoApprove,
+    invokeSetAttentionSummary,
     invokeSetPlanApprovalRequired,
     invokeSetProfileEnabled,
     invokeUpdateWindowLayout,
@@ -296,9 +297,18 @@
     type WindowActions,
   } from '../session/window-actions';
   import { syncWindows } from '../session/window-sync';
-  import { summarizeWindowStatuses } from '../status-tone';
+  import {
+    attentionCount,
+    emptyArrivalMemory,
+    observeNeedsYouArrivals,
+    summarizeWindowStatuses,
+  } from '../status-tone';
   import { createWindowSessionStore } from '../stores/session-store';
-  import { createWindowRegistry, type WindowEntry } from '../stores/window-registry';
+  import {
+    createWindowRegistry,
+    type WindowEntry,
+    type WindowRegistryState,
+  } from '../stores/window-registry';
   import { bindPalette } from '../theme/theme-apply';
   import { startDefaultPaletteSync } from '../theme/default-palettes';
   import { isBuiltInSelection, type AppThemeSelection } from '../theme/theme-resolve';
@@ -2338,6 +2348,49 @@
 
   const unsubscribeListObservation = registry.subscribe(observeWindowList);
 
+  // What the core is told about the things waiting for the user. Arrivals are
+  // gathered into one mark that the next send carries and clears.
+  let arrivalMemory = emptyArrivalMemory();
+  let isArrivalPending = false;
+  let sentTotals: { needsYou: number; pendingPermissions: number } | null = null;
+
+  // Every registry change is observed, not only the last one of a tick: a
+  // `running` applied and replaced within one tick still opens a turn.
+  function observeArrivals(state: WindowRegistryState): void {
+    const observed = observeNeedsYouArrivals(arrivalMemory, state.windows);
+    arrivalMemory = observed.memory;
+    if (observed.arrived.length > 0) {
+      isArrivalPending = true;
+    }
+    sendAttentionSummary(state, approvals, false);
+  }
+
+  /** Sends when the totals moved or an arrival is pending, or always when `always`. */
+  function sendAttentionSummary(
+    registryState: WindowRegistryState,
+    queue: approvalQueue.ApprovalQueueState,
+    always: boolean
+  ): void {
+    const needsYou = attentionCount(registryState.windows);
+    const pendingPermissions = approvalQueue.size(queue);
+    const isTotalsChanged =
+      sentTotals === null ||
+      sentTotals.needsYou !== needsYou ||
+      sentTotals.pendingPermissions !== pendingPermissions;
+    if (!always && !isTotalsChanged && !isArrivalPending) {
+      return;
+    }
+    const arrived = isArrivalPending;
+    isArrivalPending = false;
+    sentTotals = { needsYou, pendingPermissions };
+    invokeSetAttentionSummary(needsYou, pendingPermissions, arrived).catch((error: unknown) => {
+      console.error('failed to set the attention summary:', error);
+    });
+  }
+
+  const unsubscribeArrivals = registry.subscribe(observeArrivals);
+  $: sendAttentionSummary(get(registry), approvals, false);
+
   const runShortcut = createShortcutRunner<WindowEntry>({
     current: currentWindowNow,
     workMode: () => get(shell).workMode,
@@ -2499,6 +2552,7 @@
 
   onDestroy(() => {
     unsubscribeListObservation();
+    unsubscribeArrivals();
     unbindAppPalette();
     stopDefaultPaletteSync?.();
     stopLayoutSync();
@@ -2541,6 +2595,9 @@
           reportBoundaryNotice('sessionEvent', error);
         },
         onApprovalRequested: (payload) => {
+          if (!approvalQueue.holds(approvals, payload.request.request_id)) {
+            isArrivalPending = true;
+          }
           approvals = approvalQueue.enqueue(approvals, payload.request);
         },
         onApprovalWithdrawn: (payload) => {
@@ -2722,6 +2779,10 @@
     } catch (error) {
       console.error('failed to list plans at startup:', error);
     }
+
+    // Unconditional: the core learns this shell's totals even when nothing
+    // moved while starting.
+    sendAttentionSummary(get(registry), approvals, true);
   }
 
   /**
