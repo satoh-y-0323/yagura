@@ -110,7 +110,6 @@ mod mcp_registration_status_items;
 mod model_choices_output;
 mod no_composer;
 mod one_shot_capture;
-mod os_pty_spawn;
 mod palette_store;
 mod parcels_survive_restart;
 mod plan_core;

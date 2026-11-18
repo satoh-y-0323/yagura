@@ -1469,6 +1469,7 @@ fn inbox_full_msg() -> DaemonMessage {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pty::PlayedHolder;
     use crate::window::{OpenWindowRequest, WindowProvenance};
 
     fn report(summary: &str) -> ReceivedReport {
@@ -1483,37 +1484,22 @@ mod tests {
         }
     }
 
-    #[cfg(windows)]
-    fn idle_command() -> Vec<String> {
-        vec!["cmd.exe".into(), "/c".into(), "exit".into()]
-    }
-
-    #[cfg(not(windows))]
-    fn idle_command() -> Vec<String> {
-        vec!["sh".into(), "-c".into(), "true".into()]
+    /// A command no window starts: the played holder stands in for its child.
+    fn played_request() -> OpenWindowRequest {
+        OpenWindowRequest {
+            command: vec!["played-child".to_owned()],
+            cwd: None,
+            name: None,
+            vendor: None,
+            detection: None,
+            on_name_taken: Default::default(),
+        }
     }
 
     #[tokio::test]
     async fn a_stale_stretchs_confirmation_does_not_consume_a_later_stretchs_notice() {
-        let registry = Arc::new(WindowRegistry::new(DaemonConfig::default()));
-        let opened = registry
-            .open_with_extra_env(
-                OpenWindowRequest {
-                    command: idle_command(),
-                    cwd: None,
-                    name: None,
-                    vendor: None,
-                    detection: None,
-                    on_name_taken: Default::default(),
-                },
-                Vec::new(),
-                Vec::new(),
-                WindowProvenance::default(),
-            )
-            .await
-            .expect("open a registered window");
-        let window = opened.window_id.as_str();
-        let inboxes = Arc::new(ReportInboxes::new(registry));
+        let (inboxes, window, _holder) = registered_window().await;
+        let window = window.as_str();
 
         inboxes.put(window, vec![report("first")], false, false);
         let (_, first_stretch) = inboxes.due_notice(window).expect("first stretch is due");
@@ -1531,28 +1517,18 @@ mod tests {
         );
     }
 
-    async fn registered_window() -> (Arc<ReportInboxes>, String) {
+    /// The window stays registered and running while its holder is kept.
+    async fn registered_window() -> (Arc<ReportInboxes>, String, PlayedHolder) {
         let registry = Arc::new(WindowRegistry::new(DaemonConfig::default()));
-        let opened = registry
-            .open_with_extra_env(
-                OpenWindowRequest {
-                    command: idle_command(),
-                    cwd: None,
-                    name: None,
-                    vendor: None,
-                    detection: None,
-                    on_name_taken: Default::default(),
-                },
-                Vec::new(),
-                Vec::new(),
-                WindowProvenance::default(),
-            )
-            .await
-            .expect("open a registered window");
-        (Arc::new(ReportInboxes::new(registry)), opened.window_id)
+        let (opened, holder) = registry.open_played(played_request()).await;
+        (
+            Arc::new(ReportInboxes::new(registry)),
+            opened.window_id,
+            holder,
+        )
     }
 
-    async fn delivering_window() -> (Arc<ReportInboxes>, Arc<WindowEntry>) {
+    async fn delivering_window() -> (Arc<ReportInboxes>, Arc<WindowEntry>, PlayedHolder) {
         let registry = Arc::new(WindowRegistry::new(DaemonConfig::default()));
         let delivery = crate::profile_delivery::ProfileDelivery {
             output: crate::inbox::DoorOutputs::all(&crate::inbox::OutputForm::Plain),
@@ -1563,27 +1539,17 @@ mod tests {
             launch_prompt: None,
             launch_context: None,
         };
-        let opened = registry
-            .open_with_extra_env(
-                OpenWindowRequest {
-                    command: idle_command(),
-                    cwd: None,
-                    name: None,
-                    vendor: None,
-                    detection: None,
-                    on_name_taken: Default::default(),
-                },
-                Vec::new(),
-                Vec::new(),
+        let (opened, holder) = registry
+            .open_played_with(
+                played_request(),
                 WindowProvenance {
                     delivery: Some(delivery),
                     ..WindowProvenance::default()
                 },
             )
-            .await
-            .expect("open a registered window");
+            .await;
         let entry = registry.get(&opened.window_id).expect("registered");
-        (Arc::new(ReportInboxes::new(registry)), entry)
+        (Arc::new(ReportInboxes::new(registry)), entry, holder)
     }
 
     /// A report put while `wait_for_report` is taking the notice of the
@@ -1591,7 +1557,7 @@ mod tests {
     /// notice there: the drain withdraws the old notice, never the new one.
     #[tokio::test]
     async fn a_report_put_while_a_drain_withdraws_its_notice_keeps_a_notice_of_its_own() {
-        let (inboxes, entry) = delivering_window().await;
+        let (inboxes, entry, _holder) = delivering_window().await;
         let window = entry.window_id().to_string();
         inboxes.put(&window, vec![report("first")], false, false);
         assert!(entry.inbox().holds(REPORT_NOTICE_KEY));
@@ -1642,7 +1608,7 @@ mod tests {
 
     #[tokio::test]
     async fn returning_an_unused_reservation_keeps_queued_reports_and_drops_an_empty_inbox() {
-        let (inboxes, window) = registered_window().await;
+        let (inboxes, window, _holder) = registered_window().await;
         let window = window.as_str();
 
         inboxes.put(window, vec![report("queued")], false, false);
@@ -1658,7 +1624,7 @@ mod tests {
 
     #[tokio::test]
     async fn reservations_count_against_the_inbox_cap_until_delivered_or_returned() {
-        let (inboxes, window) = registered_window().await;
+        let (inboxes, window, _holder) = registered_window().await;
         let window = window.as_str();
 
         let held = inboxes.reserve(window).expect("room for a reservation");
@@ -1682,7 +1648,7 @@ mod tests {
 
     #[tokio::test]
     async fn discarding_an_inbox_drops_its_reports_and_its_due_notice() {
-        let (inboxes, window) = registered_window().await;
+        let (inboxes, window, _holder) = registered_window().await;
         let window = window.as_str();
 
         inboxes.put(window, vec![report("unread")], false, false);
@@ -1697,7 +1663,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_wait_abandoned_after_a_hand_off_puts_the_report_back_and_spares_other_waiters() {
-        let (inboxes, window) = registered_window().await;
+        let (inboxes, window, _holder) = registered_window().await;
         let window = window.as_str();
         let waiting = |taken: Taken| match taken {
             Taken::Waiting(registration) => registration,
@@ -1726,7 +1692,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_reply_that_cannot_be_sent_puts_the_drained_reports_back() {
-        let (inboxes, window) = registered_window().await;
+        let (inboxes, window, _holder) = registered_window().await;
         let window = window.as_str();
         let (tx, rx) = tokio::sync::mpsc::channel(1);
         drop(rx);

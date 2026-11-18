@@ -2367,5 +2367,41 @@ region = "bottom"
                 "the exit the holder sent before it closed is read, not lost to the failed write"
             );
         }
+
+        #[tokio::test]
+        async fn output_that_reached_the_model_before_the_pump_started_is_still_judged() {
+            let marker = yagura_test_support::detection::CONTROL_READY_MARKER;
+            let (endpoint, listener) = bind_holder_endpoint("pump").await;
+            let (session, mut holder) =
+                tokio::join!(played_session(&endpoint), Holder::accept(listener));
+            holder.expect_ack(1).await;
+            // The copy is in the model by the time it is acknowledged, and
+            // nothing follows it, so the pump's look at what arrived before
+            // it is all that can report the marker.
+            let copy = holder.push(true, &[line(0, marker)], 0).await;
+            holder.expect_ack(copy).await;
+
+            let definition = parse_definition(
+                &yagura_test_support::detection::idle_definition_toml("pump-test", "", ""),
+            )
+            .expect("the idle definition must parse");
+            let engine = DetectionEngine::new(
+                Some(definition),
+                &DaemonConfig::default(),
+                session.model_for_detection(),
+            );
+            let (handle, mut statuses) = crate::detector::DetectorHandle::spawn(engine);
+            let handle = std::sync::Arc::new(handle);
+            crate::window::spawn_output_pump(&session, std::sync::Arc::downgrade(&handle));
+
+            // The definition has no time table, so the detector reads the model
+            // only when told output arrived.
+            let confirmed =
+                tokio::time::timeout(std::time::Duration::from_secs(10), statuses.recv())
+                    .await
+                    .expect("the marker that arrived before the pump must still be judged")
+                    .expect("the detector must still be running");
+            assert_eq!(confirmed.status, DetectedStatus::Idle);
+        }
     }
 }

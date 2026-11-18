@@ -4586,9 +4586,20 @@ impl WindowRegistry {
         &self,
         req: OpenWindowRequest,
     ) -> (OpenedWindow, crate::pty::PlayedHolder) {
+        self.open_played_with(req, WindowProvenance::default())
+            .await
+    }
+
+    /// [`WindowRegistry::open_played`] with the window's `provenance`, as
+    /// [`WindowRegistry::open_with_extra_env`] takes it.
+    pub(crate) async fn open_played_with(
+        &self,
+        req: OpenWindowRequest,
+        provenance: WindowProvenance,
+    ) -> (OpenedWindow, crate::pty::PlayedHolder) {
         let (endpoint, listener) = crate::pty::bind_holder_endpoint("window").await;
         self.holder_host.queue_played(endpoint);
-        let opening = self.open(req);
+        let opening = self.open_impl(req, &[], Vec::new(), provenance);
         let accepting = crate::pty::PlayedHolder::accept(listener);
         tokio::pin!(opening);
         tokio::pin!(accepting);
@@ -4619,6 +4630,7 @@ mod tests {
     /// that has not finished by then is waiting on something other than time.
     const UNTIL_IDLE: Duration = Duration::from_secs(3600);
 
+    /// A command no window starts: the played holder stands in for its child.
     fn played_request() -> OpenWindowRequest {
         OpenWindowRequest {
             command: vec!["played-child".to_owned()],
@@ -4627,6 +4639,14 @@ mod tests {
             vendor: None,
             detection: None,
             on_name_taken: Default::default(),
+        }
+    }
+
+    fn named_played_request(name: &str) -> OpenWindowRequest {
+        OpenWindowRequest {
+            name: Some(name.to_string()),
+            on_name_taken: OnNameTaken::Refuse,
+            ..played_request()
         }
     }
 
@@ -4711,28 +4731,14 @@ mod tests {
         assert!(settled.is_none());
     }
 
-    fn named_echo_child_request(name: &str) -> OpenWindowRequest {
-        OpenWindowRequest {
-            command: yagura_test_support::process::echo_child_command(),
-            cwd: None,
-            name: Some(name.to_string()),
-            vendor: None,
-            detection: None,
-            on_name_taken: OnNameTaken::Refuse,
-        }
-    }
-
     #[tokio::test]
     async fn an_open_in_progress_holds_its_name_against_another_open_and_a_rename() {
         let registry = WindowRegistry::new(DaemonConfig::default());
-        let other = registry
-            .open(named_echo_child_request("other"))
-            .await
-            .expect("an echo_child window must open");
+        let (other, _other_holder) = registry.open_played(named_played_request("other")).await;
         let held = registry.begin_opening("w-held", "held");
 
         let reopened = registry
-            .open(named_echo_child_request("held"))
+            .open(named_played_request("held"))
             .await
             .map(|opened| opened.name);
         let renamed = registry.rename_window(&other.entry, "held").await;
@@ -4778,10 +4784,7 @@ mod tests {
             *lock_recover(&hook_counted) = Some((entries, opening));
         }));
 
-        registry
-            .open(named_echo_child_request("counted"))
-            .await
-            .expect("an echo_child window must open");
+        let (_counted, _holder) = registry.open_played(named_played_request("counted")).await;
         registry.terminate_all().await;
 
         assert_eq!(
@@ -4797,7 +4800,7 @@ mod tests {
             max_windows: 1,
             ..DaemonConfig::default()
         });
-        let request = named_echo_child_request("next");
+        let request = named_played_request("next");
         let before = registry.check_open_request(&request).map(|_| ());
 
         let held = registry.begin_opening("w-held", "held");
@@ -4825,17 +4828,7 @@ mod tests {
     #[tokio::test]
     async fn only_one_notice_agent_is_claimed_until_it_is_released() {
         let registry = WindowRegistry::new(DaemonConfig::default());
-        let opened = registry
-            .open(OpenWindowRequest {
-                command: yagura_test_support::process::echo_child_command(),
-                cwd: None,
-                name: None,
-                vendor: None,
-                detection: None,
-                on_name_taken: Default::default(),
-            })
-            .await
-            .expect("an echo_child window must open");
+        let (opened, _holder) = registry.open_played(played_request()).await;
         let entry = opened.entry;
 
         assert!(entry.claim_notice_agent());
@@ -4934,53 +4927,5 @@ mod tests {
                 "WSLENV ({wslenv:?}) must forward {name}"
             );
         }
-    }
-
-    #[tokio::test]
-    async fn output_that_reached_the_model_before_the_pump_started_is_still_judged() {
-        let config = DaemonConfig::default();
-        let marker = yagura_test_support::detection::CONTROL_READY_MARKER;
-        let command = yagura_test_support::process::ready_child_command(marker);
-        let argv: Vec<&str> = command.iter().map(String::as_str).collect();
-        let session =
-            PtySession::spawn_with_command(&argv, &config, &HolderHost::from_config(&config))
-                .await
-                .expect("a ready_child session must spawn");
-
-        // The pump starts only once the marker is in the model, so nothing
-        // but its look at what arrived before it can report the marker.
-        let mut arrivals = session.output_arrivals();
-        tokio::time::timeout(Duration::from_secs(10), async {
-            while !session
-                .text_tail(100, 1 << 16)
-                .await
-                .is_some_and(|(text, _)| text.contains(marker))
-            {
-                arrivals
-                    .changed()
-                    .await
-                    .expect("the output channel must stay open while the child runs");
-            }
-        })
-        .await
-        .expect("the child's marker must reach the model");
-
-        let definition = crate::detector::definition::parse_definition(
-            &yagura_test_support::detection::idle_definition_toml("pump-test", "", ""),
-        )
-        .expect("the idle definition must parse");
-        let engine = DetectionEngine::new(Some(definition), &config, session.model_for_detection());
-        let (handle, mut statuses) = DetectorHandle::spawn(engine);
-        let handle = Arc::new(handle);
-        spawn_output_pump(&session, Arc::downgrade(&handle));
-
-        // The definition has no time table, so the detector reads the model
-        // only when told output arrived.
-        let confirmed = tokio::time::timeout(Duration::from_secs(10), statuses.recv())
-            .await
-            .expect("the marker that arrived before the pump must still be judged")
-            .expect("the detector must still be running");
-        assert_eq!(confirmed.status, DetectedStatus::Idle);
-        session.terminate();
     }
 }
