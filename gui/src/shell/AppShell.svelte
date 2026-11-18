@@ -20,7 +20,6 @@
   import ApprovalDialog from '../components/ApprovalDialog.svelte';
   import ChatPanel from '../components/ChatPanel.svelte';
   import ConfirmDialog from '../components/ConfirmDialog.svelte';
-  import FloatWindow from '../components/FloatWindow.svelte';
   import Icon from '../components/Icon.svelte';
   import IconButton from '../components/IconButton.svelte';
   import PlansPanel from '../components/PlansPanel.svelte';
@@ -231,7 +230,7 @@
   import { confirmCopy, type ConfirmOperation } from '../session/confirm-target';
   import { pairPanes, type Pane } from '../session/pane-plan';
   import { createAttentionNavigation } from '../session/attention-navigation';
-  import { currentWindowFor, isWindowVisibleFor, type WorkMode } from '../session/current-window';
+  import { currentWindowFor, type WorkMode } from '../session/current-window';
   import {
     diffAppearedWindows,
     diffGoneWindows,
@@ -324,6 +323,7 @@
   } from '../ui-messages';
   import { shouldDropRememberedCwd, windowOpenFailureOf } from '../window-open-failure-model';
   import Navigator from './Navigator.svelte';
+  import WorkArea from './WorkArea.svelte';
 
   // Add-window dialog state. The detection definition the dialog shows is
   // held here because the option list is derived from it (below). The working
@@ -443,8 +443,7 @@
   // Measured size of the float area; every layout calculation is fed from it
   let area: Size = { width: 0, height: 0 };
 
-  // The element tiling measures, so the grid covers the area the windows get
-  // once the tab strip is gone; `area` still tracks the float area.
+  // The work area element tiling measures; `area` tracks the float area inside it.
   let mainContentElement: HTMLElement | undefined;
 
   // How this machine shows the application, not part of the restored session,
@@ -719,13 +718,20 @@
     dispatchShell({ type: 'select', windowId });
   }
 
-  /** The view menu's choice; the reducer decides what switching asks for. */
+  /**
+   * The view menu's choice; the reducer decides what switching asks for. Choosing is the
+   * user's own act, so the keyboard follows to the window the new view shows.
+   */
   function chooseWorkMode(mode: WorkMode): void {
     dispatchShell(
       mode === 'focus'
         ? { type: 'enterFocus', canvasCurrent: currentWindowNow() }
         : { type: 'enterCanvas' }
     );
+    const shown = currentWindowNow();
+    if (shown !== null) {
+      focusTerminalOf(shown.windowId);
+    }
   }
 
   /** Passes on an exit code of a window the view still lists or shows a card for. */
@@ -3120,9 +3126,7 @@
   }
 
   /**
-   * Measures the main content area for tiling: the region the
-   * windows end up in still includes the strip the tab bar occupies right
-   * now. Shared by `handleArrangeWindows` and the per-room tile
+   * Measures the work area for tiling. Shared by `handleArrangeWindows` and the per-room tile
    * action, so the measurement is not taken twice.
    */
   function measureTileArea(): Size | null {
@@ -3506,31 +3510,21 @@
          layer, so the divider is not exposed to assistive technology. -->
     <div class="sidebar-resize" aria-hidden="true" use:pointerDrag={sidebarDrag}></div>
 
-    <section class="main-content" bind:this={mainContentElement}>
-      <div class="float-area" use:trackFloatArea>
-        {#if $registry.windows.length === 0}
-          <div class="empty-main">
-            <p>{hints.noWindows}</p>
-          </div>
-        {/if}
-        {#each renderedPanes as rendered (rendered.entry.windowId)}
-          <FloatWindow
-            entry={rendered.entry}
-            {area}
-            {layout}
-            {actions}
-            {themeStore}
-            controller={rendered.pane.controller}
-            sessionStore={rendered.pane.sessionStore}
-            isVisible={isWindowVisibleFor(workView, rendered.entry, $registry.windows)}
-            isCurrent={rendered.entry.windowId === current?.windowId}
-            onRename={() => handleRenameWindow(rendered.entry)}
-            onPressed={(pressOnControl: boolean) =>
-              activateWindow({ byUser: true, target: rendered.entry.windowId, pressOnControl })}
-          />
-        {/each}
-      </div>
-    </section>
+    <WorkArea
+      bind:element={mainContentElement}
+      windows={$registry.windows}
+      rendered={renderedPanes}
+      {workView}
+      currentWindowId={current?.windowId ?? null}
+      {area}
+      {layout}
+      {actions}
+      {themeStore}
+      trackArea={trackFloatArea}
+      onRename={handleRenameWindow}
+      onPressed={(entry: WindowEntry, pressOnControl: boolean) =>
+        activateWindow({ byUser: true, target: entry.windowId, pressOnControl })}
+    />
   </div>
 </main>
 
@@ -3778,28 +3772,6 @@
     touch-action: none;
   }
 
-  /* Holds the optional tab strip above the float area, stacked;
-     the containing block for the windows lives on .float-area now. */
-  .main-content {
-    display: flex;
-    flex-direction: column;
-    flex: 1 1 auto;
-    min-width: 0;
-    min-height: 0;
-  }
-
-  /* Windows are absolutely positioned against this element and their
-     rectangles come from its measured size, so it establishes the containing
-     block and never scrolls. */
-  .float-area {
-    position: relative;
-    flex: 1 1 auto;
-    min-height: 0;
-    overflow: hidden;
-    /* Keeps the windows' z-order from competing with the overlay layer. */
-    isolation: isolate;
-  }
-
   /* Above every panel; the elements drawn in it set their own order. */
   #overlay-layer {
     position: fixed;
@@ -3810,13 +3782,5 @@
 
   #overlay-layer > :global(*) {
     pointer-events: auto;
-  }
-
-  .empty-main {
-    display: flex;
-    height: 100%;
-    align-items: center;
-    justify-content: center;
-    color: var(--color-text-secondary);
   }
 </style>

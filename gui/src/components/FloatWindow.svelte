@@ -65,6 +65,11 @@
   export let isVisible = true;
   /** Whether keyboard operations currently act on this window. */
   export let isCurrent = false;
+  /**
+   * Whether the window fills the area (Focus): it is drawn at the area bounds
+   * and offers no move or resize, so the canvas placement is neither read nor written.
+   */
+  export let fillsArea = false;
   /** Callback to open the rename dialog for this window. */
   export let onRename: (() => void) | undefined = undefined;
   /**
@@ -89,7 +94,7 @@
   let themeScope: HTMLDivElement;
   let unbindWindowPalette: (() => void) | null = null;
 
-  $: rect = resolveRect(entry.display, area);
+  $: rect = fillsArea ? maximizedRect(area) : resolveRect(entry.display, area);
   $: notice = describePaneNotice($sessionStore.phase);
   $: unknownExplanation = describeUnknownExplanation(entry.detected, entry.displayDetectionWarning);
 
@@ -164,11 +169,11 @@
     }
   }
 
-  /** The rect a move or resize starts from, or null while the window is maximized. */
+  /** The rect a move or resize starts from, or null while drawn at the area bounds. */
   function gestureStartRect(): Rect | null {
-    // A maximized window is drawn at the area bounds, so a gesture on it would
-    // write coordinates that are not the ones on screen.
-    return entry.display.isMaximized ? null : rect;
+    // A gesture on a window drawn at the area bounds would write coordinates
+    // that are not the ones on screen.
+    return fillsArea || entry.display.isMaximized ? null : rect;
   }
 
   const moveDrag: PointerDragOptions<Rect> = {
@@ -212,9 +217,14 @@
        the application palette so a window never loses its outline.
        `display: contents` keeps the wrapper out of the layout. -->
   <div class="float-window__theme-scope" bind:this={themeScope}>
-    <!-- The frame bar is not drawn while the window is maximized. -->
-    {#if !entry.display.isMaximized}
-      <div class="float-window__bar" role="presentation" use:pointerDrag={moveDrag}>
+    <!-- The frame bar is not drawn while the window is maximized on the canvas. -->
+    {#if fillsArea || !entry.display.isMaximized}
+      <div
+        class="float-window__bar"
+        class:float-window__bar--fixed={fillsArea}
+        role="presentation"
+        use:pointerDrag={moveDrag}
+      >
         <h2
           class="float-window__title"
           use:tooltip={{ text: entry.displayName, announcedElsewhere: true }}
@@ -260,15 +270,17 @@
       vendor={entry.vendor}
     />
 
-    {#each RESIZE_HANDLES as handle (handle)}
-      <!-- Pointer-only affordance: keyboard move/resize belongs to the shortcut
-           layer, so the grips are not exposed to assistive technology. -->
-      <div
-        class="float-window__grip float-window__grip--{handle}"
-        aria-hidden="true"
-        use:pointerDrag={resizeDrag(handle)}
-      ></div>
-    {/each}
+    {#if !fillsArea}
+      {#each RESIZE_HANDLES as handle (handle)}
+        <!-- Pointer-only affordance: keyboard move/resize belongs to the shortcut
+             layer, so the grips are not exposed to assistive technology. -->
+        <div
+          class="float-window__grip float-window__grip--{handle}"
+          aria-hidden="true"
+          use:pointerDrag={resizeDrag(handle)}
+        ></div>
+      {/each}
+    {/if}
   </div>
 </article>
 
@@ -305,6 +317,10 @@
     cursor: move;
     touch-action: none;
     user-select: none;
+  }
+
+  .float-window__bar--fixed {
+    cursor: default;
   }
 
   .float-window__title {
