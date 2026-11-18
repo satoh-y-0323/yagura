@@ -50,6 +50,10 @@ describe('the entry point seals Object.prototype before it mounts the app', () =
       addEventListener: () => undefined,
       documentElement: { style: { setProperty: () => undefined } },
     });
+    vi.stubGlobal('window', {
+      addEventListener: () => undefined,
+      removeEventListener: () => undefined,
+    });
     await import('./main');
 
     expect(mountMock).toHaveBeenCalledTimes(1);

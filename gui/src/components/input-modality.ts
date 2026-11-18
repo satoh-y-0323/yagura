@@ -58,3 +58,16 @@ export function sharedInputModality(): InputModality {
 export function isKeyboardFocus(node: Element): boolean {
   return node.matches(':focus-visible') && sharedInputModality().isKeyboard();
 }
+
+/**
+ * Focuses `element` with the focus ring when the last input was a key.
+ * Chromium leaves a script's focus after a Ctrl chord unmarked, so a move made
+ * from a shortcut would otherwise show no ring.
+ */
+export function focusAsLastInput(element: HTMLElement): void {
+  // `focusVisible` is not in TypeScript's DOM types yet.
+  const options: FocusOptions & { focusVisible?: boolean } = {
+    focusVisible: sharedInputModality().isKeyboard(),
+  };
+  element.focus(options);
+}

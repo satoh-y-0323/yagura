@@ -28,6 +28,7 @@
   import RestoreDialog from '../components/RestoreDialog.svelte';
   import SettingsPanel from '../components/SettingsPanel.svelte';
   import Tooltip from '../components/Tooltip.svelte';
+  import { focusAsLastInput } from '../components/input-modality';
   import { bodyEscapePanel } from '../components/panel-focus';
   import { pointerDrag, type PointerDragOptions } from '../components/pointer-drag';
   import {
@@ -2170,12 +2171,20 @@
       case 'terminal':
         get(panes).get(move.windowId)?.controller.focusTerminal();
         return;
-      case 'sidebar-row':
-        sidebarRow(move.windowId)?.focus();
+      case 'sidebar-row': {
+        const row = sidebarRow(move.windowId);
+        if (row !== null) {
+          focusAsLastInput(row);
+        }
         return;
-      case 'sidebar-start':
-        firstFocusable(sidebarElement)?.focus();
+      }
+      case 'sidebar-start': {
+        const first = firstFocusable(sidebarElement);
+        if (first !== null) {
+          focusAsLastInput(first);
+        }
         return;
+      }
       case 'current-if-lost':
         runFocusMove(lostFocusMove(focusFacts(document.activeElement), currentWindowNow()));
         return;

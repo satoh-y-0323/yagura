@@ -1,6 +1,7 @@
 import { mount } from 'svelte';
 
 import App from './App.svelte';
+import { sharedInputModality } from './components/input-modality';
 import { suppressNativeContextMenu } from './native-context-menu';
 import { sealObjectPrototype } from './prototype-seal';
 import './styles/tokens.css';
@@ -20,6 +21,10 @@ document.addEventListener('contextmenu', suppressNativeContextMenu);
 // (the stored selection or the default) once; a named user theme and later
 // changes are applied by the app's store.
 applyPalette(document.documentElement, startupPalette(createBrowserThemeDeps()));
+
+// Before the app mounts: listeners on one target run in the order they were added,
+// so the tracker sees a key before a shortcut that moves focus on it.
+sharedInputModality();
 
 const target = document.getElementById('app');
 if (target === null) {
