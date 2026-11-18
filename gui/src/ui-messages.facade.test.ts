@@ -14,6 +14,13 @@ const messages = resolveMessages();
 
 const UNKNOWN_WITH_REASON: DetectedStatusView = { status: 'unknown', reason: 'no_rule_matched' };
 const BLOCKED: ConfirmTarget = { allowed: false, requiresConfirmation: false, reason: 'exited' };
+const HEADER_FACTS: render.WindowHeaderFacts = {
+  vendor: 'claude-code',
+  cwd: '/work/yagura',
+  showsMcpMark: true,
+  showsStatusReportMark: false,
+  queuedCount: 2,
+};
 
 const CASES: ReadonlyArray<[string, () => unknown, () => unknown]> = [
   [
@@ -40,6 +47,11 @@ const CASES: ReadonlyArray<[string, () => unknown, () => unknown]> = [
     'describeWindowRow',
     () => facade.describeWindowRow('reviewer', 'waiting_input', true),
     () => render.describeWindowRow(messages, 'reviewer', 'waiting_input', true),
+  ],
+  [
+    'describeWindowHeader',
+    () => facade.describeWindowHeader(HEADER_FACTS),
+    () => render.describeWindowHeader(messages, HEADER_FACTS),
   ],
   ['describeExit', () => facade.describeExit(3), () => render.describeExit(messages, 3)],
   [

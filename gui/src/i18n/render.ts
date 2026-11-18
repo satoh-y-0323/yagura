@@ -50,6 +50,42 @@ export function describeWindowRow(
   return isAwaitingPermission ? messages.formats.windowRowAwaitingPermission(label) : label;
 }
 
+/** What a window header says beyond what it shows as text; see {@link describeWindowHeader}. */
+export interface WindowHeaderFacts {
+  /** The window's vendor, already prepared for display; `null` when it has none. */
+  vendor: string | null;
+  /** The window's working directory, already prepared for display. */
+  cwd: string;
+  /** Whether the header shows the MCP connection mark. */
+  showsMcpMark: boolean;
+  /** Whether the header shows the mark that status reports are not arriving. */
+  showsStatusReportMark: boolean;
+  /** The inbox count the header shows, `undefined` while it shows none. */
+  queuedCount: number | undefined;
+}
+
+/**
+ * Describes a window header as its accessible description: where the window
+ * runs, then what each mark it shows means, so the marks are not icon-only.
+ */
+export function describeWindowHeader(messages: Messages, facts: WindowHeaderFacts): string {
+  const sentences = [
+    facts.vendor === null
+      ? messages.formats.windowHeaderCwd(facts.cwd)
+      : messages.formats.windowHeaderVendorCwd(facts.vendor, facts.cwd),
+  ];
+  if (facts.showsMcpMark) {
+    sentences.push(messages.hints.mcpConnected);
+  }
+  if (facts.showsStatusReportMark) {
+    sentences.push(messages.hints.statusReportsMissing);
+  }
+  if (facts.queuedCount !== undefined) {
+    sentences.push(messages.formats.queuedMessages(facts.queuedCount));
+  }
+  return messages.formats.sentences(sentences);
+}
+
 /** Describes what is wrong with one window's connection, `null` while nothing is. */
 export function describePaneNotice(messages: Messages, phase: string): string | null {
   if (phase === 'failed') {

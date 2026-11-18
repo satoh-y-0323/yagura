@@ -35,7 +35,8 @@ function roomIdOf(entry: RoomMember): string {
   return entry.room?.roomId ?? entry.cwd;
 }
 
-function roomNameOf(entry: RoomMember): string {
+/** The name a window's place is shown by: its room's, or its working directory without one. */
+export function roomNameOf(entry: RoomMember): string {
   return entry.room?.displayName ?? entry.displayCwd;
 }
 

@@ -32,14 +32,13 @@
   import { attentionCount, summarizeWindowStatuses } from '../status-tone';
   import type { WindowEntry } from '../stores/window-registry';
   import type { ThemeStore } from '../theme/theme-store';
+  import { windowThemeOptions } from '../theme/window-theme-options';
   import {
     describeAttentionBadge,
     describeRoomTitle,
     describeStatus,
-    describeThemeName,
     hints,
     sidebar,
-    themes,
   } from '../ui-messages';
 
   export let entries: readonly WindowEntry[];
@@ -141,13 +140,7 @@
   }
   $: menuThemeValue =
     menuEntry === undefined ? '' : ($themeStore.windowOverrides[menuEntry.windowId] ?? '');
-  $: menuThemeOptions = [
-    { value: '', label: themes.windowFollowsAppOption },
-    ...['dark', 'light', ...Object.keys($themeStore.userPalettes)].map((name) => ({
-      value: name,
-      label: describeThemeName(name),
-    })),
-  ];
+  $: menuThemeOptions = windowThemeOptions($themeStore.userPalettes);
   $: menuMoves =
     menuEntry !== undefined && isReorderable ? rowMoves(menuEntry.windowId, order, entries) : null;
   $: dropMark = drag === null ? null : dropMarkOf(drag);

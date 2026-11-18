@@ -59,13 +59,11 @@
 }
 
 .btn:hover:not(:disabled):not([aria-disabled='true']),
-.window-controls__menu-anchor:hover,
 .window-controls__button:hover:not(:disabled):not([aria-disabled='true']) {
   background-image: linear-gradient(var(--bg-hover), var(--bg-hover));
 }
 
 .btn:active:not(:disabled):not([aria-disabled='true']),
-.window-controls__menu-anchor:active,
 .window-controls__button:active:not(:disabled):not([aria-disabled='true']) {
   background-image: linear-gradient(var(--bg-pressed), var(--bg-pressed));
 }
@@ -77,7 +75,6 @@
 }
 
 .btn:focus-visible,
-.window-controls__menu-anchor:focus-visible,
 .window-controls__button:focus-visible,
 .banner-close:focus-visible,
 .dialog-close:focus-visible {
@@ -165,29 +162,26 @@
   justify-content: space-between;
 }
 
-/* An unfilled control drawn only as a framed glyph: the WindowControls button
-   row. Unlike .btn it carries no fill of its own, so the frame reads as
-   part of the surface it sits on until it is hovered. */
-.window-controls__menu-anchor,
+/* A ghost icon button of a window header (WindowControls.svelte): no frame
+   and no fill until it is hovered, so the header's buttons stay quieter than
+   the status pill beside them. */
 .window-controls__button {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  border: var(--line-width) solid var(--line);
+  min-width: var(--icon-button-hit-min);
+  min-height: var(--icon-button-hit-min);
+  padding: 0;
+  border: var(--line-width) solid transparent;
   border-radius: var(--radius-sm);
-  color: var(--fg-default);
-  font-family: inherit;
-  font-size: var(--text-sm);
+  background-color: transparent;
+  color: var(--fg-muted);
   cursor: pointer;
   transition: background-color var(--dur-fast) var(--ease-out);
 }
 
-.window-controls__menu-anchor,
-.window-controls__button {
-  min-width: var(--icon-button-size);
-  min-height: var(--icon-button-size);
-  padding: 0 var(--space-2);
-  background-color: var(--bg-canvas);
+.window-controls__button:hover:not(:disabled):not([aria-disabled='true']) {
+  color: var(--fg-default);
 }
 
 /* A dismiss glyph that borrows the colour of whatever surface it sits on:
@@ -208,21 +202,17 @@
   opacity: 0.7;
 }
 
-/* A window's waiting-messages mark (QueuedMark.svelte) in the float-window
-   title bar: an outline in the secondary text colour and no fill, so it stays
-   quieter than the status pill beside it. */
+/* A window's waiting-messages mark (QueuedMark.svelte): the count bare beside
+   its envelope in the muted text colour, as quiet as the header's other marks. */
 .queued-mark {
   display: inline-flex;
   align-items: center;
   flex: 0 0 auto;
-  gap: var(--space-xs);
-  padding: 0 var(--space-xs);
-  border: 1px solid var(--fg-muted);
-  border-radius: var(--radius-sm);
+  gap: var(--space-0_5);
   color: var(--fg-muted);
-  font-size: var(--font-size-xs);
+  font-size: var(--text-2xs);
   font-variant-numeric: tabular-nums;
-  line-height: var(--line-height-base);
+  line-height: var(--leading-2xs);
 }
 
 .queued-mark__icon {

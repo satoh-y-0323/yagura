@@ -1,9 +1,8 @@
 <script lang="ts">
   /**
-   * The operation buttons of one window — the `⋯` menu anchor and the
-   * interrupt / minimize / maximize / close row — with the menu they open
-   * The float window title bar mounts this, so
-   * the menu has exactly one owner and no caller ever holds its anchor.
+   * The operation buttons of one window header -- interrupt, the `⋯` menu
+   * anchor, minimize and maximize (Canvas only) and close -- with the menu
+   * they open, so the menu has exactly one owner and no caller ever holds its anchor.
    *
    * Each button carries `data-window-control`: focus left on one is not an
    * input target (`isInputTarget` in `focus-moves.ts`), because the window it
@@ -12,14 +11,8 @@
   import { resolveConfirmTarget } from '../session/confirm-target';
   import type { WindowActions } from '../session/window-actions';
   import type { ThemeStore } from '../theme/theme-store';
-  import {
-    buttons,
-    describeInterruptHint,
-    describeThemeName,
-    hints,
-    nav,
-    themes,
-  } from '../ui-messages';
+  import { windowThemeOptions } from '../theme/window-theme-options';
+  import { buttons, describeInterruptHint, hints, nav } from '../ui-messages';
   import Icon from './Icon.svelte';
   import IconButton from './IconButton.svelte';
   import WindowMenu from './WindowMenu.svelte';
@@ -35,6 +28,8 @@
   export let actions: WindowActions;
   /** The application theme store; the menu reads and overrides it. */
   export let themeStore: ThemeStore;
+  /** Whether minimize and maximize are offered; Focus has no window size to change. */
+  export let offersSizeControls: boolean;
   /** Callback to open the rename dialog for this window. */
   export let onRename: (() => void) | undefined = undefined;
 
@@ -47,11 +42,7 @@
   $: maximizeLabel = entry.display.isMaximized ? buttons.restore : buttons.maximize;
   $: maximizeHint = entry.display.isMaximized ? hints.restoreWindow : hints.maximizeWindow;
   $: windowThemeValue = $themeStore.windowOverrides[entry.windowId] ?? '';
-  $: windowThemeNames = ['dark', 'light', ...Object.keys($themeStore.userPalettes)];
-  $: themeOptions = [
-    { value: '', label: themes.windowFollowsAppOption },
-    ...windowThemeNames.map((name) => ({ value: name, label: describeThemeName(name) })),
-  ];
+  $: themeOptions = windowThemeOptions($themeStore.userPalettes);
 
   function handleThemeChange(event: Event & { currentTarget: HTMLSelectElement }): void {
     const value = event.currentTarget.value;
@@ -62,17 +53,6 @@
 <div class="window-controls">
   <IconButton
     data-window-control
-    class="window-controls__menu-anchor"
-    label={nav.windowMenu}
-    bind:element={menuAnchor}
-    on:click={() => {
-      isMenuOpen = !isMenuOpen;
-    }}
-  >
-    <Icon name="ellipsis" />
-  </IconButton>
-  <IconButton
-    data-window-control
     class="window-controls__button"
     label={buttons.interrupt}
     hint={describeInterruptHint(interruptTarget)}
@@ -81,26 +61,39 @@
       void actions.interrupt(entry);
     }}
   >
-    <Icon name="square" />
+    <Icon name="square" size="sm" />
   </IconButton>
   <IconButton
     data-window-control
     class="window-controls__button"
-    label={buttons.minimize}
-    hint={hints.minimizeWindow}
-    on:click={() => actions.minimize(entry)}
+    label={nav.windowMenu}
+    bind:element={menuAnchor}
+    on:click={() => {
+      isMenuOpen = !isMenuOpen;
+    }}
   >
-    <Icon name="minus" />
+    <Icon name="ellipsis" size="sm" />
   </IconButton>
-  <IconButton
-    data-window-control
-    class="window-controls__button"
-    label={maximizeLabel}
-    hint={maximizeHint}
-    on:click={() => actions.maximize(entry)}
-  >
-    <Icon name={entry.display.isMaximized ? 'minimize-2' : 'maximize-2'} />
-  </IconButton>
+  {#if offersSizeControls}
+    <IconButton
+      data-window-control
+      class="window-controls__button"
+      label={buttons.minimize}
+      hint={hints.minimizeWindow}
+      on:click={() => actions.minimize(entry)}
+    >
+      <Icon name="minus" size="sm" />
+    </IconButton>
+    <IconButton
+      data-window-control
+      class="window-controls__button"
+      label={maximizeLabel}
+      hint={maximizeHint}
+      on:click={() => actions.maximize(entry)}
+    >
+      <Icon name={entry.display.isMaximized ? 'minimize-2' : 'maximize-2'} size="sm" />
+    </IconButton>
+  {/if}
   <IconButton
     data-window-control
     class="window-controls__button"
@@ -110,7 +103,7 @@
       void actions.close(entry);
     }}
   >
-    <Icon name="x" />
+    <Icon name="x" size="sm" />
   </IconButton>
 
   <WindowMenu
@@ -131,6 +124,6 @@
     flex: 0 0 auto;
     display: flex;
     align-items: center;
-    gap: var(--space-sm);
+    gap: var(--space-0_5);
   }
 </style>

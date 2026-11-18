@@ -20,6 +20,7 @@ import {
   describeStatus,
   describeExit,
   describeExitCode,
+  describeWindowHeader,
   describeWindowRow,
   describePaneNotice,
   describeDetectionWarning,
@@ -34,6 +35,7 @@ import {
   describeUnknownExplanation,
   describeUndeliveredUnknownReason,
   describeInterruptHint,
+  type WindowHeaderFacts,
 } from './render';
 
 const english = resolveMessages();
@@ -422,6 +424,64 @@ describe('describeWindowRow', () => {
       dummyMessages.formats.windowRowAwaitingPermission(
         dummyMessages.formats.windowRow('reviewer', dummyMessages.statusLabels.waiting_input)
       )
+    );
+  });
+});
+
+describe('describeWindowHeader', () => {
+  const NO_MARKS: WindowHeaderFacts = {
+    vendor: 'claude-code',
+    cwd: '/work/yagura',
+    showsMcpMark: false,
+    showsStatusReportMark: false,
+    queuedCount: undefined,
+  };
+
+  it('says only where the window runs while no mark shows', () => {
+    expect(describeWindowHeader(dummyMessages, NO_MARKS)).toBe(
+      dummyMessages.formats.sentences([
+        dummyMessages.formats.windowHeaderVendorCwd('claude-code', '/work/yagura'),
+      ])
+    );
+  });
+
+  it('names only the working directory for a window without a vendor', () => {
+    expect(describeWindowHeader(dummyMessages, { ...NO_MARKS, vendor: null })).toBe(
+      dummyMessages.formats.sentences([dummyMessages.formats.windowHeaderCwd('/work/yagura')])
+    );
+  });
+
+  it('adds the meaning of each mark the header shows, in the order they show', () => {
+    const facts = {
+      ...NO_MARKS,
+      showsMcpMark: true,
+      showsStatusReportMark: true,
+      queuedCount: 3,
+    };
+    expect(describeWindowHeader(dummyMessages, facts)).toBe(
+      dummyMessages.formats.sentences([
+        dummyMessages.formats.windowHeaderVendorCwd('claude-code', '/work/yagura'),
+        dummyMessages.hints.mcpConnected,
+        dummyMessages.hints.statusReportsMissing,
+        dummyMessages.formats.queuedMessages(3),
+      ])
+    );
+  });
+
+  it('ends every English sentence with one full stop, whether or not its text has one', () => {
+    const text = describeWindowHeader(english, {
+      ...NO_MARKS,
+      showsMcpMark: true,
+      showsStatusReportMark: true,
+      queuedCount: 1,
+    });
+    expect(text).toBe(
+      [
+        `${english.formats.windowHeaderVendorCwd('claude-code', '/work/yagura')}.`,
+        `${english.hints.mcpConnected}.`,
+        english.hints.statusReportsMissing,
+        `${english.formats.queuedMessages(1)}.`,
+      ].join(' ')
     );
   });
 });

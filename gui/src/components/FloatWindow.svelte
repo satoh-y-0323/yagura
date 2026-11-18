@@ -28,23 +28,11 @@
   import { bindPalette } from '../theme/theme-apply';
   import { resolveWindowPaletteFromState } from '../theme/theme-resolve';
   import type { ThemeStore } from '../theme/theme-store';
-  import {
-    describeExitCode,
-    describePaneNotice,
-    describeUnknownExplanation,
-    describeUnknownReasonSuffix,
-    hints,
-  } from '../ui-messages';
+  import { describePaneNotice } from '../ui-messages';
   import Icon from './Icon.svelte';
-  import IconButton from './IconButton.svelte';
-  import McpMark from './McpMark.svelte';
-  import QueuedMark from './QueuedMark.svelte';
-  import StatusBadge from './StatusBadge.svelte';
-  import StatusReportMark from './StatusReportMark.svelte';
   import { isPressOnControl, pointerDrag, type PointerDragOptions } from './pointer-drag';
   import TerminalPane from './TerminalPane.svelte';
-  import { tooltip } from './tooltip';
-  import WindowControls from './WindowControls.svelte';
+  import WindowHeader from './WindowHeader.svelte';
 
   /** The registry mutators that own this window's position and size. */
   interface WindowLayoutSink {
@@ -96,7 +84,6 @@
 
   $: rect = fillsArea ? maximizedRect(area) : resolveRect(entry.display, area);
   $: notice = describePaneNotice($sessionStore.phase);
-  $: unknownExplanation = describeUnknownExplanation(entry.detected, entry.displayDetectionWarning);
 
   // The scope element only exists once the window is in the DOM, so the
   // palette is bound from `onMount` rather than at initialization.
@@ -179,8 +166,8 @@
   const moveDrag: PointerDragOptions<Rect> = {
     start: (event) => {
       // Capturing the pointer here would swallow the interaction with the
-      // controls the bar contains: its buttons, and the menu they open, which
-      // is mounted inside the bar as a descendant of WindowControls.
+      // controls the header contains: its buttons, and the menu they open, which
+      // is mounted inside the header as a descendant of WindowControls.
       if (isPressOnControl(event.target)) {
         return null;
       }
@@ -205,6 +192,8 @@
 
 <article
   class="float-window"
+  class:float-window--card={!fillsArea}
+  class:float-window--current={!fillsArea && isCurrent}
   class:float-window--hidden={!isVisible}
   style="left: {rect.position.x}px; top: {rect.position.y}px; width: {rect.size
     .width}px; height: {rect.size.height}px; z-index: {entry.display.zOrder};"
@@ -217,49 +206,27 @@
        the application palette so a window never loses its outline.
        `display: contents` keeps the wrapper out of the layout. -->
   <div class="float-window__theme-scope" bind:this={themeScope}>
-    <!-- The frame bar is not drawn while the window is maximized on the canvas. -->
-    {#if fillsArea || !entry.display.isMaximized}
-      <div
-        class="float-window__bar"
-        class:float-window__bar--fixed={fillsArea}
-        role="presentation"
-        use:pointerDrag={moveDrag}
-      >
-        <h2
-          class="float-window__title"
-          use:tooltip={{ text: entry.displayName, announcedElsewhere: true }}
-        >
-          {entry.displayName}
-        </h2>
-        <McpMark mcpConnected={entry.mcpConnected} />
-        <StatusReportMark statusReportsMissing={entry.statusReportsMissing} />
-        <QueuedMark count={entry.queuedCount} />
-        <span class="float-window__status">
-          <StatusBadge
-            status={entry.detected.status}
-            variant="label"
-            detail={describeUnknownReasonSuffix(entry.detected)}
-          />
-        </span>
-        {#if unknownExplanation !== ''}
-          <IconButton
-            data-window-control
-            class="float-window__why"
-            label={hints.whyUnknown}
-            toggletip={unknownExplanation}
-          >
-            <Icon name="info" size="sm" />
-          </IconButton>
-        {/if}
-        {#if entry.detected.status === 'exited' && entry.exitCode !== null}
-          <span class="float-window__exit">{describeExitCode(entry.exitCode)}</span>
-        {/if}
-        <WindowControls {entry} {actions} {themeStore} {onRename} />
-      </div>
-    {/if}
+    <!-- Kept while the window is maximized on the canvas: its Restore button lives here. -->
+    <div
+      class="float-window__drag"
+      class:float-window__drag--movable={!fillsArea && !entry.display.isMaximized}
+      role="presentation"
+      use:pointerDrag={moveDrag}
+    >
+      <WindowHeader
+        {entry}
+        {actions}
+        {themeStore}
+        {onRename}
+        variant={fillsArea ? 'focus' : 'canvas'}
+      />
+    </div>
 
     {#if notice !== null}
-      <p class="float-window__notice" role="status">{notice}</p>
+      <p class="float-window__notice" role="status">
+        <Icon name="triangle-exclamation-point" size="sm" />
+        <span class="float-window__notice-text">{notice}</span>
+      </p>
     {/if}
 
     <TerminalPane
@@ -290,10 +257,17 @@
     display: flex;
     flex-direction: column;
     overflow: hidden;
-    border: 1px solid var(--color-border);
-    border-radius: var(--radius-sm);
-    background-color: var(--color-surface);
-    box-shadow: var(--shadow-md);
+    background-color: var(--bg-canvas);
+  }
+
+  .float-window--card {
+    border: var(--line-width) solid var(--line);
+    border-radius: var(--radius-md);
+  }
+
+  .float-window--current {
+    border-color: var(--line-strong);
+    box-shadow: var(--shadow-popover);
   }
 
   .float-window--hidden {
@@ -306,77 +280,46 @@
     display: contents;
   }
 
-  .float-window__bar {
-    flex: 0 0 auto;
+  .float-window__drag {
     display: flex;
-    align-items: center;
-    gap: var(--space-sm);
-    padding: var(--space-xs) var(--space-sm);
-    border-bottom: 1px solid var(--color-border);
-    background-color: var(--color-surface);
-    cursor: move;
+    flex-direction: column;
+    flex: 0 0 auto;
+    min-width: 0;
     touch-action: none;
     user-select: none;
   }
 
-  .float-window__bar--fixed {
-    cursor: default;
-  }
-
-  .float-window__title {
-    flex: 1 1 auto;
-    margin: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    color: var(--color-text-primary);
-    font-size: var(--font-size-sm);
-    font-weight: 600;
-  }
-
-  .float-window__status {
-    display: inline-flex;
-    flex: 0 0 auto;
-  }
-
-  /* A ghost icon button: no frame, the hover and focus layers come from the tokens. */
-  :global(.float-window__why) {
-    display: inline-flex;
-    flex: 0 0 auto;
-    align-items: center;
-    justify-content: center;
-    min-width: var(--icon-button-hit-min);
-    min-height: var(--icon-button-hit-min);
-    padding: 0;
-    border: none;
-    border-radius: var(--radius-sm);
-    background-color: transparent;
-    color: var(--fg-muted);
-    cursor: pointer;
-  }
-
-  :global(.float-window__why:hover) {
-    background-color: var(--bg-hover);
-  }
-
-  :global(.float-window__why:focus-visible) {
-    outline: var(--line-width-strong) solid var(--ring);
-    outline-offset: 1px;
-  }
-
-  .float-window__exit {
-    flex: 0 0 auto;
-    color: var(--color-text-secondary);
-    font-size: var(--font-size-sm);
+  .float-window__drag--movable {
+    cursor: move;
   }
 
   .float-window__notice {
     flex: 0 0 auto;
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    height: 28px;
     margin: 0;
-    padding: var(--space-xs) var(--space-sm);
+    padding: 0 var(--space-3);
+    border-bottom: var(--line-width) solid var(--line);
     background-color: var(--st-approval-tint);
     color: var(--fg-default);
-    font-size: var(--font-size-sm);
+    font-size: var(--text-xs);
+  }
+
+  .float-window__notice :global(svg) {
+    color: var(--st-approval);
+  }
+
+  .float-window__notice-text {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  /* Room around the terminal's cells; the pane measures its own padding when it fits. */
+  .float-window :global(.terminal-pane) {
+    padding: var(--space-2) var(--space-3);
   }
 
   .float-window__grip {

@@ -387,6 +387,13 @@ export const messagesEn = {
     windowRow: (name: string, status: string): string => `${name}, ${status}`,
     /** A sidebar row's accessible name when the window waits for the user's permission. */
     windowRowAwaitingPermission: (label: string): string => `${label}, waiting for your permission`,
+
+    /** Where a window runs, opening its header's description. */
+    windowHeaderVendorCwd: (vendor: string, cwd: string): string => `${vendor} in ${cwd}`,
+    windowHeaderCwd: (cwd: string): string => `In ${cwd}`,
+    /** Joins sentences into one text, ending each that lacks one with a full stop. */
+    sentences: (parts: readonly string[]): string =>
+      parts.map((part) => (/[.!?]$/.test(part) ? part : `${part}.`)).join(' '),
   },
 
   /**

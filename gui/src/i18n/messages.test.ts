@@ -204,6 +204,10 @@ export const dummyMessages: Messages = {
     queuedMessages: (count: number) => `DUMMY_queuedMessages(${count})`,
     windowRow: (name: string, status: string) => `DUMMY_windowRow(${name}, ${status})`,
     windowRowAwaitingPermission: (label: string) => `DUMMY_windowRowAwaitingPermission(${label})`,
+    windowHeaderVendorCwd: (vendor: string, cwd: string) =>
+      `DUMMY_windowHeaderVendorCwd(${vendor}, ${cwd})`,
+    windowHeaderCwd: (cwd: string) => `DUMMY_windowHeaderCwd(${cwd})`,
+    sentences: (parts: readonly string[]) => `DUMMY_sentences(${parts.join('|')})`,
   },
 
   // Why a window's status is Unknown, in the three forms the sidebar

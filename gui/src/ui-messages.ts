@@ -24,9 +24,11 @@ import {
   describeUndeliveredUnknownReason as renderDescribeUndeliveredUnknownReason,
   describeUnknownExplanation as renderDescribeUnknownExplanation,
   describeUnknownReasonSuffix as renderDescribeUnknownReasonSuffix,
+  describeWindowHeader as renderDescribeWindowHeader,
   describeWindowRow as renderDescribeWindowRow,
   EXTERNAL_TEXT_MAX_CODE_POINTS,
   foldExternalText,
+  type WindowHeaderFacts,
 } from './i18n/render';
 import type { ChatDeliveryOutcome, DetectedStatusView } from './ipc/session-boundary';
 import type { ConfirmTarget } from './session/confirm-target';
@@ -134,6 +136,16 @@ export function describeWindowRow(
   isAwaitingPermission: boolean
 ): string {
   return renderDescribeWindowRow(messages, name, status, isAwaitingPermission);
+}
+
+export type { WindowHeaderFacts };
+
+/**
+ * Describes a window header as its accessible description.
+ * @param facts where the window runs and which marks its header shows
+ */
+export function describeWindowHeader(facts: WindowHeaderFacts): string {
+  return renderDescribeWindowHeader(messages, facts);
 }
 
 /**
