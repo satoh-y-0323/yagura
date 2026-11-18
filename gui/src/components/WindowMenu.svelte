@@ -1,16 +1,23 @@
 <script lang="ts">
-  import PopupMenu from './PopupMenu.svelte';
   import { menus, themes } from '../ui-messages';
+  import PopupMenu from './PopupMenu.svelte';
+  import type { Rect } from './menu-position';
 
   export let isOpen = false;
   export let anchor: HTMLButtonElement | undefined;
+  /** Where the menu opens instead of beside `anchor`, such as a right-click's point. */
+  export let at: Rect | null = null;
   export let onClose: () => void;
   export let themeValue: string;
   export let themeOptions: { value: string; label: string }[];
   export let onThemeChange: (event: Event & { currentTarget: HTMLSelectElement }) => void;
   export let onRename: (() => void) | undefined;
+  /** Moves the window within its room; Move up and Move down are offered only when set. */
+  export let onMove: ((direction: 'up' | 'down') => void) | undefined = undefined;
+  export let canMoveUp = false;
+  export let canMoveDown = false;
 
-  $: anchorRect = isOpen && anchor ? anchor.getBoundingClientRect() : null;
+  $: anchorRect = isOpen && anchor ? (at ?? anchor.getBoundingClientRect()) : null;
 
   function handleClose(reason: 'escape' | 'tab' | 'outside' | 'resize'): void {
     onClose();
@@ -48,13 +55,28 @@
   >
     <span class="popup-menu__label">{menus.rename}</span>
   </button>
-  <hr class="popup-menu__divider" />
-  <button type="button" class="popup-menu__item" role="menuitem" disabled>
-    <span class="popup-menu__label">{menus.copyOutput}</span>
-  </button>
-  <button type="button" class="popup-menu__item" role="menuitem" disabled>
-    <span class="popup-menu__label">{menus.detectionDefinition}</span>
-  </button>
+  {#if onMove !== undefined}
+    {@const move = onMove}
+    <hr class="popup-menu__divider" />
+    <button
+      type="button"
+      class="popup-menu__item"
+      role="menuitem"
+      disabled={!canMoveUp}
+      on:click={() => move('up')}
+    >
+      <span class="popup-menu__label">{menus.moveUp}</span>
+    </button>
+    <button
+      type="button"
+      class="popup-menu__item"
+      role="menuitem"
+      disabled={!canMoveDown}
+      on:click={() => move('down')}
+    >
+      <span class="popup-menu__label">{menus.moveDown}</span>
+    </button>
+  {/if}
 </PopupMenu>
 
 <style>

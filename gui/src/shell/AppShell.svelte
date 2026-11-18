@@ -3485,17 +3485,21 @@
       width={sidebarWidth}
       entries={$registry.windows}
       groups={sidebarGroupsNow}
+      order={$registry.tabOrder}
       currentWindowId={current?.windowId ?? null}
       workMode={$shell.workMode}
       awaitingPermission={permissionWaiters}
       {needsYouView}
       {roomActions}
+      {themeStore}
       onToggleNeedsYou={toggleNeedsYouFilter}
       onSelectWindow={goToWindowFromSidebar}
       onChooseWorkMode={chooseWorkMode}
       onTileWindows={handleArrangeWindows}
       onNewWindow={openAddDialog}
       onOpenChat={openChatForRoom}
+      onRenameWindow={handleRenameWindow}
+      onMoveWindow={registry.moveTab}
     />
 
     <!-- Pointer-only affordance: keyboard resize belongs to the shortcut

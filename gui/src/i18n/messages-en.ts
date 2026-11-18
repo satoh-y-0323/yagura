@@ -430,8 +430,8 @@ export const messagesEn = {
   menus: {
     theme: 'Theme',
     rename: 'Rename…',
-    copyOutput: 'Copy output',
-    detectionDefinition: 'Detection definition',
+    moveUp: 'Move up',
+    moveDown: 'Move down',
     sectionLabel: 'This window',
     copy: 'Copy',
     paste: 'Paste',

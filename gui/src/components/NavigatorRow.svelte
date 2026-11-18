@@ -5,8 +5,9 @@
    */
   import type { WindowEntry } from '../stores/window-registry';
   import { needsYou } from '../status-tone';
-  import { describeUnknownExplanation, describeWindowRow, sidebar } from '../ui-messages';
+  import { describeUnknownExplanation, describeWindowRow, nav, sidebar } from '../ui-messages';
   import Icon from './Icon.svelte';
+  import IconButton from './IconButton.svelte';
   import QueuedMark from './QueuedMark.svelte';
   import StatusBadge from './StatusBadge.svelte';
   import { tooltip } from './tooltip';
@@ -20,6 +21,15 @@
   /** A permission request from this window waits for the user. */
   export let isAwaitingPermission: boolean;
   export let onSelect: (entry: WindowEntry) => void;
+  /** The `⋯` button was pressed; the menu opens beside it. */
+  export let onOpenMenu: (entry: WindowEntry, anchor: HTMLButtonElement) => void;
+  export let isMenuOpen = false;
+  /** The row is held by a drag. */
+  export let isDragging = false;
+  /** The held row would land on this edge of the row. */
+  export let dropEdge: 'before' | 'after' | null = null;
+
+  let menuButton: HTMLButtonElement | undefined;
 
   // Unknown is not counted as needing the user, but it is not quiet either.
   $: isProminent = !isSettled && (needsYou(entry) || entry.detected.status === 'unknown');
@@ -33,13 +43,14 @@
       .join(' ') || undefined;
 </script>
 
-<li class="navigator-row__item">
+<li class="navigator-row__item" data-drop-edge={dropEdge ?? undefined}>
   <button
     type="button"
     class="navigator-row"
     data-window-id={entry.windowId}
     data-prominent={isProminent}
     data-minimized={isMinimized}
+    data-dragging={isDragging}
     aria-current={isCurrent ? 'true' : undefined}
     aria-labelledby={nameId}
     aria-describedby={describedBy}
@@ -77,11 +88,36 @@
       {/if}
     </span>
   </button>
+  <!-- Out of the tab order: from the keyboard, Shift+F10 and the ContextMenu key open the same menu. -->
+  <IconButton
+    class="btn btn-ghost navigator-row__more"
+    label={nav.windowMenu}
+    tabindex={-1}
+    aria-haspopup="menu"
+    aria-expanded={isMenuOpen}
+    bind:element={menuButton}
+    on:click={() => {
+      if (menuButton !== undefined) {
+        onOpenMenu(entry, menuButton);
+      }
+    }}
+  >
+    <Icon name="ellipsis" size="sm" />
+  </IconButton>
 </li>
 
 <style>
   .navigator-row__item {
+    position: relative;
     list-style: none;
+  }
+
+  .navigator-row__item[data-drop-edge='before'] {
+    box-shadow: inset 0 var(--line-width-strong) 0 var(--accent);
+  }
+
+  .navigator-row__item[data-drop-edge='after'] {
+    box-shadow: inset 0 calc(-1 * var(--line-width-strong)) 0 var(--accent);
   }
 
   .navigator-row {
@@ -115,6 +151,11 @@
 
   .navigator-row[aria-current='true'] {
     background-color: var(--bg-selected);
+  }
+
+  .navigator-row[data-dragging='true'] {
+    opacity: 0.6;
+    cursor: grabbing;
   }
 
   .navigator-row[aria-current='true']::before {
@@ -180,6 +221,35 @@
     border: none;
     color: inherit;
     font-size: inherit;
+  }
+
+  /* Revealed on hover and while focus is in the row; always there without hover. */
+  .navigator-row__item :global(.navigator-row__more) {
+    position: absolute;
+    top: 50%;
+    right: var(--space-0_5);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: var(--icon-button-hit-min);
+    min-height: var(--icon-button-hit-min);
+    padding: 0;
+    background-color: var(--bg-hover);
+    color: var(--fg-muted);
+    opacity: 0;
+    transform: translateY(-50%);
+  }
+
+  .navigator-row__item:hover :global(.navigator-row__more),
+  .navigator-row__item:focus-within :global(.navigator-row__more),
+  .navigator-row__item :global(.navigator-row__more[aria-expanded='true']) {
+    opacity: 1;
+  }
+
+  @media (hover: none) {
+    .navigator-row__item :global(.navigator-row__more) {
+      opacity: 1;
+    }
   }
 
   @media (forced-colors: active) {

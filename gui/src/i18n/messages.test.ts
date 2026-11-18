@@ -241,8 +241,8 @@ export const dummyMessages: Messages = {
   menus: {
     theme: 'DUMMY_menu_theme',
     rename: 'DUMMY_menu_rename',
-    copyOutput: 'DUMMY_menu_copyOutput',
-    detectionDefinition: 'DUMMY_menu_detectionDefinition',
+    moveUp: 'DUMMY_menu_moveUp',
+    moveDown: 'DUMMY_menu_moveDown',
     sectionLabel: 'DUMMY_menu_sectionLabel',
     copy: 'DUMMY_menu_copy',
     paste: 'DUMMY_menu_paste',
