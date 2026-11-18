@@ -20,9 +20,11 @@
   $: anchorRect = isOpen && anchor ? (at ?? anchor.getBoundingClientRect()) : null;
 
   function handleClose(reason: 'escape' | 'tab' | 'outside' | 'resize'): void {
+    // Read before `onClose`: a parent that clears the menu also clears `anchor`.
+    const opener = anchor;
     onClose();
     if (reason === 'escape') {
-      anchor?.focus();
+      opener?.focus();
     }
   }
 </script>
