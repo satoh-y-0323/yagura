@@ -75,6 +75,12 @@
     max-width: 460px;
   }
 
+  /* The app's ring, not the engine's own (WebKitGTK draws a wide glow). */
+  .exited-card:focus-visible {
+    outline: var(--line-width-strong) solid var(--ring);
+    outline-offset: 4px;
+  }
+
   .exited-card__actions {
     display: flex;
     gap: var(--space-2);
