@@ -122,9 +122,8 @@
     if (isImeKey(event)) {
       return;
     }
-    // The menu keeps the arrows, Home and End even on a <select>: on Windows and
-    // Linux they would change its value while the user only walks the menu.
-    // Space or Alt+Down opens its list instead.
+    // On a closed <select>, Windows and Linux change the value with the arrows, so the
+    // menu keeps them; Space or Alt+Down still opens its list.
     const isOnSelect = event.target instanceof HTMLSelectElement;
     if (isOnSelect && (event.altKey || !MENU_KEYS_ON_SELECT.has(event.key))) {
       return;

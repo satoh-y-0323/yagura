@@ -621,6 +621,16 @@ describe('attention send: whether the shell tells the core', () => {
       pendingPermissions: 0,
       arrived: false,
     });
+
+    // With two sends in flight, the newer one is what the totals are compared with.
+    const older = beginAttentionSend(emptyAttentionSendState(), totals(1, 0), false);
+    const newer = beginAttentionSend(older.state, totals(2, 0), false);
+    expect(beginAttentionSend(newer.state, totals(2, 0), false).send).toBeNull();
+    expect(beginAttentionSend(newer.state, totals(1, 0), false).send).toEqual({
+      needsYou: 1,
+      pendingPermissions: 0,
+      arrived: false,
+    });
   });
 
   it('sends unchanged totals when told to send always', () => {
