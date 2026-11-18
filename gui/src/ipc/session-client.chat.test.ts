@@ -173,6 +173,7 @@ describe('narrowChatMessages', () => {
           from_kind: 'window',
           from_window_id: 'w-a',
           from_name: 'window a',
+          displayFromName: 'window a',
           body: 'hello',
           mentions: [],
           broadcast: false,
@@ -182,8 +183,22 @@ describe('narrowChatMessages', () => {
       next_after_seq: 1,
       halted: null,
       needs_user: false,
-      roster: [{ window_id: 'w-a', name: 'window a' }],
+      roster: [{ window_id: 'w-a', name: 'window a', displayName: 'window a' }],
     });
+  });
+
+  it('keeps the poster and participant names raw and strips what they may not show', () => {
+    const messages = narrowChatMessages(
+      chatMessagesWire({
+        messages: [chatMessageWire({ from_name: 'win\u202Edow\u200B a\u0007' })],
+        roster: [{ window_id: 'w-a', name: 'win\u2066dow\uFEFF a' }],
+      })
+    );
+    expect(messages.messages[0]?.from_name).toBe('win\u202Edow\u200B a\u0007');
+    expect(messages.messages[0]?.displayFromName).toBe('window a');
+    expect(messages.roster).toEqual([
+      { window_id: 'w-a', name: 'win\u2066dow\uFEFF a', displayName: 'window a' },
+    ]);
   });
 
   it('accepts a non-null halted', () => {
@@ -373,7 +388,9 @@ describe('invokeReadChat', () => {
 
     const messages: ChatMessages = await invokeReadChat();
 
-    expect(messages.roster).toEqual([{ window_id: 'w-a', name: 'window a' }]);
+    expect(messages.roster).toEqual([
+      { window_id: 'w-a', name: 'window a', displayName: 'window a' },
+    ]);
   });
 
   it('rejects with BoundaryError when the reply fails validation', async () => {
@@ -515,6 +532,7 @@ describe('narrowChatRooms', () => {
       {
         room_id: 'main',
         name: 'main',
+        displayName: 'main',
         participant_count: 2,
         needs_user: false,
         halted: null,
@@ -524,6 +542,7 @@ describe('narrowChatRooms', () => {
       {
         room_id: 'r-2b7c1d',
         name: 'yagura',
+        displayName: 'yagura',
         participant_count: 1,
         needs_user: true,
         halted: null,
@@ -596,6 +615,15 @@ describe('narrowChatRooms', () => {
   it('accepts a row whose name is empty', () => {
     const [room] = narrowChatRooms(chatRoomsWire([chatRoomWire({ name: '' })]));
     expect(room?.name).toBe('');
+    expect(room?.displayName).toBe('');
+  });
+
+  it('keeps the room name raw and writes out its hidden characters for display', () => {
+    const [room] = narrowChatRooms(
+      chatRoomsWire([chatRoomWire({ room_id: 'r-2b7c1d', name: 'ya\u202Egura\u200B' })])
+    );
+    expect(room?.name).toBe('ya\u202Egura\u200B');
+    expect(room?.displayName).toBe('ya\\u{202E}gura\\u{200B}');
   });
 
   it('rejects a row missing needs_user', () => {

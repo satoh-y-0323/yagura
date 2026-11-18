@@ -201,8 +201,8 @@
             {forms.profileSummaryDetectionLabel}
             {selectedProfile?.detection ?? forms.detectionDefaultOption}
           </span>
-          {#if selectedProfile?.detectionWarning}
-            <span class="profile-summary-warning">{selectedProfile.detectionWarning}</span>
+          {#if selectedProfile?.displayDetectionWarning}
+            <span class="profile-summary-warning">{selectedProfile.displayDetectionWarning}</span>
           {/if}
         </div>
       {/if}

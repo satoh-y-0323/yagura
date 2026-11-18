@@ -446,8 +446,10 @@ export type ApprovalRegistrationRefusedPayload = Record<string, never>;
 export interface ChatParticipant {
   /** The participant window's id. */
   window_id: string;
-  /** The participant window's display name. */
+  /** The participant window's display name, as the daemon sent it. */
   name: string;
+  /** `name` with the characters it must not draw removed, for rendering. */
+  displayName: string;
 }
 
 /** What kind of party posted a chat message. */
@@ -514,8 +516,10 @@ export interface ChatMessage {
   from_kind: ChatMessageFromKind;
   /** The posting window's id, `null` for every non-window kind. */
   from_window_id: string | null;
-  /** The poster's display name. */
+  /** The poster's display name, as the daemon sent it. */
   from_name: string;
+  /** `from_name` with the characters it must not draw removed, for rendering. */
+  displayFromName: string;
   /** The message body, verbatim. */
   body: string;
   /** Resolved window ids this message mentioned, plus `"user"` for `@user`. */
@@ -577,8 +581,10 @@ export interface ChatMessages {
 export interface ChatRoomInfo {
   /** The room's identifier. */
   room_id: string;
-  /** The room's display name. */
+  /** The room's display name (the last path segment), as the daemon sent it. */
   name: string;
+  /** `name` with its hidden characters written out visibly, for rendering. */
+  displayName: string;
   /** How many of the daemon's current participants belong to this room. */
   participant_count: number;
   /** Whether the room currently needs a human's attention. */
@@ -1458,9 +1464,11 @@ export function narrowChatRooms(value: unknown): ChatRoomInfo[] {
  */
 function narrowChatRoomInfo(value: unknown, context: string): ChatRoomInfo {
   const record = requireRecord(value, context);
+  const name = requireString(record, 'name', context);
   return {
     room_id: requireString(record, 'room_id', context),
-    name: requireString(record, 'name', context),
+    name,
+    displayName: formatPathForDisplay(name),
     participant_count: requireNonNegativeInteger(record, 'participant_count', context),
     needs_user: requireBoolean(record, 'needs_user', context),
     halted: narrowChatHalt(readOwnField(record, 'halted'), `${context}.halted`),
@@ -1509,12 +1517,14 @@ export function narrowChatChanged(value: unknown): ChatChanged {
 function narrowChatMessage(value: unknown, context: string): ChatMessage {
   const record = requireRecord(value, context);
   const deliveriesContext = `${context}.deliveries`;
+  const fromName = requireString(record, 'from_name', context);
   return {
     seq: requireInteger(record, 'seq', context),
     at_ms: requireInteger(record, 'at_ms', context),
     from_kind: requireChatFromKind(record, 'from_kind', context),
     from_window_id: readOptionalString(record, 'from_window_id', context),
-    from_name: requireString(record, 'from_name', context),
+    from_name: fromName,
+    displayFromName: sanitizeForDisplay(fromName),
     body: requireString(record, 'body', context),
     mentions: requireStringArray(record, 'mentions', context),
     broadcast: requireBoolean(record, 'broadcast', context),
@@ -1544,9 +1554,11 @@ function narrowChatDeliveryInfo(value: unknown, context: string): ChatDeliveryIn
  */
 function narrowChatParticipant(value: unknown, context: string): ChatParticipant {
   const record = requireRecord(value, context);
+  const name = requireString(record, 'name', context);
   return {
     window_id: requireString(record, 'window_id', context),
-    name: requireString(record, 'name', context),
+    name,
+    displayName: sanitizeForDisplay(name),
   };
 }
 

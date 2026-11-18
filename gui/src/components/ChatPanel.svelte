@@ -124,7 +124,7 @@
   $: canPost = draft.trim() !== '' && !isPosting;
   /** The current room's display name, from the room list rather than its raw id. */
   $: currentRoomName =
-    rooms.find((entry) => entry.room_id === currentRoomId)?.name ?? currentRoomId;
+    rooms.find((entry) => entry.room_id === currentRoomId)?.displayName ?? currentRoomId;
   $: shownRect = clampChatPanelRect(chosenRect, viewport);
   $: maxPanelSize = chatPanelMaxSize(shownRect, viewport);
   $: roomRailWidth = clampRoomRailWidth(storedRoomRailWidth, shownRect.width);
@@ -436,7 +436,7 @@
     <div class="room-rail__head">{chat.roomsHeading}</div>
     <ul class="room-rail__list">
       {#each rooms.filter((row) => row.name !== '') as row (row.room_id)}
-        {@const name = splitForMiddleEllipsis(row.name)}
+        {@const name = splitForMiddleEllipsis(row.displayName)}
         <li
           class="room-row"
           data-selected={row.room_id === currentRoomId}
@@ -448,7 +448,7 @@
             class="room-row__hit"
             role="button"
             tabindex="0"
-            use:tooltip={{ text: row.name, announcedElsewhere: true }}
+            use:tooltip={{ text: row.displayName, announcedElsewhere: true }}
             on:click={() => onSelectRoom(row.room_id)}
             on:keydown={(event) => {
               if (event.key === 'Enter' || event.key === ' ') {
@@ -562,7 +562,7 @@
           {chat.rosterLabel}
         </button>
         {#each room.roster as participant (participant.window_id)}
-          <span class="roster-chip">{participant.name}</span>
+          <span class="roster-chip">{participant.displayName}</span>
         {/each}
       </div>
     {/if}
@@ -576,7 +576,7 @@
         <ul class="roster-list">
           {#each room.roster as participant (participant.window_id)}
             <li>
-              <span class="roster-list__name">{participant.name}</span>
+              <span class="roster-list__name">{participant.displayName}</span>
               <span class="roster-list__id">{participant.window_id}</span>
             </li>
           {/each}
@@ -590,7 +590,7 @@
       {#each room.messages as message (message.seq)}
         <article class="msg" data-from={message.from_kind}>
           <div class="msg__head">
-            <span class="msg__name">{message.from_name}</span>
+            <span class="msg__name">{message.displayFromName}</span>
             <span class="msg__kind">{describeFromKind(message.from_kind)}</span>
             {#if message.broadcast}
               <span class="msg__broadcast">{chat.broadcastMarker}</span>
@@ -649,7 +649,7 @@
                     data-selected={index === activeCandidate}
                     on:click={() => void applyCandidate(candidate)}
                   >
-                    <span class="mention-menu__name">{candidate.name}</span>
+                    <span class="mention-menu__name">{candidate.displayName}</span>
                   </button>
                 </li>
               {/each}

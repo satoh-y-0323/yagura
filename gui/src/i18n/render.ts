@@ -239,9 +239,9 @@ function detailText(detail: unknown): string {
  * single spaces, the ends are trimmed, and the rest is capped so that one
  * message cannot take over the notice area.
  *
- * The folding here is broader than `DISPLAY_CONTROL_CHARS`
- * (`session-boundary.ts`), which covers fewer classes and strips rather than
- * folds.
+ * The folding here is broader than the characters `sanitizeForDisplay`
+ * (`display/untrusted-text.ts`) removes: it folds every control, format and
+ * separator character to a space rather than stripping a fixed set.
  *
  * @param text the external text, as it arrived
  */

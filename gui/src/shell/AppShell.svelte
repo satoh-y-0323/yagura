@@ -814,7 +814,7 @@
     })),
   ];
 
-  $: currentRoomName = chatRooms.get(currentRoomId)?.name ?? currentRoomId;
+  $: currentRoomName = chatRooms.get(currentRoomId)?.displayName ?? currentRoomId;
   $: confirmWording =
     confirmDialog.operation === 'broadcast'
       ? {
@@ -1092,7 +1092,7 @@
     operation: 'clear_room' | 'delete_room',
     room: ChatRoomInfo
   ): Promise<void> {
-    if (!(await requestConfirmation(operation, room.name))) {
+    if (!(await requestConfirmation(operation, room.displayName))) {
       return;
     }
     operationError = null;

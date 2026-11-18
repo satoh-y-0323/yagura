@@ -18,6 +18,7 @@ function room(overrides: Partial<ChatRoomInfo> = {}): ChatRoomInfo {
   return {
     room_id: 'r-a',
     name: 'yagura',
+    displayName: 'yagura',
     participant_count: 0,
     needs_user: false,
     halted: null,

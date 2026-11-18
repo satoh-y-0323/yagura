@@ -22,6 +22,7 @@ function option(overrides: Partial<ProfileOption> = {}): ProfileOption {
     displayName: 'Codex CLI',
     detection: null,
     detectionWarning: null,
+    displayDetectionWarning: null,
     cwd: null,
     command: ['codex'],
     available: true,

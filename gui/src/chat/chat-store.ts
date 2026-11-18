@@ -99,12 +99,12 @@ export function mergeChatMessages(state: ChatRoomState, page: ChatMessages): Cha
 export function resolveDisplayName(state: ChatRoomState, windowId: string): string {
   const participant = state.roster.find((entry) => entry.window_id === windowId);
   if (participant !== undefined) {
-    return participant.name;
+    return participant.displayName;
   }
   const latest = [...state.messages]
     .reverse()
     .find((message) => message.from_window_id === windowId);
-  return latest?.from_name ?? windowId;
+  return latest?.displayFromName ?? windowId;
 }
 
 /**
@@ -199,6 +199,7 @@ export function applyChatChangedToRooms(
     next.set(changed.room_id, {
       room_id: changed.room_id,
       name: '',
+      displayName: '',
       participant_count: 0,
       needs_user: changed.needs_user,
       last_at_ms: null,

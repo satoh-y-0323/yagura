@@ -21,9 +21,9 @@ import {
 import type { ChatParticipant } from '../ipc/session-boundary';
 
 const ROSTER: ChatParticipant[] = [
-  { window_id: 'win1', name: 'builder' },
-  { window_id: 'win2', name: 'reviewer' },
-  { window_id: 'win4', name: 'code planner' },
+  { window_id: 'win1', name: 'builder', displayName: 'builder' },
+  { window_id: 'win2', name: 'reviewer', displayName: 'reviewer' },
+  { window_id: 'win4', name: 'code planner', displayName: 'code planner' },
 ];
 
 /** The candidate names, in the order they are offered. */
@@ -119,11 +119,22 @@ describe('filterMentionCandidates: who is offered', () => {
 
   it('keeps the window id of a participant and leaves the reserved entry without one', () => {
     const candidates = filterMentionCandidates(ROSTER, '');
-    expect(candidates[0]).toEqual({ name: 'builder', windowId: 'win1' });
+    expect(candidates[0]).toEqual({ name: 'builder', windowId: 'win1', displayName: 'builder' });
     expect(candidates[candidates.length - 1]).toEqual({
       name: MENTION_USER_NAME,
       windowId: null,
+      displayName: MENTION_USER_NAME,
     });
+  });
+
+  it('matches on the raw name and draws the display name', () => {
+    const roster: ChatParticipant[] = [
+      { window_id: 'win9', name: 'bui\u202Elder', displayName: 'builder' },
+    ];
+    expect(filterMentionCandidates(roster, 'bui\u202E')).toEqual([
+      { name: 'bui\u202Elder', windowId: 'win9', displayName: 'builder' },
+    ]);
+    expect(filterMentionCandidates(roster, 'buil')).toEqual([]);
   });
 
   it('narrows to the participants whose name starts with the query', () => {
@@ -135,7 +146,9 @@ describe('filterMentionCandidates: who is offered', () => {
   });
 
   it('treats an underscore and a hyphen in the name as the same character', () => {
-    const roster: ChatParticipant[] = [{ window_id: 'win9', name: 'code_planner' }];
+    const roster: ChatParticipant[] = [
+      { window_id: 'win9', name: 'code_planner', displayName: 'code_planner' },
+    ];
     expect(names(roster, 'code-pl')).toEqual(['code_planner']);
     expect(names(roster, 'code_pl')).toEqual(['code_planner']);
   });
@@ -157,11 +170,11 @@ describe('filterMentionCandidates: who is offered', () => {
   });
 
   it('still offers the reserved entry last when a participant carries that same name', () => {
-    const roster: ChatParticipant[] = [{ window_id: 'win7', name: 'user' }];
+    const roster: ChatParticipant[] = [{ window_id: 'win7', name: 'user', displayName: 'user' }];
     const candidates = filterMentionCandidates(roster, 'user');
     expect(candidates).toEqual([
-      { name: 'user', windowId: 'win7' },
-      { name: MENTION_USER_NAME, windowId: null },
+      { name: 'user', windowId: 'win7', displayName: 'user' },
+      { name: MENTION_USER_NAME, windowId: null, displayName: MENTION_USER_NAME },
     ]);
   });
 
@@ -428,7 +441,10 @@ describe('keepMentionSelection: the chosen candidate survives a re-read of the s
     const mention = at('hello @');
     const before = offered(ROSTER, mention);
     expect(before[1]?.windowId).toBe('win2');
-    const joined: ChatParticipant[] = [{ window_id: 'win9', name: 'newcomer' }, ...ROSTER];
+    const joined: ChatParticipant[] = [
+      { window_id: 'win9', name: 'newcomer', displayName: 'newcomer' },
+      ...ROSTER,
+    ];
     const after = offered(joined, mention);
     expect(
       keepMentionSelection(
@@ -442,9 +458,9 @@ describe('keepMentionSelection: the chosen candidate survives a re-read of the s
     const mention = at('hello @');
     const before = offered(ROSTER, mention);
     const renamed: ChatParticipant[] = [
-      { window_id: 'win7', name: 'reviewer' },
-      { window_id: 'win1', name: 'builder' },
-      { window_id: 'win2', name: 'reviewer-renamed' },
+      { window_id: 'win7', name: 'reviewer', displayName: 'reviewer' },
+      { window_id: 'win1', name: 'builder', displayName: 'builder' },
+      { window_id: 'win2', name: 'reviewer-renamed', displayName: 'reviewer-renamed' },
     ];
     const after = offered(renamed, mention);
     expect(
@@ -458,7 +474,10 @@ describe('keepMentionSelection: the chosen candidate survives a re-read of the s
   it('follows the reserved human entry by its name when the list grows', () => {
     const mention = at('hello @');
     const before = offered(ROSTER, mention);
-    const joined: ChatParticipant[] = [...ROSTER, { window_id: 'win9', name: 'newcomer' }];
+    const joined: ChatParticipant[] = [
+      ...ROSTER,
+      { window_id: 'win9', name: 'newcomer', displayName: 'newcomer' },
+    ];
     const after = offered(joined, mention);
     expect(
       keepMentionSelection(

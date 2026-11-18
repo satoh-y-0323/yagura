@@ -840,6 +840,7 @@ function launchProfile(id: string, limits: ProfileLimit['capability'][]): Profil
     displayName: `${id} name`,
     detection: null,
     detectionWarning: null,
+    displayDetectionWarning: null,
     cwd: null,
     command: [id],
     available: true,

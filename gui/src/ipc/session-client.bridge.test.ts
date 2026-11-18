@@ -266,6 +266,7 @@ describe('invokeListProfiles', () => {
       displayName: 'P',
       detection: 'det',
       detectionWarning: 'warn',
+      displayDetectionWarning: 'warn',
       cwd: '/work',
       command: ['p'],
       available: true,
@@ -290,6 +291,19 @@ describe('invokeListProfiles', () => {
       expect(result.profiles[0]?.guidance).toEqual({ text: 't', command: 'c', url: null });
     }
   );
+
+  it('keeps the detection warning raw and strips what it may not show for display', async () => {
+    invokeMock.mockResolvedValueOnce({
+      profiles: [
+        profileWire({ detection_warning: 'definition \u202Eexe.txt\u200B was\u0007 not found' }),
+        profileWire({ detection_warning: null }),
+      ],
+    });
+    const [warned, clean] = (await invokeListProfiles()).profiles;
+    expect(warned?.detectionWarning).toBe('definition \u202Eexe.txt\u200B was\u0007 not found');
+    expect(warned?.displayDetectionWarning).toBe('definition exe.txt was not found');
+    expect(clean?.displayDetectionWarning).toBeNull();
+  });
 
   it('reads guidance with no command or page as nulls', async () => {
     invokeMock.mockResolvedValueOnce({

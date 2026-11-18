@@ -20,6 +20,7 @@
 import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 
+import { sanitizeForDisplay } from '../display/untrusted-text';
 import type { FrameAckEntry } from './frame-pull';
 import {
   asRecord,
@@ -490,6 +491,8 @@ export interface ProfileEntry {
   detection: string | null;
   /** Why that definition could not be found, `null` when it was. */
   detectionWarning: string | null;
+  /** `detectionWarning` with the characters it must not draw removed, for rendering. */
+  displayDetectionWarning: string | null;
   /** The profile's own default working directory, `null` when it has none. */
   cwd: string | null;
   /**
@@ -759,11 +762,14 @@ function narrowProfileEntry(value: unknown, context: string): ProfileEntry {
   if (typeof available !== 'boolean') {
     throw new BoundaryError(`${context}.profiles.available: expected a boolean`);
   }
+  const detectionWarning = readOptionalString(record, 'detection_warning', context);
   return {
     id: requireString(record, 'id', context),
     displayName: requireString(record, 'display_name', context),
     detection: readOptionalString(record, 'detection', context),
-    detectionWarning: readOptionalString(record, 'detection_warning', context),
+    detectionWarning,
+    displayDetectionWarning:
+      detectionWarning === null ? null : sanitizeForDisplay(detectionWarning),
     cwd: readOptionalString(record, 'cwd', context),
     // The daemon always sends `command` (empty when it has no argv to run),
     // so a missing key is a contract violation rather than "no value".

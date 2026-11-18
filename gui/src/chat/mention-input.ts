@@ -15,8 +15,10 @@ export const MENTION_USER_NAME = 'user';
 
 /** One entry the completion offers. */
 export interface MentionCandidate {
-  /** The name that would be inserted. */
+  /** The name that would be inserted and matched on, as the daemon knows it. */
   name: string;
+  /** `name` with the characters it must not draw removed, for rendering. */
+  displayName: string;
   /** The participant's window id, `null` for the reserved entry. */
   windowId: string | null;
 }
@@ -88,9 +90,10 @@ export function filterMentionCandidates(
   const candidates: MentionCandidate[] = [
     ...roster.map((participant) => ({
       name: participant.name,
+      displayName: participant.displayName,
       windowId: participant.window_id,
     })),
-    { name: MENTION_USER_NAME, windowId: null },
+    { name: MENTION_USER_NAME, displayName: MENTION_USER_NAME, windowId: null },
   ];
   const prefix = normalize(query);
   return candidates.filter((candidate) => normalize(candidate.name).startsWith(prefix));

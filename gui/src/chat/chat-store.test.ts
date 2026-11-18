@@ -37,6 +37,7 @@ function message(seq: number, overrides: Partial<ChatMessage> = {}): ChatMessage
     from_kind: 'window',
     from_window_id: 'w-a',
     from_name: 'builder',
+    displayFromName: 'builder',
     body: `body ${seq}`,
     mentions: [],
     broadcast: false,
@@ -59,8 +60,8 @@ function page(overrides: Partial<ChatMessages> = {}): ChatMessages {
 }
 
 const ROSTER: ChatParticipant[] = [
-  { window_id: 'w-a', name: 'builder' },
-  { window_id: 'w-b', name: 'reviewer' },
+  { window_id: 'w-a', name: 'builder', displayName: 'builder' },
+  { window_id: 'w-b', name: 'reviewer', displayName: 'reviewer' },
 ];
 
 /** A `chat_changed` payload for the room `main`. */
@@ -73,6 +74,7 @@ function roomInfo(overrides: Partial<ChatRoomInfo> = {}): ChatRoomInfo {
   return {
     room_id: 'main',
     name: 'main',
+    displayName: 'main',
     participant_count: 0,
     needs_user: false,
     halted: null,
@@ -321,7 +323,13 @@ describe('resolveDisplayName', () => {
     const state = mergeChatMessages(
       emptyChatRoom('main'),
       page({
-        messages: [message(1, { from_window_id: 'w-c', from_name: 'closed-window' })],
+        messages: [
+          message(1, {
+            from_window_id: 'w-c',
+            from_name: 'closed-window',
+            displayFromName: 'closed-window',
+          }),
+        ],
         next_after_seq: 1,
         roster: ROSTER,
       })
@@ -333,7 +341,13 @@ describe('resolveDisplayName', () => {
     const state = mergeChatMessages(
       emptyChatRoom('main'),
       page({
-        messages: [message(1, { from_window_id: 'w-a', from_name: 'stale-name' })],
+        messages: [
+          message(1, {
+            from_window_id: 'w-a',
+            from_name: 'stale-name',
+            displayFromName: 'stale-name',
+          }),
+        ],
         next_after_seq: 1,
         roster: ROSTER,
       })
@@ -344,6 +358,25 @@ describe('resolveDisplayName', () => {
   it('falls back to the window id when neither the roster nor any held message names it', () => {
     const state = mergeChatMessages(emptyChatRoom('main'), page({ roster: ROSTER }));
     expect(resolveDisplayName(state, 'w-z')).toBe('w-z');
+  });
+
+  it('names a participant and a closed window by their display fields, not the raw names', () => {
+    const state = mergeChatMessages(
+      emptyChatRoom('main'),
+      page({
+        messages: [
+          message(1, {
+            from_window_id: 'w-c',
+            from_name: 'clo\u202Esed\u200B',
+            displayFromName: 'closed',
+          }),
+        ],
+        next_after_seq: 1,
+        roster: [{ window_id: 'w-a', name: 'bui\u2066lder', displayName: 'builder' }],
+      })
+    );
+    expect(resolveDisplayName(state, 'w-a')).toBe('builder');
+    expect(resolveDisplayName(state, 'w-c')).toBe('closed');
   });
 });
 
@@ -418,6 +451,7 @@ describe('applyChatChangedToRooms: a room already in the list', () => {
       roomInfo({
         room_id: 'r-yagura',
         name: 'yagura',
+        displayName: 'yagura',
         participant_count: 3,
         needs_user: false,
         halted: { reason: 'monologue', since_ms: 1_700_000_000_000 },
@@ -431,6 +465,7 @@ describe('applyChatChangedToRooms: a room already in the list', () => {
     expect(updated.get('r-yagura')).toEqual({
       room_id: 'r-yagura',
       name: 'yagura',
+      displayName: 'yagura',
       participant_count: 3,
       needs_user: true,
       halted: { reason: 'monologue', since_ms: 1_700_000_000_000 },
@@ -469,6 +504,7 @@ describe('applyChatChangedToRooms: a room not yet in the list', () => {
     expect(added).toEqual({
       room_id: 'r-new',
       name: '',
+      displayName: '',
       participant_count: 0,
       needs_user: true,
       last_at_ms: null,
@@ -516,10 +552,18 @@ describe('resolveDisplayName: the most recent message wins', () => {
       emptyChatRoom('main'),
       page({
         messages: [
-          message(1, { from_window_id: 'w-c', from_name: 'first-name' }),
-          message(2, { from_window_id: 'w-d', from_name: 'other' }),
-          message(3, { from_window_id: 'w-c', from_name: 'renamed' }),
-          message(4, { from_window_id: 'w-d', from_name: 'other-later' }),
+          message(1, {
+            from_window_id: 'w-c',
+            from_name: 'first-name',
+            displayFromName: 'first-name',
+          }),
+          message(2, { from_window_id: 'w-d', from_name: 'other', displayFromName: 'other' }),
+          message(3, { from_window_id: 'w-c', from_name: 'renamed', displayFromName: 'renamed' }),
+          message(4, {
+            from_window_id: 'w-d',
+            from_name: 'other-later',
+            displayFromName: 'other-later',
+          }),
         ],
         next_after_seq: 4,
       })

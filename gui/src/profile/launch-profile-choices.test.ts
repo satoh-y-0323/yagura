@@ -29,6 +29,7 @@ function profile(
     displayName,
     detection: null,
     detectionWarning: null,
+    displayDetectionWarning: null,
     cwd: null,
     command: [id],
     available: reason === null,

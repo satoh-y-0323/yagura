@@ -32,6 +32,7 @@ function profileEntry(overrides: Partial<ProfileEntry> = {}): ProfileEntry {
     displayName: 'Claude Code',
     detection: null,
     detectionWarning: null,
+    displayDetectionWarning: null,
     cwd: null,
     command: [],
     available: true,
