@@ -610,6 +610,19 @@ describe('attention send: whether the shell tells the core', () => {
     });
   });
 
+  it('does not repeat totals a send in flight already carries, until that send fails', () => {
+    const first = beginAttentionSend(emptyAttentionSendState(), totals(1, 0), false);
+    const repeated = beginAttentionSend(first.state, totals(1, 0), false);
+    expect(repeated.send).toBeNull();
+
+    const failed = settleAttentionSend(repeated.state, sendOf(first), false);
+    expect(beginAttentionSend(failed, totals(1, 0), false).send).toEqual({
+      needsYou: 1,
+      pendingPermissions: 0,
+      arrived: false,
+    });
+  });
+
   it('sends unchanged totals when told to send always', () => {
     const sent = seededState();
     expect(beginAttentionSend(sent, totals(1, 0), true).send).toEqual({

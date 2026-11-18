@@ -242,7 +242,8 @@ export function noteAttentionArrival(state: AttentionSendState): AttentionSendSt
 
 /**
  * Decides whether to send now. A send is made when nothing was sent yet, the
- * totals differ from the last acknowledged send, an arrival is unacknowledged,
+ * totals differ from the newest send in flight (else the last acknowledged
+ * one), an arrival is not yet carried,
  * or `always` is set. The returned state tracks the send until it is settled.
  */
 export function beginAttentionSend(
@@ -257,7 +258,10 @@ export function beginAttentionSend(
     state.acknowledged
   );
   const arrived = state.arrivals > carried;
-  const last = state.lastSent;
+  // Compared with the newest send still in flight, so a burst of observations
+  // before the first answer does not repeat it; if that send fails it leaves
+  // `inFlight` and the totals count as moved again.
+  const last = state.inFlight[state.inFlight.length - 1]?.send ?? state.lastSent;
   const moved =
     last === null ||
     last.needsYou !== totals.needsYou ||
