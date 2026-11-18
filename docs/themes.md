@@ -236,7 +236,7 @@ Changing the selection takes effect immediately in the app and all open terminal
 ### Window-Specific Overrides
 
 Each terminal window can have its own theme override, independent of the app-wide selection. Use the
-**Theme for this window** selector in the window menu (opened from the window's title bar or its tab)
+**Theme for this window** selector in the window menu (opened from the window's header)
 to override that window. Setting it to "Same as app" removes the override and makes that window follow the app
 selection again.
 

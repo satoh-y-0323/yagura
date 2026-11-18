@@ -13,8 +13,9 @@ allow it.
 
 **Many windows, one screen**
 
-- Every window is a real terminal running the command you choose. Drag, resize, minimize, maximize
-  into tabs, or tile them in a grid.
+- Every window is a real terminal running the command you choose. Work in Focus, where the current
+  window fills the work area, or in Canvas, where windows float: drag, resize, minimize, maximize
+  or tile them in a grid. yagura remembers which of the two you use.
 - The sidebar groups windows by the repository or directory they run in, and shows each one's
   status, vendor and working directory.
 - Windows keep running in a background daemon, so closing the GUI does not stop your agents. Next
@@ -41,8 +42,8 @@ allow it.
 - Nothing is typed into a CLI's input line. Messages, handoffs, chat and notices wait in the
   window's inbox and reach the CLI through its own hooks and start-up request; the sender learns
   whether one was delivered or is still queued, and can take a queued one back. The GUI marks a
-  window whose inbox holds waiting messages with an envelope and their number, in its tab and on
-  a floating window's title bar. See
+  window whose inbox holds waiting messages with an envelope and their number, on its sidebar row
+  and in its header. See
   [how delivery works](docs/mcp-setup.md#how-the-daemon-delivers-text).
 - **Interrupting**: your own interrupt presses the CLI's key. An agent's stops the CLI at its next
   tool call through its hooks, without touching your draft; Codex CLI refuses an agent's

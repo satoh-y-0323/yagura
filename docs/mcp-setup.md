@@ -704,7 +704,7 @@ Returns a list of all active and exited windows managed by the daemon.
 
 `queued_count` is how many envelopes and notices wait in the window's inbox (see [How the daemon delivers text](#how-the-daemon-delivers-text)), whoever sent them. It is omitted when the daemon does not report it.
 
-The GUI shows the count as an envelope mark with the number, in the window's tab and in the title bar of a floating window, with the tooltip "N queued message(s) — delivered on its next turn". No mark is shown when the count is 0 or when the daemon does not report it.
+The GUI shows the count as an envelope mark with the number, on the window's sidebar row and in its header, with the tooltip "N queued message(s) — delivered on its next turn". No mark is shown when the count is 0 or when the daemon does not report it.
 
 ### get_window_status
 

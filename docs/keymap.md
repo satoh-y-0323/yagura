@@ -24,9 +24,20 @@ is the `Meta` modifier in the file (see [Writing a Key](#writing-a-key)).
 | `toggle-plans`           | Plans panel                             | `Ctrl+Shift+p`      | `Shift+Meta+p` |
 | `toggle-settings`        | Settings panel                          | `Ctrl+Shift+s`      | `Meta+,`      |
 
-"The current window" is the window shown on screen. Next and previous follow the order of the
-sidebar, top to bottom, and wrap around at both ends; a window inside a collapsed room opens the
-room first. With no window on screen, the operations on the current window do nothing.
+yagura has two work views. In **Focus** (the default) the current window fills the work area and
+the other windows keep running out of sight. In **Canvas** windows float and can be dragged,
+resized, minimized and maximized. Switch from the view menu in the sidebar header; yagura
+remembers your choice. "The current window" is the window on screen in Focus and the front window
+in Canvas. `minimize-window` and `toggle-maximize-window` work only in Canvas, and do nothing in
+Focus. With no window on screen, the operations on the current window do nothing.
+
+Next and previous follow the order of the sidebar, top to bottom, and wrap around at both ends; a
+window inside a collapsed room opens the room first. While the **Needs you** filter is on they
+follow the rows the filter shows (windows that have settled and ones with an unknown status
+included) in the order shown, and next window needing you visits only the windows that need you.
+While the card for a window that ended is shown, there is no current window: next goes where the
+card's **Go to** button goes, previous goes to the window before the one that ended, and neither
+wraps around.
 
 A shortcut does nothing while a modal dialog is open or while an input method is composing text.
 Holding a shortcut down runs it once.
@@ -36,6 +47,13 @@ Holding a shortcut down runs it once.
 `toggle-sidebar-focus` moves keyboard focus into the sidebar, onto the row of the current window
 (or to the start of the sidebar when that window has no row), and moves it back to the current
 window when pressed again from inside the sidebar.
+
+The window list in the sidebar is a single `Tab` stop: `Tab` lands on the current window's row (or
+the first row shown), the arrow keys, `Home` and `End` move between the rows and stop at the ends,
+`Enter` or `Space` goes to the window, and the next `Tab` leaves the list. `Shift+F10` or the
+context menu key opens the row's menu, whose **Move up** and **Move down** reorder a window within
+its room. Reordering is not offered while the **Needs you** filter is on. The **Windows** button in
+the rail sends the keyboard to the current window's terminal.
 
 ### Escape Closes a Panel
 
@@ -56,9 +74,10 @@ list in Chat), and an `Esc` typed inside a window still goes to the program runn
 ### Where Typing Goes After You Pick a Window or Close a Dialog
 
 - When you pick a window yourself, what you type next goes to that window: its row in the sidebar
-  (click, `Enter` or `Space`), its tab, a press on its frame (the title, the status or a resize
-  edge), or its maximize button. Pressing a control in the frame, such as `⋯` or a button, leaves
-  focus to that control.
+  (click, `Enter` or `Space`), a press on its frame (the title, the status or a resize edge in
+  Canvas), or its maximize button. After you switch between Focus and Canvas from the view menu,
+  focus goes to the terminal of the window the new view shows. Pressing a control in the header,
+  such as `⋯` or a button, leaves focus to that control.
 - When you minimize or close a window, or restore windows from the banner, focus moves to the
   current window (or the start of the sidebar when none is left) only if it has nowhere to type
   into: it was on the window that went away, on a window's own buttons, or on nothing. A button in
@@ -69,7 +88,10 @@ list in Chat), and an `Esc` typed inside a window still goes to the program runn
   the panel you were in, and then to the current window.
 - A window that comes to the front without you choosing it, such as one an AI opened, or a window
   whose program exits by itself, does not take focus: keys you are typing keep going where they
-  were going.
+  were going. A window that ends on its own, or that an agent closes, does not move you to another
+  window either: in Focus a card says which window ended and with what exit code, and offers
+  **Go to** the next window or a new window; focus stays where it was, so what you type does not
+  reach another CLI. Only a window you close yourself moves you to the next one.
 
 ### How Keys Reach the Program
 
