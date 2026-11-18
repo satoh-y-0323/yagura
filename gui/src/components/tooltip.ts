@@ -7,7 +7,7 @@
 import { writable } from 'svelte/store';
 
 import { isImeKey } from '../keymap/key-chord';
-import { sharedInputModality } from './input-modality';
+import { isKeyboardFocus, sharedInputModality } from './input-modality';
 import { createTooltipController } from './tooltip-controller';
 
 export interface TooltipOptions {
@@ -39,7 +39,7 @@ export function tooltip(node: HTMLElement, initial: TooltipOptions | undefined) 
   let isVisible = false;
   const owner = {};
   // Started here, not on the first focus, so that the key that moves it is seen.
-  const modality = sharedInputModality();
+  sharedInputModality();
 
   const controller = createTooltipController({
     mode: initial?.mode ?? 'hover',
@@ -112,7 +112,7 @@ export function tooltip(node: HTMLElement, initial: TooltipOptions | undefined) 
   }
 
   function handleFocus(): void {
-    controller.focusTrigger(node.matches(':focus-visible') && modality.isKeyboard());
+    controller.focusTrigger(isKeyboardFocus(node));
   }
 
   function handleClick(): void {

@@ -57,6 +57,7 @@ function groupsOf(order: readonly Win[]): RoomGroup<Win>[] {
       found.entries.push(entry);
     } else {
       groups.push({
+        kind: 'folder',
         roomId: entry.roomId,
         name: entry.roomId,
         entries: [entry],

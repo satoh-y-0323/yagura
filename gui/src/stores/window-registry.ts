@@ -12,7 +12,7 @@ import { writable, type Readable } from 'svelte/store';
 
 import { bringToFront, MIN_WINDOW_SIZE, type Rect, type Size } from '../layout/float-layout';
 import { tileRects } from '../layout/tile-layout';
-import { reorderTabs } from '../layout/tab-order';
+import { reorderTabs } from '../sidebar/row-order';
 import type { DetectedStatusView, StatusBoot, TaskReportMark } from '../ipc/session-boundary';
 import type { WindowEventHandlers, WindowInfo } from '../ipc/session-client';
 

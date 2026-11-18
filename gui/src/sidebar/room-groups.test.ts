@@ -47,6 +47,7 @@ describe('groupByRoom', () => {
     const groups = groupByRoom(entries, new Set(), ['w-a', 'w-b', 'w-c']);
 
     expect(groups.map((group) => group.roomId)).toEqual(['room-a', 'room-b']);
+    expect(groups.map((group) => group.kind)).toEqual(['room', 'room']);
   });
 
   it('groups a null room by cwd, used as both roomId and name', () => {
@@ -57,6 +58,7 @@ describe('groupByRoom', () => {
     expect(groups).toHaveLength(1);
     expect(groups[0]?.roomId).toBe('C:\\Users\\dev\\solo');
     expect(groups[0]?.name).toBe('C:\\Users\\dev\\solo');
+    expect(groups[0]?.kind).toBe('folder');
   });
 
   it('orders entries within a room by tabOrder position, not by tone', () => {

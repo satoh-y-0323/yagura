@@ -26,6 +26,8 @@ export interface RoomGroup<T> {
   minimized: number;
   /** Whether the room's windows are hidden behind its heading. */
   collapsed: boolean;
+  /** `room` when the windows belong to a room; `folder` when they only share a working directory. */
+  kind: 'room' | 'folder';
 }
 
 function roomIdOf(entry: RoomMember): string {
@@ -96,6 +98,7 @@ export function groupByRoom<
       entries: ordered,
       minimized: ordered.filter((entry) => entry.display.isMinimized).length,
       collapsed: collapsed.has(roomId),
+      kind: ordered.some((entry) => entry.room !== null) ? 'room' : 'folder',
     };
   });
 }

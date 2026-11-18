@@ -49,3 +49,12 @@ export function sharedInputModality(): InputModality {
   shared ??= createInputModality(window);
   return shared;
 }
+
+/**
+ * Whether `node` holds focus the way a keyboard user gets it: `:focus-visible`
+ * and a last input that was a key. The single place the application reads
+ * `:focus-visible` from script, so every focus-driven display agrees.
+ */
+export function isKeyboardFocus(node: Element): boolean {
+  return node.matches(':focus-visible') && sharedInputModality().isKeyboard();
+}
