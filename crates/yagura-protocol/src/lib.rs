@@ -228,6 +228,11 @@
 //! window whose CLI runs in another environment asks for the window's launch
 //! overlay. A caller establishes [`LAUNCH_OVERLAY_MIN_REVISION`] before sending
 //! it.
+//!
+//! Revision 35 adds an optional `task_report` ([`TaskReportMark`]) to
+//! [`WindowInfo`] and `status_changed`: whether a plan task window's report to
+//! its owner still stands. A body without the key decodes as `None`, which is
+//! what a daemon predating this revision means by sending nothing.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -252,7 +257,7 @@ pub use screen_copy::{
 /// anything a peer can observe on the wire. It is what a peer reports when
 /// asked which wire it speaks, and what a caller compares against before
 /// sending something an older peer would mishandle.
-pub const PROTOCOL_REVISION: u32 = 34;
+pub const PROTOCOL_REVISION: u32 = 35;
 
 /// The largest column count, and the largest row count, a window takes.
 ///
@@ -1831,6 +1836,22 @@ pub struct StatusBoot {
     pub seq: u64,
 }
 
+/// The daemon's fact about a plan task window's latest report to its plan's
+/// owner, as of the moment the message carrying it was built.
+///
+/// Ordered on its own key, not by the status pair: within one
+/// [`StatusBoot`], a larger `seq` is newer, and for the same `seq` `standing`
+/// only ever goes from `true` to `false`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TaskReportMark {
+    /// The window's report count in this daemon boot, starting at 1.
+    pub seq: u64,
+    /// Whether the report still stands: its owner is alive, the window is
+    /// still the plan's task, and no new instruction has reached the
+    /// window's CLI since the report.
+    pub standing: bool,
+}
+
 /// Window metadata shared across wire protocol responses (multi-window v2).
 ///
 /// The single source of truth for window information transmitted in responses
@@ -1911,6 +1932,12 @@ pub struct WindowInfo {
     /// not report this fact. Omitted from the wire when `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub queued_count: Option<u64>,
+    /// The window's latest report as a plan task (see [`TaskReportMark`]).
+    /// `None` when the window has not reported as a task in this daemon boot,
+    /// or the daemon predates this field; a reader treats both as "no report
+    /// stands". Omitted from the wire when `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_report: Option<TaskReportMark>,
 }
 
 /// One restore candidate: a window from the previous boot's configuration,
@@ -3734,6 +3761,11 @@ pub enum DaemonMessage {
         /// `None`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         status_boot: Option<StatusBoot>,
+        /// The window's latest report as a plan task, carrying the same
+        /// meaning as [`WindowInfo::task_report`] as of when this push was
+        /// built. Omitted from the wire when `None`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        task_report: Option<TaskReportMark>,
     },
     /// Response to [`ClientMessage::OpenWindow`]: the window was opened successfully.
     WindowOpened {

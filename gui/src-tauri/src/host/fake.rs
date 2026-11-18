@@ -91,6 +91,7 @@ pub(crate) fn window_info(window_id: &str, status: WindowStatus) -> WindowInfo {
         mcp_connected: None,
         status_reports_missing: None,
         queued_count: None,
+        task_report: None,
     }
 }
 

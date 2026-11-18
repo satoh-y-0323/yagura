@@ -45,6 +45,7 @@ fn window_info(mcp_connected: Option<bool>) -> WindowInfo {
         mcp_connected,
         status_reports_missing: None,
         queued_count: None,
+        task_report: None,
     }
 }
 

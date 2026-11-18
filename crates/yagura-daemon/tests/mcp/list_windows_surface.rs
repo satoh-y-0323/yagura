@@ -1,14 +1,17 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-//! The daemon reports `status_reports_missing` and `status_boot` on its window
-//! records for the GUI; the MCP surface is an external contract that must not
-//! grow with them, so `list_windows` leaves both out whatever their value.
+//! The daemon reports `status_reports_missing`, `status_boot` and `task_report`
+//! on its window records for the GUI; the MCP surface is an external contract
+//! that must not grow with them, so `list_windows` leaves them out whatever
+//! their value.
 
 use std::sync::Mutex;
 
 use yagura_daemon::mcp::tools::list_windows;
 use yagura_daemon::mcp::{DaemonTransport, RequesterIdentity, TransportError};
-use yagura_protocol::{ClientMessage, DaemonMessage, StatusBoot, WindowInfo, WindowStatus};
+use yagura_protocol::{
+    ClientMessage, DaemonMessage, StatusBoot, TaskReportMark, WindowInfo, WindowStatus,
+};
 
 struct OneReply(Mutex<Option<DaemonMessage>>);
 
@@ -44,6 +47,10 @@ fn window(window_id: &str, status_reports_missing: Option<bool>) -> WindowInfo {
         mcp_connected: Some(true),
         status_reports_missing,
         queued_count: None,
+        task_report: Some(TaskReportMark {
+            seq: 2,
+            standing: true,
+        }),
     }
 }
 
@@ -71,6 +78,10 @@ async fn list_windows_does_not_surface_status_reports_missing() {
         assert!(
             entry.get("status_boot").is_none(),
             "the boot the GUI orders status by must not reach an agent, got: {entry}"
+        );
+        assert!(
+            entry.get("task_report").is_none(),
+            "the standing-report fact is for the GUI only and must not reach an agent, got: {entry}"
         );
         assert_eq!(
             entry.get("mcp_connected"),

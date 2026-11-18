@@ -28,6 +28,7 @@ use yagura_protocol::{DaemonMessage, DeliveryStream, WindowStatus, WithdrawOutco
 
 use crate::parcel_store::{ChatDelivery, InboxKeeper, KeptParcel, RowEnd, Written};
 use crate::waiter::StatusAt;
+use crate::window::task_report::TaskReport;
 
 /// Between two parcels, and between the intro and the first parcel.
 const SEPARATOR: &str = "\n\n";
@@ -949,6 +950,8 @@ struct Shared {
     intro: String,
     status: watch::Receiver<StatusAt>,
     keeper: Option<InboxKeeper>,
+    /// Counts every handover the CLI takes as a new instruction.
+    task_report: Arc<TaskReport>,
     #[cfg(test)]
     before_withdraw: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
@@ -1214,6 +1217,9 @@ impl Shared {
                 return;
             };
             door.printed = true;
+            // Once per door, whatever its parcels' records: a door hold holds
+            // at least one parcel, and the CLI asked for what it took.
+            self.task_report.instruction_taken();
             let mut rows = Vec::new();
             if self.keeper.is_some() {
                 for held in door.held.iter_mut().filter(|held| held.parcel.saved) {
@@ -1505,6 +1511,7 @@ impl Inbox {
             status,
             None,
             Vec::new(),
+            Arc::default(),
         )
     }
 
@@ -1513,7 +1520,9 @@ impl Inbox {
     /// of the parcels, keeping every change through `keeper` and holding
     /// `kept` first: the parcels the store kept for the window, oldest first,
     /// whose depositors are gone. A kept parcel no answer carries whole is
-    /// dropped, as a deposit of it would have been turned away.
+    /// dropped, as a deposit of it would have been turned away. Every
+    /// handover the CLI takes is counted in `task_report`.
+    #[allow(clippy::too_many_arguments)] // Each is one of the inbox's fixed inputs.
     pub(crate) fn kept(
         capacity: usize,
         sender_bound: usize,
@@ -1522,6 +1531,7 @@ impl Inbox {
         status: watch::Receiver<StatusAt>,
         keeper: Option<InboxKeeper>,
         kept: Vec<KeptParcel>,
+        task_report: Arc<TaskReport>,
     ) -> Self {
         let mut state = State::default();
         let mut too_long = Vec::new();
@@ -1568,6 +1578,7 @@ impl Inbox {
                 intro: intro.to_string(),
                 status,
                 keeper,
+                task_report,
                 #[cfg(test)]
                 before_withdraw: Mutex::new(None),
             }),
@@ -1958,6 +1969,8 @@ impl Inbox {
         let carried = state.carrying.remove(position);
         match end {
             PushEnd::Taken => {
+                let at = *self.shared.status.borrow();
+                self.shared.task_report.instruction_arrived(&at);
                 self.shared.forget_ended(&carried.held);
                 for held in carried.held {
                     held.settle(ParcelEnd::Taken);

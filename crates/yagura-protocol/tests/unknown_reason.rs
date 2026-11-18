@@ -193,6 +193,7 @@ fn sample_window_info(
         mcp_connected: None,
         status_reports_missing: None,
         queued_count: None,
+        task_report: None,
     }
 }
 
@@ -282,6 +283,7 @@ fn sample_status_changed(unknown_reason: Option<UnknownReason>) -> DaemonMessage
         unknown_reason,
         status_rev: None,
         status_boot: None,
+        task_report: None,
     }
 }
 

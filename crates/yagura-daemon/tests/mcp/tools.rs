@@ -132,6 +132,7 @@ fn sample_window_info(window_id: &str) -> WindowInfo {
         mcp_connected: None,
         status_reports_missing: None,
         queued_count: None,
+        task_report: None,
     }
 }
 
@@ -159,6 +160,7 @@ async fn list_windows_maps_window_list_response_to_a_windows_array() {
             mcp_connected: None,
             status_reports_missing: None,
             queued_count: Some(3),
+            task_report: None,
         },
     ];
     let transport = MockTransport::with_response(Ok(DaemonMessage::WindowList {

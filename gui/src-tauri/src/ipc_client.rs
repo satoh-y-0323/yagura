@@ -2524,6 +2524,7 @@ mod tests {
             mcp_connected: None,
             status_reports_missing: None,
             queued_count: None,
+            task_report: None,
         }
     }
 

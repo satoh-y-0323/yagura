@@ -21,7 +21,8 @@
 //! fail to compile.
 
 use yagura_protocol::{
-    DaemonMessage, WindowInfo, WindowStatus, decode_daemon_message, encode_daemon_message,
+    DaemonMessage, TaskReportMark, WindowInfo, WindowStatus, decode_daemon_message,
+    encode_daemon_message,
 };
 
 fn sample_window_info(status_rev: Option<u64>) -> WindowInfo {
@@ -41,6 +42,7 @@ fn sample_window_info(status_rev: Option<u64>) -> WindowInfo {
         mcp_connected: None,
         status_reports_missing: None,
         queued_count: None,
+        task_report: None,
     }
 }
 
@@ -72,6 +74,7 @@ fn status_changed(status_rev: Option<u64>) -> DaemonMessage {
         unknown_reason: None,
         status_rev,
         status_boot: None,
+        task_report: None,
     }
 }
 
@@ -136,5 +139,78 @@ fn window_status_response_has_no_status_rev_field() {
     assert!(
         value.get("status_rev").is_none(),
         "the request/response status query must never carry a generation, got: {value}"
+    );
+}
+
+// ---------------------------------------------------------------------
+// task_report: the daemon's standing-report fact on the two registry-updating
+// carriers (`WindowInfo`, `StatusChanged`)
+// ---------------------------------------------------------------------
+
+fn mark(seq: u64, standing: bool) -> TaskReportMark {
+    TaskReportMark { seq, standing }
+}
+
+#[test]
+fn window_info_task_report_round_trips_as_a_seq_and_standing_object() {
+    let mut info = sample_window_info(None);
+    info.task_report = Some(mark(2, true));
+    let value = serde_json::to_value(&info).expect("must serialize");
+    assert_eq!(
+        value.get("task_report"),
+        Some(&serde_json::json!({ "seq": 2, "standing": true })),
+        "got: {value}"
+    );
+    let back: WindowInfo = serde_json::from_value(value).expect("must deserialize");
+    assert_eq!(back, info);
+}
+
+#[test]
+fn window_info_omits_task_report_from_the_wire_when_none() {
+    let value = serde_json::to_value(sample_window_info(None)).expect("must serialize");
+    assert!(
+        value.get("task_report").is_none(),
+        "task_report: None must be omitted, not sent as null, got: {value}"
+    );
+}
+
+#[test]
+fn window_info_without_the_task_report_key_decodes_as_none() {
+    // A revision 34 frame: the same body minus the new key.
+    let mut value = serde_json::to_value(sample_window_info(None)).expect("must serialize");
+    value.as_object_mut().expect("object").remove("task_report");
+    let back: WindowInfo = serde_json::from_value(value).expect("must deserialize");
+    assert_eq!(back.task_report, None);
+}
+
+#[test]
+fn status_changed_task_report_round_trips_when_present() {
+    let msg = DaemonMessage::StatusChanged {
+        window_id: "w1".to_string(),
+        status: WindowStatus::WaitingInput,
+        unknown_reason: None,
+        status_rev: None,
+        status_boot: None,
+        task_report: Some(mark(1, false)),
+    };
+    let body = encode_daemon_message(&msg);
+    let value: serde_json::Value = serde_json::from_slice(&body).expect("valid json");
+    assert_eq!(
+        value.get("task_report"),
+        Some(&serde_json::json!({ "seq": 1, "standing": false })),
+        "got: {value}"
+    );
+    assert_eq!(decode_daemon_message(&body).expect("decode"), msg);
+}
+
+#[test]
+fn status_changed_omits_task_report_when_none_and_decodes_a_body_without_the_key() {
+    let body = encode_daemon_message(&status_changed(None));
+    let value: serde_json::Value = serde_json::from_slice(&body).expect("valid json");
+    assert!(value.get("task_report").is_none(), "got: {value}");
+    let old = br#"{"type":"status_changed","window_id":"w1","status":"waiting_input"}"#;
+    assert_eq!(
+        decode_daemon_message(old).expect("decode"),
+        status_changed(None)
     );
 }

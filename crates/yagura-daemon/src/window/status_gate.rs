@@ -1,10 +1,11 @@
 //! The one place a window's confirmed status is written.
 
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use tokio::sync::{broadcast, watch};
 use yagura_protocol::{DetectedStatus, UnknownReason};
 
+use super::task_report::TaskReport;
 use super::{STATUS_BROADCAST_CAPACITY, window_status_wire};
 use crate::detector::engine::ConfirmedStatus;
 use crate::pty::lock_recover;
@@ -31,13 +32,21 @@ pub(crate) enum Publication {
 pub(crate) struct StatusGate {
     current: watch::Sender<StatusAt>,
     changes: broadcast::Sender<StatusAt>,
-    // A std mutex: no write awaits, and none of it takes another lock.
+    /// Told of every confirmed rest, which ends an instruction typed ahead.
+    task_report: Arc<TaskReport>,
+    // A std mutex: no write awaits, and none of it takes another lock but
+    // the task report's, which is a leaf.
     section: Mutex<()>,
 }
 
 impl StatusGate {
-    /// A gate whose current value is `initial` as of `at`, generation 0.
-    pub(crate) fn new(initial: DetectedStatus, at: tokio::time::Instant) -> Self {
+    /// A gate whose current value is `initial` as of `at`, generation 0,
+    /// telling `task_report` of every confirmed rest.
+    pub(crate) fn new(
+        initial: DetectedStatus,
+        at: tokio::time::Instant,
+        task_report: Arc<TaskReport>,
+    ) -> Self {
         let (current, _) = watch::channel(StatusAt {
             status: initial,
             changed_at: at,
@@ -48,6 +57,7 @@ impl StatusGate {
         Self {
             current,
             changes,
+            task_report,
             section: Mutex::new(()),
         }
     }
@@ -110,6 +120,9 @@ impl StatusGate {
                 generation,
             };
         });
+        if matches!(status, DetectedStatus::WaitingInput | DetectedStatus::Idle) {
+            self.task_report.rested(generation);
+        }
         let _ = self.changes.send(StatusAt {
             status,
             changed_at: now,
@@ -173,7 +186,7 @@ mod tests {
             let initial_changed_at = tokio::time::Instant::now()
                 .checked_sub(Duration::from_secs(60))
                 .expect("the test clock must support a 60s offset into the past");
-            let gate = StatusGate::new(status, initial_changed_at);
+            let gate = StatusGate::new(status, initial_changed_at, Arc::default());
             let fanout = gate.subscribe();
             Self {
                 gate,
@@ -248,7 +261,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn publish_restarts_the_age_at_every_transition_on_the_paused_clock() {
         let opened_at = tokio::time::Instant::now();
-        let gate = StatusGate::new(DetectedStatus::Running, opened_at);
+        let gate = StatusGate::new(DetectedStatus::Running, opened_at, Arc::default());
         let mut fanout = gate.subscribe();
         let publish = |status: DetectedStatus| {
             gate.publish(

@@ -15,10 +15,11 @@ use crate::send_message_lifecycle::{
     entry, note_of, open_wait_window, state_of, take_and_print, until,
 };
 use common::{
-    CONTROL_DETECTION_NAME, Harness, approver_base_config, call_open_window,
+    CONTROL_DETECTION_NAME, Harness, approver_base_config, attach, call_open_window,
     call_send_handoff_from_profile, detection_config, empty_lookup, expect_error,
     expect_handoff_sent, handoff_profile_config, identify, launch_prompt_profile_source, policy,
-    read_response, register_approver, send, unique_temp_dir, write_profile,
+    read_frame, read_response, register_approver, send, unique_temp_dir, wait_until_status,
+    write_interactive_input, write_profile,
 };
 
 use yagura_daemon::DaemonConfig;
@@ -27,8 +28,10 @@ use yagura_daemon::ipc::report::REPORT_INBOX_MAX;
 use yagura_daemon::store;
 use yagura_protocol::{
     ClientMessage, DaemonMessage, PlanInfo, PlanTaskSpec, REPORT_PATH_MAX_BYTES,
-    REPORT_SUMMARY_MAX_BYTES, ReceivedReport, ReportOutcome, ReportTaskRef, WindowStatus,
+    REPORT_SUMMARY_MAX_BYTES, ReceivedReport, ReportOutcome, ReportTaskRef, TaskReportMark,
+    WindowStatus,
 };
+use yagura_test_support::detection::CONTROL_READY_LINE;
 use yagura_test_support::ipc::Connection;
 use yagura_test_support::paths::TempDir;
 use yagura_test_support::process::{echo_child_command, ready_child_profile_source};
@@ -333,6 +336,143 @@ fn unix_ms_now() -> u64 {
     u64::try_from(elapsed.as_millis()).expect("milliseconds fit in u64")
 }
 
+// --- the standing-report fact a window list carries --------------------------------
+
+fn mark(seq: u64, standing: bool) -> Option<TaskReportMark> {
+    Some(TaskReportMark { seq, standing })
+}
+
+/// Reads the next answer on a connection that may also be pushed `plan_changed`,
+/// `status_changed` or view frames at any moment (`read_response` skips every one
+/// of those but `plan_changed`).
+async fn read_answer(client: &mut Connection) -> DaemonMessage {
+    loop {
+        match read_frame(client).await {
+            DaemonMessage::PlanChanged { .. }
+            | DaemonMessage::StatusChanged { .. }
+            | DaemonMessage::Frame(_)
+            | DaemonMessage::ChatChanged { .. }
+            | DaemonMessage::ChatParticipantsChanged => continue,
+            other => return other,
+        }
+    }
+}
+
+/// The `task_report` the daemon's window list carries for `window_id`.
+async fn task_mark(client: &mut Connection, window_id: &str) -> Option<TaskReportMark> {
+    send(client, &ClientMessage::ListWindows).await;
+    match read_answer(client).await {
+        DaemonMessage::WindowList { windows } => {
+            windows
+                .into_iter()
+                .find(|window| window.window_id == window_id)
+                .unwrap_or_else(|| panic!("{window_id} is not in the window list"))
+                .task_report
+        }
+        other => panic!("expected window_list, got {other:?}"),
+    }
+}
+
+/// Attaches `client` to `window_id` and returns the `task_report` the first
+/// `status_changed` after the attach carries.
+async fn task_mark_on_attach(client: &mut Connection, window_id: &str) -> Option<TaskReportMark> {
+    send(
+        client,
+        &ClientMessage::AttachView {
+            window_id: window_id.to_string(),
+            size: None,
+        },
+    )
+    .await;
+    let mut attached = false;
+    let mut first_status = None;
+    loop {
+        match read_frame(client).await {
+            DaemonMessage::Attached { .. } => attached = true,
+            DaemonMessage::StatusChanged {
+                window_id: pushed,
+                task_report,
+                ..
+            } if pushed == window_id && first_status.is_none() => first_status = Some(task_report),
+            _ => {}
+        }
+        if attached && let Some(task_report) = first_status {
+            return task_report;
+        }
+    }
+}
+
+/// Writes `text` as the user's keystrokes on an attached connection and returns once
+/// the daemon has taken the write: frames on one connection are handled in order, so
+/// the pong after it proves the write went through the window's input.
+async fn type_and_sync(typist: &mut Connection, text: &str) {
+    write_interactive_input(typist, text).await;
+    send(typist, &ClientMessage::Ping).await;
+    match read_response(typist).await {
+        DaemonMessage::Pong => {}
+        other => panic!("expected pong, got {other:?}"),
+    }
+}
+
+/// Brings a window whose input was just typed into back to a confirmed `Idle`: the
+/// ready line is what its detection definition reads as `idle`.
+async fn settle_idle(typist: &mut Connection, observer: &mut Connection, window_id: &str) {
+    type_and_sync(typist, CONTROL_READY_LINE).await;
+    wait_until_status(observer, window_id, WindowStatus::Idle).await;
+}
+
+/// `interrupt_window` from a registered approver, whose connection is also pushed
+/// `plan_changed`: the answer's `outcome`, or the error code it was refused with.
+async fn approver_interrupt(client: &mut Connection, window_id: &str) -> Result<String, String> {
+    send(
+        client,
+        &ClientMessage::InterruptWindow {
+            window_id: window_id.to_string(),
+        },
+    )
+    .await;
+    match read_answer(client).await {
+        DaemonMessage::Error { code, .. } => Err(code),
+        answer @ DaemonMessage::WindowInterrupted { .. } => {
+            let encoded = serde_json::to_value(&answer).expect("an answer encodes");
+            Ok(encoded["outcome"].as_str().unwrap_or_default().to_string())
+        }
+        other => panic!("expected window_interrupted or an error, got {other:?}"),
+    }
+}
+
+/// `close_window` from a registered approver (see [`approver_interrupt`]).
+async fn approver_close(client: &mut Connection, window_id: &str) {
+    send(
+        client,
+        &ClientMessage::CloseWindow {
+            window_id: window_id.to_string(),
+            force: None,
+        },
+    )
+    .await;
+    match read_answer(client).await {
+        DaemonMessage::WindowClosed { window_id: closed } => assert_eq!(closed, window_id),
+        other => panic!("expected window_closed, got {other:?}"),
+    }
+}
+
+/// `set_plan_owner` from a registered approver (see [`approver_interrupt`]).
+async fn approver_nominate(client: &mut Connection, plan_id: &str, window_id: &str) {
+    send(
+        client,
+        &ClientMessage::SetPlanOwner {
+            plan_id: plan_id.to_string(),
+            window_id: window_id.to_string(),
+        },
+    )
+    .await;
+    match read_answer(client).await {
+        DaemonMessage::PlanDetail { .. } => {}
+        other => panic!("expected plan_detail, got {other:?}"),
+    }
+}
+
 // --- Who becomes a window's opener ---------------------------------------
 
 #[tokio::test]
@@ -371,6 +511,12 @@ async fn a_window_opened_by_an_identified_connection_becomes_its_opener_and_rece
         (sent_after..=answered_before).contains(&report.at_ms),
         "at_ms {} must be the wall-clock time the report was received",
         report.at_ms
+    );
+
+    assert_eq!(
+        task_mark(&mut b, &window_b).await,
+        None,
+        "a window bound to no task leaves no standing-report fact"
     );
 }
 
@@ -623,11 +769,12 @@ async fn a_bound_windows_report_reaches_the_plans_alive_owner_and_lands_on_the_t
     let profiles_dir = dir.join("profiles");
     std::fs::create_dir_all(&profiles_dir).expect("create profiles dir");
     write_plain_profile(&profiles_dir, "report-task-profile", "Report Task Profile");
-    let (h, _locks) = Harness::start_with_ledger(
-        "report-task-basic",
-        report_ledger_config(&dir, profiles_dir, &[]),
-    )
-    .await;
+    // `0x03` would end the `ready_child` task window on Windows.
+    let config = DaemonConfig {
+        interrupt_bytes: b"REPORT-INTERRUPT-KEY\r\n".to_vec(),
+        ..detection_config(&dir, report_ledger_config(&dir, profiles_dir, &[]))
+    };
+    let (h, _locks) = Harness::start_with_ledger("report-task-basic", config).await;
 
     let mut owner = h.connect().await;
     let owner_window = open_and_identify(&h, &mut owner).await;
@@ -643,6 +790,7 @@ async fn a_bound_windows_report_reaches_the_plans_alive_owner_and_lands_on_the_t
     identify(&mut bound, &bound_window).await;
 
     let mut approver = approver_connection(&h).await;
+    wait_until_status(&mut owner, &bound_window, WindowStatus::Idle).await;
 
     let reply = call_send_report(
         &mut bound,
@@ -687,6 +835,51 @@ async fn a_bound_windows_report_reaches_the_plans_alive_owner_and_lands_on_the_t
     assert_eq!(report.summary, "the build passed");
     assert_eq!(report.path.as_deref(), Some("C:\\out\\result.txt"));
     assert!(report.reported_at > 0);
+
+    // The window now waits on its owner: the report stands until a new
+    // instruction reaches the window.
+    assert_eq!(task_mark(&mut owner, &bound_window).await, mark(1, true));
+    let mut late = h.connect().await;
+    assert_eq!(
+        task_mark_on_attach(&mut late, &bound_window).await,
+        mark(1, true),
+        "the first status an attaching view receives carries the same fact"
+    );
+
+    let mut typist = h.connect().await;
+    attach(&mut typist, &bound_window).await;
+    type_and_sync(&mut typist, "draft without enter").await;
+    type_and_sync(&mut typist, "\x1b").await;
+    assert_eq!(
+        task_mark(&mut owner, &bound_window).await,
+        mark(1, true),
+        "typing with no Enter is not a new instruction"
+    );
+    type_and_sync(&mut typist, "go on\r").await;
+    assert_eq!(
+        task_mark(&mut owner, &bound_window).await,
+        mark(1, false),
+        "a submitted line is a new instruction"
+    );
+
+    // A report sent once the window is confirmed idle again stands again,
+    // under the next seq.
+    settle_idle(&mut typist, &mut owner, &bound_window).await;
+    let reply = call_send_report(&mut bound, ReportOutcome::Succeeded, "second", None).await;
+    expect_report_sent(reply);
+    assert_eq!(
+        expect_reports(call_wait_for_report(&mut owner, 0).await).len(),
+        1
+    );
+    assert_eq!(task_mark(&mut owner, &bound_window).await, mark(2, true));
+
+    // An approver's interrupt writes its key into the window: it releases the
+    // report the same way a submitted line does.
+    assert_eq!(
+        approver_interrupt(&mut approver, &bound_window).await,
+        Ok("interrupted".to_string())
+    );
+    assert_eq!(task_mark(&mut owner, &bound_window).await, mark(2, false));
 }
 
 #[tokio::test]
@@ -697,7 +890,10 @@ async fn a_bound_windows_report_still_lands_on_the_task_once_its_owner_has_close
     write_plain_profile(&profiles_dir, "report-task-profile", "Report Task Profile");
     let (h, _locks) = Harness::start_with_ledger(
         "report-task-dead-owner",
-        report_ledger_config(&dir, profiles_dir, &["close_window"]),
+        detection_config(
+            &dir,
+            report_ledger_config(&dir, profiles_dir, &["close_window"]),
+        ),
     )
     .await;
 
@@ -714,6 +910,7 @@ async fn a_bound_windows_report_still_lands_on_the_task_once_its_owner_has_close
     let mut bound = h.connect().await;
     identify(&mut bound, &bound_window).await;
 
+    wait_until_status(&mut bound, &bound_window, WindowStatus::Idle).await;
     let mut approver = approver_connection(&h).await;
     close_window(&mut approver, &owner_window).await;
 
@@ -722,6 +919,11 @@ async fn a_bound_windows_report_still_lands_on_the_task_once_its_owner_has_close
     let (delivered_to, task) = expect_report_sent(reply);
     assert_eq!(delivered_to, None);
     assert_eq!(task.map(|t| t.task_id), Some("t1".to_string()));
+    assert_eq!(
+        task_mark(&mut bound, &bound_window).await,
+        mark(1, false),
+        "a report nobody was alive to hear is born released"
+    );
 
     let detail = expect_plan_detail(get_plan(&mut bound, &plan.plan_id).await);
     let report = task_info(&detail, "t1")
@@ -782,6 +984,79 @@ async fn a_bound_windows_report_follows_an_owner_nomination_not_the_windows_own_
     );
 }
 
+/// The fact is read against the plan's owner now, not the one the report was
+/// sent to: nominating another owner moves the report with it. The owner is
+/// nominated after the report, the opposite order of the test above.
+#[tokio::test]
+async fn a_standing_report_follows_a_later_owner_nomination_and_ends_with_the_new_owner() {
+    let dir = unique_temp_dir("report-task-renominate-standing");
+    let profiles_dir = dir.join("profiles");
+    std::fs::create_dir_all(&profiles_dir).expect("create profiles dir");
+    write_plain_profile(&profiles_dir, "report-task-profile", "Report Task Profile");
+    let (h, _locks) = Harness::start_with_ledger(
+        "report-task-renominate-standing",
+        detection_config(
+            &dir,
+            report_ledger_config(&dir, profiles_dir, &["close_window"]),
+        ),
+    )
+    .await;
+
+    let mut owner_a = h.connect().await;
+    let window_a = open_and_identify(&h, &mut owner_a).await;
+    let plan = create_ok(
+        &mut owner_a,
+        "plan",
+        vec![task_with_profile("t1", "report-task-profile")],
+    )
+    .await;
+    let (_, _, bound_window, _) =
+        expect_task_window_opened(open_task_window(&mut owner_a, &plan.plan_id, "t1").await);
+    let mut bound = h.connect().await;
+    identify(&mut bound, &bound_window).await;
+    let mut owner_b = h.connect().await;
+    let window_b = open_and_identify(&h, &mut owner_b).await;
+    let mut owner_c = h.connect().await;
+    let window_c = open_and_identify(&h, &mut owner_c).await;
+
+    wait_until_status(&mut owner_a, &bound_window, WindowStatus::Idle).await;
+    let reply = call_send_report(&mut bound, ReportOutcome::Succeeded, "first", None).await;
+    let (delivered_to, _) = expect_report_sent(reply);
+    assert_eq!(delivered_to.as_deref(), Some(window_a.as_str()));
+    assert_eq!(
+        expect_reports(call_wait_for_report(&mut owner_a, 0).await).len(),
+        1
+    );
+    assert_eq!(task_mark(&mut owner_a, &bound_window).await, mark(1, true));
+
+    let mut approver = approver_connection(&h).await;
+    approver_nominate(&mut approver, &plan.plan_id, &window_b).await;
+    assert_eq!(
+        task_mark(&mut owner_a, &bound_window).await,
+        mark(1, true),
+        "nominating does not release a report"
+    );
+    approver_close(&mut approver, &window_a).await;
+    assert_eq!(
+        task_mark(&mut owner_b, &bound_window).await,
+        mark(1, true),
+        "the superseded owner closing is no reason to call the user"
+    );
+    approver_close(&mut approver, &window_b).await;
+    assert_eq!(
+        task_mark(&mut owner_c, &bound_window).await,
+        mark(1, false),
+        "the current owner is gone"
+    );
+
+    approver_nominate(&mut approver, &plan.plan_id, &window_c).await;
+    assert_eq!(
+        task_mark(&mut owner_c, &bound_window).await,
+        mark(2, true),
+        "a live owner stands again, under the next seq so a reader that saw it released accepts it"
+    );
+}
+
 #[tokio::test]
 async fn a_reports_stale_window_identity_is_refused_once_its_task_has_been_rebound() {
     let dir = unique_temp_dir("report-task-rebind-stale");
@@ -832,7 +1107,7 @@ async fn a_bound_windows_report_is_refused_once_its_task_was_dropped_from_the_pl
     write_plain_profile(&profiles_dir, "report-task-profile", "Report Task Profile");
     let (h, _locks) = Harness::start_with_ledger(
         "report-task-dropped",
-        report_ledger_config(&dir, profiles_dir, &[]),
+        detection_config(&dir, report_ledger_config(&dir, profiles_dir, &[])),
     )
     .await;
 
@@ -849,7 +1124,21 @@ async fn a_bound_windows_report_is_refused_once_its_task_was_dropped_from_the_pl
     let mut bound = h.connect().await;
     identify(&mut bound, &bound_window).await;
 
+    wait_until_status(&mut owner, &bound_window, WindowStatus::Idle).await;
+    let reply = call_send_report(&mut bound, ReportOutcome::Succeeded, "before", None).await;
+    expect_report_sent(reply);
+    assert_eq!(
+        expect_reports(call_wait_for_report(&mut owner, 0).await).len(),
+        1
+    );
+    assert_eq!(task_mark(&mut owner, &bound_window).await, mark(1, true));
+
     expect_plan_detail(update_plan(&mut owner, &plan.plan_id, vec![task("t2")]).await);
+    assert_eq!(
+        task_mark(&mut owner, &bound_window).await,
+        mark(1, false),
+        "dropping the task unbinds the window, which releases its report"
+    );
 
     let reply = call_send_report(&mut bound, ReportOutcome::Succeeded, "orphaned", None).await;
     expect_error(reply, "invalid_state");
@@ -867,7 +1156,7 @@ async fn a_bound_windows_report_is_refused_once_the_plan_is_deleted_and_leaves_n
     write_plain_profile(&profiles_dir, "report-task-profile", "Report Task Profile");
     let (h, locks) = Harness::start_with_ledger(
         "report-task-plan-deleted",
-        report_ledger_config(&dir, profiles_dir, &[]),
+        detection_config(&dir, report_ledger_config(&dir, profiles_dir, &[])),
     )
     .await;
 
@@ -884,8 +1173,22 @@ async fn a_bound_windows_report_is_refused_once_the_plan_is_deleted_and_leaves_n
     let mut bound = h.connect().await;
     identify(&mut bound, &bound_window).await;
 
+    wait_until_status(&mut owner, &bound_window, WindowStatus::Idle).await;
+    let reply = call_send_report(&mut bound, ReportOutcome::Succeeded, "before", None).await;
+    expect_report_sent(reply);
+    assert_eq!(
+        expect_reports(call_wait_for_report(&mut owner, 0).await).len(),
+        1
+    );
+    assert_eq!(task_mark(&mut owner, &bound_window).await, mark(1, true));
+
     let reply = delete_plan(&mut owner, &plan.plan_id).await;
     assert!(matches!(reply, DaemonMessage::PlanDeleted { .. }));
+    assert_eq!(
+        task_mark(&mut owner, &bound_window).await,
+        mark(1, false),
+        "deleting the plan unbinds the window, which releases its report"
+    );
     let after_delete = locks.len();
 
     let reply = call_send_report(&mut bound, ReportOutcome::Succeeded, "too late", None).await;

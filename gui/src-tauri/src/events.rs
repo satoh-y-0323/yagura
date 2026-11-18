@@ -7,8 +7,8 @@
 use serde::{Deserialize, Serialize};
 use yagura_protocol::{
     ApprovalRequest, McpRegistrationAction, McpRegistrationStatusInfo, McpRegistrationStep,
-    ModelChoice, ModelChoiceSource, StatusBoot, UnknownReason, WindowInfo, WindowStatus,
-    WithdrawReason,
+    ModelChoice, ModelChoiceSource, StatusBoot, TaskReportMark, UnknownReason, WindowInfo,
+    WindowStatus, WithdrawReason,
 };
 
 use crate::recovery_state::RecoveryStatus;
@@ -184,6 +184,11 @@ pub struct StatusPayload {
     /// Omitted from the wire when `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status_boot: Option<StatusBoot>,
+    /// The window's task-report mark, forwarded verbatim from
+    /// `DaemonMessage::StatusChanged`; the WebView orders it on its own key.
+    /// Omitted from the wire when `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_report: Option<TaskReportMark>,
 }
 
 /// Payload of [`EVENT_WINDOW_LIST`].
@@ -350,6 +355,7 @@ mod tests {
             unknown_reason: None,
             status_rev: Some(1),
             status_boot: None,
+            task_report: None,
         };
         let json = serde_json::to_value(&payload).unwrap();
         assert!(!json.as_object().unwrap().contains_key("unknown_reason"));
@@ -363,6 +369,7 @@ mod tests {
             unknown_reason: Some(UnknownReason::ScreenLost),
             status_rev: Some(1),
             status_boot: None,
+            task_report: None,
         };
         let json = serde_json::to_value(&payload).unwrap();
         assert_eq!(json["unknown_reason"], "screen_lost");
@@ -379,6 +386,7 @@ mod tests {
             unknown_reason: None,
             status_rev: None,
             status_boot: None,
+            task_report: None,
         };
         let json = serde_json::to_value(&payload).unwrap();
         assert!(!json.as_object().unwrap().contains_key("status_rev"));
@@ -392,6 +400,7 @@ mod tests {
             unknown_reason: None,
             status_rev: Some(7),
             status_boot: Some(yagura_protocol::StatusBoot { origin: 7, seq: 3 }),
+            task_report: None,
         };
         let json = serde_json::to_value(&payload).unwrap();
         assert_eq!(json["status_rev"], 7);
@@ -413,6 +422,7 @@ mod tests {
                 unknown_reason: None,
                 status_rev: None,
                 status_boot: None,
+                task_report: None,
             }
         );
     }
@@ -425,6 +435,7 @@ mod tests {
             unknown_reason: Some(UnknownReason::ScreenLost),
             status_rev: Some(42),
             status_boot: None,
+            task_report: None,
         };
         let json = serde_json::to_string(&payload).unwrap();
         let back: StatusPayload = serde_json::from_str(&json).unwrap();

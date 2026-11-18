@@ -240,6 +240,7 @@ fn sample_window_info(layout_json: Option<&str>) -> WindowInfo {
         mcp_connected: None,
         status_reports_missing: None,
         queued_count: None,
+        task_report: None,
     }
 }
 

@@ -1209,6 +1209,7 @@ async fn send_task_report(
     let task_id = task.task_id.clone();
     let registry_in_store = Arc::clone(registry);
     let inboxes_in_store = Arc::clone(inboxes);
+    let task_report = Arc::clone(entry.task_report());
     let ReportBody {
         outcome,
         summary,
@@ -1252,6 +1253,9 @@ async fn send_task_report(
                 Some((SaveOutcome::NoRow, _)) | None => (None, Landed::Inbox),
                 Some((_, landed)) => (parent, landed),
             };
+            // Under the plan's lock, so no change to the task's binding or
+            // owner can come between the report and its mark.
+            task_report.place(parent.as_deref());
             Ok((parent, landed))
         })
         .await;
@@ -1292,7 +1296,7 @@ fn received_report(
 ) -> ReceivedReport {
     ReceivedReport {
         from_window_id: entry.window_id().to_string(),
-        from_name: entry.window_info().name,
+        from_name: entry.name(),
         outcome: body.outcome,
         summary: body.summary.clone(),
         path: body.path.clone(),

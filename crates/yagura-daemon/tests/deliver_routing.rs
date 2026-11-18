@@ -34,7 +34,7 @@ use yagura_daemon::profile::ProfileOs;
 use yagura_daemon::{IpcServer, OpenWindowRequest, WindowRegistry};
 use yagura_protocol::{
     ChatMessage, ClientMessage, DaemonMessage, InstructionNoticeState, PlanInfo, PlanTaskSpec,
-    ReportOutcome, WindowStatus,
+    ReportOutcome, TaskReportMark, WindowStatus,
 };
 use yagura_test_support::ipc::Connection;
 use yagura_test_support::process::{
@@ -1620,4 +1620,237 @@ async fn a_failed_command_push_puts_the_post_back_for_the_next_turn() {
 
     assert!(taken.contains("R13FAILED"), "{taken:?}");
     until_state(&mut user, seq, &id, "delivered").await;
+}
+
+// =========================================================================================
+// a task window's report stands until a new instruction reaches the window
+// =========================================================================================
+
+/// A one-task plan, its task window, the plan's owner, a connection speaking as the task
+/// window (its reports) and a plain one that observes.
+struct BoundTask {
+    id: String,
+    owner: Connection,
+    reporter: Connection,
+    probe: Connection,
+}
+
+impl BoundTask {
+    /// Opens the task window from `profile` once its screen waits for input. Nothing waits
+    /// in its inbox, so no delivery of the start-up can be taken for one that follows a
+    /// report.
+    async fn open(scene: &Scene, profile: &str) -> Self {
+        let mut owner = plan_owner(scene).await;
+        let plan = create_plan(&mut owner, vec![task("t1", profile, None)]).await;
+        let id = match open_task(&mut owner, &plan.plan_id, "t1", "task-window").await {
+            DaemonMessage::TaskWindowOpened { window_id, .. } => window_id,
+            other => panic!("expected task_window_opened, got {other:?}"),
+        };
+        let mut probe = scene.connect().await;
+        wait_until_status(&mut probe, &id, WindowStatus::WaitingInput).await;
+        let mut reporter = scene.connect().await;
+        identify(&mut reporter, &id).await;
+        assert_eq!(
+            scene.entry(&id).inbox().pending_count(),
+            0,
+            "a task window starts with nothing waiting in its inbox"
+        );
+        Self {
+            id,
+            owner,
+            reporter,
+            probe,
+        }
+    }
+
+    /// Reports to the plan's owner and reads the report back from its inbox, so the owner's
+    /// inbox is empty again.
+    async fn report(&mut self, summary: &str) {
+        match request(
+            &mut self.reporter,
+            ClientMessage::SendReport {
+                outcome: ReportOutcome::Succeeded,
+                summary: summary.to_string(),
+                path: None,
+            },
+        )
+        .await
+        {
+            DaemonMessage::ReportSent { .. } => {}
+            other => panic!("expected report_sent, got {other:?}"),
+        }
+        match request(
+            &mut self.owner,
+            ClientMessage::WaitForReport { timeout_sec: 0 },
+        )
+        .await
+        {
+            DaemonMessage::Reports { reports, .. } => assert_eq!(reports.len(), 1),
+            other => panic!("expected reports, got {other:?}"),
+        }
+    }
+
+    /// The `task_report` the window list carries for the task window.
+    async fn mark(&mut self) -> Option<TaskReportMark> {
+        match request(&mut self.probe, ClientMessage::ListWindows).await {
+            DaemonMessage::WindowList { windows } => {
+                windows
+                    .into_iter()
+                    .find(|window| window.window_id == self.id)
+                    .expect("the task window is listed")
+                    .task_report
+            }
+            other => panic!("expected window_list, got {other:?}"),
+        }
+    }
+
+    /// Waits for the list to carry `expected`: the event that releases a report is seen
+    /// before the list is read.
+    async fn until_mark(&mut self, expected: Option<TaskReportMark>) {
+        let deadline = tokio::time::Instant::now() + yagura_test_support::HANG_GUARD;
+        loop {
+            let seen = self.mark().await;
+            if seen == expected {
+                return;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "timed out waiting for the task window's report to read {expected:?} (last \
+                 seen {seen:?})"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+}
+
+fn mark(seq: u64, standing: bool) -> Option<TaskReportMark> {
+    Some(TaskReportMark { seq, standing })
+}
+
+/// Types `text` into `window_id` the way its user does, through an attached view, and
+/// returns once the daemon took the write.
+async fn type_as_the_user(scene: &Scene, window_id: &str, text: &str) {
+    let mut typist = scene.connect().await;
+    common::attach(&mut typist, window_id).await;
+    common::write_interactive_input(&mut typist, text).await;
+    send(&mut typist, &ClientMessage::Ping).await;
+    match read_response(&mut typist).await {
+        DaemonMessage::Pong => {}
+        other => panic!("expected pong, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn a_report_stands_through_state_swings_and_ends_when_a_door_hands_the_window_a_post() {
+    let scene = Scene::start("task-report-doors", Opts::default()).await;
+    let logs = scene.profile("hc-wait", WAIT_FLAGS, Some(WAIT_DELIVERY));
+    let mut user = scene.user().await;
+    let mut task = BoundTask::open(&scene, "hc-wait").await;
+    let id = task.id.clone();
+    scene.until_waiting(&id).await;
+
+    task.report("first").await;
+    assert_eq!(task.mark().await, mark(1, true));
+
+    // A post the wait door hands over is a new instruction (a parcel with a delivery record).
+    let (seq, _) = post(&mut user, &format!("@{id} R6WAITPOST")).await;
+    logs.until_received("R6WAITPOST").await;
+    until_state(&mut user, seq, &id, "delivered").await;
+    task.until_mark(mark(1, false)).await;
+
+    // So is a handoff (a parcel with no delivery record).
+    scene.until_waiting(&id).await;
+    wait_until_status(&mut task.probe, &id, WindowStatus::WaitingInput).await;
+    task.report("second").await;
+    assert_eq!(task.mark().await, mark(2, true));
+    let (_, _, delivery) =
+        expect_handoff_sent(request(&mut user, handoff_to(&id, "R6HANDOFF")).await);
+    assert_eq!(delivery, "delivered");
+    logs.until_received("R6HANDOFF").await;
+    task.until_mark(mark(2, false)).await;
+}
+
+#[tokio::test]
+async fn a_report_survives_a_post_that_only_reached_the_inbox_and_the_post_that_starts_a_turn() {
+    let scene = Scene::start("task-report-none", Opts::default()).await;
+    let logs = scene.profile("hc-none", NONE_FLAGS, Some(NONE_DELIVERY));
+    let mut user = scene.user().await;
+    let mut task = BoundTask::open(&scene, "hc-none").await;
+    let id = task.id.clone();
+
+    // The post that starts a turn is taken while the window already shows `Running`: it is
+    // the turn's own instruction, not one that follows the report sent in that turn.
+    let (seq, _) = post(&mut user, &format!("@{id} R6STARTS")).await;
+    until_state(&mut user, seq, &id, "queued").await;
+    scene.start_turn(&mut task.probe, &logs, &id).await;
+    until_state(&mut user, seq, &id, "delivered").await;
+    task.report("first").await;
+    assert_eq!(task.mark().await, mark(1, true));
+    scene.end_turn(&mut task.probe, &logs, &id).await;
+    assert_eq!(task.mark().await, mark(1, true));
+
+    // A status the detection cannot read, and the way back, do not release it either.
+    lose(&scene, &mut task.probe, &id).await;
+    scene.type_line(&id, "FIND").await;
+    wait_until_status(&mut task.probe, &id, WindowStatus::WaitingInput).await;
+    assert_eq!(task.mark().await, mark(1, true));
+
+    // A turn that takes nothing is no new instruction.
+    scene.start_turn(&mut task.probe, &logs, &id).await;
+    assert_eq!(task.mark().await, mark(1, true));
+
+    // A post that only reached the inbox is not one yet; the door that hands it over is.
+    task.report("second").await;
+    assert_eq!(task.mark().await, mark(2, true));
+    let (seq, _) = post(&mut user, &format!("@{id} R6QUEUED")).await;
+    until_state(&mut user, seq, &id, "queued").await;
+    assert_eq!(task.mark().await, mark(2, true));
+    scene.end_turn(&mut task.probe, &logs, &id).await;
+    assert_eq!(task.mark().await, mark(2, true));
+    scene.start_turn(&mut task.probe, &logs, &id).await;
+    until_state(&mut user, seq, &id, "delivered").await;
+    task.until_mark(mark(2, false)).await;
+
+    // What the user types ahead of a turn's end is the next instruction, not the end of
+    // the one this report answers: a report sent while the window shows `Running` stays
+    // released once the window waits.
+    scene.end_turn(&mut task.probe, &logs, &id).await;
+    scene.start_turn(&mut task.probe, &logs, &id).await;
+    type_as_the_user(&scene, &id, "keep going please\r").await;
+    task.report("third").await;
+    assert_eq!(task.mark().await, mark(3, false));
+    scene.end_turn(&mut task.probe, &logs, &id).await;
+    assert_eq!(task.mark().await, mark(3, false));
+}
+
+#[tokio::test]
+async fn a_report_ends_when_the_wake_command_hands_the_window_a_post_even_ahead_of_its_turn_end() {
+    let scene = Scene::start("task-report-command", Opts::default()).await;
+    let logs = scene.profile("hc-command", COMMAND_FLAGS, Some(COMMAND_DELIVERY));
+    let mut user = scene.user().await;
+    let mut task = BoundTask::open(&scene, "hc-command").await;
+    let id = task.id.clone();
+    // The first turn tells the daemon the session the wake command needs.
+    scene.start_turn(&mut task.probe, &logs, &id).await;
+    scene.end_turn(&mut task.probe, &logs, &id).await;
+    assert_eq!(scene.entry(&id).session_id().as_deref(), Some(SESSION));
+
+    task.report("first").await;
+    assert_eq!(task.mark().await, mark(1, true));
+    let (seq, _) = post(&mut user, &format!("@{id} R6PUSHED")).await;
+    logs.until_received("R6PUSHED").await;
+    until_state(&mut user, seq, &id, "delivered").await;
+    task.until_mark(mark(1, false)).await;
+
+    // A post pushed while the window shows `Running` is an instruction that reached the
+    // CLI ahead of the turn's end: a report sent in the rest of that turn is released
+    // from the start, and stays so once the window waits.
+    scene.start_turn(&mut task.probe, &logs, &id).await;
+    let (seq, _) = post(&mut user, &format!("@{id} R6PUSHEDRUNNING")).await;
+    logs.until_received("R6PUSHEDRUNNING").await;
+    until_state(&mut user, seq, &id, "delivered").await;
+    task.report("second").await;
+    assert_eq!(task.mark().await, mark(2, false));
+    scene.end_turn(&mut task.probe, &logs, &id).await;
+    assert_eq!(task.mark().await, mark(2, false));
 }

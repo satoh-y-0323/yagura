@@ -21,7 +21,7 @@ use tokio::sync::{Mutex as AsyncMutex, Notify, broadcast, mpsc, oneshot, watch};
 use yagura_os::program;
 use yagura_protocol::{
     DaemonMessage, DefaultPalettes, DetectedStatus, INSTANCE_ENV, MCP_BRIDGE_ENV, OnNameTaken,
-    Palette, RoomRef, STATUS_TOKEN_ENV, StatusBoot, UnknownReason, WINDOW_ID_ENV,
+    Palette, RoomRef, STATUS_TOKEN_ENV, StatusBoot, TaskReportMark, UnknownReason, WINDOW_ID_ENV,
     WINDOW_NAME_MAX_BYTES, WindowInfo, WindowNameError, WindowStatus, WithdrawOutcome,
     validate_window_name, validate_window_vendor,
 };
@@ -52,8 +52,10 @@ use crate::window_table::{
 use crate::workspace::{self, WorkspaceKey, resolve_key_blocking};
 
 mod status_gate;
+pub(crate) mod task_report;
 
 use status_gate::{Publication, StatusGate};
+use task_report::{ReportChange, TaskReport};
 
 /// Capacity of the fan-out channel carrying confirmed status changes to
 /// subscribers. Status changes are debounced and therefore rare, so this is
@@ -698,14 +700,15 @@ impl WindowOpenError {
 
 /// Who wrote the bytes going to a window's PTY.
 ///
-/// The three variants map 1:1 onto the daemon's three PTY write paths and
-/// exist so the detector can tell interactive line editing (whose output is
-/// just an echo) from a write that may start work.
+/// Lets the detector tell interactive line editing (whose output is just an
+/// echo) from a write that may start work. The daemon itself writes only
+/// `Interactive` (IPC `input`) and `Control` (`interrupt_window`) bytes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InputOrigin {
     /// Keystrokes and pastes from an attached client (IPC `input`).
     Interactive,
-    /// Text delivered through `send_text` / the MCP `send_message` tool.
+    /// Text a caller of [`WindowEntry::write_pty_input`] delivers on an
+    /// agent's behalf; no daemon path writes it.
     Message,
     /// A control byte sequence delivered by `interrupt_window`.
     Control,
@@ -867,6 +870,9 @@ pub struct WindowEntry {
     /// The parcels waiting for this window's CLI to read them through the
     /// doors its hooks run.
     inbox: Inbox,
+    /// The new instructions that reached this window's CLI and the mark its
+    /// last task report left, shared with its status gate and inbox.
+    task_report: Arc<TaskReport>,
     /// The identifier the window's CLI reported for its own session, as the
     /// daemon keeps it ([`WindowEntry::record_session_id`]).
     session_id: Mutex<Option<String>>,
@@ -1116,12 +1122,18 @@ impl WindowEntry {
         origin: InputOrigin,
         press: Option<crate::input_encode::NamedPress>,
     ) -> crate::pty::PtyResult<()> {
+        let echo = classify_input_echo(data, origin);
+        if echo == InputEcho::MayStartWork {
+            // Counted before the write, so nothing the write causes is seen
+            // before the instruction is.
+            self.task_report
+                .instruction_arrived(&self.status_gate.snapshot());
+        }
         // Scoped so the `std::sync::Mutex` guard is released before the
         // `.await` below (`WindowEntry::detector`).
         {
             let guard = lock_recover(&self.detector);
             if let Some(detector) = guard.as_ref() {
-                let echo = classify_input_echo(data, origin);
                 match origin {
                     InputOrigin::Interactive | InputOrigin::Message => detector.notify_input(echo),
                     InputOrigin::Control => detector.notify_interrupt_input(echo),
@@ -1219,6 +1231,27 @@ impl WindowEntry {
     /// The parcels waiting for this window's CLI.
     pub fn inbox(&self) -> &Inbox {
         &self.inbox
+    }
+
+    /// Where this window's task reports leave their mark.
+    pub(crate) fn task_report(&self) -> &Arc<TaskReport> {
+        &self.task_report
+    }
+
+    /// Whether this window's last task report still stands, its owner's
+    /// liveness read from `entries`, the registry's windows. The one place
+    /// the fact is made.
+    fn task_report_among(&self, entries: &[Arc<WindowEntry>]) -> Option<TaskReportMark> {
+        self.task_report
+            .fact(|owner| matches!(liveness_among(entries, owner), WindowLiveness::Alive(_)))
+    }
+
+    /// [`Self::task_report_among`] the registry's windows as they are now.
+    /// Takes the registry's list lock, so it is never called under it.
+    fn task_report_now(&self) -> Option<TaskReportMark> {
+        let peers = self.peers.upgrade();
+        let entries = peers.as_deref().map(lock_recover);
+        self.task_report_among(entries.as_deref().map_or(&[], Vec::as_slice))
     }
 
     /// The turns of the window's CLI and the mark an AI's interrupt put on
@@ -1566,6 +1599,11 @@ impl WindowEntry {
     /// This window's current record, before [`WindowRegistry::list`] adds the
     /// listing-only `room` decoration.
     pub(crate) fn window_info(&self) -> WindowInfo {
+        self.window_info_with(self.task_report_now())
+    }
+
+    /// [`Self::window_info`] carrying `task_report`.
+    fn window_info_with(&self, task_report: Option<TaskReportMark>) -> WindowInfo {
         // One read of the published pair, so the reported status, its reason
         // and the generation all describe the same transition.
         let at = self.status_snapshot();
@@ -1585,6 +1623,7 @@ impl WindowEntry {
             mcp_connected: Some(self.mcp_connected()),
             status_reports_missing: Some(self.report_gap()),
             queued_count: Some(u64::try_from(self.inbox.pending_count()).unwrap_or(u64::MAX)),
+            task_report,
         }
     }
 
@@ -1593,6 +1632,8 @@ impl WindowEntry {
     ///
     /// Built from `at` alone (never from the entry's current pair), so a push
     /// is never stamped with a generation newer than the change it reports.
+    /// The task report fact is read as the push is built: it is ordered by
+    /// its own `seq`, not by the status generation.
     pub(crate) fn status_changed(&self, at: &StatusAt) -> DaemonMessage {
         DaemonMessage::StatusChanged {
             window_id: self.window_id.clone(),
@@ -1600,6 +1641,7 @@ impl WindowEntry {
             unknown_reason: at.status.unknown_reason(),
             status_rev: Some(at.generation),
             status_boot: self.status_boot,
+            task_report: self.task_report_now(),
         }
     }
 
@@ -1732,6 +1774,18 @@ pub enum WindowLiveness {
     Dead,
     /// No entry with this id has ever been registered here.
     NotFound,
+}
+
+/// The rule behind [`WindowRegistry::liveness`], applied to `entries`, the
+/// registry's windows a caller already holds under the list lock.
+fn liveness_among(entries: &[Arc<WindowEntry>], window_id: &str) -> WindowLiveness {
+    let Some(entry) = entries.iter().find(|entry| entry.window_id == window_id) else {
+        return WindowLiveness::NotFound;
+    };
+    if entry.closed.load(Ordering::SeqCst) || entry.current_status() == WindowStatus::Exited {
+        return WindowLiveness::Dead;
+    }
+    WindowLiveness::Alive(Arc::clone(entry))
 }
 
 /// `window_id -> WindowEntry` registry: the SSOT for opening, listing,
@@ -2738,7 +2792,12 @@ impl WindowRegistry {
         } else {
             DetectedStatus::Unknown(UnknownReason::NoDefinition)
         };
-        let status_gate = StatusGate::new(initial_status, tokio::time::Instant::now());
+        let task_report = Arc::new(TaskReport::default());
+        let status_gate = StatusGate::new(
+            initial_status,
+            tokio::time::Instant::now(),
+            Arc::clone(&task_report),
+        );
         let delivery_spec = provenance
             .delivery
             .as_ref()
@@ -2756,6 +2815,7 @@ impl WindowRegistry {
             status_gate.watch(),
             keeper,
             kept,
+            Arc::clone(&task_report),
         );
         let detector_weak = Arc::downgrade(&detector_handle);
         let provenance_overlay = provenance.facts.overlay;
@@ -2784,6 +2844,7 @@ impl WindowRegistry {
             status_events: AtomicU64::new(0),
             notice_wake: Notify::new(),
             inbox,
+            task_report,
             session_id: Mutex::new(None),
             provenance,
             mcp_connections: Arc::new(AtomicUsize::new(0)),
@@ -2852,7 +2913,10 @@ impl WindowRegistry {
     /// left its room. No I/O is performed while the entries lock is held.
     pub fn list(&self) -> Vec<WindowInfo> {
         let entries = lock_recover(&self.entries);
-        let mut infos: Vec<WindowInfo> = entries.iter().map(|entry| entry.window_info()).collect();
+        let mut infos: Vec<WindowInfo> = entries
+            .iter()
+            .map(|entry| entry.window_info_with(entry.task_report_among(&entries)))
+            .collect();
 
         let mut rooms: Vec<(String, Option<WorkspaceKey>)> = vec![("main".to_string(), None)];
         let mut seen_room_ids = HashSet::new();
@@ -2905,6 +2969,19 @@ impl WindowRegistry {
         lookup_once_opened(&self.opening, window_id, || self.get(window_id)).await
     }
 
+    /// Applies `change` to the task report mark of each of `window_ids`, the
+    /// windows bound to a plan's tasks. Called under the plan's lock, after
+    /// the store write that made the change succeeded.
+    pub(crate) fn change_task_reports(&self, window_ids: &[String], change: ReportChange<'_>) {
+        for window_id in window_ids {
+            if let Some(entry) = self.get(window_id) {
+                entry.task_report.apply(change, |owner| {
+                    matches!(self.liveness(owner), WindowLiveness::Alive(_))
+                });
+            }
+        }
+    }
+
     /// Looks up a window by ID.
     pub fn get(&self, window_id: &str) -> Option<Arc<WindowEntry>> {
         lock_recover(&self.entries)
@@ -2919,13 +2996,7 @@ impl WindowRegistry {
     /// place that answers the question; callers elsewhere must not grow a
     /// second liveness check of their own.
     pub fn liveness(&self, window_id: &str) -> WindowLiveness {
-        let Some(entry) = self.get(window_id) else {
-            return WindowLiveness::NotFound;
-        };
-        if entry.closed.load(Ordering::SeqCst) || entry.current_status() == WindowStatus::Exited {
-            return WindowLiveness::Dead;
-        }
-        WindowLiveness::Alive(entry)
+        liveness_among(&lock_recover(&self.entries), window_id)
     }
 
     /// Withdraws the envelope `id` for `asker` from whichever live window's

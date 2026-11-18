@@ -36,6 +36,7 @@ use crate::plan_store::{
 use crate::profile;
 use crate::roles::{RoleRow, RolesError, RolesTable, read_roles, save_roles as save_roles_file};
 use crate::store::StoreError;
+use crate::window::task_report::ReportChange;
 use crate::window::{WindowLiveness, WindowRegistry};
 
 use super::store_gate::{StoreAccessError, StoreGate};
@@ -383,9 +384,19 @@ pub(super) async fn handle_update_plan(
             let permit =
                 plan_permit::issue_change(&origin, ChangeKind::UpdatePlan, guard, store, &registry)
                     .map_err(UpdateOutcome::Permit)?;
+            let bound_before =
+                bound_windows(store, permit.plan_id()).map_err(UpdateOutcome::Write)?;
             store
                 .replace_tasks(&permit, &validated)
                 .map_err(UpdateOutcome::Write)?;
+            // Still under the plan's lock: a task left out of the plan
+            // unbinds its window.
+            let dropped: Vec<String> = bound_before
+                .into_iter()
+                .filter(|(task_id, _)| !validated.tasks.iter().any(|task| &task.task_id == task_id))
+                .map(|(_, window_id)| window_id)
+                .collect();
+            registry.change_task_reports(&dropped, ReportChange::Unbound);
             store
                 .get_plan(permit.plan_id())
                 .map_err(UpdateOutcome::Write)?
@@ -421,6 +432,21 @@ pub(super) async fn handle_update_plan(
         }
         Err(access_err) => outbound.reply(&map_access_error(access_err)),
     }
+}
+
+/// `(task_id, window_id)` of every task of `plan_id` that has a window bound,
+/// read under the plan's lock.
+fn bound_windows(
+    store: &crate::plan_store::PlanStore,
+    plan_id: &str,
+) -> Result<Vec<(String, String)>, StoreError> {
+    Ok(store.get_plan(plan_id)?.map_or_else(Vec::new, |detail| {
+        detail
+            .tasks
+            .into_iter()
+            .filter_map(|task| task.window_id.map(|window_id| (task.task_id, window_id)))
+            .collect()
+    }))
 }
 
 // --- get_plan / list_plans -------------------------------------------------
@@ -675,7 +701,14 @@ pub(super) async fn handle_delete_plan(
             let permit =
                 plan_permit::issue_change(&origin, ChangeKind::DeletePlan, guard, store, &registry)
                     .map_err(ChangeOutcome::Permit)?;
-            store.delete_plan(permit).map_err(ChangeOutcome::Write)
+            let unbound: Vec<String> = bound_windows(store, permit.plan_id())
+                .map_err(ChangeOutcome::Write)?
+                .into_iter()
+                .map(|(_, window_id)| window_id)
+                .collect();
+            let deleted = store.delete_plan(permit).map_err(ChangeOutcome::Write)?;
+            registry.change_task_reports(&unbound, ReportChange::Unbound);
+            Ok(deleted)
         })
         .await;
 
@@ -968,7 +1001,13 @@ pub(super) async fn handle_set_plan_owner(
             let permit = plan_permit::issue_nominate(&origin, guard, &window_id, &registry)
                 .map_err(UpdateOutcome::Permit)?;
             let nominated_plan_id = permit.plan_id().to_string();
+            let bound: Vec<String> = bound_windows(store, &nominated_plan_id)
+                .map_err(UpdateOutcome::Write)?
+                .into_iter()
+                .map(|(_, window_id)| window_id)
+                .collect();
             store.set_owner(permit).map_err(UpdateOutcome::Write)?;
+            registry.change_task_reports(&bound, ReportChange::NewOwner(&window_id));
             store
                 .get_plan(&nominated_plan_id)
                 .map_err(UpdateOutcome::Write)?

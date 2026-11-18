@@ -90,9 +90,9 @@ use yagura_protocol::{
     ProfileCommandDetail, ProfileDetailEntry, ProfileGuidance, ProfileInfo, ProfileLimit,
     ProfileUnavailableKind, ReceivedReport, ReportOutcome, ReportTaskRef, ResolvedAssignment,
     RestoreCandidate, ReviewMark, RoleEntry, RoomRef, StatusBoot, TaskAssignment, TaskReport,
-    TerminalSize, TicketConfigInfo, TicketFieldInfo, TicketInfo, TicketResultInfo, TicketStateInfo,
-    TicketSummary, TicketWorkspaceInfo, ToolAutoApprove, UnknownReason, ViewState, WheelInput,
-    WindowInfo, WindowStatus as WireWindowStatus, WithdrawOutcome, WithdrawReason,
+    TaskReportMark, TerminalSize, TicketConfigInfo, TicketFieldInfo, TicketInfo, TicketResultInfo,
+    TicketStateInfo, TicketSummary, TicketWorkspaceInfo, ToolAutoApprove, UnknownReason, ViewState,
+    WheelInput, WindowInfo, WindowStatus as WireWindowStatus, WithdrawOutcome, WithdrawReason,
 };
 
 // ---------------------------------------------------------------------
@@ -321,7 +321,9 @@ wire_sample!(struct WindowInfo {
     mcp_connected,
     status_reports_missing,
     queued_count,
+    task_report,
 });
+wire_sample!(struct TaskReportMark { seq, standing });
 wire_sample!(struct RestoreCandidate {
     position,
     command,
@@ -890,6 +892,7 @@ fn daemon_message_corpus() -> Vec<DaemonMessage> {
             unknown_reason,
             status_rev,
             status_boot,
+            task_report,
         }),
         wire_sample!(DaemonMessage::WindowOpened {
             window_id,
