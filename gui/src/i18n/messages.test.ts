@@ -173,31 +173,18 @@ export const dummyMessages: Messages = {
     restoreNotRestoredMore: (count: number) => `DUMMY_restoreNotRestoredMore(${count})`,
   },
   hints: {
-    windowList: 'DUMMY_windowList',
     noWindows: 'DUMMY_noWindows',
     interruptWindow: 'DUMMY_interruptWindow',
     closeWindow: 'DUMMY_closeWindow',
     minimizeWindow: 'DUMMY_minimizeWindow',
     maximizeWindow: 'DUMMY_maximizeWindow',
     restoreWindow: 'DUMMY_restoreWindow',
-    focusWindow: 'DUMMY_focusWindow',
     whyUnknown: 'DUMMY_whyUnknown',
     dismissBanner: 'DUMMY_dismissBanner',
     tileWindows: 'DUMMY_tileWindows',
     restoreAlreadyOpen: 'DUMMY_restoreAlreadyOpen',
     restoreNoteExecution: 'DUMMY_restoreNoteExecution',
     restoreNoteUnselected: 'DUMMY_restoreNoteUnselected',
-    // The room heading's collapse toggle and per-room action buttons,
-    // plus the minimized-window marker shown in place of the cwd.
-    collapseRoom: 'DUMMY_collapseRoom',
-    expandRoom: 'DUMMY_expandRoom',
-    tileRoom: 'DUMMY_tileRoom',
-    minimizeRoom: 'DUMMY_minimizeRoom',
-    restoreRoom: 'DUMMY_restoreRoom',
-    minimizedMarker: 'DUMMY_minimizedMarker',
-    // The hint on the header badge that jumps to the next window
-    // needing the user.
-    goToNextNeedingYou: 'DUMMY_goToNextNeedingYou',
     // Why the ⏹ button is disabled, one hint per blocked reason.
     // `renameWindow` is retired alongside it: the sidebar row drops the ✏️
     // button, and the window `⋯` menu already has its own label
@@ -215,6 +202,8 @@ export const dummyMessages: Messages = {
       `DUMMY_restoreSelectionCount(${selected}, ${total})`,
     // The tooltip of a window's waiting-messages mark.
     queuedMessages: (count: number) => `DUMMY_queuedMessages(${count})`,
+    windowRow: (name: string, status: string) => `DUMMY_windowRow(${name}, ${status})`,
+    windowRowAwaitingPermission: (label: string) => `DUMMY_windowRowAwaitingPermission(${label})`,
   },
 
   // Why a window's status is Unknown, in the three forms the sidebar
@@ -433,6 +422,29 @@ export const dummyMessages: Messages = {
     theme: 'DUMMY_nav_theme',
     settings: 'DUMMY_nav_settings',
     windowMenu: 'DUMMY_nav_windowMenu',
+  },
+  sidebar: {
+    title: 'DUMMY_sidebar_title',
+    needsYou: 'DUMMY_sidebar_needsYou',
+    viewMenu: (mode: string) => `DUMMY_sidebar_viewMenu(${mode})`,
+    focusMode: 'DUMMY_sidebar_focusMode',
+    canvasMode: 'DUMMY_sidebar_canvasMode',
+    canvasOnly: 'DUMMY_sidebar_canvasOnly',
+    newWindow: 'DUMMY_sidebar_newWindow',
+    roomActions: 'DUMMY_sidebar_roomActions',
+    folderActions: 'DUMMY_sidebar_folderActions',
+    tileRoom: 'DUMMY_sidebar_tileRoom',
+    minimizeAll: 'DUMMY_sidebar_minimizeAll',
+    showAll: 'DUMMY_sidebar_showAll',
+    openChat: 'DUMMY_sidebar_openChat',
+    collapse: 'DUMMY_sidebar_collapse',
+    expand: 'DUMMY_sidebar_expand',
+    statusUnknown: 'DUMMY_sidebar_statusUnknown',
+    nothingNeedsYou: 'DUMMY_sidebar_nothingNeedsYou',
+    showAllWindows: 'DUMMY_sidebar_showAllWindows',
+    empty: 'DUMMY_sidebar_empty',
+    minimized: 'DUMMY_sidebar_minimized',
+    awaitingPermission: 'DUMMY_sidebar_awaitingPermission',
   },
 
   /** The chat panel, its delivery chips, its halt banner and its badge. */

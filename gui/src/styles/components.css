@@ -33,8 +33,6 @@
 
 .btn:disabled,
 .btn[aria-disabled='true'],
-.status-panel__button:disabled,
-.status-panel__button[aria-disabled='true'],
 .window-controls__button:disabled,
 .window-controls__button[aria-disabled='true'] {
   opacity: 0.5;
@@ -61,14 +59,12 @@
 }
 
 .btn:hover:not(:disabled):not([aria-disabled='true']),
-.status-panel__button:hover:not(:disabled):not([aria-disabled='true']),
 .window-controls__menu-anchor:hover,
 .window-controls__button:hover:not(:disabled):not([aria-disabled='true']) {
   background-image: linear-gradient(var(--bg-hover), var(--bg-hover));
 }
 
 .btn:active:not(:disabled):not([aria-disabled='true']),
-.status-panel__button:active:not(:disabled):not([aria-disabled='true']),
 .window-controls__menu-anchor:active,
 .window-controls__button:active:not(:disabled):not([aria-disabled='true']) {
   background-image: linear-gradient(var(--bg-pressed), var(--bg-pressed));
@@ -81,7 +77,6 @@
 }
 
 .btn:focus-visible,
-.status-panel__button:focus-visible,
 .window-controls__menu-anchor:focus-visible,
 .window-controls__button:focus-visible,
 .banner-close:focus-visible,
@@ -156,11 +151,8 @@
 }
 
 /* A horizontal strip whose children sit on one baseline with the standard
-   gap. The three shared declarations live here; each component <style> keeps
+   gap. The shared declarations live here; each component <style> keeps
    only its genuinely local declarations. */
-.status-panel__header-row,
-.status-panel__room-heading,
-.status-panel__header,
 .dialog-header,
 .window-menu__theme-item {
   display: flex;
@@ -168,25 +160,14 @@
   gap: var(--space-sm);
 }
 
-/* The two of the above that also space their children apart:
-   the remaining three keep their children packed at the start, so this stays
-   a separate, narrower selector list rather than widening the group above. */
-.status-panel__header,
+/* The one of the above that also spaces its children apart. */
 .dialog-header {
   justify-content: space-between;
 }
 
-/* The sidebar itself has no padding so the rows reach both edges; the room
-   heading supplies its own inset, aligned with the row text. */
-.status-panel__room-heading {
-  padding: var(--space-sm);
-}
-
-/* An unfilled control drawn only as a framed glyph: the row actions in the
-   window list, the WindowControls button row, and the sidebar's tile-arrange
-   button. Unlike .btn it carries no fill of its own, so the frame reads as
+/* An unfilled control drawn only as a framed glyph: the WindowControls button
+   row. Unlike .btn it carries no fill of its own, so the frame reads as
    part of the surface it sits on until it is hovered. */
-.status-panel__button,
 .window-controls__menu-anchor,
 .window-controls__button {
   display: inline-flex;
@@ -199,11 +180,6 @@
   font-size: var(--text-sm);
   cursor: pointer;
   transition: background-color var(--dur-fast) var(--ease-out);
-}
-
-.status-panel__button {
-  padding: var(--space-1) var(--space-2);
-  background-color: var(--bg-raised);
 }
 
 .window-controls__menu-anchor,
@@ -232,9 +208,9 @@
   opacity: 0.7;
 }
 
-/* A window's waiting-messages mark (QueuedMark.svelte), drawn in the tab strip
-   and the float-window title bar: an outline in the secondary text colour and
-   no fill, so it stays quieter than the status pill beside it. */
+/* A window's waiting-messages mark (QueuedMark.svelte) in the float-window
+   title bar: an outline in the secondary text colour and no fill, so it stays
+   quieter than the status pill beside it. */
 .queued-mark {
   display: inline-flex;
   align-items: center;

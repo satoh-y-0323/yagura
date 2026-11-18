@@ -20,7 +20,7 @@ import {
   describeStatus,
   describeExit,
   describeExitCode,
-  describeWindowListTitle,
+  describeWindowRow,
   describePaneNotice,
   describeDetectionWarning,
   describeDiscardedKeymapEntries,
@@ -55,12 +55,6 @@ describe('render.ts: output is driven by the given locale (dummy-locale swap)', 
     const result = describeExitCode(dummyMessages, 3);
     expect(result).toBe(dummyMessages.formats.exitCode(3));
     expect(result).not.toBe(english.formats.exitCode(3));
-  });
-
-  it('describeWindowListTitle: renders from the dummy hints.windowList label', () => {
-    const result = describeWindowListTitle(dummyMessages, 2);
-    expect(result).toBe(dummyMessages.formats.windowListTitle(dummyMessages.hints.windowList, 2));
-    expect(result).not.toContain(english.hints.windowList);
   });
 
   it('describePaneNotice: renders the dummy banner text for a failed phase', () => {
@@ -412,6 +406,22 @@ describe('describeInterruptHint: which message each reason picks', () => {
     );
     expect(describeInterruptHint(english, blockedTarget('unknown'))).toBe(
       english.hints.interruptUnavailableUnknown
+    );
+  });
+});
+
+describe('describeWindowRow', () => {
+  it('names the window and its status word', () => {
+    expect(describeWindowRow(dummyMessages, 'reviewer', 'waiting_input', false)).toBe(
+      dummyMessages.formats.windowRow('reviewer', dummyMessages.statusLabels.waiting_input)
+    );
+  });
+
+  it('adds the permission wait only while the window waits for the user', () => {
+    expect(describeWindowRow(dummyMessages, 'reviewer', 'waiting_input', true)).toBe(
+      dummyMessages.formats.windowRowAwaitingPermission(
+        dummyMessages.formats.windowRow('reviewer', dummyMessages.statusLabels.waiting_input)
+      )
     );
   });
 });

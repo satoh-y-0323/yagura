@@ -24,7 +24,7 @@ import {
   describeUndeliveredUnknownReason as renderDescribeUndeliveredUnknownReason,
   describeUnknownExplanation as renderDescribeUnknownExplanation,
   describeUnknownReasonSuffix as renderDescribeUnknownReasonSuffix,
-  describeWindowListTitle as renderDescribeWindowListTitle,
+  describeWindowRow as renderDescribeWindowRow,
   EXTERNAL_TEXT_MAX_CODE_POINTS,
   foldExternalText,
 } from './i18n/render';
@@ -65,6 +65,9 @@ export const menus = messages.menus;
 
 /** Accessible names for the navigation rail's icons. */
 export const nav = messages.nav;
+
+/** The sidebar's window list: its header, its room headings and its rows. */
+export const sidebar = messages.sidebar;
 
 /** The chat panel's text: its chrome, its chips, its banner and its badge. */
 export const chat = messages.chat;
@@ -120,11 +123,17 @@ export function describeDetectionWarning(detail: unknown): string {
 }
 
 /**
- * Describes the window list heading together with how many windows are open.
- * @param count the number of open windows
+ * Describes a sidebar row as its accessible name.
+ * @param name the window's display name
+ * @param status the window's status
+ * @param isAwaitingPermission whether the window waits for the user's permission
  */
-export function describeWindowListTitle(count: number): string {
-  return renderDescribeWindowListTitle(messages, count);
+export function describeWindowRow(
+  name: string,
+  status: string,
+  isAwaitingPermission: boolean
+): string {
+  return renderDescribeWindowRow(messages, name, status, isAwaitingPermission);
 }
 
 /**

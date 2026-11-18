@@ -338,14 +338,12 @@ export const messagesEn = {
   },
 
   hints: {
-    windowList: 'Open windows',
     noWindows: 'No windows are open yet',
     interruptWindow: 'Interrupt the process',
     closeWindow: 'Close the window',
     minimizeWindow: 'Minimize the window',
     maximizeWindow: 'Maximize the window',
     restoreWindow: 'Restore the window to its previous size',
-    focusWindow: 'Click to bring to front',
     whyUnknown: 'Why is the status unknown?',
     dismissBanner: 'Dismiss this notice',
     tileWindows: 'Tile windows',
@@ -353,19 +351,6 @@ export const messagesEn = {
     restoreNoteExecution: 'Running state and unsaved output are not restored.',
     restoreNoteUnselected:
       "Windows you don't restore now won't be offered again after the daemon's next restart.",
-
-    // The room heading's collapse toggle and per-room action buttons,
-    // plus the minimized-window marker shown in place of the cwd.
-    collapseRoom: 'Collapse this room',
-    expandRoom: 'Expand this room',
-    tileRoom: "Tile this room's windows",
-    minimizeRoom: "Minimize this room's windows",
-    restoreRoom: "Restore this room's windows",
-    minimizedMarker: 'Minimized',
-
-    // The header badge doubles as the way to reach the next window
-    // needing the user.
-    goToNextNeedingYou: 'Go to the next window that needs you',
 
     // Why the interrupt button is disabled. The two reasons are
     // separate facts -- nothing is left to interrupt, versus nothing is known
@@ -397,6 +382,11 @@ export const messagesEn = {
     /** The tooltip of a window's waiting-messages mark. */
     queuedMessages: (count: number): string =>
       `${count} queued ${count === 1 ? 'message' : 'messages'} — delivered on its next turn`,
+
+    /** A sidebar row's accessible name: the window's name and its status word. */
+    windowRow: (name: string, status: string): string => `${name}, ${status}`,
+    /** A sidebar row's accessible name when the window waits for the user's permission. */
+    windowRowAwaitingPermission: (label: string): string => `${label}, waiting for your permission`,
   },
 
   /**
@@ -915,5 +905,30 @@ export const messagesEn = {
     theme: 'Theme',
     settings: 'Settings',
     windowMenu: 'Window menu',
+  },
+
+  /** The sidebar's window list: its header, its room headings and its rows. */
+  sidebar: {
+    title: 'Windows',
+    needsYou: 'Needs you',
+    viewMenu: (mode: string): string => `View: ${mode}`,
+    focusMode: 'Focus',
+    canvasMode: 'Canvas',
+    canvasOnly: 'Canvas only',
+    newWindow: 'New window',
+    roomActions: 'Room actions',
+    folderActions: 'Folder actions',
+    tileRoom: 'Tile room',
+    minimizeAll: 'Minimize all',
+    showAll: 'Show all',
+    openChat: 'Open chat',
+    collapse: 'Collapse',
+    expand: 'Expand',
+    statusUnknown: 'Status unknown',
+    nothingNeedsYou: 'Nothing needs you right now',
+    showAllWindows: 'Show all windows',
+    empty: 'Windows you open appear here.',
+    minimized: 'Minimized',
+    awaitingPermission: 'Waiting for your permission',
   },
 };

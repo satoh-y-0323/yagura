@@ -34,9 +34,20 @@ export function describeExitCode(messages: Messages, exitCode: number): string {
   return messages.formats.exitCode(exitCode);
 }
 
-/** Describes the window list heading together with how many windows are open. */
-export function describeWindowListTitle(messages: Messages, count: number): string {
-  return messages.formats.windowListTitle(messages.hints.windowList, count);
+/**
+ * Describes a sidebar row as its accessible name: the window's name and its
+ * status word, and whether the window waits for the user's permission.
+ *
+ * @param name the window's display name, already prepared for display
+ */
+export function describeWindowRow(
+  messages: Messages,
+  name: string,
+  status: string,
+  isAwaitingPermission: boolean
+): string {
+  const label = messages.formats.windowRow(name, describeStatus(messages, status));
+  return isAwaitingPermission ? messages.formats.windowRowAwaitingPermission(label) : label;
 }
 
 /** Describes what is wrong with one window's connection, `null` while nothing is. */

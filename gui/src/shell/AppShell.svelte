@@ -28,8 +28,6 @@
   import RestoreBanner from '../components/RestoreBanner.svelte';
   import RestoreDialog from '../components/RestoreDialog.svelte';
   import SettingsPanel from '../components/SettingsPanel.svelte';
-  import StatusPanel from '../components/StatusPanel.svelte';
-  import TileIcon from '../components/TileIcon.svelte';
   import Tooltip from '../components/Tooltip.svelte';
   import { bodyEscapePanel } from '../components/panel-focus';
   import { pointerDrag, type PointerDragOptions } from '../components/pointer-drag';
@@ -233,7 +231,7 @@
   import { confirmCopy, type ConfirmOperation } from '../session/confirm-target';
   import { pairPanes, type Pane } from '../session/pane-plan';
   import { createAttentionNavigation } from '../session/attention-navigation';
-  import { currentWindowFor, isWindowVisibleFor } from '../session/current-window';
+  import { currentWindowFor, isWindowVisibleFor, type WorkMode } from '../session/current-window';
   import {
     diffAppearedWindows,
     diffGoneWindows,
@@ -242,6 +240,7 @@
     readWorkMode,
     reduceShell,
     workViewOf,
+    writeWorkMode,
     type OrderedWindow,
     type ShellEvent,
     type ShellState,
@@ -280,6 +279,7 @@
   } from '../session/restore-model';
   import { SessionController } from '../session/session-controller';
   import { createCollapsedRooms } from '../sidebar/collapsed-rooms';
+  import { nextNeedsYouView, type NeedsYouView } from '../sidebar/needs-you-view';
   import {
     groupByRoom,
     roomIdsOf,
@@ -319,6 +319,7 @@
     settings,
   } from '../ui-messages';
   import { shouldDropRememberedCwd, windowOpenFailureOf } from '../window-open-failure-model';
+  import Navigator from './Navigator.svelte';
 
   // Add-window dialog state. The detection definition the dialog shows is
   // held here because the option list is derived from it (below). The working
@@ -682,11 +683,18 @@
   /**
    * Runs one event through the shell reducer and carries out what it asks for.
    * The keyboard moves only when the reducer says so: the window list changing
-   * on its own never moves it.
+   * on its own never moves it. The work mode is saved only when a step changes it.
    */
   function dispatchShell(event: ShellEvent): void {
+    const modeBefore = get(shell).workMode;
     const step = reduceShell(get(shell), event);
     shell.set(step.state);
+    if (step.state.workMode !== modeBefore) {
+      writeWorkMode(
+        { setItem: (key: string, value: string) => createGuardedLocalStorage(key).write(value) },
+        step.state.workMode
+      );
+    }
     for (const effect of step.effects) {
       switch (effect.type) {
         case 'bringToFront': {
@@ -705,6 +713,15 @@
 
   function selectWindow(windowId: string): void {
     dispatchShell({ type: 'select', windowId });
+  }
+
+  /** The view menu's choice; the reducer decides what switching asks for. */
+  function chooseWorkMode(mode: WorkMode): void {
+    dispatchShell(
+      mode === 'focus'
+        ? { type: 'enterFocus', canvasCurrent: currentWindowNow() }
+        : { type: 'enterCanvas' }
+    );
   }
 
   /** Passes on an exit code of a window the view still lists or shows a card for. */
@@ -2059,10 +2076,53 @@
     current: currentWindowNow,
   });
 
+  // What the Needs you filter lists, `null` while it is off. Only the user's
+  // own acts rebuild it, so its rows never move on their own.
+  let needsYouView: NeedsYouView | null = null;
+
+  function toggleNeedsYouFilter(): void {
+    needsYouView = needsYouView === null ? nextNeedsYouView(null, sidebarGroups(), true) : null;
+  }
+
+  function advanceNeedsYouView(
+    userOperated: boolean,
+    groups: readonly RoomGroup<WindowEntry>[] = sidebarGroups()
+  ): void {
+    if (needsYouView !== null) {
+      needsYouView = nextNeedsYouView(needsYouView, groups, userOperated);
+    }
+  }
+
+  function goToNextWindowNeedingYou(): WindowEntry | null {
+    const target = attentionNavigation.goToNextWindowNeedingYou();
+    advanceNeedsYouView(true);
+    return target;
+  }
+
+  /** A row the user chose: its window comes on screen and takes the keyboard. */
+  function goToWindowFromSidebar(entry: WindowEntry): void {
+    revealWindow(revealDeps, entry);
+    advanceNeedsYouView(true);
+  }
+
+  function openChatForRoom(roomId: string): void {
+    if (isChatOpen) {
+      selectChatRoom(roomId);
+      return;
+    }
+    currentRoomId = roomId;
+    void toggleChat();
+  }
+
   const FOCUSABLE =
     'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
 
   let sidebarElement: HTMLElement | null = null;
+
+  $: sidebarGroupsNow = groupByRoom($registry.windows, $collapsedRooms, $registry.tabOrder);
+  $: advanceNeedsYouView(false, sidebarGroupsNow);
+  // A request names the window that asked; that window's row wears the mark.
+  $: permissionWaiters = approvals.items.flatMap((request) => request.requester.window_id ?? []);
 
   function firstFocusable(
     root: ParentNode | null,
@@ -2266,7 +2326,7 @@
     groups: sidebarGroups,
     expandRoom: collapsedRooms.expand,
     actions,
-    goToNextWindowNeedingYou: attentionNavigation.goToNextWindowNeedingYou,
+    goToNextWindowNeedingYou,
     focusTerminal: focusTerminalOf,
     openWindowForm: openAddDialog,
     toggleChat,
@@ -3415,34 +3475,23 @@
       {isSettingsOpen}
     />
 
-    <aside class="sidebar" bind:this={sidebarElement} style="flex-basis: {sidebarWidth}px;">
-      <StatusPanel
-        entries={$registry.windows}
-        {actions}
-        {roomActions}
-        collapsed={$collapsedRooms}
-        tabOrder={$registry.tabOrder}
-        onGoToNextNeedingYou={attentionNavigation.goToNextWindowNeedingYou}
-        onSelectWindow={(entry: WindowEntry) => revealWindow(revealDeps, entry)}
-      >
-        <div slot="header-action" class="header-actions">
-          <IconButton
-            class="btn btn-primary add-window-trigger"
-            label={forms.addWindowTitle}
-            on:click={openAddDialog}
-          >
-            <Icon name="plus" />
-          </IconButton>
-          <IconButton
-            class="status-panel__button arrange-window-trigger"
-            label={hints.tileWindows}
-            on:click={handleArrangeWindows}
-          >
-            <TileIcon />
-          </IconButton>
-        </div>
-      </StatusPanel>
-    </aside>
+    <Navigator
+      bind:element={sidebarElement}
+      width={sidebarWidth}
+      entries={$registry.windows}
+      groups={sidebarGroupsNow}
+      currentWindowId={current?.windowId ?? null}
+      workMode={$shell.workMode}
+      awaitingPermission={permissionWaiters}
+      {needsYouView}
+      {roomActions}
+      onToggleNeedsYou={toggleNeedsYouFilter}
+      onSelectWindow={goToWindowFromSidebar}
+      onChooseWorkMode={chooseWorkMode}
+      onTileWindows={handleArrangeWindows}
+      onNewWindow={openAddDialog}
+      onOpenChat={openChatForRoom}
+    />
 
     <!-- Pointer-only affordance: keyboard resize belongs to the shortcut
          layer, so the divider is not exposed to assistive technology. -->
@@ -3710,19 +3759,6 @@
     gap: 0;
   }
 
-  /* The width comes from the element's own flex-basis, written from the value
-     ./layout/sidebar-width keeps; the rows reach both edges. */
-  .sidebar {
-    flex-grow: 0;
-    flex-shrink: 0;
-    display: flex;
-    flex-direction: column;
-    gap: 0;
-    padding: 0;
-    overflow-y: auto;
-    background-color: var(--color-surface);
-  }
-
   /* Both the divider and the grab target for the resize, which is why it is
      wider than the hairline it draws. */
   .sidebar-resize {
@@ -3731,26 +3767,6 @@
     background-color: var(--color-surface);
     cursor: ew-resize;
     touch-action: none;
-  }
-
-  /* Tighter than the header row's own spacing, so the two buttons read as one
-     group rather than as two unrelated header controls. */
-  .header-actions {
-    display: flex;
-    gap: var(--space-xs);
-  }
-
-  :global(.btn.add-window-trigger),
-  :global(.status-panel__button.arrange-window-trigger) {
-    flex: 0 0 auto;
-    width: 28px;
-    height: 28px;
-    padding: 0;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    font-size: var(--font-size-md);
-    line-height: 1;
   }
 
   /* Holds the optional tab strip above the float area, stacked;

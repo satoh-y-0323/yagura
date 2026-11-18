@@ -37,9 +37,9 @@ const CASES: ReadonlyArray<[string, () => unknown, () => unknown]> = [
     () => render.describeDetectionWarning(messages, 'bad toml'),
   ],
   [
-    'describeWindowListTitle',
-    () => facade.describeWindowListTitle(7),
-    () => render.describeWindowListTitle(messages, 7),
+    'describeWindowRow',
+    () => facade.describeWindowRow('reviewer', 'waiting_input', true),
+    () => render.describeWindowRow(messages, 'reviewer', 'waiting_input', true),
   ],
   ['describeExit', () => facade.describeExit(3), () => render.describeExit(messages, 3)],
   [
