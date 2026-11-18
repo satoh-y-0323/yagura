@@ -2,7 +2,7 @@
   /**
    * A menu drawn in the overlay host (the open modal, else the app's overlay
    * layer), not where it is declared, so a menu opened from inside a floating
-   * window or a dialog is neither clipped nor inert. Items are `role="menuitem"`
+   * window or a dialog is neither clipped nor inert. Items are `role="menuitem"` (or `menuitemradio`)
    * children, optionally laid out as `popup-menu__icon`, `popup-menu__label`
    * and `popup-menu__badge`; a `<select>` is reachable like an item.
    */
@@ -16,7 +16,8 @@
   /** Why the menu asks to be closed. */
   type CloseReason = 'escape' | 'tab' | 'outside' | 'resize';
 
-  const NAVIGABLE = '[role="menuitem"], [role="separator"], hr, select';
+  const ITEM = '[role="menuitem"], [role="menuitemradio"]';
+  const NAVIGABLE = `${ITEM}, [role="separator"], hr, select`;
 
   export let isOpen = false;
   /** Viewport-relative box the menu opens next to; a point is a zero-size box. */
@@ -149,7 +150,7 @@
 
   // Hover and keyboard focus are one highlight: pointing at an item focuses it.
   function handlePointerOver(event: PointerEvent): void {
-    const item = event.target instanceof Element ? event.target.closest('[role="menuitem"]') : null;
+    const item = event.target instanceof Element ? event.target.closest(ITEM) : null;
     if (item instanceof HTMLElement && !describeEntry(item).disabled) {
       item.focus({ preventScroll: true });
     }

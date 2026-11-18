@@ -672,8 +672,8 @@
   <button
     type="button"
     class="popup-menu__item"
-    role="menuitem"
-    aria-current={isCanvas ? undefined : 'true'}
+    role="menuitemradio"
+    aria-checked={!isCanvas}
     on:click={() => chooseFromViewMenu(() => onChooseWorkMode('focus'))}
   >
     <span class="popup-menu__icon">
@@ -684,8 +684,8 @@
   <button
     type="button"
     class="popup-menu__item"
-    role="menuitem"
-    aria-current={isCanvas ? 'true' : undefined}
+    role="menuitemradio"
+    aria-checked={isCanvas}
     on:click={() => chooseFromViewMenu(() => onChooseWorkMode('canvas'))}
   >
     <span class="popup-menu__icon">
