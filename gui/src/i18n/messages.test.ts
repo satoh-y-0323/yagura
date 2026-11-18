@@ -420,6 +420,7 @@ export const dummyMessages: Messages = {
   },
   nav: {
     windows: 'DUMMY_nav_windows',
+    board: 'DUMMY_nav_board',
     // The Kanban seat becomes the Plans seat.
     plans: 'DUMMY_nav_plans',
     chat: 'DUMMY_nav_chat',

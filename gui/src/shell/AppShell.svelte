@@ -2235,6 +2235,14 @@
     activateWindow({ byUser: true, target: windowId, pressOnControl: false });
   }
 
+  /** The rail's Windows item: the keyboard goes back to the current window, when there is one. */
+  function focusCurrentTerminal(): void {
+    const now = currentWindowNow();
+    if (now !== null) {
+      focusTerminalOf(now.windowId);
+    }
+  }
+
   /** After the user changed the front window without one target: back only if focus was lost. */
   function returnFocusIfLost(): void {
     activateWindow({ byUser: true, target: null, pressOnControl: false });
@@ -3481,6 +3489,7 @@
   <div class="layout">
     <AppRail
       windowsSummary={summarizeWindowStatuses($registry.windows)}
+      onWindowsSelect={focusCurrentTerminal}
       {appThemeValue}
       {appThemeOptions}
       onAppThemeChange={handleAppThemeChange}

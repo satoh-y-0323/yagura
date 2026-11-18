@@ -907,6 +907,7 @@ export const messagesEn = {
 
   nav: {
     windows: 'Windows',
+    board: 'Board',
     plans: 'Plans',
     chat: 'Chat',
     theme: 'Theme',

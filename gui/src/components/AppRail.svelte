@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { chat, nav, plans } from '../ui-messages';
+  import { chat, describeAttentionBadge, nav, plans } from '../ui-messages';
   import type { WindowStatusSummary } from '../status-tone';
   import StatusBadge from './StatusBadge.svelte';
   import PlansAttentionMark from './PlansAttentionMark.svelte';
@@ -11,12 +11,14 @@
   import appMark from '../../src-tauri/icons/icon-small.svg';
 
   /**
-   * The rail carries navigation only: which panel
-   * is visible, the app theme, and the "needs you" count. It owns no IPC and
+   * The rail carries navigation only: the work surface, which panel is
+   * visible, the app theme, and the "needs you" count. It owns no IPC and
    * no store: the count and the theme wiring are both derived
    * upstream and handed in as props.
    */
   export let windowsSummary: WindowStatusSummary;
+  /** Takes the keyboard back to the work surface, the current window's terminal. */
+  export let onWindowsSelect: () => void;
   export let appThemeValue: string;
   export let appThemeOptions: { value: string; label: string }[];
   export let onAppThemeChange: (event: Event) => void;
@@ -39,12 +41,23 @@
       ? null
       : plans.plansAttentionBadge(plansAttention.kind === 'pending', plansAttention.count);
   $: themeMark = themeMarkOf(appThemeValue, appThemeOptions);
+  // The button's own name replaces the badge's, so the count is described instead.
+  $: windowsHint =
+    windowsSummary.count > 0 ? describeAttentionBadge(windowsSummary.count) : undefined;
 </script>
 
 <nav class="app-rail">
   <img class="app-rail__mark" src={appMark} alt="" aria-hidden="true" />
 
-  <IconButton class="app-rail__button app-rail__button--active" label={nav.windows}>
+  <!-- The work surface is always the windows until other pages exist, so this
+       item is always the current place. -->
+  <IconButton
+    class="app-rail__button"
+    label={nav.windows}
+    hint={windowsHint}
+    aria-current="page"
+    on:click={onWindowsSelect}
+  >
     <svg class="app-rail__icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
       <rect
         x="3"
@@ -69,7 +82,7 @@
 
   <IconButton
     class="app-rail__button"
-    label={nav.plans}
+    label={nav.board}
     hint={plansAttentionText ?? undefined}
     aria-pressed={isPlansOpen}
     on:click={onPlansToggle}
@@ -207,53 +220,70 @@
 
 <style>
   .app-rail {
-    flex: 0 0 48px;
-    width: 48px;
+    flex: 0 0 var(--rail-width);
+    width: var(--rail-width);
     display: flex;
     flex-direction: column;
     align-items: center;
-    gap: var(--space-sm);
-    padding: var(--space-sm) 0;
-    background-color: var(--color-background);
-    border-right: 1px solid var(--color-border);
+    gap: var(--space-1);
+    padding: var(--space-1_5) 0;
+    background-color: var(--bg-chrome);
+    border-right: var(--line-width) solid var(--line);
   }
 
   .app-rail__mark {
     flex: 0 0 auto;
-    width: 30px;
-    height: 30px;
+    width: 28px;
+    height: 28px;
+    margin: var(--space-0_5) 0 var(--space-2);
   }
 
   :global(.app-rail__button) {
     position: relative;
     flex: 0 0 auto;
-    width: 34px;
-    height: 34px;
+    width: var(--rail-button-size);
+    height: var(--rail-button-size);
     display: flex;
     align-items: center;
     justify-content: center;
+    padding: 0;
     border: none;
-    border-left: 2px solid transparent;
     border-radius: var(--radius-sm);
     background: none;
-    color: var(--color-text-secondary);
+    color: var(--fg-muted);
     cursor: pointer;
   }
 
-  :global(.app-rail__button:disabled) {
-    opacity: 0.4;
-    cursor: not-allowed;
+  :global(.app-rail__button:hover) {
+    background-color: var(--bg-hover);
   }
 
+  :global(.app-rail__button:focus-visible) {
+    outline: var(--line-width-strong) solid var(--ring);
+    outline-offset: 0;
+  }
+
+  /* A panel floats over the work surface rather than replacing it, so an open
+     one is shown pressed, never with the bar that marks the current place. */
   :global(.app-rail__button[aria-pressed='true']) {
-    background-color: var(--color-surface);
-    color: var(--color-primary);
+    background-color: var(--bg-selected);
+    color: var(--fg-default);
   }
 
-  :global(.app-rail__button--active) {
-    background-color: var(--color-surface);
-    border-left-color: var(--color-primary);
-    color: var(--color-primary);
+  :global(.app-rail__button[aria-current='page']) {
+    color: var(--fg-default);
+  }
+
+  /* The bar sits on the rail's own edge, so the place is not told by colour alone. */
+  :global(.app-rail__button[aria-current='page']::before) {
+    content: '';
+    position: absolute;
+    top: 7px;
+    bottom: 7px;
+    left: calc((var(--rail-width) - var(--rail-button-size)) / -2);
+    width: var(--line-width-strong);
+    border-radius: var(--line-width-strong);
+    background-color: var(--fg-default);
   }
 
   .app-rail__icon {
@@ -263,23 +293,26 @@
 
   .app-rail__badge {
     position: absolute;
-    top: 2px;
-    right: 2px;
+    top: -2px;
+    right: -3px;
     display: flex;
   }
 
   /* The chat asks for the user: a bare dot in the input-needed colour. */
   .app-rail__badge--dot {
-    width: 8px;
-    height: 8px;
+    top: var(--space-1);
+    right: var(--space-1);
+    width: 7px;
+    height: 7px;
     border-radius: var(--radius-full);
     background-color: var(--st-input);
+    box-shadow: 0 0 0 var(--line-width-strong) var(--bg-chrome);
   }
 
   .app-rail__plans-mark {
     position: absolute;
-    top: 2px;
-    right: 2px;
+    top: -2px;
+    right: -3px;
     display: flex;
   }
 
@@ -290,15 +323,15 @@
   .app-rail__divider {
     flex: 0 0 auto;
     width: 24px;
-    height: 1px;
-    background-color: var(--color-border);
+    height: var(--line-width);
+    background-color: var(--line);
   }
 
   /* The hidden select cannot show its own focus ring, so the seat shows it,
      for keyboard focus only. */
   .app-rail__theme:has(.theme-select:focus-visible) {
-    outline: 2px solid var(--color-primary);
-    outline-offset: 2px;
+    outline: var(--line-width-strong) solid var(--ring);
+    outline-offset: 0;
   }
 
   /* Transparent over the icon but still hit-tested, so a click opens the
@@ -314,6 +347,6 @@
     border: none;
     opacity: 0;
     cursor: pointer;
-    font-size: var(--font-size-sm);
+    font-size: var(--text-sm);
   }
 </style>
