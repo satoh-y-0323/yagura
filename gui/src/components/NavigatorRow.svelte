@@ -5,7 +5,13 @@
    */
   import type { WindowEntry } from '../stores/window-registry';
   import { needsYou } from '../status-tone';
-  import { describeUnknownExplanation, describeWindowRow, nav, sidebar } from '../ui-messages';
+  import {
+    describeUnknownExplanation,
+    describeWindowHeader,
+    describeWindowRow,
+    nav,
+    sidebar,
+  } from '../ui-messages';
   import Icon from './Icon.svelte';
   import IconButton from './IconButton.svelte';
   import QueuedMark from './QueuedMark.svelte';
@@ -36,6 +42,18 @@
   // Unknown is not counted as needing the user, but it is not quiet either.
   $: isProminent = !isSettled && (needsYou(entry) || entry.detected.status === 'unknown');
   $: explanation = describeUnknownExplanation(entry.detected, entry.displayDetectionWarning);
+  // The card repeats what the window's header says: where it runs (the header
+  // description's first sentence) and why its status is unknown.
+  $: cardDetails = [
+    describeWindowHeader({
+      vendor: entry.displayVendor,
+      cwd: entry.displayCwd,
+      showsMcpMark: false,
+      showsStatusReportMark: false,
+      queuedCount: undefined,
+    }),
+    explanation,
+  ].filter((line) => line !== '');
   $: nameId = `navigator-row-name-${entry.windowId}`;
   $: whyId = `navigator-row-why-${entry.windowId}`;
   $: minimizedId = `navigator-row-minimized-${entry.windowId}`;
@@ -57,6 +75,7 @@
     aria-current={isCurrent ? 'true' : undefined}
     aria-labelledby={nameId}
     aria-describedby={describedBy}
+    use:tooltip={{ text: entry.displayName, details: cardDetails, announcedElsewhere: true }}
     on:click={() => onSelect(entry)}
   >
     <span id={nameId} hidden
@@ -69,10 +88,7 @@
       <span id={minimizedId} hidden>{sidebar.minimized}</span>
     {/if}
     <StatusBadge status={entry.detected.status} variant="icon" />
-    <span
-      class="navigator-row__name"
-      use:tooltip={{ text: entry.displayName, announcedElsewhere: true }}>{entry.displayName}</span
-    >
+    <span class="navigator-row__name">{entry.displayName}</span>
     {#if entry.displayVendor !== null}
       <span class="navigator-row__vendor">{entry.displayVendor}</span>
     {/if}

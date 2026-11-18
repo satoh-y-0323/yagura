@@ -3,6 +3,7 @@
  * publish into `activeTooltip`; `Tooltip.svelte` renders it, in the host that
  * `overlay-host` picks for the trigger. A tooltip only repeats what the trigger
  * already exposes by name or description, never carries information alone.
+ * With `details` it is a hover card: the heading `text` and the lines below it.
  */
 import { writable } from 'svelte/store';
 
@@ -12,6 +13,8 @@ import { createTooltipController } from './tooltip-controller';
 
 export interface TooltipOptions {
   text: string;
+  /** Lines drawn under `text`; empty or absent for a plain tooltip. */
+  details?: readonly string[];
   /** `toggle` is the press-to-open chip (a toggletip); `hover` is the default. */
   mode?: 'hover' | 'toggle';
   /** The trigger already exposes `text` as its name or description, so assistive tech skips the tooltip. */
@@ -23,6 +26,7 @@ export interface ActiveTooltip {
   owner: object;
   origin: HTMLElement;
   text: string;
+  details: readonly string[];
   mode: 'hover' | 'toggle';
   announcedElsewhere: boolean;
   holdOpen: () => void;
@@ -66,6 +70,7 @@ export function tooltip(node: HTMLElement, initial: TooltipOptions | undefined) 
       owner,
       origin: node,
       text: options.text,
+      details: options.details ?? [],
       mode: options.mode ?? 'hover',
       announcedElsewhere: options.announcedElsewhere ?? false,
       holdOpen: controller.pointerEnterTooltip,

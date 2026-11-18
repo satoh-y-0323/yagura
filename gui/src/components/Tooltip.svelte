@@ -54,6 +54,9 @@
     on:pointerleave={active.release}
   >
     {active.text}
+    {#each active.details as detail, index (index)}
+      <div class="tooltip__detail">{detail}</div>
+    {/each}
   </div>
 {/if}
 
@@ -73,5 +76,9 @@
     overflow-wrap: anywhere;
     pointer-events: auto;
     z-index: var(--z-tooltip);
+  }
+
+  .tooltip__detail {
+    color: var(--fg-muted);
   }
 </style>
