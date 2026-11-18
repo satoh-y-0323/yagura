@@ -299,8 +299,12 @@
   import { syncWindows } from '../session/window-sync';
   import {
     attentionCount,
+    beginAttentionSend,
     emptyArrivalMemory,
+    emptyAttentionSendState,
+    noteAttentionArrival,
     observeNeedsYouArrivals,
+    settleAttentionSend,
     summarizeWindowStatuses,
   } from '../status-tone';
   import { createWindowSessionStore } from '../stores/session-store';
@@ -2351,8 +2355,7 @@
   // What the core is told about the things waiting for the user. Arrivals are
   // gathered into one mark that the next send carries and clears.
   let arrivalMemory = emptyArrivalMemory();
-  let isArrivalPending = false;
-  let sentTotals: { needsYou: number; pendingPermissions: number } | null = null;
+  let attentionSend = emptyAttentionSendState();
 
   // Every registry change is observed, not only the last one of a tick: a
   // `running` applied and replaced within one tick still opens a turn.
@@ -2360,7 +2363,7 @@
     const observed = observeNeedsYouArrivals(arrivalMemory, state.windows);
     arrivalMemory = observed.memory;
     if (observed.arrived.length > 0) {
-      isArrivalPending = true;
+      attentionSend = noteAttentionArrival(attentionSend);
     }
     sendAttentionSummary(state, approvals, false);
   }
@@ -2371,21 +2374,28 @@
     queue: approvalQueue.ApprovalQueueState,
     always: boolean
   ): void {
-    const needsYou = attentionCount(registryState.windows);
-    const pendingPermissions = approvalQueue.size(queue);
-    const isTotalsChanged =
-      sentTotals === null ||
-      sentTotals.needsYou !== needsYou ||
-      sentTotals.pendingPermissions !== pendingPermissions;
-    if (!always && !isTotalsChanged && !isArrivalPending) {
+    const began = beginAttentionSend(
+      attentionSend,
+      {
+        needsYou: attentionCount(registryState.windows),
+        pendingPermissions: approvalQueue.size(queue),
+      },
+      always
+    );
+    attentionSend = began.state;
+    const { send } = began;
+    if (send === null) {
       return;
     }
-    const arrived = isArrivalPending;
-    isArrivalPending = false;
-    sentTotals = { needsYou, pendingPermissions };
-    invokeSetAttentionSummary(needsYou, pendingPermissions, arrived).catch((error: unknown) => {
-      console.error('failed to set the attention summary:', error);
-    });
+    invokeSetAttentionSummary(send.needsYou, send.pendingPermissions, send.arrived).then(
+      () => {
+        attentionSend = settleAttentionSend(attentionSend, send, true);
+      },
+      (error: unknown) => {
+        attentionSend = settleAttentionSend(attentionSend, send, false);
+        console.error('failed to set the attention summary:', error);
+      }
+    );
   }
 
   const unsubscribeArrivals = registry.subscribe(observeArrivals);
@@ -2596,7 +2606,7 @@
         },
         onApprovalRequested: (payload) => {
           if (!approvalQueue.holds(approvals, payload.request.request_id)) {
-            isArrivalPending = true;
+            attentionSend = noteAttentionArrival(attentionSend);
           }
           approvals = approvalQueue.enqueue(approvals, payload.request);
         },

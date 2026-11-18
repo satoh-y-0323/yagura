@@ -206,3 +206,89 @@ function sameReportKey(a: ReportKey, b: ReportKey): boolean {
   }
   return a.boot.origin === b.boot.origin && a.boot.seq === b.boot.seq;
 }
+
+/** The totals the shell tells the core about. */
+export interface AttentionTotals {
+  needsYou: number;
+  pendingPermissions: number;
+}
+
+/** One message to the core: the totals and whether an arrival rides on it. */
+export interface AttentionSend extends AttentionTotals {
+  arrived: boolean;
+}
+
+/**
+ * What the shell remembers about telling the core. Arrivals are counted, and
+ * the count the core has acknowledged is kept apart, so an arrival that lands
+ * while a send is in flight, or a send that fails, never loses one.
+ */
+export interface AttentionSendState {
+  readonly lastSent: AttentionTotals | null;
+  readonly arrivals: number;
+  readonly acknowledged: number;
+  readonly inFlight: readonly { send: AttentionSend; through: number }[];
+}
+
+/** The state a shell starts with: nothing sent, nothing arrived. */
+export function emptyAttentionSendState(): AttentionSendState {
+  return { lastSent: null, arrivals: 0, acknowledged: 0, inFlight: [] };
+}
+
+/** Records that something arrived for the user since the last acknowledged send. */
+export function noteAttentionArrival(state: AttentionSendState): AttentionSendState {
+  return { ...state, arrivals: state.arrivals + 1 };
+}
+
+/**
+ * Decides whether to send now. A send is made when nothing was sent yet, the
+ * totals differ from the last acknowledged send, an arrival is unacknowledged,
+ * or `always` is set. The returned state tracks the send until it is settled.
+ */
+export function beginAttentionSend(
+  state: AttentionSendState,
+  totals: AttentionTotals,
+  always: boolean
+): { state: AttentionSendState; send: AttentionSend | null } {
+  const arrived = state.arrivals > state.acknowledged;
+  const last = state.lastSent;
+  const moved =
+    last === null ||
+    last.needsYou !== totals.needsYou ||
+    last.pendingPermissions !== totals.pendingPermissions;
+  if (!always && !moved && !arrived) {
+    return { state, send: null };
+  }
+  const send: AttentionSend = {
+    needsYou: totals.needsYou,
+    pendingPermissions: totals.pendingPermissions,
+    arrived,
+  };
+  return {
+    state: { ...state, inFlight: [...state.inFlight, { send, through: state.arrivals }] },
+    send,
+  };
+}
+
+/**
+ * Applies the outcome of a send returned by {@link beginAttentionSend}.
+ * Success acknowledges only the arrivals that send carried and records its
+ * totals; failure changes nothing, so the next send carries them again.
+ */
+export function settleAttentionSend(
+  state: AttentionSendState,
+  send: AttentionSend,
+  succeeded: boolean
+): AttentionSendState {
+  const entry = state.inFlight.find((item) => item.send === send);
+  const inFlight = state.inFlight.filter((item) => item.send !== send);
+  if (!succeeded || entry === undefined) {
+    return { ...state, inFlight };
+  }
+  return {
+    ...state,
+    inFlight,
+    lastSent: { needsYou: send.needsYou, pendingPermissions: send.pendingPermissions },
+    acknowledged: Math.max(state.acknowledged, entry.through),
+  };
+}
