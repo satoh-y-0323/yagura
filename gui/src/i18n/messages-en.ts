@@ -119,14 +119,6 @@ export const messagesEn = {
     unknown: 'Unknown',
   },
 
-  sessionPhaseLabels: {
-    connecting: 'Connecting…',
-    attached: 'Attached',
-    exited: 'The process has exited',
-    superseded: 'Another window connected',
-    failed: 'Cannot reach the daemon',
-  },
-
   buttons: {
     close: 'Close',
     interrupt: 'Interrupt',

@@ -8,7 +8,6 @@ import {
   describeDeliveryState as renderDescribeDeliveryState,
   describeDetectionWarning as renderDescribeDetectionWarning,
   describeDiscardedKeymapEntries as renderDescribeDiscardedKeymapEntries,
-  describeExit as renderDescribeExit,
   describeExitCode as renderDescribeExitCode,
   describeExitedWindow as renderDescribeExitedWindow,
   describeGoToWindow as renderDescribeGoToWindow,
@@ -40,9 +39,6 @@ const messages = resolveMessages();
 
 /** Status display strings. */
 export const statusLabels = messages.statusLabels;
-
-/** Session phase display strings. */
-export const sessionPhaseLabels = messages.sessionPhaseLabels;
 
 /** Button labels. */
 export const buttons = messages.buttons;
@@ -179,14 +175,6 @@ export type { WindowHeaderFacts };
  */
 export function describeWindowHeader(facts: WindowHeaderFacts): string {
   return renderDescribeWindowHeader(messages, facts);
-}
-
-/**
- * Describes an exit code for display.
- * @param exitCode the exit code, or null if not yet determined
- */
-export function describeExit(exitCode: number | null): string {
-  return renderDescribeExit(messages, exitCode);
 }
 
 /**

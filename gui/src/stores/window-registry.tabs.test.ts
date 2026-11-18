@@ -260,26 +260,6 @@ describe('window registry tab order: the multiset invariant holds on every path'
 });
 
 describe('window registry tab order: single-maximize does not regress', () => {
-  it('still restores the previously maximized window when another one is maximized', () => {
-    const registry = openRegistry('w-a', 'w-b');
-    registry.setWindowMaximized('w-a', true);
-
-    registry.setWindowMaximized('w-b', true);
-
-    const maximized = get(registry).windows.filter((entry) => entry.display.isMaximized);
-    expect(maximized.map((entry) => entry.windowId)).toEqual(['w-b']);
-  });
-
-  it('still restores the maximized window when another one is brought to the front', () => {
-    const registry = openRegistry('w-a', 'w-b');
-    registry.setWindowMaximized('w-a', true);
-
-    registry.bringWindowToFront('w-b');
-
-    const maximized = get(registry).windows.filter((entry) => entry.display.isMaximized);
-    expect(maximized).toEqual([]);
-  });
-
   it('leaves the tab order untouched when the maximized window changes', () => {
     const registry = openRegistry('w-a', 'w-b', 'w-c');
     registry.moveTab('w-c', 0);

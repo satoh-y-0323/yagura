@@ -20,15 +20,6 @@ export function describeStatus(messages: Messages, status: string): string {
     : messages.statusLabels.unknown;
 }
 
-/** Describes an exit code for display (session-phase label, with the code appended once known). */
-export function describeExit(messages: Messages, exitCode: number | null): string {
-  const exitLabel = messages.sessionPhaseLabels.exited;
-  if (exitCode === null) {
-    return exitLabel;
-  }
-  return `${exitLabel} ${messages.formats.exitCode(exitCode)}`;
-}
-
 /** Describes an exit code shown next to a window status that already says the process has exited. */
 export function describeExitCode(messages: Messages, exitCode: number): string {
   return messages.formats.exitCode(exitCode);

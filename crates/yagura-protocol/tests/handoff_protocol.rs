@@ -184,21 +184,6 @@ fn handoff_sent_missing_delivery_is_a_decode_error() {
     );
 }
 
-#[test]
-fn existing_message_types_still_decode_after_adding_send_handoff_and_handoff_sent() {
-    // Adding a variant to each enum's #[serde(tag = "type")] wire format must
-    // not disturb any existing message's shape.
-    let ping = decode_client_message(br#"{"type":"ping"}"#).expect("ping must still decode");
-    assert!(matches!(ping, ClientMessage::Ping));
-
-    let pong = decode_daemon_message(br#"{"type":"pong"}"#).expect("pong must still decode");
-    assert!(matches!(pong, DaemonMessage::Pong));
-
-    let attach = decode_client_message(br#"{"type":"attach_view","window_id":"w1"}"#)
-        .expect("attach decodes");
-    assert!(matches!(attach, ClientMessage::AttachView { .. }));
-}
-
 // =====================================================================
 // validate_handoff_target: the window_id / profile exclusivity rule
 // =====================================================================

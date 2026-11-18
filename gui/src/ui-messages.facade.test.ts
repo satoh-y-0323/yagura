@@ -53,7 +53,6 @@ const CASES: ReadonlyArray<[string, () => unknown, () => unknown]> = [
     () => facade.describeWindowHeader(HEADER_FACTS),
     () => render.describeWindowHeader(messages, HEADER_FACTS),
   ],
-  ['describeExit', () => facade.describeExit(3), () => render.describeExit(messages, 3)],
   [
     'describeExitedWindow',
     () => facade.describeExitedWindow('reviewer', 1),

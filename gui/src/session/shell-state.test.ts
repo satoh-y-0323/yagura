@@ -84,6 +84,7 @@ interface ShellStateModule {
     current: readonly OrderedWindow[]
   ) => ShellEvent[];
   workViewOf: (state: ShellState) => WorkView;
+  exitedCardNeighbor: (card: ExitedCard, step: 1 | -1) => string | null;
   readWorkMode: (storage: { getItem: (key: string) => string | null }) => WorkMode;
   writeWorkMode: (storage: Pick<Storage, 'setItem'>, mode: WorkMode) => void;
   firstWindowAtStartup: <T extends StartupWindow>(
@@ -737,19 +738,11 @@ describe('reduceShell: going to the canvas while a card is shown', () => {
   });
 });
 
-/**
- * The key-driven neighbour of an ended window's card. No name is fixed for it
- * anywhere yet, so it is looked up inside each case and only these cases fail
- * while it is missing.
- */
-type CardNeighbor = (card: ExitedCard, step: 1 | -1) => string | null;
-
 function cardNeighborOf(card: ExitedCard | null, step: 1 | -1): string | null {
-  const found = (shellStateModule() as unknown as Record<string, unknown>)['exitedCardNeighbor'];
-  if (typeof found !== 'function' || card === null) {
-    throw new Error('exitedCardNeighbor (gui/src/session/shell-state.ts) is not provided');
+  if (card === null) {
+    throw new Error('no card is showing');
   }
-  return (found as CardNeighbor)(card, step);
+  return shellStateModule().exitedCardNeighbor(card, step);
 }
 
 function cardedAmong(windowId: string, order: readonly OrderedWindow[]): ShellState {

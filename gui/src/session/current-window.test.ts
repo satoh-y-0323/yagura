@@ -72,8 +72,6 @@ function placed(windowId: string, placement: Placement): PlacedWindow {
   };
 }
 
-describe('current-window module', () => {});
-
 describe('isWindowVisibleFor in Canvas: the one definition of a window being on screen', () => {
   it('shows every window that is not minimized while no window is maximized', () => {
     const { isWindowVisibleFor } = currentWindowModule();

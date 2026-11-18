@@ -26,6 +26,7 @@ import {
   isWithinGuard,
   markInFlight,
   clearInFlight,
+  windowsAwaitingPermission,
   type ApprovalQueueState,
 } from './approval-queue';
 import type { ApprovalRequest } from '../ipc/session-boundary';
@@ -517,39 +518,31 @@ describe('isWithinGuard: the boundary', () => {
 });
 
 describe('windowsAwaitingPermission: which windows wear the permission mark', () => {
-  // The function's name has no source line yet; it is read here so a different name fails only this block.
-  async function waiting(state: ApprovalQueueState): Promise<ReadonlySet<string>> {
-    const queue = (await import('./approval-queue')) as unknown as {
-      windowsAwaitingPermission: (state: ApprovalQueueState) => ReadonlySet<string>;
-    };
-    return queue.windowsAwaitingPermission(state);
-  }
-
   const from = (windowId: string | null) => ({
     requester: { kind: 'window' as const, window_id: windowId, name: null },
   });
 
-  it('holds the window that asked, and leaves out a request that did not come from a window', async () => {
+  it('holds the window that asked, and leaves out a request that did not come from a window', () => {
     let state = enqueue(emptyQueue(), makeRequest('req-a', from('w-1')));
     state = enqueue(state, makeRequest('req-b', from(null)));
     state = enqueue(state, makeRequest('req-c', from('w-2')));
 
-    expect([...(await waiting(state))].sort()).toEqual(['w-1', 'w-2']);
+    expect([...windowsAwaitingPermission(state)].sort()).toEqual(['w-1', 'w-2']);
   });
 
-  it('counts a window once however many of its requests are pending, and still while one is in flight', async () => {
+  it('counts a window once however many of its requests are pending, and still while one is in flight', () => {
     let state = enqueue(emptyQueue(), makeRequest('req-a', from('w-1')));
     state = enqueue(state, makeRequest('req-b', from('w-1')));
     state = markInFlight(state, 'req-a');
 
-    expect([...(await waiting(state))]).toEqual(['w-1']);
+    expect([...windowsAwaitingPermission(state)]).toEqual(['w-1']);
   });
 
-  it('drops the window when its request is withdrawn, and is empty for an empty queue', async () => {
+  it('drops the window when its request is withdrawn, and is empty for an empty queue', () => {
     const state = enqueue(emptyQueue(), makeRequest('req-a', from('w-1')));
 
-    expect((await waiting(withdraw(state, 'req-a'))).size).toBe(0);
-    expect((await waiting(emptyQueue())).size).toBe(0);
+    expect(windowsAwaitingPermission(withdraw(state, 'req-a')).size).toBe(0);
+    expect(windowsAwaitingPermission(emptyQueue()).size).toBe(0);
   });
 });
 

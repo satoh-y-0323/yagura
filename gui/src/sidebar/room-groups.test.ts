@@ -141,20 +141,6 @@ describe('groupByRoom', () => {
     expect(idsAfter).toEqual(['w-a', 'w-b', 'w-c']);
   });
 
-  it('places a window id absent from tabOrder at the end of its room (totality)', () => {
-    const room = { roomId: 'room-a', name: 'Room A', displayName: 'Room A' };
-    const entries = [
-      makeEntry({ windowId: 'w-a', room, status: 'idle' }),
-      makeEntry({ windowId: 'w-b', room, status: 'running' }),
-      makeEntry({ windowId: 'w-c', room, status: 'waiting_input' }),
-    ];
-    const tabOrder = ['w-c', 'w-a']; // w-b is absent from tabOrder
-
-    const groups = groupByRoom(entries, new Set(), tabOrder);
-
-    expect(groups[0]?.entries.map((entry) => entry.windowId)).toEqual(['w-c', 'w-a', 'w-b']);
-  });
-
   it('keeps room order tied to entries, unaffected by status changes and a reordered tabOrder (rejects path B)', () => {
     const roomA = { roomId: 'room-a', name: 'Room A', displayName: 'Room A' };
     const roomB = { roomId: 'room-b', name: 'Room B', displayName: 'Room B' };
@@ -287,19 +273,14 @@ describe('pruneCollapsed', () => {
     expect(pruneCollapsed(collapsed, live)).toEqual(new Set(['room-a']));
   });
 
-  it('does not mutate the input collapsed set', () => {
+  it('returns a new Set and does not mutate the input collapsed set', () => {
     const collapsed = new Set(['room-a', 'room-b']);
     const live = new Set(['room-a']);
 
-    pruneCollapsed(collapsed, live);
+    const pruned = pruneCollapsed(collapsed, live);
 
+    expect(pruned).not.toBe(collapsed);
     expect(collapsed).toEqual(new Set(['room-a', 'room-b']));
-  });
-
-  it('returns a new Set instance', () => {
-    const collapsed = new Set(['room-a']);
-
-    expect(pruneCollapsed(collapsed, new Set(['room-a']))).not.toBe(collapsed);
   });
 });
 

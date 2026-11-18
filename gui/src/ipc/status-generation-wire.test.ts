@@ -190,46 +190,22 @@ function rustReportStateSpellings(): string[] {
   return spellings;
 }
 
-describe('the three wire shapes name the status generation identically', () => {
-  it('reads a non-empty source for each side (sanity check against a vacuous pass)', () => {
-    expect(protocolSource.length).toBeGreaterThan(0);
-    expect(desktopEventsSource.length).toBeGreaterThan(0);
-  });
-
-  it('finds a generation field in each of the three shapes', () => {
-    expect(WINDOW_RECORD_KEY.length).toBeGreaterThan(0);
-    expect(STATUS_PUSH_KEY.length).toBeGreaterThan(0);
-    expect(DESKTOP_EVENT_KEY.length).toBeGreaterThan(0);
-    expect(WINDOW_RECORD_BOOT_KEY.length).toBeGreaterThan(0);
-    expect(STATUS_PUSH_BOOT_KEY.length).toBeGreaterThan(0);
-    expect(DESKTOP_EVENT_BOOT_KEY.length).toBeGreaterThan(0);
-  });
-
-  it('spells the generation key the same way in all three', () => {
-    expect(new Set([WINDOW_RECORD_KEY, STATUS_PUSH_KEY, DESKTOP_EVENT_KEY]).size).toBe(1);
-    expect(
-      new Set([WINDOW_RECORD_BOOT_KEY, STATUS_PUSH_BOOT_KEY, DESKTOP_EVENT_BOOT_KEY]).size
-    ).toBe(1);
-    expect(
-      new Set([
-        WINDOW_RECORD_TASK_REPORT_KEY,
-        STATUS_PUSH_TASK_REPORT_KEY,
-        DESKTOP_EVENT_TASK_REPORT_KEY,
-      ]).size
-    ).toBe(1);
-  });
-});
-
 describe('this boundary reads the generation under the key the Rust sources use', () => {
-  it('carries the generation of a status event sent under the desktop layer key', () => {
-    const payload = narrowStatusPayload({
-      status: 'running',
-      window_id: WINDOW_ID,
-      [DESKTOP_EVENT_KEY]: 9,
-      [DESKTOP_EVENT_BOOT_KEY]: { origin: 7, seq: 3 },
-    });
-    expect(payload.status_rev).toBe(9);
-    expect(payload.status_boot).toEqual({ origin: 7, seq: 3 });
+  it('carries the generation of a status event sent under the desktop layer key and under the daemon push key', () => {
+    const routes: [string, string, number][] = [
+      [DESKTOP_EVENT_KEY, DESKTOP_EVENT_BOOT_KEY, 9],
+      [STATUS_PUSH_KEY, STATUS_PUSH_BOOT_KEY, 5],
+    ];
+    for (const [key, bootKey, generation] of routes) {
+      const payload = narrowStatusPayload({
+        status: 'running',
+        window_id: WINDOW_ID,
+        [key]: generation,
+        [bootKey]: { origin: 7, seq: 3 },
+      });
+      expect(payload.status_rev, key).toBe(generation);
+      expect(payload.status_boot, key).toEqual({ origin: 7, seq: 3 });
+    }
   });
 
   it('carries the generation of a window record sent under the daemon record key', () => {
@@ -245,17 +221,6 @@ describe('this boundary reads the generation under the key the Rust sources use'
     });
     expect(info.status_rev).toBe(4);
     expect(info.status_boot).toEqual({ origin: 7, seq: 3 });
-  });
-
-  it('carries the generation of a status event sent under the daemon push key', () => {
-    const payload = narrowStatusPayload({
-      status: 'running',
-      window_id: WINDOW_ID,
-      [STATUS_PUSH_KEY]: 5,
-      [STATUS_PUSH_BOOT_KEY]: { origin: 7, seq: 3 },
-    });
-    expect(payload.status_rev).toBe(5);
-    expect(payload.status_boot).toEqual({ origin: 7, seq: 3 });
   });
 
   it('carries the report mark of each shape sent under the Rust key and field names', () => {

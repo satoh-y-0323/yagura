@@ -8,7 +8,12 @@ import { describe, it, expect } from 'vitest';
 
 import type { DetectedStatusView, TaskReportMark, WindowStatus } from '../ipc/session-boundary';
 import { groupByRoom } from './room-groups';
-import type { NeedsYouView } from './needs-you-view';
+import {
+  needsYouSections,
+  nextNeedsYouView,
+  visibleWindowOrder,
+  type NeedsYouView,
+} from './needs-you-view';
 
 interface Entry {
   windowId: string;
@@ -32,11 +37,6 @@ function makeEntry(windowId: string, status: WindowStatus, overrides: Partial<En
   };
 }
 
-/** The module under test is loaded per test so a missing function fails only its own test. */
-async function needsYouView() {
-  return import('./needs-you-view');
-}
-
 /** The sidebar's rooms for `entries`, in tab order `order` (default: the entries' own order). */
 function groupsOf(entries: readonly Entry[], order = entries.map((entry) => entry.windowId)) {
   return groupByRoom(entries, new Set(), order);
@@ -46,8 +46,7 @@ const ROOM_A = { roomId: 'room-a', name: 'Room A', displayName: 'Room A' };
 const ROOM_B = { roomId: 'room-b', name: 'Room B', displayName: 'Room B' };
 
 describe('nextNeedsYouView: rebuilding on a user operation', () => {
-  it('lists the windows that need you in the sidebar order, room by room', async () => {
-    const { nextNeedsYouView } = await needsYouView();
+  it('lists the windows that need you in the sidebar order, room by room', () => {
     // Entries interleave the rooms; the sidebar reads room A (a2, a1) then room B (b1).
     const entries = [
       makeEntry('a1', 'waiting_input', { room: ROOM_A }),
@@ -63,8 +62,7 @@ describe('nextNeedsYouView: rebuilding on a user operation', () => {
     expect(view.rows.every((row) => !row.settled)).toBe(true);
   });
 
-  it('drops the settled rows and takes up the windows that came in', async () => {
-    const { nextNeedsYouView } = await needsYouView();
+  it('drops the settled rows and takes up the windows that came in', () => {
     const before = [makeEntry('a', 'waiting_input'), makeEntry('b', 'waiting_input')];
     const first = nextNeedsYouView(null, groupsOf(before), true);
     const after = [
@@ -83,8 +81,7 @@ describe('nextNeedsYouView: rebuilding on a user operation', () => {
 });
 
 describe('nextNeedsYouView: between user operations nothing moves', () => {
-  it('keeps a row that stopped needing you, marked settled, in place', async () => {
-    const { nextNeedsYouView } = await needsYouView();
+  it('keeps a row that stopped needing you, marked settled, in place', () => {
     const first = nextNeedsYouView(
       null,
       groupsOf([
@@ -133,8 +130,7 @@ describe('nextNeedsYouView: between user operations nothing moves', () => {
     expect(closed.rows.map((row) => row.windowId)).toEqual(['a']);
   });
 
-  it('appends a window that started needing you at the end, without pushing the rows above', async () => {
-    const { nextNeedsYouView } = await needsYouView();
+  it('appends a window that started needing you at the end, without pushing the rows above', () => {
     const first = nextNeedsYouView(
       null,
       groupsOf([makeEntry('b', 'waiting_input'), makeEntry('c', 'waiting_input')]),
@@ -155,8 +151,7 @@ describe('nextNeedsYouView: between user operations nothing moves', () => {
     expect(next.rows.map((row) => row.windowId)).toEqual(['b', 'c', 'a']);
   });
 
-  it('keeps a window whose report still stands out of the rows (the one decision is needsYou)', async () => {
-    const { nextNeedsYouView } = await needsYouView();
+  it('keeps a window whose report still stands out of the rows (the one decision is needsYou)', () => {
     const entries = [
       makeEntry('owner-wait', 'waiting_input', { taskReport: { seq: 1, state: 'standing' } }),
       makeEntry('you', 'waiting_input'),
@@ -169,8 +164,7 @@ describe('nextNeedsYouView: between user operations nothing moves', () => {
 });
 
 describe('nextNeedsYouView: windows with an unknown status', () => {
-  it('lists them apart from the rows, so they are not counted among the windows that need you', async () => {
-    const { nextNeedsYouView } = await needsYouView();
+  it('lists them apart from the rows, so they are not counted among the windows that need you', () => {
     const entries = [makeEntry('a', 'waiting_input'), makeEntry('u', 'unknown')];
 
     const view = nextNeedsYouView(null, groupsOf(entries), true);
@@ -179,16 +173,13 @@ describe('nextNeedsYouView: windows with an unknown status', () => {
     expect(view.unknown.map((row) => row.windowId)).toEqual(['u']);
   });
 
-  it('has no unknown rows (so no heading) when no window is unknown', async () => {
-    const { nextNeedsYouView } = await needsYouView();
-
+  it('has no unknown rows (so no heading) when no window is unknown', () => {
     const view = nextNeedsYouView(null, groupsOf([makeEntry('a', 'waiting_input')]), true);
 
     expect(view.unknown).toEqual([]);
   });
 
-  it('shows an unknown window that appears between operations, without moving the rows', async () => {
-    const { nextNeedsYouView } = await needsYouView();
+  it('shows an unknown window that appears between operations, without moving the rows', () => {
     const first = nextNeedsYouView(null, groupsOf([makeEntry('a', 'waiting_input')]), true);
 
     const next = nextNeedsYouView(
@@ -212,9 +203,7 @@ describe('nextNeedsYouView: windows with an unknown status', () => {
 });
 
 describe('nextNeedsYouView: the empty states', () => {
-  it('says nothing needs you when no window needs you and none is unknown', async () => {
-    const { nextNeedsYouView } = await needsYouView();
-
+  it('says nothing needs you when no window needs you and none is unknown', () => {
     const view = nextNeedsYouView(null, groupsOf([makeEntry('a', 'running')]), true);
 
     expect(view.rows).toEqual([]);
@@ -222,8 +211,7 @@ describe('nextNeedsYouView: the empty states', () => {
     expect(view.showsNothingNeedsYou).toBe(true);
   });
 
-  it('does not say nothing needs you while a settled row is still listed, until the next rebuild', async () => {
-    const { nextNeedsYouView } = await needsYouView();
+  it('does not say nothing needs you while a settled row is still listed, until the next rebuild', () => {
     const first = nextNeedsYouView(null, groupsOf([makeEntry('a', 'waiting_input')]), true);
     const running = groupsOf([makeEntry('a', 'running')]);
 
@@ -235,9 +223,7 @@ describe('nextNeedsYouView: the empty states', () => {
     expect(rebuilt.showsNothingNeedsYou).toBe(true);
   });
 
-  it('does not say nothing needs you when only unknown windows are left', async () => {
-    const { nextNeedsYouView } = await needsYouView();
-
+  it('does not say nothing needs you when only unknown windows are left', () => {
     const view = nextNeedsYouView(null, groupsOf([makeEntry('u', 'unknown')]), true);
 
     expect(view.rows).toEqual([]);
@@ -246,33 +232,12 @@ describe('nextNeedsYouView: the empty states', () => {
   });
 });
 
-// The two functions below have no source line naming them yet; each test reads its function
-// through these helpers so a different name fails only the tests that use it.
-interface SectionShape {
-  roomId: string;
-  name: string;
-  rows: { windowId: string }[];
-}
-
-async function visibleOrderOf(
-  groups: ReturnType<typeof groupsOf>,
-  view: NeedsYouView | null
-): Promise<string[]> {
-  const module = (await needsYouView()) as unknown as {
-    visibleWindowOrder: (groups: unknown, view: unknown) => Entry[];
-  };
-  return module.visibleWindowOrder(groups, view).map((entry) => entry.windowId);
-}
-
-async function sectionsOf(rows: readonly { windowId: string }[]): Promise<SectionShape[]> {
-  const module = (await needsYouView()) as unknown as {
-    needsYouSections: (rows: unknown) => SectionShape[];
-  };
-  return module.needsYouSections(rows);
+function visibleOrderOf(groups: ReturnType<typeof groupsOf>, view: NeedsYouView | null): string[] {
+  return visibleWindowOrder(groups, view).map((entry) => entry.windowId);
 }
 
 describe('visibleWindowOrder: the order the keys walk', () => {
-  it('is the sidebar order, collapsed rooms included, while the filter is off', async () => {
+  it('is the sidebar order, collapsed rooms included, while the filter is off', () => {
     const entries = [
       makeEntry('a1', 'running', { room: ROOM_A }),
       makeEntry('b1', 'waiting_input', { room: ROOM_B }),
@@ -280,11 +245,10 @@ describe('visibleWindowOrder: the order the keys walk', () => {
     ];
     const groups = groupByRoom(entries, new Set(['room-b']), ['a2', 'b1', 'a1']);
 
-    expect(await visibleOrderOf(groups, null)).toEqual(['a2', 'a1', 'b1']);
+    expect(visibleOrderOf(groups, null)).toEqual(['a2', 'a1', 'b1']);
   });
 
-  it('is the view rows in their own order, then the unknown windows, once the filter is on', async () => {
-    const { nextNeedsYouView } = await needsYouView();
+  it('is the view rows in their own order, then the unknown windows, once the filter is on', () => {
     // Sidebar order: a, b, c, d, u. The rows were b, d; then a and c joined, and b settled.
     const first = nextNeedsYouView(
       null,
@@ -309,22 +273,20 @@ describe('visibleWindowOrder: the order the keys walk', () => {
 
     expect(view.rows.map((row) => row.windowId)).toEqual(['b', 'd', 'a', 'c']);
     // The settled b stays; the unknown u follows; the running r is not visible at all.
-    expect(await visibleOrderOf(groups, view)).toEqual(['b', 'd', 'a', 'c', 'u']);
+    expect(visibleOrderOf(groups, view)).toEqual(['b', 'd', 'a', 'c', 'u']);
   });
 
-  it('lists a kept row whose window turned unknown once', async () => {
-    const { nextNeedsYouView } = await needsYouView();
+  it('lists a kept row whose window turned unknown once', () => {
     const first = nextNeedsYouView(null, groupsOf([makeEntry('a', 'waiting_input')]), true);
     const groups = groupsOf([makeEntry('a', 'unknown'), makeEntry('u', 'unknown')]);
     const view = nextNeedsYouView(first, groups, false);
 
-    expect(await visibleOrderOf(groups, view)).toEqual(['a', 'u']);
+    expect(visibleOrderOf(groups, view)).toEqual(['a', 'u']);
   });
 });
 
 describe('needsYouSections: a heading per run of rows of one room', () => {
-  it('starts a heading at each change of room, keeping the rows in the view order', async () => {
-    const { nextNeedsYouView } = await needsYouView();
+  it('starts a heading at each change of room, keeping the rows in the view order', () => {
     const view = nextNeedsYouView(
       null,
       groupsOf([
@@ -335,7 +297,7 @@ describe('needsYouSections: a heading per run of rows of one room', () => {
       true
     );
 
-    const sections = await sectionsOf(view.rows);
+    const sections = needsYouSections(view.rows);
 
     expect(sections.map((s) => [s.roomId, s.name, s.rows.map((r) => r.windowId)])).toEqual([
       ['room-a', 'Room A', ['a1', 'a2']],
@@ -343,8 +305,7 @@ describe('needsYouSections: a heading per run of rows of one room', () => {
     ]);
   });
 
-  it('repeats a room heading before a row that joined after the rows of another room, without moving it', async () => {
-    const { nextNeedsYouView } = await needsYouView();
+  it('repeats a room heading before a row that joined after the rows of another room, without moving it', () => {
     const first = nextNeedsYouView(
       null,
       groupsOf([
@@ -365,7 +326,7 @@ describe('needsYouSections: a heading per run of rows of one room', () => {
     );
     expect(view.rows.map((row) => row.windowId)).toEqual(['a1', 'b1', 'a2']);
 
-    const sections = await sectionsOf(view.rows);
+    const sections = needsYouSections(view.rows);
 
     expect(sections.map((s) => [s.roomId, s.name, s.rows.map((r) => r.windowId)])).toEqual([
       ['room-a', 'Room A', ['a1']],
@@ -374,8 +335,7 @@ describe('needsYouSections: a heading per run of rows of one room', () => {
     ]);
   });
 
-  it('heads a kept row by the room its window is in now, not the room it was listed under', async () => {
-    const { nextNeedsYouView } = await needsYouView();
+  it('heads a kept row by the room its window is in now, not the room it was listed under', () => {
     const first = nextNeedsYouView(
       null,
       groupsOf([
@@ -393,15 +353,14 @@ describe('needsYouSections: a heading per run of rows of one room', () => {
       false
     );
 
-    const sections = await sectionsOf(view.rows);
+    const sections = needsYouSections(view.rows);
 
     expect(sections.map((s) => [s.roomId, s.name, s.rows.map((r) => r.windowId)])).toEqual([
       ['room-b', 'Room B', ['a1', 'b1']],
     ]);
   });
 
-  it('gives windows without a room a heading keyed by their folder and named by its display form', async () => {
-    const { nextNeedsYouView } = await needsYouView();
+  it('gives windows without a room a heading keyed by their folder and named by its display form', () => {
     const view = nextNeedsYouView(
       null,
       groupsOf([
@@ -412,7 +371,7 @@ describe('needsYouSections: a heading per run of rows of one room', () => {
       true
     );
 
-    const sections = await sectionsOf(view.rows);
+    const sections = needsYouSections(view.rows);
 
     expect(sections.map((s) => [s.roomId, s.name, s.rows.map((r) => r.windowId)])).toEqual([
       ['/raw/one', 'one', ['f1', 'f2']],
@@ -420,7 +379,7 @@ describe('needsYouSections: a heading per run of rows of one room', () => {
     ]);
   });
 
-  it('has no heading for no rows', async () => {
-    expect(await sectionsOf([])).toEqual([]);
+  it('has no heading for no rows', () => {
+    expect(needsYouSections([])).toEqual([]);
   });
 });

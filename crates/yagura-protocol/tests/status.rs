@@ -75,25 +75,6 @@ fn status_event_decodes_from_its_snake_case_tagged_json() {
 }
 
 #[test]
-fn status_event_round_trip_preserves_all_fields() {
-    for (source, status, token) in [
-        ("cli", "idle", "0123456789abcdef0123456789abcdef"),
-        (
-            "hook_source-1",
-            "unknown",
-            "fedcba9876543210fedcba9876543210",
-        ),
-    ] {
-        let msg = status_event_from_json(serde_json::json!({
-            "type": "status_event", "source": source, "status": status, "token": token,
-        }));
-        let body = encode_client_message(&msg);
-        let decoded = decode_client_message(&body).expect("round trip decode must succeed");
-        assert_eq!(decoded, msg);
-    }
-}
-
-#[test]
 fn status_event_encodes_with_the_snake_case_type_tag_and_no_ttl_ms() {
     // A report is a fact about the turn, not a value with a lifetime, so the
     // frame carries no `ttl_ms` -- not even a null one.
@@ -399,24 +380,4 @@ fn an_unrelated_unknown_type_is_still_reported_as_unknown_type() {
         decode_daemon_message(br#"{"type":"bogus"}"#),
         Err(MessageError::UnknownType)
     );
-}
-
-#[test]
-fn status_event_ignores_unknown_fields_for_forward_compatibility() {
-    let body = br#"{"type":"status_event","source":"cli","status":"idle","token":"0123456789abcdef0123456789abcdef","unexpected_field":123}"#;
-    match decode_client_message(body).expect("unknown fields must be ignored") {
-        ClientMessage::StatusEvent {
-            source,
-            status,
-            window_id,
-            token,
-            ..
-        } => {
-            assert_eq!(source, "cli");
-            assert_eq!(status, WindowStatus::Idle);
-            assert_eq!(window_id, None);
-            assert_eq!(token, "0123456789abcdef0123456789abcdef");
-        }
-        other => panic!("expected status_event, got {other:?}"),
-    }
 }

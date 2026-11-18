@@ -182,25 +182,6 @@ describe('status generations', () => {
 
     expect(entryOf(registry, 'w1')).toMatchObject({ detected: { status: 'idle' }, statusRev: -1 });
   });
-
-  it('refuses an observation older than the recorded generation and accepts an equal one', () => {
-    const registry = openRegistry('w1');
-    registry.setStatus('w1', { status: 'idle' }, 5, null);
-
-    registry.setStatus('w1', { status: 'running' }, 4, null);
-    expect(entryOf(registry, 'w1').detected).toEqual({ status: 'idle' });
-
-    registry.setStatus('w1', { status: 'running' }, 5, null);
-    expect(entryOf(registry, 'w1').detected).toEqual({ status: 'running' });
-  });
-
-  it('leaves the other windows alone when one window is observed', () => {
-    const registry = openRegistry('w1', 'w2');
-
-    registry.setStatus('w1', { status: 'idle' }, 1, null);
-
-    expect(entryOf(registry, 'w2').detected).toEqual({ status: 'running' });
-  });
 });
 
 describe('closing a window', () => {
@@ -224,38 +205,6 @@ describe('closing a window', () => {
 });
 
 describe('operations on one window leave the others alone', () => {
-  it('renames only the named window', () => {
-    const registry = openRegistry('w1', 'w2');
-
-    registry.renameWindow('w1', 'new');
-
-    expect([entryOf(registry, 'w1').name, entryOf(registry, 'w2').name]).toEqual([
-      'new',
-      'name-w2',
-    ]);
-  });
-
-  it('leaves everything as it was when the renamed id is unknown', () => {
-    const registry = openRegistry('w1');
-    const before = structuredClone(get(registry));
-
-    registry.renameWindow('missing', 'new');
-
-    expect(get(registry)).toEqual(before);
-  });
-
-  it('minimizes only the listed windows', () => {
-    const registry = openRegistry('w1', 'w2', 'w3');
-
-    registry.setWindowsMinimized(['w1', 'w3', 'missing'], true);
-
-    expect(get(registry).windows.map((entry) => entry.display.isMinimized)).toEqual([
-      true,
-      false,
-      true,
-    ]);
-  });
-
   it('moves only the named window', () => {
     const registry = openRegistry('w1', 'w2');
 

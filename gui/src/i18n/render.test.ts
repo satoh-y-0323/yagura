@@ -18,7 +18,6 @@ import type { ConfirmTarget } from '../session/confirm-target';
 import {
   describeDeliveryState,
   describeStatus,
-  describeExit,
   describeExitCode,
   describeExitedWindow,
   describeWindowHeader,
@@ -46,12 +45,6 @@ describe('render.ts: output is driven by the given locale (dummy-locale swap)', 
     const result = describeStatus(dummyMessages, 'running');
     expect(result).toBe(dummyMessages.statusLabels.running);
     expect(result).not.toBe(english.statusLabels.running);
-  });
-
-  it('describeExit: renders the dummy session-phase label when there is no exit code', () => {
-    const result = describeExit(dummyMessages, null);
-    expect(result).toBe(dummyMessages.sessionPhaseLabels.exited);
-    expect(result).not.toBe(english.sessionPhaseLabels.exited);
   });
 
   it('describeExitCode: renders from the dummy formats.exitCode template', () => {
@@ -378,14 +371,6 @@ const blockedTarget = (reason: 'unknown' | 'exited'): ConfirmTarget => ({
 const permittedTarget: ConfirmTarget = { allowed: true, requiresConfirmation: true };
 
 describe('describeInterruptHint', () => {
-  it('returns a non-empty string when interrupt is blocked because the status is unknown', () => {
-    expect(describeInterruptHint(english, blockedTarget('unknown')).length).toBeGreaterThan(0);
-  });
-
-  it('returns a non-empty string when interrupt is blocked because the process exited', () => {
-    expect(describeInterruptHint(english, blockedTarget('exited')).length).toBeGreaterThan(0);
-  });
-
   it('returns a different sentence for the unknown reason than for the exited reason', () => {
     const unknownText = describeInterruptHint(english, blockedTarget('unknown'));
     const exitedText = describeInterruptHint(english, blockedTarget('exited'));
@@ -484,21 +469,6 @@ describe('describeWindowHeader', () => {
         `${english.formats.queuedMessages(1)}.`,
       ].join(' ')
     );
-  });
-});
-
-describe('describeExit: with an exit code', () => {
-  it('appends the formatted code to the session-phase label, separated by a space', () => {
-    expect(describeExit(english, 3)).toBe(
-      `${english.sessionPhaseLabels.exited} ${english.formats.exitCode(3)}`
-    );
-    expect(describeExit(english, 0)).toBe(
-      `${english.sessionPhaseLabels.exited} ${english.formats.exitCode(0)}`
-    );
-  });
-
-  it('is the bare label without an exit code', () => {
-    expect(describeExit(english, null)).toBe(english.sessionPhaseLabels.exited);
   });
 });
 

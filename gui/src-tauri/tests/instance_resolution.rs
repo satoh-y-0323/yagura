@@ -99,40 +99,22 @@ fn config_root_diverges_from_the_default_for_a_named_instance() {
 // ---------------------------------------------------------------------
 
 #[test]
-fn compose_window_title_returns_the_stem_unchanged_for_the_default_instance() {
-    assert_eq!(compose_window_title("yagura", None, 0), "yagura");
-}
-
-#[test]
-fn compose_window_title_appends_the_bracketed_id_for_a_named_instance() {
-    assert_eq!(
-        compose_window_title("yagura", Some("dev"), 0),
-        "yagura [dev]"
-    );
-}
-
-#[test]
-fn compose_window_title_uses_the_given_stem_rather_than_a_hardcoded_product_name() {
-    // A stem other than "yagura" still drives the output: proof the
-    // function holds no "yagura" literal of its own.
-    assert_eq!(compose_window_title("Example", None, 0), "Example");
-    assert_eq!(
-        compose_window_title("Example", Some("dev"), 0),
-        "Example [dev]"
-    );
-}
-
-#[test]
-fn compose_window_title_prefixes_the_waiting_count_only_when_it_is_not_zero() {
-    assert_eq!(compose_window_title("yagura", None, 3), "(3) yagura");
-    assert_eq!(
-        compose_window_title("yagura", Some("dev"), 3),
-        "(3) yagura [dev]"
-    );
-    assert_eq!(
-        compose_window_title("Example", Some("dev"), 12),
-        "(12) Example [dev]"
-    );
+fn compose_window_title_follows_the_stem_the_instance_id_and_the_waiting_count() {
+    // Rows: (stem, instance id, waiting count, title). A stem other than
+    // "yagura" still drives the output, so the function holds no product
+    // name of its own; the count is prefixed only when it is not zero.
+    let cases = [
+        ("yagura", None, 0, "yagura"),
+        ("yagura", Some("dev"), 0, "yagura [dev]"),
+        ("Example", None, 0, "Example"),
+        ("Example", Some("dev"), 0, "Example [dev]"),
+        ("yagura", None, 3, "(3) yagura"),
+        ("yagura", Some("dev"), 3, "(3) yagura [dev]"),
+        ("Example", Some("dev"), 12, "(12) Example [dev]"),
+    ];
+    for (stem, id, count, expected) in cases {
+        assert_eq!(compose_window_title(stem, id, count), expected);
+    }
 }
 
 // ---------------------------------------------------------------------

@@ -20,13 +20,6 @@ export const dummyMessages: Messages = {
     exited: 'DUMMY_exited',
     unknown: 'DUMMY_unknown',
   },
-  sessionPhaseLabels: {
-    connecting: 'DUMMY_connecting',
-    attached: 'DUMMY_attached',
-    exited: 'DUMMY_phase_exited',
-    superseded: 'DUMMY_superseded',
-    failed: 'DUMMY_failed',
-  },
   buttons: {
     close: 'DUMMY_close',
     interrupt: 'DUMMY_interrupt',

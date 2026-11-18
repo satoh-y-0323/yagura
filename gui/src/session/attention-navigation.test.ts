@@ -1,73 +1,16 @@
-/**
- * The sidebar's "go to the next window that needs you" jump.
- *
- * The module is read through `import.meta.glob` rather
- * than a direct import, so that a module this file cannot resolve reports
- * which contracts are unmet instead of failing collection of the whole file
- * and reporting 0 tests.
- */
+/** The sidebar's "go to the next window that needs you" jump. */
 import { describe, it, expect } from 'vitest';
 import { get } from 'svelte/store';
 
 import type { DetectedStatusView, WindowStatus } from '../ipc/session-boundary';
-import { groupByRoom, type RoomGroup } from '../sidebar/room-groups';
+import { nextNeedsYouView } from '../sidebar/needs-you-view';
+import { groupByRoom } from '../sidebar/room-groups';
 import { createCollapsedRooms, type CollapsedRooms } from '../sidebar/collapsed-rooms';
-
-// ---------------------------------------------------------------------------
-// The contract the jump module must meet
-// ---------------------------------------------------------------------------
-
-/** The part of a window entry the jump needs. */
-interface NavigableWindow {
-  windowId: string;
-  detected: DetectedStatusView;
-  display: { zOrder: number };
-}
-
-/** The window to jump to, with the room that has to be expanded to reach it. */
-interface AttentionTarget<T> {
-  entry: T;
-  roomId: string;
-}
-
-/** What the jump acts through; the view injects the store and the actions. */
-interface AttentionNavigationDeps<T extends NavigableWindow> {
-  groups: () => readonly RoomGroup<T>[];
-  /** The window the jump starts from: the current window of the work view. */
-  current: () => { windowId: string } | null;
-  /** The Needs you filter's view, `null` while it is off. */
-  view: () => unknown;
-  expandRoom: (roomId: string) => void;
-  goTo: (entry: T) => void;
-  focusTerminal: (windowId: string) => void;
-}
-
-interface AttentionNavigation {
-  goToNextWindowNeedingYou: () => void;
-}
-
-interface AttentionNavigationModule {
-  nextWindowNeedingYou: <T extends NavigableWindow>(
-    groups: readonly RoomGroup<T>[],
-    current: { windowId: string } | null
-  ) => AttentionTarget<T> | null;
-  createAttentionNavigation: <T extends NavigableWindow>(
-    deps: AttentionNavigationDeps<T>
-  ) => AttentionNavigation;
-}
-
-const navigationModules = import.meta.glob<AttentionNavigationModule>('./attention-navigation.ts', {
-  eager: true,
-});
-
-/** The module's exports, or a failure naming the file that could not be read. */
-function attentionNavigationModule(): AttentionNavigationModule {
-  const found = Object.values(navigationModules)[0];
-  if (found === undefined) {
-    throw new Error('gui/src/session/attention-navigation.ts could not be read');
-  }
-  return found;
-}
+import {
+  createAttentionNavigation,
+  nextWindowNeedingYou,
+  type AttentionNavigation,
+} from './attention-navigation';
 
 // ---------------------------------------------------------------------------
 // Fixture: two rooms whose screen order differs from the global tab order
@@ -146,7 +89,7 @@ function orderSnapshot(entries: readonly Entry[], collapsed: ReadonlySet<string>
 }
 
 interface Harness {
-  navigation: AttentionNavigation;
+  navigation: AttentionNavigation<Entry>;
   collapsedRooms: CollapsedRooms;
   /** Every `expand:<roomId>` / `goTo:<windowId>` call, in the order they were made. */
   calls: string[];
@@ -175,7 +118,6 @@ function harnessOf(
   const focused: string[] = [];
   let currentId = current;
 
-  const { createAttentionNavigation } = attentionNavigationModule();
   const navigation = createAttentionNavigation<Entry>({
     groups: () => groupsOf(state.entries, get(collapsedRooms)),
     current: () => (currentId === null ? null : { windowId: currentId }),
@@ -216,14 +158,10 @@ function harnessOf(
 // Which window the jump picks
 // ---------------------------------------------------------------------------
 
-describe('attention-navigation module (the jump lives in session/)', () => {});
-
 describe('nextWindowNeedingYou: the next waiting window in screen order', () => {
   it('reads the list top to bottom, not in tab order: from the current window a2 it picks a1, the window the screen shows next', () => {
     // In tab order the waiting windows read b2, a1 -- the opposite order --
     // so picking b2 here would mean the cycle followed `tabOrder` globally.
-    const { nextWindowNeedingYou } = attentionNavigationModule();
-
     const target = nextWindowNeedingYou(groupsOf(fourWindows(['a1', 'b2'])), { windowId: 'a2' });
 
     expect(target?.entry.windowId).toBe('a1');
@@ -231,25 +169,25 @@ describe('nextWindowNeedingYou: the next waiting window in screen order', () => 
 
   it('starts from the current window it is given, not from the window placed in front', () => {
     // Focus does not move the placement: a2 stays in front while a1 is shown.
-    const { nextWindowNeedingYou } = attentionNavigationModule();
-
     const target = nextWindowNeedingYou(groupsOf(fourWindows(['a1', 'b2'], 'a2')), {
       windowId: 'a1',
     });
 
     expect(target?.entry.windowId).toBe('b2');
+
+    // With no current window the search starts from the top of the list, whatever the placement:
+    // a2 is in front and waiting; starting from it would pick b2.
+    const fromTop = nextWindowNeedingYou(groupsOf(fourWindows(['a2', 'b2'], 'a2')), null);
+    expect(fromTop?.entry.windowId).toBe('a2');
   });
 
   it('crosses into the next room when the current window is the previous target', () => {
-    const { nextWindowNeedingYou } = attentionNavigationModule();
-
     const target = nextWindowNeedingYou(groupsOf(fourWindows(['a1', 'b2'])), { windowId: 'a1' });
 
     expect(target?.entry.windowId).toBe('b2');
   });
 
   it('names the room of the window it returns, so the caller can expand it', () => {
-    const { nextWindowNeedingYou } = attentionNavigationModule();
     const groups = groupsOf(fourWindows(['b2']));
 
     // groups[1] is room-b, whose first entry on screen is b2.
@@ -261,44 +199,32 @@ describe('nextWindowNeedingYou: the next waiting window in screen order', () => 
   });
 
   it('wraps to the first waiting window when the current window sits below the last one', () => {
-    const { nextWindowNeedingYou } = attentionNavigationModule();
-
     const target = nextWindowNeedingYou(groupsOf(fourWindows(['a1', 'b2'])), { windowId: 'b1' });
 
     expect(target?.entry.windowId).toBe('a1');
   });
 
   it('skips the current window itself when it is waiting, and wraps past the end', () => {
-    const { nextWindowNeedingYou } = attentionNavigationModule();
-
     const target = nextWindowNeedingYou(groupsOf(fourWindows(['a1', 'b2'])), { windowId: 'b2' });
 
     expect(target?.entry.windowId).toBe('a1');
   });
 
   it('returns the only waiting window even when it is the current window (jumping back to it is harmless)', () => {
-    const { nextWindowNeedingYou } = attentionNavigationModule();
-
     const target = nextWindowNeedingYou(groupsOf(fourWindows(['a1'])), { windowId: 'a1' });
 
     expect(target?.entry.windowId).toBe('a1');
   });
 
   it('returns null when no window is waiting', () => {
-    const { nextWindowNeedingYou } = attentionNavigationModule();
-
     expect(nextWindowNeedingYou(groupsOf(fourWindows([])), { windowId: 'a2' })).toBeNull();
   });
 
   it('returns null when there is no room at all', () => {
-    const { nextWindowNeedingYou } = attentionNavigationModule();
-
     expect(nextWindowNeedingYou(groupsOf([]), null)).toBeNull();
   });
 
   it('reaches a waiting window inside a collapsed room (collapsing hides a room, it does not mute it)', () => {
-    const { nextWindowNeedingYou } = attentionNavigationModule();
-
     const target = nextWindowNeedingYou(groupsOf(fourWindows(['b2']), new Set(['room-b'])), {
       windowId: 'a2',
     });
@@ -315,8 +241,9 @@ describe('createAttentionNavigation: expanding and focusing', () => {
   it('expands the target room before focusing the window', () => {
     const harness = harnessOf(fourWindows(['b2']), ['room-a', 'room-b'], 'a2');
 
-    harness.navigation.goToNextWindowNeedingYou();
+    const landed = harness.navigation.goToNextWindowNeedingYou();
 
+    expect(landed).toBe(harness.currentEntries()[3]);
     expect(harness.calls).toEqual(['expand:room-b', 'goTo:b2', 'terminal:b2']);
     expect(get(harness.collapsedRooms).has('room-b')).toBe(false);
   });
@@ -361,8 +288,9 @@ describe('createAttentionNavigation: expanding and focusing', () => {
   it('does nothing at all when no window is waiting', () => {
     const harness = harnessOf(fourWindows([]), ['room-b'], 'a2');
 
-    harness.navigation.goToNextWindowNeedingYou();
+    const landed = harness.navigation.goToNextWindowNeedingYou();
 
+    expect(landed).toBeNull();
     expect(harness.calls).toEqual([]);
     expect(get(harness.collapsedRooms)).toEqual(new Set(['room-b']));
   });
@@ -394,45 +322,32 @@ describe('createAttentionNavigation: repeated presses (no cursor is held)', () =
 });
 
 describe('nextWindowNeedingYou: while the Needs you filter is on', () => {
-  // The third argument (the filter's view) has no source line yet; it is passed through a loosened
-  // signature so a different shape fails only these tests.
-  type WithView = (
-    groups: readonly RoomGroup<Entry>[],
-    current: { windowId: string } | null,
-    view: unknown
-  ) => AttentionTarget<Entry> | null;
-
-  async function filteredView() {
-    const { nextNeedsYouView } = await import('../sidebar/needs-you-view');
+  function filteredView() {
     const first = nextNeedsYouView(null, groupsOf(fourWindows(['a1', 'b1'])), true);
     // a2 and b2 started waiting and a1 stopped: rows a1 (settled), b1, a2, b2, whereas the sidebar reads a2, a1, b2, b1.
     const groups = groupsOf(fourWindows(['a2', 'b1', 'b2']));
     return { groups, view: nextNeedsYouView(first, groups, false) };
   }
 
-  it('walks the rows in the view order, not the sidebar order', async () => {
-    const { nextWindowNeedingYou } = attentionNavigationModule();
-    const { groups, view } = await filteredView();
+  it('walks the rows in the view order, not the sidebar order', () => {
+    const { groups, view } = filteredView();
     expect(view.rows.map((row) => row.windowId)).toEqual(['a1', 'b1', 'a2', 'b2']);
 
-    const target = (nextWindowNeedingYou as unknown as WithView)(groups, { windowId: 'a1' }, view);
+    const target = nextWindowNeedingYou(groups, { windowId: 'a1' }, view);
 
     expect(target?.entry.windowId).toBe('b1');
   });
 
-  it('skips a settled row and starts from the top of the rows when there is no current window', async () => {
-    const { nextWindowNeedingYou } = attentionNavigationModule();
-    const { groups, view } = await filteredView();
+  it('skips a settled row and starts from the top of the rows when there is no current window', () => {
+    const { groups, view } = filteredView();
 
-    const target = (nextWindowNeedingYou as unknown as WithView)(groups, null, view);
+    const target = nextWindowNeedingYou(groups, null, view);
 
     expect(target?.entry.windowId).toBe('b1');
   });
 
   it('walks the sidebar order when the filter is off', () => {
-    const { nextWindowNeedingYou } = attentionNavigationModule();
-
-    const target = (nextWindowNeedingYou as unknown as WithView)(
+    const target = nextWindowNeedingYou(
       groupsOf(fourWindows(['a1', 'b2'])),
       { windowId: 'a2' },
       null

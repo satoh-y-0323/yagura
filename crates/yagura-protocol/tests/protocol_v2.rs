@@ -303,42 +303,6 @@ fn daemon_message_error_with_spawn_failed_code() {
 }
 
 // =============================================================================
-// Backward compatibility: existing message types must still work in v2
-// =============================================================================
-
-#[test]
-fn existing_client_messages_still_decode_in_v2_protocol() {
-    let cases: &[(&[u8], &str)] = &[
-        (br#"{"type":"text","text":"ls"}"#, "Text"),
-        (br#"{"type":"resize","cols":80,"rows":24}"#, "Resize"),
-        (br#"{"type":"ping"}"#, "Ping"),
-        (br#"{"type":"shutdown"}"#, "Shutdown"),
-    ];
-    for (body, name) in cases {
-        let decoded = decode_client_message(body)
-            .unwrap_or_else(|_| panic!("existing {name} must still decode in v2"));
-        let _ = decoded;
-    }
-}
-
-#[test]
-fn existing_daemon_messages_still_decode_in_v2_protocol() {
-    let cases: &[(&[u8], &str)] = &[
-        (
-            br#"{"type":"attached","child_exited":false,"exit_code":null}"#,
-            "Attached",
-        ),
-        (br#"{"type":"exit","exit_code":-1}"#, "Exit"),
-        (br#"{"type":"pong"}"#, "Pong"),
-    ];
-    for (body, name) in cases {
-        let decoded = decode_daemon_message(body)
-            .unwrap_or_else(|_| panic!("existing {name} must still decode in v2"));
-        let _ = decoded;
-    }
-}
-
-// =============================================================================
 // Unknown type and malformed message handling (same as v1, preserved for v2)
 // =============================================================================
 

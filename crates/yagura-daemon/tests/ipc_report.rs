@@ -1423,23 +1423,11 @@ async fn wait_for_report_returns_as_soon_as_a_report_arrives_and_empty_on_a_bare
 }
 
 #[tokio::test]
-async fn wait_for_report_rejects_a_timeout_over_the_configured_maximum() {
+async fn wait_for_report_rejects_a_timeout_over_the_configured_maximum_and_accepts_one_exactly_at_it()
+ {
     let mut config = base_config();
     config.wait_timeout_max_secs = 5;
     let h = Harness::start("report-wait-timeout-cap", config).await;
-    let window_a = h.open(echo_child_command(), None).await;
-    let mut a = h.connect().await;
-    identify(&mut a, &window_a).await;
-
-    let reply = call_wait_for_report(&mut a, 6).await;
-    expect_error(reply, "invalid_argument");
-}
-
-#[tokio::test]
-async fn wait_for_report_accepts_a_timeout_exactly_at_the_configured_maximum() {
-    let mut config = base_config();
-    config.wait_timeout_max_secs = 5;
-    let h = Harness::start("report-wait-timeout-at-cap", config).await;
     let window_a = h.open(echo_child_command(), None).await;
     let mut a = h.connect().await;
     identify(&mut a, &window_a).await;
@@ -1449,6 +1437,9 @@ async fn wait_for_report_accepts_a_timeout_exactly_at_the_configured_maximum() {
     expect_report_sent(
         call_send_report(&mut b, ReportOutcome::Succeeded, "at the cap", None).await,
     );
+
+    let reply = call_wait_for_report(&mut a, 6).await;
+    expect_error(reply, "invalid_argument");
 
     // The report is already queued, so the call returns without waiting.
     let reports = expect_reports(call_wait_for_report(&mut a, 5).await);

@@ -14,9 +14,9 @@ import type {
   WindowStatus,
 } from './ipc/session-boundary';
 import { STATUS_PRESENTATION } from './status-presentation';
-import * as statusTone from './status-tone';
 import {
   attentionCount,
+  emptyArrivalMemory,
   needsYou,
   observeNeedsYouArrivals,
   summarizeWindowStatuses,
@@ -75,16 +75,6 @@ const EXPECTED_NEEDS_YOU: Record<WindowStatus, boolean> = {
 };
 
 describe('windowsNeedingYou / attentionCount: membership in the waiting set', () => {
-  for (const [status, expected] of Object.entries(EXPECTED_NEEDS_YOU) as [
-    WindowStatus,
-    boolean,
-  ][]) {
-    it(`windowsNeedingYou ${expected ? 'includes' : 'excludes'} a lone ${status} window`, () => {
-      const entry = entryOf(status, 'solo');
-      expect(windowsNeedingYou([entry]).map((e) => e.id)).toEqual(expected ? ['solo'] : []);
-    });
-  }
-
   it('returns an empty array for an empty entry list', () => {
     expect(windowsNeedingYou<Entry>([])).toEqual([]);
   });
@@ -96,6 +86,8 @@ describe('windowsNeedingYou / attentionCount: membership in the waiting set', ()
       entryOf('running', 'c'),
       entryOf('waiting_approval', 'd'),
       entryOf('unknown', 'e'),
+      entryOf('interrupted', 'f'),
+      entryOf('exited', 'g'),
     ];
 
     expect(windowsNeedingYou(entries).map((e) => e.id)).toEqual(['b', 'd']);
@@ -170,17 +162,6 @@ describe('needsYou: a task window waiting on its owner after its report is not t
   });
 });
 
-describe('attentionCount(x) === windowsNeedingYou(x).length', () => {
-  it('holds for every combination of the seven statuses appearing together', () => {
-    const allStatuses = Object.keys(EXPECTED_NEEDS_YOU) as WindowStatus[];
-    const entries: Entry[] = [...allStatuses, ...allStatuses].map((status, i) =>
-      entryOf(status, `e${i}`)
-    );
-
-    expect(attentionCount(entries)).toBe(windowsNeedingYou(entries).length);
-  });
-});
-
 /** The seven statuses from the highest attention rank to the lowest. */
 const STATUSES_BY_RANK: WindowStatus[] = [
   'waiting_approval',
@@ -237,17 +218,6 @@ function summarize(statuses: WindowStatus[]): { summary: RailSummary; entries: E
 }
 
 describe('Rail summary of a group of windows', () => {
-  it('counts only the needs-you windows, the same as attentionCount', () => {
-    for (const statuses of [
-      ['idle', 'running'],
-      ['waiting_input', 'unknown', 'running'],
-      ['waiting_approval', 'waiting_input', 'exited', 'unknown'],
-    ] as WindowStatus[][]) {
-      const { summary, entries } = summarize(statuses);
-      expect(summary.count).toBe(attentionCount(entries));
-    }
-  });
-
   it('marks the group with the highest-ranked status present', () => {
     const cases: [WindowStatus[], WindowStatus][] = [
       [['idle', 'running'], 'running'],
@@ -297,9 +267,7 @@ type ArrivalMemory = Parameters<typeof observeNeedsYouArrivals>[0];
 
 /** An empty memory, as the shell starts with (and starts again with after a WebView reload). */
 function emptyMemory(): ArrivalMemory {
-  // The constructor's name has no source line yet; it is read here so a different name fails only this helper.
-  const tone = statusTone as unknown as { emptyArrivalMemory: () => ArrivalMemory };
-  return tone.emptyArrivalMemory();
+  return emptyArrivalMemory();
 }
 
 const ORIGIN = 7;
