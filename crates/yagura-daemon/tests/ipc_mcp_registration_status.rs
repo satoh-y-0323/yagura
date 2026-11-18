@@ -1009,10 +1009,8 @@ async fn unreadable_output_is_unknown_with_a_fixed_reason() {
         home_dir: Some(layout.home_dir.as_path()),
     };
     let broken_source = format!(
-        "{}MCP_CLI_STUB_FAIL_SUBCOMMAND = 'get'
-MCP_CLI_STUB_FAIL_EXIT_CODE = '0'
-         MCP_CLI_STUB_FAIL_STDOUT = '{{not json'
-",
+        "{}MCP_CLI_STUB_FAIL_SUBCOMMAND = 'get'\nMCP_CLI_STUB_FAIL_EXIT_CODE = '0'\n\
+         MCP_CLI_STUB_FAIL_STDOUT = '{{not json'\n",
         mcp_cli_stub_profile_source("Juliet", &fixture)
     );
     write_profile(&layout.profiles_dir, "juliet", &broken_source);

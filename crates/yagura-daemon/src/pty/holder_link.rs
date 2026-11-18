@@ -2230,6 +2230,20 @@ region = "bottom"
                 }
             }
 
+            /// Waits, at most `HANG_GUARD`, until the daemon has sent a
+            /// `Terminate`, including one already passed over.
+            pub(crate) async fn told_to_end(&mut self) {
+                if self.was_told_to_end() {
+                    return;
+                }
+                tokio::time::timeout(
+                    HANG_GUARD,
+                    self.next_of(|frame| matches!(frame, HolderFrame::Terminate { .. })),
+                )
+                .await
+                .expect("the daemon tells the holder to end within HANG_GUARD");
+            }
+
             fn was_told_to_end(&self) -> bool {
                 self.passed
                     .iter()

@@ -12,9 +12,12 @@ tool: CI never calls it, and it is not a test.
   Unix-socket endpoint and `/proc` / `ps` statistics are not written. `compare` runs anywhere.
 - `python` on `PATH` (measured with 3.11.9). **Standard library only**; no dependency is added.
 - A release build of the daemon, the holder it starts for each window from beside itself, and the
-  `hex_echo` fixture. `run` places the bundled ConPTY (`vendor/conpty/x64/`) beside the staged
-  copy of each build and checks it against the pins in the daemon (read through
-  `scripts/dep-audit/dep_audit.py`); a mismatch stops the run:
+  `hex_echo` fixture. `run` places the bundled ConPTY of this working tree
+  (`vendor/conpty/x64/`) beside the staged copy of each build and checks it against the pins in
+  this working tree's `crates/yagura-os/src/bundled_conpty_pins.rs` (read through
+  `scripts/dep-audit/dep_audit.py`); a mismatch stops the run. A base build whose daemon carries
+  other pins than the working tree gets the working tree's pair, which that daemon refuses, so
+  such a build cannot be measured:
 
   ```bash
   CARGO_TARGET_DIR=D:/yagura-build/target-t1051 cargo build --release -p yagura-daemon -p yagura-holder --bins

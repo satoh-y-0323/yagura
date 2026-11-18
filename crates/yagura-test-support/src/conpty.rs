@@ -12,13 +12,15 @@ use std::sync::{Arc, Mutex, OnceLock};
 use yagura_os::bundled_conpty::{file_names, verify_beside};
 
 /// Makes `dir` hold the pinned pair. A pair already there with the pinned
-/// contents is kept; anything else is replaced from the vendored copy. Done
+/// contents is kept; anything else is replaced from the vendored copy, which
+/// is checked against the pins first and never copied when it differs. Done
 /// once per directory per process: concurrent callers for the same directory
 /// wait for the first one and share its outcome. Does nothing off Windows.
 ///
 /// # Panics
 ///
-/// Panics if `dir` does not hold the pinned pair after placing it, naming why.
+/// Panics if the vendored pair differs from the pins, or if `dir` does not
+/// hold the pinned pair after placing it, naming why.
 pub fn place_bundled_conpty(dir: &Path) {
     if !cfg!(windows) {
         return;
@@ -46,6 +48,12 @@ fn place(dir: &Path) -> Result<(), String> {
         return Ok(());
     }
     let vendored = vendored_dir();
+    verify_beside(&vendored).map_err(|fault| {
+        format!(
+            "the vendored bundled ConPTY in {} does not match the pins: {fault}",
+            vendored.display()
+        )
+    })?;
     let mut copy_errors = Vec::new();
     for name in file_names() {
         if let Err(error) = replace_with_copy(&vendored.join(name), &dir.join(name)) {

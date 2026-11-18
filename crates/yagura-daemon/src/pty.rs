@@ -520,7 +520,9 @@ impl PtySession {
         };
         #[cfg(test)]
         if let Some(endpoint) = host.take_played() {
-            // A test plays this window's holder in its own process.
+            // A test plays this window's holder in its own process. Skipping
+            // `link_context` and `spawn.lost`, it measures neither the holder's
+            // start nor its loss.
             let (shared, sink) = Shared::new(Self::INITIAL_COLS, Self::INITIAL_ROWS);
             let started = holder_link::start_over(
                 endpoint,

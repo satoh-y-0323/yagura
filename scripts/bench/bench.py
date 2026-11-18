@@ -557,23 +557,26 @@ def _dep_audit():
     return sys.modules[name]
 
 
-def stage_build(source: Path, staged: Path, vendor_dir: Optional[Path] = None) -> Path:
+def stage_build(source: Path, staged: Path) -> Path:
     """Copies the top-level files of `source` into `staged` and returns it.
 
     Identical binaries run from a cargo target directory measured 2-3% more CPU
     than from a plain copy (README.md section 4), so every build runs from a
     sibling directory of the same kind.
 
-    On Windows the bundled ConPTY pair is placed from `vendor_dir` (default
-    `vendor/conpty`) beside the binaries and checked against the pins the daemon
-    carries; a mismatch stops the run, because the daemon would open no window."""
+    On Windows the bundled ConPTY pair is placed from this working tree's
+    `vendor/conpty` beside the binaries and checked against the pins in this
+    working tree's `bundled_conpty_pins.rs`; a mismatch stops the run, because
+    the daemon would open no window. A build carrying other pins than the
+    working tree (a base from another commit) still gets the working tree's
+    pair, which its daemon refuses."""
     staged.mkdir(parents=True, exist_ok=True)
     for entry in source.iterdir():
         if entry.is_file():
             shutil.copy2(entry, staged / entry.name)
     if os.name == "nt":
         audit = _dep_audit()
-        vendor = vendor_dir if vendor_dir is not None else audit.CONPTY_DIR
+        vendor = audit.CONPTY_DIR
         for name, relpath in audit.CONPTY_FILES.items():
             try:
                 shutil.copy2(vendor / relpath, staged / name)

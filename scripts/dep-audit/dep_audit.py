@@ -104,14 +104,13 @@ def conpty_pinned_hashes() -> Dict[str, Optional[str]]:
     return {name: _pinned_hash(pins, name) for name in CONPTY_FILES}
 
 
-def conpty_problems(directory: Path, nested: bool = False) -> List[str]:
-    """Checks the bundled pair in `directory` against the pinned hashes.
+def conpty_problems(directory: Path) -> List[str]:
+    """Checks the bundled pair sitting directly in `directory` against the pinned hashes.
 
-    `nested` reads the vendor layout (`x64/<name>`); otherwise the files sit directly in
-    `directory`. Returns one line per problem; empty when the pair matches the pins."""
+    Returns one line per problem; empty when the pair matches the pins."""
     problems = []
     for name, pinned in conpty_pinned_hashes().items():
-        path = directory / (CONPTY_FILES[name] if nested else name)
+        path = directory / name
         if pinned is None:
             problems.append(f"{name}: no pinned hash found")
             continue

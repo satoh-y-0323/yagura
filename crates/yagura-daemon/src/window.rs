@@ -4651,30 +4651,43 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_played_window_registers_and_terminate_all_ends_without_the_holder_answering() {
+    async fn terminate_all_returns_unanswered_and_tells_the_holder_to_end_its_window() {
         let registry = WindowRegistry::new(DaemonConfig::default());
-        let (opened, _holder) = registry.open_played(played_request()).await;
+        let (opened, mut holder) = registry.open_played(played_request()).await;
+        let mut status = opened.entry.watch_status();
         assert!(registry.get(&opened.window_id).is_some());
 
         tokio::time::timeout(Duration::from_secs(30), registry.terminate_all())
             .await
             .expect("terminate_all ends although the played holder never answers");
+        holder.told_to_end().await;
+
+        drop(holder);
+        tokio::time::timeout(
+            Duration::from_secs(30),
+            status.wait_for(|at| at.status.status() == WindowStatus::Exited),
+        )
+        .await
+        .expect("the window becomes Exited once its holder ends as told")
+        .expect("the window keeps publishing its status");
     }
 
     #[tokio::test]
     async fn a_played_window_is_exited_only_once_its_holder_connection_ends() {
         let registry = WindowRegistry::new(DaemonConfig::default());
-        let (_opened, holder) = registry.open_played(played_request()).await;
+        let (opened, holder) = registry.open_played(played_request()).await;
+        let mut status = opened.entry.watch_status();
         assert_ne!(registry.list()[0].status, WindowStatus::Exited);
 
         drop(holder);
-        tokio::time::timeout(Duration::from_secs(30), async {
-            while registry.list()[0].status != WindowStatus::Exited {
-                tokio::task::yield_now().await;
-            }
-        })
+        tokio::time::timeout(
+            Duration::from_secs(30),
+            status.wait_for(|at| at.status.status() == WindowStatus::Exited),
+        )
         .await
-        .expect("a window whose holder connection ended becomes Exited");
+        .expect("a window whose holder connection ended becomes Exited")
+        .expect("the window keeps publishing its status");
+        assert_eq!(registry.list()[0].status, WindowStatus::Exited);
     }
 
     #[tokio::test(start_paused = true)]
@@ -4744,7 +4757,6 @@ mod tests {
         let renamed = registry.rename_window(&other.entry, "held").await;
         drop(held);
         let renamed_once_ended = registry.rename_window(&other.entry, "held").await;
-        // Before the asserts, so a refusal that failed leaves no child behind.
         registry.terminate_all().await;
 
         assert!(
