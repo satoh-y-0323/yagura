@@ -405,9 +405,9 @@ pub fn second_workspace_dir(tag: &str) -> PathBuf {
 
 /// Fixture for the natural-exit teardown route: a detached grandchild appending to
 /// `tick_path`, behind a direct child that exits on its own a few seconds later. See
-/// [`yagura_test_support::process::grandchild_command`] for the argv shape.
+/// [`bins::grandchild_command`] for the argv shape.
 pub fn grandchild_command(tick_path: &str) -> Vec<String> {
-    yagura_test_support::process::grandchild_command(tick_path)
+    bins::grandchild_command(tick_path)
 }
 
 /// A fixed command (not a real vendor CLI) whose direct child stays alive for roughly
@@ -418,13 +418,15 @@ pub fn sleepy_command(ping_count: &str) -> Vec<String> {
 }
 
 /// Starts `argv` in a session of its own, outside any registry, under a holder
-/// host made from `config` the way a window's child runs.
+/// host made from `config` (given the built holder when it names none, see
+/// [`bins::config_with_holder`]) the way a window's child runs.
 pub async fn spawn_session(
     argv: &[&str],
     config: &DaemonConfig,
 ) -> yagura_daemon::pty::PtyResult<yagura_daemon::PtySession> {
-    let host = yagura_daemon::HolderHost::from_config(config);
-    yagura_daemon::PtySession::spawn_with_command(argv, config, &host).await
+    let config = bins::config_with_holder(config.clone());
+    let host = yagura_daemon::HolderHost::from_config(&config);
+    yagura_daemon::PtySession::spawn_with_command(argv, &config, &host).await
 }
 
 /// [`spawn_session`] in `cwd`, with `extra_env` laid over the child's environment.
@@ -434,8 +436,9 @@ pub async fn spawn_session_in_env(
     extra_env: &[(&str, &str)],
     config: &DaemonConfig,
 ) -> yagura_daemon::pty::PtyResult<yagura_daemon::PtySession> {
-    let host = yagura_daemon::HolderHost::from_config(config);
-    yagura_daemon::PtySession::spawn_with_command_in_env(argv, cwd, extra_env, config, &host).await
+    let config = bins::config_with_holder(config.clone());
+    let host = yagura_daemon::HolderHost::from_config(&config);
+    yagura_daemon::PtySession::spawn_with_command_in_env(argv, cwd, extra_env, &config, &host).await
 }
 
 /// Installs this test binary's one global `tracing` default (idempotent). Called from
@@ -752,7 +755,10 @@ pub struct Harness {
 }
 
 impl Harness {
+    /// Serves a registry over `config`, given the built holder when it names
+    /// none ([`bins::config_with_holder`]), as every `start_*` here does.
     pub async fn start(tag: &str, config: DaemonConfig) -> Self {
+        let config = bins::config_with_holder(config);
         let registry = Arc::new(WindowRegistry::new(config.clone()));
         let endpoint = unique_pipe_name(tag);
         let server = Arc::new(IpcServer::new(
@@ -780,6 +786,7 @@ impl Harness {
     /// in this suite exercises window-layout persistence, and `Harness::start`
     /// does not wire it either.
     pub async fn start_with_chat(tag: &str, config: DaemonConfig) -> Self {
+        let config = bins::config_with_holder(config);
         let registry = Arc::new(WindowRegistry::new(config.clone()));
         let chat = {
             let from_config_config = config.clone();
@@ -822,6 +829,7 @@ impl Harness {
         tag: &str,
         config: DaemonConfig,
     ) -> (Self, Arc<yagura_daemon::plan_permit::LockTable>) {
+        let config = bins::config_with_holder(config);
         let registry = Arc::new(WindowRegistry::new(config.clone()));
         let ledger = Arc::new(
             tokio::task::spawn_blocking({
@@ -861,6 +869,7 @@ impl Harness {
         tag: &str,
         config: DaemonConfig,
     ) -> (Self, Arc<yagura_daemon::plan_permit::LockTable>) {
+        let config = bins::config_with_holder(config);
         let registry = Arc::new(WindowRegistry::new(config.clone()));
         let ledger = Arc::new(
             tokio::task::spawn_blocking({
@@ -910,6 +919,7 @@ impl Harness {
         tag: &str,
         config: DaemonConfig,
     ) -> (Self, Arc<yagura_daemon::plan_permit::LockTable>) {
+        let config = bins::config_with_holder(config);
         let registry = Arc::new(WindowRegistry::new(config.clone()));
         let chat = {
             let from_config_config = config.clone();
@@ -1215,7 +1225,7 @@ pub fn detection_config(dir: &Path, base: DaemonConfig) -> DaemonConfig {
     DaemonConfig {
         detection_dir: Some(dir.to_path_buf()),
         detection_name: CONTROL_DETECTION_NAME.to_string(),
-        ..base
+        ..bins::config_with_holder(base)
     }
 }
 
@@ -1324,7 +1334,7 @@ impl Harness {
     /// `{CONTROL_DETECTION_NAME}.toml` under its resolved detection directory (see the
     /// `detection_config` helper each test file that calls this keeps for itself).
     pub async fn open_idle_window(&self, client: &mut Connection) -> String {
-        self.open_idle_window_running(client, yagura_test_support::process::echo_child_command())
+        self.open_idle_window_running(client, bins::echo_child_command())
             .await
     }
 
@@ -1333,11 +1343,8 @@ impl Harness {
     /// delivery needs this: the delivery path observes the composer before it
     /// writes, and a fixture that paints nothing can never be observed.
     pub async fn open_idle_window_with_composer(&self, client: &mut Connection) -> String {
-        self.open_idle_window_running(
-            client,
-            yagura_test_support::process::echo_child_command_with_composer(0),
-        )
-        .await
+        self.open_idle_window_running(client, bins::echo_child_command_with_composer(0))
+            .await
     }
 
     async fn open_idle_window_running(
@@ -1370,12 +1377,7 @@ pub async fn open_echo_window(
     registry: &WindowRegistry,
     detection: Option<&str>,
 ) -> yagura_daemon::window::OpenedWindow {
-    open_registry_window(
-        registry,
-        yagura_test_support::process::echo_child_command(),
-        detection,
-    )
-    .await
+    open_registry_window(registry, bins::echo_child_command(), detection).await
 }
 
 /// Opens a window running `command` under `registry`, optionally selecting `detection`
@@ -1433,19 +1435,19 @@ pub async fn wait_until_no_connection_claims(registry: &WindowRegistry, window_i
     }
 }
 
-/// Path to the `echo_child` test-fixture binary next to this test binary.
+/// Path to the `echo_child` test-fixture binary.
 pub fn echo_child_path() -> PathBuf {
-    yagura_test_support::process::echo_child_path()
+    bins::echo_child_path()
 }
 
-/// Path to the `hex_echo` test-fixture binary next to this test binary.
+/// Path to the `hex_echo` test-fixture binary.
 pub fn hex_echo_path() -> PathBuf {
-    yagura_test_support::process::hex_echo_path()
+    bins::hex_echo_path()
 }
 
-/// Path to the `env_probe` test-fixture binary next to this test binary.
+/// Path to the `env_probe` test-fixture binary.
 pub fn env_probe_path() -> PathBuf {
-    yagura_test_support::process::env_probe_path()
+    bins::env_probe_path()
 }
 
 /// How much of a window's text [`window_text_now`] asks for.
@@ -1916,7 +1918,7 @@ pub fn approver_base_config() -> DaemonConfig {
         status_token_override: Some(VALID_TOKEN.into()),
         approver_exe: Some(yagura_test_support::process::own_canonical_exe()),
         approval_policy: Some(policy(&["open_window"])),
-        ..DaemonConfig::default()
+        ..bins::default_config_with_holder()
     }
 }
 
@@ -2002,7 +2004,7 @@ pub fn policy_opening(tools: &[&str]) -> ApprovalPolicy {
 pub fn opening_config() -> DaemonConfig {
     DaemonConfig {
         approval_policy: Some(policy(&["open_window"])),
-        ..DaemonConfig::default()
+        ..bins::default_config_with_holder()
     }
 }
 
@@ -2017,7 +2019,7 @@ pub fn live_playbook_config(dir: &Path, base: DaemonConfig, source: &str) -> Dae
     std::fs::write(&path, source).expect("write the live playbook file");
     let loaded: ApprovalPolicy = yagura_daemon::control::load_policy(&path)
         .unwrap_or_else(|err| panic!("the live playbook must load: {err}\n---\n{source}\n---"));
-    let mut config = base;
+    let mut config = bins::config_with_holder(base);
     yagura_daemon::control::apply_limits(&mut config, loaded.limits());
     yagura_daemon::control::apply_chat_section(&mut config, loaded.chat.as_ref());
     yagura_daemon::control::apply_plans_section(&mut config, loaded.plans.as_ref());
@@ -2336,11 +2338,7 @@ pub async fn open_marked_delivering_window(
     )
     .expect("write the marked window's definition");
     let window_id = h
-        .open_delivering_in(
-            yagura_test_support::process::echo_child_command(),
-            Some(name),
-            cwd,
-        )
+        .open_delivering_in(bins::echo_child_command(), Some(name), cwd)
         .await;
     h.write_input(&window_id, format!("{marker}\r").as_bytes())
         .await;
@@ -2580,40 +2578,10 @@ pub fn expect_handoff_sent(msg: DaemonMessage) -> (String, bool, DeliveryState) 
 
 // --- mcp_cli_stub fixture path and profile document --------------------------
 
-/// Path to the `mcp_cli_stub` fixture binary that belongs to the test binary
-/// currently running (see `src/bin/mcp_cli_stub.rs`'s module doc for its
-/// argv and environment-variable contract).
-///
-/// Resolved the same way [`echo_child_path`] is (`cargo test` places a test
-/// binary in `target/{profile}/deps/`, a plain bin target one level up), and
-/// kept local to this file rather than added to `yagura-test-support`: only
-/// `yagura-daemon`'s own tests spawn a registration CLI.
-///
-/// # Panics
-///
-/// Panics if the running executable's own path cannot be resolved, or if the
-/// fixture binary is not present next to it -- build it with `cargo build -p
-/// yagura-daemon --bin mcp_cli_stub` first.
+/// Path to the `mcp_cli_stub` fixture binary (see `src/bin/mcp_cli_stub.rs`'s
+/// module doc for its argv and environment-variable contract).
 pub fn mcp_cli_stub_path() -> PathBuf {
-    let mut dir =
-        std::env::current_exe().expect("current_exe should resolve for a running test binary");
-    dir.pop();
-    if dir.file_name().and_then(|n| n.to_str()) == Some("deps") {
-        dir.pop();
-    }
-    let name = if cfg!(windows) {
-        "mcp_cli_stub.exe"
-    } else {
-        "mcp_cli_stub"
-    };
-    dir.push(name);
-    assert!(
-        dir.exists(),
-        "the mcp_cli_stub fixture binary is missing at {}: run `cargo build -p yagura-daemon \
-         --bin mcp_cli_stub` first",
-        dir.display()
-    );
-    dir
+    bins::mcp_cli_stub_path()
 }
 
 /// The environment [`mcp_cli_stub_profile_source`] carries through the
@@ -2812,6 +2780,7 @@ pub fn mcp_cli_stub_profile_with_table(
     source
 }
 
+pub mod bins;
 pub mod detection_rules;
 pub mod docs;
 pub mod global_tracing;
@@ -2915,6 +2884,7 @@ impl Harness {
         let namespace = yagura_os::resolve_instance_from(Some(std::ffi::OsStr::new(instance)))
             .expect("the instance identifier must be valid");
         let endpoint = yagura_os::default_endpoint_owning(&user, &namespace);
+        let config = bins::config_with_holder(config);
         let registry = Arc::new(WindowRegistry::new(config.clone()));
         let server = Arc::new(IpcServer::new(
             registry.clone(),

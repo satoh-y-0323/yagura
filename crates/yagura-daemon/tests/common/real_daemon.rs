@@ -20,8 +20,8 @@ use yagura_protocol::{ClientMessage, DaemonMessage};
 use yagura_test_support::HANG_GUARD;
 use yagura_test_support::ipc::{Connection, InstanceEndpoint, connect_with_retry};
 use yagura_test_support::paths::TempDir;
-use yagura_test_support::process::env_probe_path;
 
+use super::bins::env_probe_path;
 use super::{read_response, send, write_profile};
 
 /// The `PATH` the daemon process itself is started with: short, so a probe line never
@@ -35,7 +35,7 @@ pub fn daemon_base_dirs() -> Vec<PathBuf> {
 }
 
 pub fn daemon_bin() -> PathBuf {
-    PathBuf::from(env!("CARGO_BIN_EXE_yagura-daemon"))
+    super::bins::daemon_exe()
 }
 
 pub fn shell_path() -> PathBuf {

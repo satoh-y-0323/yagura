@@ -690,10 +690,15 @@ pub const COMPOSER_SEPARATOR: &str = ">>";
 /// must hold.
 pub const COMPOSER_CONTINUATION_PREFIX: &str = "::";
 
-/// The four argv elements that put a fixture into composer-draw mode: the
-/// shared composer triple, then `reflect_delay_ms` (`0` reflects a write as
-/// soon as it arrives).
-fn composer_arguments(reflect_delay_ms: u64) -> [String; 4] {
+/// The four argv elements that put a fixture into composer-draw mode, to be
+/// appended after the fixture's own arguments: [`COMPOSER_MARKER`],
+/// [`COMPOSER_SEPARATOR`], [`COMPOSER_CONTINUATION_PREFIX`], then
+/// `reflect_delay_ms` (`0` reflects a write as soon as it arrives).
+///
+/// A fixture draws a composer only when all four are present, in this order;
+/// with any of them missing it silently falls back to plain echo.
+#[must_use]
+pub fn composer_arguments(reflect_delay_ms: u64) -> [String; 4] {
     [
         COMPOSER_MARKER.to_string(),
         COMPOSER_SEPARATOR.to_string(),

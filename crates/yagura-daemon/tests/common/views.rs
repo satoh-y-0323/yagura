@@ -16,7 +16,7 @@ pub const SCRIPT_READY: &[u8] = b"SCRIPT-READY";
 /// The argv of a `term_script` window in script mode.
 pub fn script_argv() -> Vec<String> {
     vec![
-        yagura_test_support::process::term_script_path()
+        super::bins::term_script_path()
             .to_str()
             .expect("term_script path must be valid UTF-8")
             .to_string(),
