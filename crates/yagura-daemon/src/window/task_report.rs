@@ -1,9 +1,10 @@
-//! Whether a task window's last report to its plan's owner still stands: the
-//! window has had no new instruction since, and the owner is still alive.
+//! Where a task window's last report to its plan's owner stands: still
+//! waiting on a live owner, released by a new instruction, or left with no
+//! reader.
 
 use std::sync::Mutex;
 
-use yagura_protocol::{DetectedStatus, TaskReportMark};
+use yagura_protocol::{DetectedStatus, ReportState, TaskReportMark};
 
 use crate::pty::lock_recover;
 use crate::waiter::StatusAt;
@@ -11,7 +12,7 @@ use crate::waiter::StatusAt;
 /// A change to what a task report waits on, made under its plan's lock.
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum ReportChange<'a> {
-    /// The window's task binding ended: the report is released for good.
+    /// The window's task binding ended: the report has no reader for good.
     Unbound,
     /// The plan named a new owner (alive when named): the report now waits
     /// on it.
@@ -49,10 +50,18 @@ struct Mark {
     owner: Option<String>,
     /// [`State::instructions`] when the report was sent.
     instructions: u64,
-    /// Whether the report no longer stands whatever happens next: it was
-    /// released from the start (no owner was alive, or an instruction typed
-    /// ahead was still to be read), or the window's task binding ended.
-    released: bool,
+    /// Why the report no longer stands whatever happens next; `None` while
+    /// it may still stand.
+    released: Option<Released>,
+}
+
+/// Why a report was released for good.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Released {
+    /// An instruction typed ahead was still to be read when it was sent.
+    TypedAhead,
+    /// No owner was alive when it was sent, or the task binding ended.
+    NoReader,
 }
 
 impl TaskReport {
@@ -63,10 +72,11 @@ impl TaskReport {
         state.instructions = state.instructions.saturating_add(1);
     }
 
-    /// Counts a new instruction written or pushed into the window while its
-    /// confirmed status was `at`. One that arrives while the window runs, or
-    /// while its status is unknown, may be read by the CLI only after a
-    /// report sent later in the same turn, so that report is born released.
+    /// Counts new work handed to the window's CLI (a submitted line, a
+    /// message or a push; never an interrupt) while its confirmed status was
+    /// `at`. One that arrives while the window runs, or while its status is
+    /// unknown, may be read by the CLI only after a report sent later in the
+    /// same turn, so that report is born released.
     pub(crate) fn instruction_arrived(&self, at: &StatusAt) {
         let mut state = lock_recover(&self.state);
         state.instructions = state.instructions.saturating_add(1);
@@ -99,7 +109,15 @@ impl TaskReport {
             seq,
             owner: owner.map(str::to_string),
             instructions,
-            released: owner.is_none() || typed_ahead,
+            // A report sent behind unread work is released by that work,
+            // whether or not anyone would have read it.
+            released: if typed_ahead {
+                Some(Released::TypedAhead)
+            } else if owner.is_none() {
+                Some(Released::NoReader)
+            } else {
+                None
+            },
         });
     }
 
@@ -115,10 +133,11 @@ impl TaskReport {
             let Some(mark) = state.mark.as_mut() else {
                 return;
             };
-            if let ReportChange::Unbound = change {
-                mark.released = true;
+            if mark.released.is_some() {
+                return;
             }
-            if mark.released {
+            if let ReportChange::Unbound = change {
+                mark.released = Some(Released::NoReader);
                 return;
             }
             mark.owner.clone()
@@ -147,16 +166,20 @@ impl TaskReport {
             let state = lock_recover(&self.state);
             (state.mark.clone()?, state.instructions)
         };
-        let alive = !mark.released && mark.owner.as_deref().is_some_and(owner_alive);
+        let instructed =
+            mark.released == Some(Released::TypedAhead) || mark.instructions != instructions;
+        // Checked first: a report an instruction released no longer waits on
+        // anyone, so its reader's end changes nothing.
+        let state = if instructed {
+            ReportState::Instruction
+        } else if mark.released.is_some() || !mark.owner.as_deref().is_some_and(owner_alive) {
+            ReportState::NoReader
+        } else {
+            ReportState::Standing
+        };
         Some(TaskReportMark {
             seq: mark.seq,
-            standing: standing(&mark, instructions, alive),
+            state,
         })
     }
-}
-
-/// Whether a report still stands: it was not released, no new
-/// instruction came after it, and its owner is alive.
-fn standing(mark: &Mark, instructions: u64, owner_alive: bool) -> bool {
-    !mark.released && mark.instructions == instructions && owner_alive
 }

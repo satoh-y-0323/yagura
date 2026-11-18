@@ -1123,7 +1123,13 @@ impl WindowEntry {
         press: Option<crate::input_encode::NamedPress>,
     ) -> crate::pty::PtyResult<()> {
         let echo = classify_input_echo(data, origin);
-        if echo == InputEcho::MayStartWork {
+        // An interrupt stops the CLI's turn without handing it work, so it is
+        // no new instruction, whoever sent it and however it is written.
+        let hands_work = match origin {
+            InputOrigin::Interactive | InputOrigin::Message => echo == InputEcho::MayStartWork,
+            InputOrigin::Control => false,
+        };
+        if hands_work {
             // Counted before the write, so nothing the write causes is seen
             // before the instruction is.
             self.task_report

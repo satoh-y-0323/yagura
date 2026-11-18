@@ -19,7 +19,7 @@ export interface NeedsYouInput {
  */
 export function needsYou(entry: NeedsYouInput): boolean {
   const { status } = entry.detected;
-  if (status === 'waiting_input' && entry.taskReport?.standing === true) {
+  if (status === 'waiting_input' && entry.taskReport?.state === 'standing') {
     return false;
   }
   return STATUS_PRESENTATION[status].needsYou;

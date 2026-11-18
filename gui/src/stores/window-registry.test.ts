@@ -910,16 +910,82 @@ describe('createWindowRegistry: an entry never holds a reason without the unknow
   });
 });
 
+/** The states a report mark reads as at the boundary. */
+type ReportStateValue = 'standing' | 'instruction' | 'no_reader' | 'unknown';
+
+/**
+ * Within one `seq` a mark only moves up this order, written here as a literal
+ * table rather than read from production: `standing` < `no_reader` = `unknown`
+ * < `instruction`.
+ */
+const STATE_RANK: Record<ReportStateValue, number> = {
+  standing: 0,
+  no_reader: 1,
+  unknown: 1,
+  instruction: 2,
+};
+
+const ALL_STATES = Object.keys(STATE_RANK) as ReportStateValue[];
+
 /**
  * A task window's report mark is ordered on its own key, apart from the status
- * pair: within one boot a larger `seq` is newer, and for the same `seq`
- * `standing` only goes from true to false. So the order the two routes arrive
- * in must not move a false mark back to true.
+ * pair: within one boot a larger `seq` is newer, and for the same `seq` the
+ * state only moves up `STATE_RANK`. So the order the two routes arrive in must
+ * never move a mark back to a reason it already left.
  */
 describe('createWindowRegistry: the task report mark merges on its own key', () => {
   const BOOT = { origin: 7, seq: 1 };
 
-  it('takes a false mark of the same seq pushed after a listed true one', () => {
+  const SAME_SEQ_PAIRS = ALL_STATES.flatMap((held) =>
+    ALL_STATES.map((arriving) => [held, arriving] as const)
+  );
+
+  it.each(SAME_SEQ_PAIRS)(
+    'holding a listed %s, a pushed mark of the same seq reading %s replaces it only when it ranks higher',
+    (held, arriving) => {
+      const registry = createWindowRegistry();
+      registry.openWindow(
+        makeWindowInfo({
+          window_id: 'w-a',
+          detected: { status: 'waiting_input' },
+          status_rev: 3,
+          status_boot: BOOT,
+          task_report: { seq: 1, state: held },
+        })
+      );
+      expect(entryOf(registry, 'w-a')?.taskReport).toEqual({ seq: 1, state: held });
+
+      registry.setStatus('w-a', { status: 'waiting_input' }, 3, BOOT, { seq: 1, state: arriving });
+
+      const expected = STATE_RANK[arriving] > STATE_RANK[held] ? arriving : held;
+      expect(entryOf(registry, 'w-a')?.taskReport).toEqual({ seq: 1, state: expected });
+    }
+  );
+
+  it.each(SAME_SEQ_PAIRS)(
+    'holding a pushed %s, a listed mark of the same seq reading %s replaces it only when it ranks higher',
+    (held, arriving) => {
+      const registry = createWindowRegistry();
+      registry.openWindow(makeWindowInfo({ window_id: 'w-a', status_rev: 2, status_boot: BOOT }));
+      registry.setStatus('w-a', { status: 'waiting_input' }, 3, BOOT, { seq: 1, state: held });
+      expect(entryOf(registry, 'w-a')?.taskReport).toEqual({ seq: 1, state: held });
+
+      registry.openWindow(
+        makeWindowInfo({
+          window_id: 'w-a',
+          detected: { status: 'waiting_input' },
+          status_rev: 3,
+          status_boot: BOOT,
+          task_report: { seq: 1, state: arriving },
+        })
+      );
+
+      const expected = STATE_RANK[arriving] > STATE_RANK[held] ? arriving : held;
+      expect(entryOf(registry, 'w-a')?.taskReport).toEqual({ seq: 1, state: expected });
+    }
+  );
+
+  it('keeps an instruction of the same seq when a no_reader arrives after it on both routes', () => {
     const registry = createWindowRegistry();
     registry.openWindow(
       makeWindowInfo({
@@ -927,33 +993,23 @@ describe('createWindowRegistry: the task report mark merges on its own key', () 
         detected: { status: 'waiting_input' },
         status_rev: 3,
         status_boot: BOOT,
-        task_report: { seq: 1, standing: true },
+        task_report: { seq: 1, state: 'standing' },
       })
     );
-    expect(entryOf(registry, 'w-a')?.taskReport).toEqual({ seq: 1, standing: true });
+    registry.setStatus('w-a', { status: 'running' }, 4, BOOT, { seq: 1, state: 'instruction' });
 
-    registry.setStatus('w-a', { status: 'waiting_input' }, 3, BOOT, { seq: 1, standing: false });
-
-    expect(entryOf(registry, 'w-a')?.taskReport).toEqual({ seq: 1, standing: false });
-  });
-
-  it('keeps a pushed false mark when a listed true one of the same seq arrives after it', () => {
-    const registry = createWindowRegistry();
-    registry.openWindow(makeWindowInfo({ window_id: 'w-a', status_rev: 2, status_boot: BOOT }));
-    registry.setStatus('w-a', { status: 'waiting_input' }, 3, BOOT, { seq: 1, standing: false });
-    expect(entryOf(registry, 'w-a')?.taskReport).toEqual({ seq: 1, standing: false });
-
+    registry.setStatus('w-a', { status: 'waiting_input' }, 5, BOOT, { seq: 1, state: 'no_reader' });
     registry.openWindow(
       makeWindowInfo({
         window_id: 'w-a',
         detected: { status: 'waiting_input' },
-        status_rev: 3,
+        status_rev: 6,
         status_boot: BOOT,
-        task_report: { seq: 1, standing: true },
+        task_report: { seq: 1, state: 'no_reader' },
       })
     );
 
-    expect(entryOf(registry, 'w-a')?.taskReport).toEqual({ seq: 1, standing: false });
+    expect(entryOf(registry, 'w-a')?.taskReport).toEqual({ seq: 1, state: 'instruction' });
   });
 
   it('takes a mark of a larger seq on either route, and never one of a smaller seq', () => {
@@ -964,7 +1020,7 @@ describe('createWindowRegistry: the task report mark merges on its own key', () 
           window_id: windowId,
           status_rev: 3,
           status_boot: BOOT,
-          task_report: { seq: 1, standing: false },
+          task_report: { seq: 1, state: 'instruction' },
         })
       );
     }
@@ -975,13 +1031,16 @@ describe('createWindowRegistry: the task report mark merges on its own key', () 
         detected: { status: 'waiting_input' },
         status_rev: 5,
         status_boot: BOOT,
-        task_report: { seq: 2, standing: true },
+        task_report: { seq: 2, state: 'standing' },
       })
     );
-    registry.setStatus('w-push', { status: 'waiting_input' }, 5, BOOT, { seq: 2, standing: true });
+    registry.setStatus('w-push', { status: 'waiting_input' }, 5, BOOT, {
+      seq: 2,
+      state: 'standing',
+    });
 
-    expect(entryOf(registry, 'w-list')?.taskReport).toEqual({ seq: 2, standing: true });
-    expect(entryOf(registry, 'w-push')?.taskReport).toEqual({ seq: 2, standing: true });
+    expect(entryOf(registry, 'w-list')?.taskReport).toEqual({ seq: 2, state: 'standing' });
+    expect(entryOf(registry, 'w-push')?.taskReport).toEqual({ seq: 2, state: 'standing' });
 
     registry.openWindow(
       makeWindowInfo({
@@ -989,13 +1048,16 @@ describe('createWindowRegistry: the task report mark merges on its own key', () 
         detected: { status: 'waiting_input' },
         status_rev: 6,
         status_boot: BOOT,
-        task_report: { seq: 1, standing: false },
+        task_report: { seq: 1, state: 'instruction' },
       })
     );
-    registry.setStatus('w-push', { status: 'waiting_input' }, 6, BOOT, { seq: 1, standing: false });
+    registry.setStatus('w-push', { status: 'waiting_input' }, 6, BOOT, {
+      seq: 1,
+      state: 'instruction',
+    });
 
-    expect(entryOf(registry, 'w-list')?.taskReport).toEqual({ seq: 2, standing: true });
-    expect(entryOf(registry, 'w-push')?.taskReport).toEqual({ seq: 2, standing: true });
+    expect(entryOf(registry, 'w-list')?.taskReport).toEqual({ seq: 2, state: 'standing' });
+    expect(entryOf(registry, 'w-push')?.taskReport).toEqual({ seq: 2, state: 'standing' });
   });
 
   it('takes the mark of a push whose status pair is older than the one held', () => {
@@ -1006,16 +1068,16 @@ describe('createWindowRegistry: the task report mark merges on its own key', () 
         detected: { status: 'waiting_input' },
         status_rev: 8,
         status_boot: BOOT,
-        task_report: { seq: 1, standing: true },
+        task_report: { seq: 1, state: 'standing' },
       })
     );
 
-    registry.setStatus('w-a', { status: 'running' }, 7, BOOT, { seq: 1, standing: false });
+    registry.setStatus('w-a', { status: 'running' }, 7, BOOT, { seq: 1, state: 'instruction' });
 
     const entry = entryOf(registry, 'w-a');
     expect(entry?.detected).toEqual({ status: 'waiting_input' });
     expect(entry?.statusRev).toBe(8);
-    expect(entry?.taskReport).toEqual({ seq: 1, standing: false });
+    expect(entry?.taskReport).toEqual({ seq: 1, state: 'instruction' });
   });
 
   it('takes the arriving observation whole once the boot changes, a missing mark clearing the one held', () => {
@@ -1025,7 +1087,7 @@ describe('createWindowRegistry: the task report mark merges on its own key', () 
         window_id: 'w-a',
         status_rev: 9,
         status_boot: BOOT,
-        task_report: { seq: 5, standing: false },
+        task_report: { seq: 5, state: 'instruction' },
       })
     );
 
@@ -1035,10 +1097,10 @@ describe('createWindowRegistry: the task report mark merges on its own key', () 
         detected: { status: 'waiting_input' },
         status_rev: 1,
         status_boot: { origin: 7, seq: 2 },
-        task_report: { seq: 1, standing: true },
+        task_report: { seq: 1, state: 'standing' },
       })
     );
-    expect(entryOf(registry, 'w-a')?.taskReport).toEqual({ seq: 1, standing: true });
+    expect(entryOf(registry, 'w-a')?.taskReport).toEqual({ seq: 1, state: 'standing' });
 
     registry.setStatus('w-a', { status: 'waiting_input' }, 1, { origin: 9, seq: 1 });
 
@@ -1053,12 +1115,12 @@ describe('createWindowRegistry: the task report mark merges on its own key', () 
         detected: { status: 'waiting_input' },
         status_rev: 3,
         status_boot: BOOT,
-        task_report: { seq: 1, standing: true },
+        task_report: { seq: 1, state: 'standing' },
       })
     );
 
     registry.setStatus('w-a', { status: 'waiting_input' }, 4, BOOT);
-    expect(entryOf(registry, 'w-a')?.taskReport).toEqual({ seq: 1, standing: true });
+    expect(entryOf(registry, 'w-a')?.taskReport).toEqual({ seq: 1, state: 'standing' });
 
     registry.openWindow(
       makeWindowInfo({
@@ -1068,7 +1130,7 @@ describe('createWindowRegistry: the task report mark merges on its own key', () 
         status_boot: BOOT,
       })
     );
-    expect(entryOf(registry, 'w-a')?.taskReport).toEqual({ seq: 1, standing: true });
+    expect(entryOf(registry, 'w-a')?.taskReport).toEqual({ seq: 1, state: 'standing' });
   });
 });
 

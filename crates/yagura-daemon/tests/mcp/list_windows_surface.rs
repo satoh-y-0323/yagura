@@ -10,7 +10,7 @@ use std::sync::Mutex;
 use yagura_daemon::mcp::tools::list_windows;
 use yagura_daemon::mcp::{DaemonTransport, RequesterIdentity, TransportError};
 use yagura_protocol::{
-    ClientMessage, DaemonMessage, StatusBoot, TaskReportMark, WindowInfo, WindowStatus,
+    ClientMessage, DaemonMessage, ReportState, StatusBoot, TaskReportMark, WindowInfo, WindowStatus,
 };
 
 struct OneReply(Mutex<Option<DaemonMessage>>);
@@ -30,7 +30,7 @@ impl DaemonTransport for OneReply {
     }
 }
 
-fn window(window_id: &str, status_reports_missing: Option<bool>) -> WindowInfo {
+fn window(window_id: &str, status_reports_missing: Option<bool>, state: ReportState) -> WindowInfo {
     WindowInfo {
         window_id: window_id.to_string(),
         name: "cli".to_string(),
@@ -47,10 +47,7 @@ fn window(window_id: &str, status_reports_missing: Option<bool>) -> WindowInfo {
         mcp_connected: Some(true),
         status_reports_missing,
         queued_count: None,
-        task_report: Some(TaskReportMark {
-            seq: 2,
-            standing: true,
-        }),
+        task_report: Some(TaskReportMark { seq: 2, state }),
     }
 }
 
@@ -58,9 +55,9 @@ fn window(window_id: &str, status_reports_missing: Option<bool>) -> WindowInfo {
 async fn list_windows_does_not_surface_status_reports_missing() {
     let transport = OneReply(Mutex::new(Some(DaemonMessage::WindowList {
         windows: vec![
-            window("w1", Some(true)),
-            window("w2", Some(false)),
-            window("w3", None),
+            window("w1", Some(true), ReportState::Standing),
+            window("w2", Some(false), ReportState::Instruction),
+            window("w3", None, ReportState::NoReader),
         ],
     })));
 

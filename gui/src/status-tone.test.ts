@@ -24,8 +24,14 @@ import {
 interface Entry {
   detected: DetectedStatusView;
   id: string;
-  taskReport?: { seq: number; standing: boolean };
+  taskReport?: { seq: number; state: ReportStateValue };
 }
+
+/** The states a report mark reads as at the boundary. */
+type ReportStateValue = 'standing' | 'instruction' | 'no_reader' | 'unknown';
+
+/** Every state but `standing`: none says the window still waits on its owner. */
+const NOT_STANDING_STATES: readonly ReportStateValue[] = ['instruction', 'no_reader', 'unknown'];
 
 /** An entry holding `status`, with the reason arm the status allows. */
 function entryOf(status: WindowStatus, id: string): Entry {
@@ -90,20 +96,26 @@ describe('windowsNeedingYou / attentionCount: membership in the waiting set', ()
 });
 
 /** `entryOf` with the task report mark the daemon attached. */
-function reportedEntryOf(status: WindowStatus, id: string, standing: boolean): Entry {
-  return { ...entryOf(status, id), taskReport: { seq: 1, standing } };
+function reportedEntryOf(status: WindowStatus, id: string, state: ReportStateValue): Entry {
+  return { ...entryOf(status, id), taskReport: { seq: 1, state } };
 }
 
 describe('needsYou: a task window waiting on its owner after its report is not the turn of the user', () => {
   it('leaves out a waiting_input window whose report still stands', () => {
-    expect(needsYou(reportedEntryOf('waiting_input', 'w', true))).toBe(false);
+    expect(needsYou(reportedEntryOf('waiting_input', 'w', 'standing'))).toBe(false);
   });
 
-  it('keeps in a waiting_approval window whose report stands, and a waiting_input one whose report no longer stands or that never reported', () => {
-    expect(needsYou(reportedEntryOf('waiting_approval', 'w', true))).toBe(true);
-    expect(needsYou(reportedEntryOf('waiting_input', 'w', false))).toBe(true);
+  it('keeps in a waiting_approval window whose report stands, and a waiting_input one that never reported', () => {
+    expect(needsYou(reportedEntryOf('waiting_approval', 'w', 'standing'))).toBe(true);
     expect(needsYou(entryOf('waiting_input', 'w'))).toBe(true);
   });
+
+  it.each(NOT_STANDING_STATES)(
+    'keeps in a waiting_input window whose report reads %s: only a standing report is left out',
+    (state) => {
+      expect(needsYou(reportedEntryOf('waiting_input', 'w', state))).toBe(true);
+    }
+  );
 
   it('agrees with the status table for every status that carries no standing report', () => {
     for (const [status, expected] of Object.entries(EXPECTED_NEEDS_YOU) as [
@@ -111,25 +123,38 @@ describe('needsYou: a task window waiting on its owner after its report is not t
       boolean,
     ][]) {
       expect(needsYou(entryOf(status, 'w')), status).toBe(expected);
-      expect(needsYou(reportedEntryOf(status, 'w', false)), status).toBe(expected);
+      for (const state of NOT_STANDING_STATES) {
+        expect(needsYou(reportedEntryOf(status, 'w', state)), `${status} ${state}`).toBe(expected);
+      }
     }
-    expect(needsYou(reportedEntryOf('unknown', 'w', true))).toBe(false);
+    expect(needsYou(reportedEntryOf('unknown', 'w', 'standing'))).toBe(false);
   });
 
   it('narrows windowsNeedingYou, attentionCount and the group summary the same way', () => {
     const entries: Entry[] = [
-      reportedEntryOf('waiting_input', 'standing', true),
-      reportedEntryOf('waiting_input', 'released', false),
+      reportedEntryOf('waiting_input', 'standing', 'standing'),
+      reportedEntryOf('waiting_input', 'instruction', 'instruction'),
+      reportedEntryOf('waiting_input', 'no-reader', 'no_reader'),
+      reportedEntryOf('waiting_input', 'unread', 'unknown'),
       entryOf('waiting_input', 'plain'),
-      reportedEntryOf('waiting_approval', 'approval', true),
+      reportedEntryOf('waiting_approval', 'approval', 'standing'),
       entryOf('unknown', 'unknown'),
     ];
 
-    expect(windowsNeedingYou(entries).map((e) => e.id)).toEqual(['released', 'plain', 'approval']);
-    expect(attentionCount(entries)).toBe(3);
-    expect(summarizeWindowStatuses(entries).count).toBe(3);
+    expect(windowsNeedingYou(entries).map((e) => e.id)).toEqual([
+      'instruction',
+      'no-reader',
+      'unread',
+      'plain',
+      'approval',
+    ]);
+    expect(attentionCount(entries)).toBe(5);
+    expect(summarizeWindowStatuses(entries).count).toBe(5);
 
-    const onlyStanding = [reportedEntryOf('waiting_input', 'standing', true), entryOf('idle', 'i')];
+    const onlyStanding = [
+      reportedEntryOf('waiting_input', 'standing', 'standing'),
+      entryOf('idle', 'i'),
+    ];
     expect(summarizeWindowStatuses(onlyStanding)).toEqual({
       count: 0,
       mark: 'waiting_input',

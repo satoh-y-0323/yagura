@@ -264,7 +264,7 @@ describe('firstWindowAtStartup: the window Focus shows when the app starts', () 
     const { firstWindowAtStartup } = shellStateModule();
     const order = [
       win('w-a', 'running'),
-      win('w-task', 'waiting_input', { seq: 1, standing: true }),
+      win('w-task', 'waiting_input', { seq: 1, state: 'standing' }),
       win('w-b', 'idle'),
     ];
 

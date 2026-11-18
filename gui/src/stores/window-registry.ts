@@ -14,7 +14,12 @@ import { bringToFront, MIN_WINDOW_SIZE, type Rect, type Size } from '../layout/f
 import { tileRects } from '../layout/tile-layout';
 import { formatPathForDisplay, sanitizeForDisplay } from '../display/untrusted-text';
 import { reorderTabs } from '../sidebar/row-order';
-import type { DetectedStatusView, StatusBoot, TaskReportMark } from '../ipc/session-boundary';
+import type {
+  DetectedStatusView,
+  ReportState,
+  StatusBoot,
+  TaskReportMark,
+} from '../ipc/session-boundary';
 import type { WindowEventHandlers, WindowInfo } from '../ipc/session-client';
 
 /** Screen position of a window pane. */
@@ -483,6 +488,17 @@ function withObservedPair(
 }
 
 /**
+ * The order one report's state moves in within one `seq`. `unknown` ranks with
+ * `no_reader`: neither is read as standing, nor known to be an instruction.
+ */
+const REPORT_STATE_RANK: Readonly<Record<ReportState, number>> = {
+  standing: 0,
+  no_reader: 1,
+  unknown: 1,
+  instruction: 2,
+};
+
+/**
  * Merges an observation's report mark, on a key apart from the status pair. Must
  * run before the pair moves `entry.statusBoot`: the boot it compares against is
  * the one the held mark was observed in.
@@ -490,8 +506,8 @@ function withObservedPair(
  * Another boot (another origin, a later boot, or either side naming none) is
  * taken whole, an absent mark clearing the one held. An earlier boot of the
  * same origin is ignored. Within one boot an absent mark keeps the held one,
- * and a mark replaces it only for a larger `seq`, or for the same `seq` when it
- * no longer stands, so the order the routes arrive in never revives a mark.
+ * and a mark replaces it only for a larger `seq`, or for the same `seq` when its
+ * state ranks higher, so the order the routes arrive in never moves a mark back.
  */
 function withTaskReport(
   entry: WindowEntry,
@@ -510,7 +526,8 @@ function withTaskReport(
       mark !== undefined &&
       (current === undefined ||
         mark.seq > current.seq ||
-        (mark.seq === current.seq && !mark.standing));
+        (mark.seq === current.seq &&
+          REPORT_STATE_RANK[mark.state] > REPORT_STATE_RANK[current.state]));
     return replaces ? { ...entry, taskReport: mark } : entry;
   }
   if (mark !== undefined) {

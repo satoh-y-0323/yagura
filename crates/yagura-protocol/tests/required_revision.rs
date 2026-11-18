@@ -967,7 +967,7 @@ fn the_view_messages_require_the_frame_threshold_whatever_they_carry() {
 }
 
 #[test]
-fn run_hook_requires_revision_thirty_one_and_the_current_revision_is_thirty_five() {
+fn run_hook_requires_revision_thirty_one_and_the_current_revision_is_thirty_six() {
     let message = ClientMessage::RunHook {
         window_id: "w1".to_string(),
         token: "t".to_string(),
@@ -981,7 +981,7 @@ fn run_hook_requires_revision_thirty_one_and_the_current_revision_is_thirty_five
         HOOK_EVENTS_MIN_REVISION
     );
     assert_eq!(HOOK_EVENTS_MIN_REVISION, 31);
-    assert_eq!(PROTOCOL_REVISION, 35);
+    assert_eq!(PROTOCOL_REVISION, 36);
 }
 
 /// A daemon before revision 34 refuses a door's read and its printed notice by name, so

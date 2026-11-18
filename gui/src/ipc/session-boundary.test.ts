@@ -574,19 +574,27 @@ function statusPayloadWire(overrides: Record<string, unknown> = {}): Record<stri
   return { window_id: WINDOW_ID, status: 'waiting_input', ...overrides };
 }
 
-/** Values of `task_report` that are present but are not a report mark. */
+/**
+ * Values of `task_report` that are present but are not a report mark: not a
+ * record, a `seq` that is not a non-negative integer, or a `state` that is
+ * missing or not a string. A revision 35 body (`standing`, no `state`) is one of
+ * them: the core always writes `state`.
+ */
 const MALFORMED_TASK_REPORTS: readonly unknown[] = [
   7,
   'standing',
   true,
-  { standing: true },
+  { state: 'standing' },
   { seq: 1 },
-  { seq: 1.5, standing: true },
-  { seq: '1', standing: true },
-  { seq: -1, standing: true },
-  { seq: Number.MIN_SAFE_INTEGER, standing: false },
-  { seq: 1, standing: 'yes' },
-  { seq: 1, standing: 1 },
+  { seq: 1, standing: true },
+  { seq: 1.5, state: 'standing' },
+  { seq: '1', state: 'standing' },
+  { seq: -1, state: 'standing' },
+  { seq: Number.MIN_SAFE_INTEGER, state: 'instruction' },
+  { seq: 1, state: true },
+  { seq: 1, state: 1 },
+  { seq: 1, state: null },
+  { seq: 1, state: { kind: 'standing' } },
 ];
 
 describe('the task report mark crosses this boundary only when present', () => {
@@ -598,9 +606,10 @@ describe('the task report mark crosses this boundary only when present', () => {
       Object.prototype.hasOwnProperty.call(narrowWindowInfo(windowInfoWire()), 'task_report')
     ).toBe(false);
     for (const mark of [
-      { seq: 0, standing: false },
-      { seq: 1, standing: true },
-      { seq: 42, standing: false },
+      { seq: 0, state: 'standing' },
+      { seq: 1, state: 'instruction' },
+      { seq: 42, state: 'no_reader' },
+      { seq: 3, state: 'unknown' },
     ]) {
       expect(narrowStatusPayload(statusPayloadWire({ task_report: mark })).task_report).toEqual(
         mark
@@ -608,6 +617,21 @@ describe('the task report mark crosses this boundary only when present', () => {
       expect(narrowWindowInfo(windowInfoWire({ task_report: mark })).task_report).toEqual(mark);
     }
   });
+
+  it.each(['held_by_someone', '', 'Standing', 'NO_READER', 'standing '])(
+    'reads a state this build does not know (%j) as unknown on both routes, refusing nothing',
+    (state) => {
+      const mark = { seq: 5, state };
+      expect(narrowStatusPayload(statusPayloadWire({ task_report: mark })).task_report).toEqual({
+        seq: 5,
+        state: 'unknown',
+      });
+      expect(narrowWindowInfo(windowInfoWire({ task_report: mark })).task_report).toEqual({
+        seq: 5,
+        state: 'unknown',
+      });
+    }
+  );
 });
 
 describe('narrowStatusPayload: refuses a status change whose task report mark it cannot read', () => {
@@ -645,12 +669,12 @@ describe('narrowWindowInfo: drops a task report mark it cannot read and keeps th
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
     try {
       const list = narrowWindowInfoList([
-        windowInfoWire({ window_id: 'w-a', task_report: { seq: -1, standing: true } }),
-        windowInfoWire({ window_id: 'w-b', task_report: { seq: 2, standing: true } }),
+        windowInfoWire({ window_id: 'w-a', task_report: { seq: -1, state: 'standing' } }),
+        windowInfoWire({ window_id: 'w-b', task_report: { seq: 2, state: 'standing' } }),
       ]);
       expect(list.map((info) => info.window_id)).toEqual(['w-a', 'w-b']);
       expect(Object.prototype.hasOwnProperty.call(list[0], 'task_report')).toBe(false);
-      expect(list[1]?.task_report).toEqual({ seq: 2, standing: true });
+      expect(list[1]?.task_report).toEqual({ seq: 2, state: 'standing' });
       expect(warn).toHaveBeenCalledTimes(1);
     } finally {
       warn.mockRestore();

@@ -123,12 +123,71 @@ function markFieldName(rustType: string): string {
   return names[0] ?? '';
 }
 
-const MARK_SEQ_KEY = markFieldName('u64');
-const MARK_STANDING_KEY = markFieldName('bool');
-
 /** A report mark spelled with the Rust field names. */
-function rustSpelledMark(seq: number, standing: boolean): Record<string, unknown> {
-  return { [MARK_SEQ_KEY]: seq, [MARK_STANDING_KEY]: standing };
+function rustSpelledMark(seq: number, state: string): Record<string, unknown> {
+  return { [markFieldName('u64')]: seq, [markFieldName('ReportState')]: state };
+}
+
+/** The `#[...]` attribute lines directly above the item at `index`, doc lines skipped. */
+function attributesAbove(source: string, index: number): string {
+  const lines = source.slice(0, index).split('\n').slice(0, -1);
+  const attributes: string[] = [];
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const line = (lines[i] ?? '').trim();
+    if (line.startsWith('#[')) {
+      attributes.push(line);
+    } else if (!line.startsWith('///')) {
+      break;
+    }
+  }
+  return attributes.join('\n');
+}
+
+/** A variant name as serde writes it under the enum's `rename_all` rule. */
+function spellVariant(rule: string | null, name: string): string {
+  if (rule === null) {
+    return name;
+  }
+  if (rule === 'snake_case') {
+    return name.replace(/([a-z0-9])([A-Z])/g, '$1_$2').toLowerCase();
+  }
+  throw new Error(`this reader does not know the rename_all rule ${rule}`);
+}
+
+/**
+ * The wire spellings of the Rust `ReportState`, read from its declaration: every
+ * unit variant under the enum's `rename_all` rule (or its own `rename`), leaving
+ * out the `#[serde(other)]` catch-all a peer's unknown value decodes to.
+ */
+function rustReportStateSpellings(): string[] {
+  const header = 'pub enum ReportState {';
+  const at = protocolSource.indexOf(header);
+  if (at === -1) {
+    throw new Error(`no Rust item found for header: ${header}`);
+  }
+  const rule = /rename_all *= *"([A-Za-z_]+)"/.exec(attributesAbove(protocolSource, at))?.[1];
+  const spellings: string[] = [];
+  let variantAttributes = '';
+  for (const raw of itemBody(protocolSource, header).split('\n')) {
+    const line = raw.trim();
+    if (line === '' || line.startsWith('///')) {
+      continue;
+    }
+    if (line.startsWith('#[')) {
+      variantAttributes += line;
+      continue;
+    }
+    const variant = /^([A-Z][A-Za-z0-9]*) *,?$/.exec(line);
+    if (variant === null) {
+      throw new Error(`ReportState holds a line this reader cannot read: ${line}`);
+    }
+    if (!/serde\( *other *\)/.test(variantAttributes)) {
+      const renamed = /serde\(rename *= *"([^"]*)"\)/.exec(variantAttributes)?.[1];
+      spellings.push(renamed ?? spellVariant(rule ?? null, variant[1] ?? ''));
+    }
+    variantAttributes = '';
+  }
+  return spellings;
 }
 
 describe('the three wire shapes name the status generation identically', () => {
@@ -203,16 +262,16 @@ describe('this boundary reads the generation under the key the Rust sources use'
     const desktop = narrowStatusPayload({
       status: 'waiting_input',
       window_id: WINDOW_ID,
-      [DESKTOP_EVENT_TASK_REPORT_KEY]: rustSpelledMark(2, true),
+      [DESKTOP_EVENT_TASK_REPORT_KEY]: rustSpelledMark(2, 'standing'),
     });
-    expect(desktop.task_report).toEqual({ seq: 2, standing: true });
+    expect(desktop.task_report).toEqual({ seq: 2, state: 'standing' });
 
     const push = narrowStatusPayload({
       status: 'waiting_input',
       window_id: WINDOW_ID,
-      [STATUS_PUSH_TASK_REPORT_KEY]: rustSpelledMark(3, false),
+      [STATUS_PUSH_TASK_REPORT_KEY]: rustSpelledMark(3, 'instruction'),
     });
-    expect(push.task_report).toEqual({ seq: 3, standing: false });
+    expect(push.task_report).toEqual({ seq: 3, state: 'instruction' });
 
     const record = narrowWindowInfo({
       window_id: WINDOW_ID,
@@ -221,9 +280,35 @@ describe('this boundary reads the generation under the key the Rust sources use'
       cwd: '/x',
       status: 'waiting_input',
       exit_code: null,
-      [WINDOW_RECORD_TASK_REPORT_KEY]: rustSpelledMark(1, true),
+      [WINDOW_RECORD_TASK_REPORT_KEY]: rustSpelledMark(1, 'standing'),
     });
-    expect(record.task_report).toEqual({ seq: 1, standing: true });
+    expect(record.task_report).toEqual({ seq: 1, state: 'standing' });
+  });
+
+  it('finds the three report states the daemon writes in the Rust ReportState, its catch-all left out', () => {
+    expect(rustReportStateSpellings()).toHaveLength(3);
+  });
+
+  it('reads every report state the Rust ReportState writes as itself on both routes, never as unknown', () => {
+    for (const state of rustReportStateSpellings()) {
+      const push = narrowStatusPayload({
+        status: 'waiting_input',
+        window_id: WINDOW_ID,
+        [STATUS_PUSH_TASK_REPORT_KEY]: rustSpelledMark(4, state),
+      });
+      expect(push.task_report, state).toEqual({ seq: 4, state });
+
+      const record = narrowWindowInfo({
+        window_id: WINDOW_ID,
+        name: 'main',
+        vendor: null,
+        cwd: '/x',
+        status: 'waiting_input',
+        exit_code: null,
+        [WINDOW_RECORD_TASK_REPORT_KEY]: rustSpelledMark(4, state),
+      });
+      expect(record.task_report, state).toEqual({ seq: 4, state });
+    }
   });
 
   it('drops a generation sent under a key none of the Rust shapes uses', () => {
@@ -241,7 +326,7 @@ describe('this boundary reads the generation under the key the Rust sources use'
     const misspelledMark = narrowStatusPayload({
       status: 'waiting_input',
       window_id: WINDOW_ID,
-      [`${STATUS_PUSH_TASK_REPORT_KEY}s`]: rustSpelledMark(1, true),
+      [`${STATUS_PUSH_TASK_REPORT_KEY}s`]: rustSpelledMark(1, 'standing'),
     });
     expect(Object.prototype.hasOwnProperty.call(misspelledMark, 'task_report')).toBe(false);
   });

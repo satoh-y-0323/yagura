@@ -34,7 +34,7 @@ use yagura_daemon::profile::ProfileOs;
 use yagura_daemon::{IpcServer, OpenWindowRequest, WindowRegistry};
 use yagura_protocol::{
     ChatMessage, ClientMessage, DaemonMessage, InstructionNoticeState, PlanInfo, PlanTaskSpec,
-    ReportOutcome, TaskReportMark, WindowStatus,
+    ReportOutcome, ReportState, TaskReportMark, WindowStatus,
 };
 use yagura_test_support::ipc::Connection;
 use yagura_test_support::process::{
@@ -1723,8 +1723,8 @@ impl BoundTask {
     }
 }
 
-fn mark(seq: u64, standing: bool) -> Option<TaskReportMark> {
-    Some(TaskReportMark { seq, standing })
+fn mark(seq: u64, state: ReportState) -> Option<TaskReportMark> {
+    Some(TaskReportMark { seq, state })
 }
 
 /// Types `text` into `window_id` the way its user does, through an attached view, and
@@ -1750,24 +1750,24 @@ async fn a_report_stands_through_state_swings_and_ends_when_a_door_hands_the_win
     scene.until_waiting(&id).await;
 
     task.report("first").await;
-    assert_eq!(task.mark().await, mark(1, true));
+    assert_eq!(task.mark().await, mark(1, ReportState::Standing));
 
     // A post the wait door hands over is a new instruction (a parcel with a delivery record).
     let (seq, _) = post(&mut user, &format!("@{id} R6WAITPOST")).await;
     logs.until_received("R6WAITPOST").await;
     until_state(&mut user, seq, &id, "delivered").await;
-    task.until_mark(mark(1, false)).await;
+    task.until_mark(mark(1, ReportState::Instruction)).await;
 
     // So is a handoff (a parcel with no delivery record).
     scene.until_waiting(&id).await;
     wait_until_status(&mut task.probe, &id, WindowStatus::WaitingInput).await;
     task.report("second").await;
-    assert_eq!(task.mark().await, mark(2, true));
+    assert_eq!(task.mark().await, mark(2, ReportState::Standing));
     let (_, _, delivery) =
         expect_handoff_sent(request(&mut user, handoff_to(&id, "R6HANDOFF")).await);
     assert_eq!(delivery, "delivered");
     logs.until_received("R6HANDOFF").await;
-    task.until_mark(mark(2, false)).await;
+    task.until_mark(mark(2, ReportState::Instruction)).await;
 }
 
 #[tokio::test]
@@ -1785,31 +1785,31 @@ async fn a_report_survives_a_post_that_only_reached_the_inbox_and_the_post_that_
     scene.start_turn(&mut task.probe, &logs, &id).await;
     until_state(&mut user, seq, &id, "delivered").await;
     task.report("first").await;
-    assert_eq!(task.mark().await, mark(1, true));
+    assert_eq!(task.mark().await, mark(1, ReportState::Standing));
     scene.end_turn(&mut task.probe, &logs, &id).await;
-    assert_eq!(task.mark().await, mark(1, true));
+    assert_eq!(task.mark().await, mark(1, ReportState::Standing));
 
     // A status the detection cannot read, and the way back, do not release it either.
     lose(&scene, &mut task.probe, &id).await;
     scene.type_line(&id, "FIND").await;
     wait_until_status(&mut task.probe, &id, WindowStatus::WaitingInput).await;
-    assert_eq!(task.mark().await, mark(1, true));
+    assert_eq!(task.mark().await, mark(1, ReportState::Standing));
 
     // A turn that takes nothing is no new instruction.
     scene.start_turn(&mut task.probe, &logs, &id).await;
-    assert_eq!(task.mark().await, mark(1, true));
+    assert_eq!(task.mark().await, mark(1, ReportState::Standing));
 
     // A post that only reached the inbox is not one yet; the door that hands it over is.
     task.report("second").await;
-    assert_eq!(task.mark().await, mark(2, true));
+    assert_eq!(task.mark().await, mark(2, ReportState::Standing));
     let (seq, _) = post(&mut user, &format!("@{id} R6QUEUED")).await;
     until_state(&mut user, seq, &id, "queued").await;
-    assert_eq!(task.mark().await, mark(2, true));
+    assert_eq!(task.mark().await, mark(2, ReportState::Standing));
     scene.end_turn(&mut task.probe, &logs, &id).await;
-    assert_eq!(task.mark().await, mark(2, true));
+    assert_eq!(task.mark().await, mark(2, ReportState::Standing));
     scene.start_turn(&mut task.probe, &logs, &id).await;
     until_state(&mut user, seq, &id, "delivered").await;
-    task.until_mark(mark(2, false)).await;
+    task.until_mark(mark(2, ReportState::Instruction)).await;
 
     // What the user types ahead of a turn's end is the next instruction, not the end of
     // the one this report answers: a report sent while the window shows `Running` stays
@@ -1818,9 +1818,9 @@ async fn a_report_survives_a_post_that_only_reached_the_inbox_and_the_post_that_
     scene.start_turn(&mut task.probe, &logs, &id).await;
     type_as_the_user(&scene, &id, "keep going please\r").await;
     task.report("third").await;
-    assert_eq!(task.mark().await, mark(3, false));
+    assert_eq!(task.mark().await, mark(3, ReportState::Instruction));
     scene.end_turn(&mut task.probe, &logs, &id).await;
-    assert_eq!(task.mark().await, mark(3, false));
+    assert_eq!(task.mark().await, mark(3, ReportState::Instruction));
 }
 
 #[tokio::test]
@@ -1836,11 +1836,11 @@ async fn a_report_ends_when_the_wake_command_hands_the_window_a_post_even_ahead_
     assert_eq!(scene.entry(&id).session_id().as_deref(), Some(SESSION));
 
     task.report("first").await;
-    assert_eq!(task.mark().await, mark(1, true));
+    assert_eq!(task.mark().await, mark(1, ReportState::Standing));
     let (seq, _) = post(&mut user, &format!("@{id} R6PUSHED")).await;
     logs.until_received("R6PUSHED").await;
     until_state(&mut user, seq, &id, "delivered").await;
-    task.until_mark(mark(1, false)).await;
+    task.until_mark(mark(1, ReportState::Instruction)).await;
 
     // A post pushed while the window shows `Running` is an instruction that reached the
     // CLI ahead of the turn's end: a report sent in the rest of that turn is released
@@ -1850,7 +1850,7 @@ async fn a_report_ends_when_the_wake_command_hands_the_window_a_post_even_ahead_
     logs.until_received("R6PUSHEDRUNNING").await;
     until_state(&mut user, seq, &id, "delivered").await;
     task.report("second").await;
-    assert_eq!(task.mark().await, mark(2, false));
+    assert_eq!(task.mark().await, mark(2, ReportState::Instruction));
     scene.end_turn(&mut task.probe, &logs, &id).await;
-    assert_eq!(task.mark().await, mark(2, false));
+    assert_eq!(task.mark().await, mark(2, ReportState::Instruction));
 }

@@ -28,8 +28,8 @@ use yagura_daemon::ipc::report::REPORT_INBOX_MAX;
 use yagura_daemon::store;
 use yagura_protocol::{
     ClientMessage, DaemonMessage, PlanInfo, PlanTaskSpec, REPORT_PATH_MAX_BYTES,
-    REPORT_SUMMARY_MAX_BYTES, ReceivedReport, ReportOutcome, ReportTaskRef, TaskReportMark,
-    WindowStatus,
+    REPORT_SUMMARY_MAX_BYTES, ReceivedReport, ReportOutcome, ReportState, ReportTaskRef,
+    TaskReportMark, WindowStatus,
 };
 use yagura_test_support::detection::CONTROL_READY_LINE;
 use yagura_test_support::ipc::Connection;
@@ -338,8 +338,8 @@ fn unix_ms_now() -> u64 {
 
 // --- the standing-report fact a window list carries --------------------------------
 
-fn mark(seq: u64, standing: bool) -> Option<TaskReportMark> {
-    Some(TaskReportMark { seq, standing })
+fn mark(seq: u64, state: ReportState) -> Option<TaskReportMark> {
+    Some(TaskReportMark { seq, state })
 }
 
 /// Reads the next answer on a connection that may also be pushed `plan_changed`,
@@ -772,7 +772,10 @@ async fn a_bound_windows_report_reaches_the_plans_alive_owner_and_lands_on_the_t
     // `0x03` would end the `ready_child` task window on Windows.
     let config = DaemonConfig {
         interrupt_bytes: b"REPORT-INTERRUPT-KEY\r\n".to_vec(),
-        ..detection_config(&dir, report_ledger_config(&dir, profiles_dir, &[]))
+        ..detection_config(
+            &dir,
+            report_ledger_config(&dir, profiles_dir, &["close_window"]),
+        )
     };
     let (h, _locks) = Harness::start_with_ledger("report-task-basic", config).await;
 
@@ -838,11 +841,14 @@ async fn a_bound_windows_report_reaches_the_plans_alive_owner_and_lands_on_the_t
 
     // The window now waits on its owner: the report stands until a new
     // instruction reaches the window.
-    assert_eq!(task_mark(&mut owner, &bound_window).await, mark(1, true));
+    assert_eq!(
+        task_mark(&mut owner, &bound_window).await,
+        mark(1, ReportState::Standing)
+    );
     let mut late = h.connect().await;
     assert_eq!(
         task_mark_on_attach(&mut late, &bound_window).await,
-        mark(1, true),
+        mark(1, ReportState::Standing),
         "the first status an attaching view receives carries the same fact"
     );
 
@@ -852,13 +858,13 @@ async fn a_bound_windows_report_reaches_the_plans_alive_owner_and_lands_on_the_t
     type_and_sync(&mut typist, "\x1b").await;
     assert_eq!(
         task_mark(&mut owner, &bound_window).await,
-        mark(1, true),
+        mark(1, ReportState::Standing),
         "typing with no Enter is not a new instruction"
     );
     type_and_sync(&mut typist, "go on\r").await;
     assert_eq!(
         task_mark(&mut owner, &bound_window).await,
-        mark(1, false),
+        mark(1, ReportState::Instruction),
         "a submitted line is a new instruction"
     );
 
@@ -871,15 +877,39 @@ async fn a_bound_windows_report_reaches_the_plans_alive_owner_and_lands_on_the_t
         expect_reports(call_wait_for_report(&mut owner, 0).await).len(),
         1
     );
-    assert_eq!(task_mark(&mut owner, &bound_window).await, mark(2, true));
+    assert_eq!(
+        task_mark(&mut owner, &bound_window).await,
+        mark(2, ReportState::Standing)
+    );
 
-    // An approver's interrupt writes its key into the window: it releases the
-    // report the same way a submitted line does.
+    // An interrupt hands the CLI no work, whoever sends it and however it reaches the
+    // window: the report still stands.
     assert_eq!(
         approver_interrupt(&mut approver, &bound_window).await,
         Ok("interrupted".to_string())
     );
-    assert_eq!(task_mark(&mut owner, &bound_window).await, mark(2, false));
+    assert_eq!(
+        task_mark(&mut owner, &bound_window).await,
+        mark(2, ReportState::Standing),
+        "an interrupt is not a new instruction"
+    );
+
+    // A submitted line after it is.
+    type_and_sync(&mut typist, "carry on\r").await;
+    assert_eq!(
+        task_mark(&mut owner, &bound_window).await,
+        mark(2, ReportState::Instruction),
+        "a submitted line after the interrupt is a new instruction"
+    );
+
+    // A report a new instruction released no longer waits on its owner, so the owner
+    // closing afterwards leaves the reason as it was.
+    approver_close(&mut approver, &owner_window).await;
+    assert_eq!(
+        task_mark(&mut typist, &bound_window).await,
+        mark(2, ReportState::Instruction),
+        "an owner closing after an instruction does not turn it into a missing reader"
+    );
 }
 
 #[tokio::test]
@@ -921,8 +951,8 @@ async fn a_bound_windows_report_still_lands_on_the_task_once_its_owner_has_close
     assert_eq!(task.map(|t| t.task_id), Some("t1".to_string()));
     assert_eq!(
         task_mark(&mut bound, &bound_window).await,
-        mark(1, false),
-        "a report nobody was alive to hear is born released"
+        mark(1, ReportState::NoReader),
+        "a report nobody was alive to hear is born with no reader"
     );
 
     let detail = expect_plan_detail(get_plan(&mut bound, &plan.plan_id).await);
@@ -1027,32 +1057,35 @@ async fn a_standing_report_follows_a_later_owner_nomination_and_ends_with_the_ne
         expect_reports(call_wait_for_report(&mut owner_a, 0).await).len(),
         1
     );
-    assert_eq!(task_mark(&mut owner_a, &bound_window).await, mark(1, true));
+    assert_eq!(
+        task_mark(&mut owner_a, &bound_window).await,
+        mark(1, ReportState::Standing)
+    );
 
     let mut approver = approver_connection(&h).await;
     approver_nominate(&mut approver, &plan.plan_id, &window_b).await;
     assert_eq!(
         task_mark(&mut owner_a, &bound_window).await,
-        mark(1, true),
+        mark(1, ReportState::Standing),
         "nominating does not release a report"
     );
     approver_close(&mut approver, &window_a).await;
     assert_eq!(
         task_mark(&mut owner_b, &bound_window).await,
-        mark(1, true),
+        mark(1, ReportState::Standing),
         "the superseded owner closing is no reason to call the user"
     );
     approver_close(&mut approver, &window_b).await;
     assert_eq!(
         task_mark(&mut owner_c, &bound_window).await,
-        mark(1, false),
+        mark(1, ReportState::NoReader),
         "the current owner is gone"
     );
 
     approver_nominate(&mut approver, &plan.plan_id, &window_c).await;
     assert_eq!(
         task_mark(&mut owner_c, &bound_window).await,
-        mark(2, true),
+        mark(2, ReportState::Standing),
         "a live owner stands again, under the next seq so a reader that saw it released accepts it"
     );
 }
@@ -1131,13 +1164,16 @@ async fn a_bound_windows_report_is_refused_once_its_task_was_dropped_from_the_pl
         expect_reports(call_wait_for_report(&mut owner, 0).await).len(),
         1
     );
-    assert_eq!(task_mark(&mut owner, &bound_window).await, mark(1, true));
+    assert_eq!(
+        task_mark(&mut owner, &bound_window).await,
+        mark(1, ReportState::Standing)
+    );
 
     expect_plan_detail(update_plan(&mut owner, &plan.plan_id, vec![task("t2")]).await);
     assert_eq!(
         task_mark(&mut owner, &bound_window).await,
-        mark(1, false),
-        "dropping the task unbinds the window, which releases its report"
+        mark(1, ReportState::NoReader),
+        "dropping the task unbinds the window, which leaves its report no reader"
     );
 
     let reply = call_send_report(&mut bound, ReportOutcome::Succeeded, "orphaned", None).await;
@@ -1180,14 +1216,17 @@ async fn a_bound_windows_report_is_refused_once_the_plan_is_deleted_and_leaves_n
         expect_reports(call_wait_for_report(&mut owner, 0).await).len(),
         1
     );
-    assert_eq!(task_mark(&mut owner, &bound_window).await, mark(1, true));
+    assert_eq!(
+        task_mark(&mut owner, &bound_window).await,
+        mark(1, ReportState::Standing)
+    );
 
     let reply = delete_plan(&mut owner, &plan.plan_id).await;
     assert!(matches!(reply, DaemonMessage::PlanDeleted { .. }));
     assert_eq!(
         task_mark(&mut owner, &bound_window).await,
-        mark(1, false),
-        "deleting the plan unbinds the window, which releases its report"
+        mark(1, ReportState::NoReader),
+        "deleting the plan unbinds the window, which leaves its report no reader"
     );
     let after_delete = locks.len();
 

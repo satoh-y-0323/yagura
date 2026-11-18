@@ -21,7 +21,7 @@
 //! fail to compile.
 
 use yagura_protocol::{
-    DaemonMessage, TaskReportMark, WindowInfo, WindowStatus, decode_daemon_message,
+    DaemonMessage, ReportState, TaskReportMark, WindowInfo, WindowStatus, decode_daemon_message,
     encode_daemon_message,
 };
 
@@ -143,26 +143,32 @@ fn window_status_response_has_no_status_rev_field() {
 }
 
 // ---------------------------------------------------------------------
-// task_report: the daemon's standing-report fact on the two registry-updating
+// task_report: the daemon's report-mark fact on the two registry-updating
 // carriers (`WindowInfo`, `StatusChanged`)
 // ---------------------------------------------------------------------
 
-fn mark(seq: u64, standing: bool) -> TaskReportMark {
-    TaskReportMark { seq, standing }
+fn mark(seq: u64, state: ReportState) -> TaskReportMark {
+    TaskReportMark { seq, state }
 }
 
 #[test]
-fn window_info_task_report_round_trips_as_a_seq_and_standing_object() {
-    let mut info = sample_window_info(None);
-    info.task_report = Some(mark(2, true));
-    let value = serde_json::to_value(&info).expect("must serialize");
-    assert_eq!(
-        value.get("task_report"),
-        Some(&serde_json::json!({ "seq": 2, "standing": true })),
-        "got: {value}"
-    );
-    let back: WindowInfo = serde_json::from_value(value).expect("must deserialize");
-    assert_eq!(back, info);
+fn window_info_task_report_round_trips_as_a_seq_and_state_object() {
+    for (state, spelled) in [
+        (ReportState::Standing, "standing"),
+        (ReportState::Instruction, "instruction"),
+        (ReportState::NoReader, "no_reader"),
+    ] {
+        let mut info = sample_window_info(None);
+        info.task_report = Some(mark(2, state));
+        let value = serde_json::to_value(&info).expect("must serialize");
+        assert_eq!(
+            value.get("task_report"),
+            Some(&serde_json::json!({ "seq": 2, "state": spelled })),
+            "got: {value}"
+        );
+        let back: WindowInfo = serde_json::from_value(value).expect("must deserialize");
+        assert_eq!(back, info);
+    }
 }
 
 #[test]
@@ -191,13 +197,13 @@ fn status_changed_task_report_round_trips_when_present() {
         unknown_reason: None,
         status_rev: None,
         status_boot: None,
-        task_report: Some(mark(1, false)),
+        task_report: Some(mark(1, ReportState::NoReader)),
     };
     let body = encode_daemon_message(&msg);
     let value: serde_json::Value = serde_json::from_slice(&body).expect("valid json");
     assert_eq!(
         value.get("task_report"),
-        Some(&serde_json::json!({ "seq": 1, "standing": false })),
+        Some(&serde_json::json!({ "seq": 1, "state": "no_reader" })),
         "got: {value}"
     );
     assert_eq!(decode_daemon_message(&body).expect("decode"), msg);
@@ -213,4 +219,43 @@ fn status_changed_omits_task_report_when_none_and_decodes_a_body_without_the_key
         decode_daemon_message(old).expect("decode"),
         status_changed(None)
     );
+}
+
+/// A revision 35 daemon sends `{ "seq", "standing" }`: the frame still decodes,
+/// and the mark reads as a state this build cannot tell, not as one it can.
+#[test]
+fn a_revision_35_mark_decodes_on_both_carriers_with_an_unknown_state() {
+    for standing in [true, false] {
+        let push = format!(
+            r#"{{"type":"status_changed","window_id":"w1","status":"waiting_input","task_report":{{"seq":4,"standing":{standing}}}}}"#
+        );
+        match decode_daemon_message(push.as_bytes()).expect("a revision 35 push decodes") {
+            DaemonMessage::StatusChanged { task_report, .. } => {
+                assert_eq!(task_report, Some(mark(4, ReportState::Unknown)));
+            }
+            other => panic!("expected status_changed, got {other:?}"),
+        }
+
+        let mut value = serde_json::to_value(sample_window_info(None)).expect("must serialize");
+        value.as_object_mut().expect("object").insert(
+            "task_report".to_string(),
+            serde_json::json!({ "seq": 4, "standing": standing }),
+        );
+        let info: WindowInfo =
+            serde_json::from_value(value).expect("a revision 35 window record decodes");
+        assert_eq!(info.task_report, Some(mark(4, ReportState::Unknown)));
+    }
+}
+
+/// A newer daemon may send a state this build does not know: the frame still
+/// decodes and the state reads as unknown.
+#[test]
+fn a_report_state_this_build_does_not_know_decodes_as_unknown() {
+    let push = br#"{"type":"status_changed","window_id":"w1","status":"waiting_input","task_report":{"seq":2,"state":"held_by_a_later_revision"}}"#;
+    match decode_daemon_message(push).expect("an unknown state does not fail the frame") {
+        DaemonMessage::StatusChanged { task_report, .. } => {
+            assert_eq!(task_report, Some(mark(2, ReportState::Unknown)));
+        }
+        other => panic!("expected status_changed, got {other:?}"),
+    }
 }

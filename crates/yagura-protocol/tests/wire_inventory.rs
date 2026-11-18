@@ -88,11 +88,12 @@ use yagura_protocol::{
     OnNameTaken, Palette, PaletteSlot, PlanInfo, PlanReview, PlanSummary, PlanTaskInfo,
     PlanTaskSpec, PlaybookState, PointerButton, PointerInput, PointerKind, ProfileCapability,
     ProfileCommandDetail, ProfileDetailEntry, ProfileGuidance, ProfileInfo, ProfileLimit,
-    ProfileUnavailableKind, ReceivedReport, ReportOutcome, ReportTaskRef, ResolvedAssignment,
-    RestoreCandidate, ReviewMark, RoleEntry, RoomRef, StatusBoot, TaskAssignment, TaskReport,
-    TaskReportMark, TerminalSize, TicketConfigInfo, TicketFieldInfo, TicketInfo, TicketResultInfo,
-    TicketStateInfo, TicketSummary, TicketWorkspaceInfo, ToolAutoApprove, UnknownReason, ViewState,
-    WheelInput, WindowInfo, WindowStatus as WireWindowStatus, WithdrawOutcome, WithdrawReason,
+    ProfileUnavailableKind, ReceivedReport, ReportOutcome, ReportState, ReportTaskRef,
+    ResolvedAssignment, RestoreCandidate, ReviewMark, RoleEntry, RoomRef, StatusBoot,
+    TaskAssignment, TaskReport, TaskReportMark, TerminalSize, TicketConfigInfo, TicketFieldInfo,
+    TicketInfo, TicketResultInfo, TicketStateInfo, TicketSummary, TicketWorkspaceInfo,
+    ToolAutoApprove, UnknownReason, ViewState, WheelInput, WindowInfo,
+    WindowStatus as WireWindowStatus, WithdrawOutcome, WithdrawReason,
 };
 
 // ---------------------------------------------------------------------
@@ -241,6 +242,7 @@ wire_sample!(enum WithdrawOutcome => Withdrawn);
 wire_sample!(enum DeliveryState => Delivered);
 wire_sample!(enum AssignmentSource => User);
 wire_sample!(enum ReportOutcome => Succeeded);
+wire_sample!(enum ReportState => Standing);
 wire_sample!(enum InstructionNoticeState => Pending);
 wire_sample!(enum PlanReview => Pending);
 wire_sample!(enum ReviewMark => New);
@@ -323,7 +325,7 @@ wire_sample!(struct WindowInfo {
     queued_count,
     task_report,
 });
-wire_sample!(struct TaskReportMark { seq, standing });
+wire_sample!(struct TaskReportMark { seq, state });
 wire_sample!(struct RestoreCandidate {
     position,
     command,
@@ -1322,6 +1324,26 @@ fn report_outcome_wire_variants() -> BTreeSet<String> {
         .collect()
 }
 
+fn report_state_wire_variants() -> BTreeSet<String> {
+    [
+        ReportState::Standing,
+        ReportState::Instruction,
+        ReportState::NoReader,
+        ReportState::Unknown,
+    ]
+    .into_iter()
+    .map(|state| {
+        let hand = match &state {
+            ReportState::Standing => "standing",
+            ReportState::Instruction => "instruction",
+            ReportState::NoReader => "no_reader",
+            ReportState::Unknown => "unknown",
+        };
+        serde_spelling(&state, hand)
+    })
+    .collect()
+}
+
 fn instruction_notice_state_wire_variants() -> BTreeSet<String> {
     [
         InstructionNoticeState::Pending,
@@ -1761,6 +1783,7 @@ fn current_enum_wire_variants() -> BTreeMap<String, BTreeSet<String>> {
             assignment_source_wire_variants(),
         ),
         ("ReportOutcome".to_string(), report_outcome_wire_variants()),
+        ("ReportState".to_string(), report_state_wire_variants()),
         (
             "InstructionNoticeState".to_string(),
             instruction_notice_state_wire_variants(),

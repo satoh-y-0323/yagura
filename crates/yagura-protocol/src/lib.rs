@@ -233,6 +233,11 @@
 //! [`WindowInfo`] and `status_changed`: whether a plan task window's report to
 //! its owner still stands. A body without the key decodes as `None`, which is
 //! what a daemon predating this revision means by sending nothing.
+//!
+//! Revision 36 replaces the mark's `standing` with `state` ([`ReportState`]):
+//! the report stands, or it was released by a new instruction, or it has no
+//! reader. A revision 35 mark, and a state this build does not know, decode as
+//! [`ReportState::Unknown`].
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -257,7 +262,7 @@ pub use screen_copy::{
 /// anything a peer can observe on the wire. It is what a peer reports when
 /// asked which wire it speaks, and what a caller compares against before
 /// sending something an older peer would mishandle.
-pub const PROTOCOL_REVISION: u32 = 35;
+pub const PROTOCOL_REVISION: u32 = 36;
 
 /// The largest column count, and the largest row count, a window takes.
 ///
@@ -1845,16 +1850,40 @@ pub struct StatusBoot {
 /// owner, as of the moment the message carrying it was built.
 ///
 /// Ordered on its own key, not by the status pair: within one
-/// [`StatusBoot`], a larger `seq` is newer, and for the same `seq` `standing`
-/// only ever goes from `true` to `false`.
+/// [`StatusBoot`], a larger `seq` is newer, and for the same `seq` `state`
+/// only ever moves from [`ReportState::Standing`] to
+/// [`ReportState::NoReader`] or [`ReportState::Instruction`], and from
+/// `NoReader` to `Instruction`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TaskReportMark {
     /// The window's report count in this daemon boot, starting at 1.
     pub seq: u64,
-    /// Whether the report still stands: its owner is alive, the window is
-    /// still the plan's task, and no new instruction has reached the
-    /// window's CLI since the report.
-    pub standing: bool,
+    /// Where the report stands. A body without the key (a revision 35 mark)
+    /// decodes as [`ReportState::Unknown`].
+    #[serde(default)]
+    pub state: ReportState,
+}
+
+/// Where a plan task window's latest report stands ([`TaskReportMark`]).
+///
+/// An unrecognized wire value decodes as [`ReportState::Unknown`] rather than
+/// failing the frame. This build never sends `Unknown`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReportState {
+    /// The report was delivered to an owner that is still alive, and no new
+    /// instruction has reached the window's CLI since.
+    Standing,
+    /// A new instruction reached the window's CLI after the report, or the
+    /// report was sent while an instruction typed ahead was still unread.
+    Instruction,
+    /// The report has no reader: no owner was alive when it was sent, its
+    /// owner is no longer alive, or the window is no longer the plan's task.
+    NoReader,
+    /// A state this build does not know.
+    #[default]
+    #[serde(other)]
+    Unknown,
 }
 
 /// Window metadata shared across wire protocol responses (multi-window v2).

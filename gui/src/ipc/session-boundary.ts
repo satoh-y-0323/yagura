@@ -266,15 +266,25 @@ export interface StatusBoot {
 }
 
 /**
+ * Where a task window's report stands (mirrors the Rust `ReportState`).
+ * `unknown` stands for any value this build cannot tell, a revision 35 daemon's
+ * mark included.
+ */
+export type ReportState = 'standing' | 'instruction' | 'no_reader' | 'unknown';
+
+const KNOWN_REPORT_STATES: ReadonlySet<string> = new Set(['standing', 'instruction', 'no_reader']);
+
+/**
  * A task window's report to its owner (mirrors the Rust `TaskReportMark`).
  * Ordered on its own key apart from the status pair: within one boot a larger
- * `seq` is newer, and for the same `seq` `standing` only goes from true to false.
+ * `seq` is newer, and for the same `seq` `state` only moves from `standing`
+ * towards `instruction`.
  */
 export interface TaskReportMark {
   /** Counts the window's reports within one daemon boot. */
   seq: number;
-  /** Whether the report still stands: no new instruction, owner still alive. */
-  standing: boolean;
+  /** Still waiting on a live owner, released by a new instruction, or left with no reader. */
+  state: ReportState;
 }
 
 /** Payload of `session://status`. */
@@ -2349,8 +2359,11 @@ function readOptionalStatusBoot(
  * shape follows `onMismatch`: the mark only narrows which windows count, so the
  * list route loses nothing but that narrowing by dropping it.
  *
+ * A `state` string this build does not know reads as `unknown`, not as a
+ * malformed mark, so a newer daemon's value still lets the window count.
+ *
  * @throws {BoundaryError} when the mark is not a record holding a non-negative
- * integer `seq` and a boolean `standing`, and the policy is `'refuse'`.
+ * integer `seq` and a string `state`, and the policy is `'refuse'`.
  */
 function readOptionalTaskReport(
   record: UntrustedRecord,
@@ -2366,7 +2379,7 @@ function readOptionalTaskReport(
     const mark = requireRecord(value, path);
     return {
       seq: requireNonNegativeInteger(mark, 'seq', path),
-      standing: requireBoolean(mark, 'standing', path),
+      state: reportStateOf(requireString(mark, 'state', path)),
     };
   } catch (error) {
     if (onMismatch === 'refuse' || !(error instanceof BoundaryError)) {
@@ -2375,4 +2388,8 @@ function readOptionalTaskReport(
     console.warn(`${path}: dropped a mark it cannot read (${error.message})`);
     return null;
   }
+}
+
+function reportStateOf(value: string): ReportState {
+  return KNOWN_REPORT_STATES.has(value) ? (value as ReportState) : 'unknown';
 }

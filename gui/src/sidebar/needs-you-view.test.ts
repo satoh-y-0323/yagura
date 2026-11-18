@@ -158,7 +158,7 @@ describe('nextNeedsYouView: between user operations nothing moves', () => {
   it('keeps a window whose report still stands out of the rows (the one decision is needsYou)', async () => {
     const { nextNeedsYouView } = await needsYouView();
     const entries = [
-      makeEntry('owner-wait', 'waiting_input', { taskReport: { seq: 1, standing: true } }),
+      makeEntry('owner-wait', 'waiting_input', { taskReport: { seq: 1, state: 'standing' } }),
       makeEntry('you', 'waiting_input'),
     ];
 
