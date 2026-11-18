@@ -16,12 +16,17 @@ import type {
 import { STATUS_PRESENTATION } from './status-presentation';
 import {
   attentionCount,
+  beginAttentionSend,
   emptyArrivalMemory,
+  emptyAttentionSendState,
   needsYou,
+  noteAttentionArrival,
   observeNeedsYouArrivals,
+  settleAttentionSend,
   summarizeWindowStatuses,
   windowsNeedingYou,
 } from './status-tone';
+import type { AttentionSend, AttentionSendState, AttentionTotals } from './status-tone';
 
 /**
  * Minimal shape `windowsNeedingYou` / `attentionCount` need from an entry: the
@@ -559,40 +564,10 @@ describe('observeNeedsYouArrivals: windows in one observation', () => {
   });
 });
 
-// The send decision's names and shape are not fixed by any design line; they are
-// looked up inside each test so a different name fails only these tests.
-interface AttentionTotals {
-  needsYou: number;
-  pendingPermissions: number;
-}
-
-interface AttentionSend extends AttentionTotals {
-  arrived: boolean;
-}
-
-interface AttentionSendApi<S> {
-  emptyAttentionSendState(): S;
-  noteAttentionArrival(state: S): S;
-  beginAttentionSend(
-    state: S,
-    totals: AttentionTotals,
-    always: boolean
-  ): { state: S; send: AttentionSend | null };
-  settleAttentionSend(state: S, send: AttentionSend, succeeded: boolean): S;
-}
-
-async function attentionSendApi(): Promise<AttentionSendApi<unknown>> {
-  const mod = (await import('./status-tone')) as unknown as Record<string, unknown>;
-  for (const name of [
-    'emptyAttentionSendState',
-    'noteAttentionArrival',
-    'beginAttentionSend',
-    'settleAttentionSend',
-  ]) {
-    expect(typeof mod[name], `status-tone exports ${name}`).toBe('function');
-  }
-  return mod as unknown as AttentionSendApi<unknown>;
-}
+const totals = (needsYou: number, pendingPermissions: number): AttentionTotals => ({
+  needsYou,
+  pendingPermissions,
+});
 
 /** The send a decision made; fails the test when it made none. */
 function sendOf(result: { send: AttentionSend | null }): AttentionSend {
@@ -600,78 +575,73 @@ function sendOf(result: { send: AttentionSend | null }): AttentionSend {
   return result.send as AttentionSend;
 }
 
-const totals = (needsYou: number, pendingPermissions: number): AttentionTotals => ({
-  needsYou,
-  pendingPermissions,
-});
+/** A state that has already told the core about `(1, 0)` with nothing outstanding. */
+function seededState(): AttentionSendState {
+  const seeded = beginAttentionSend(emptyAttentionSendState(), totals(1, 0), false);
+  return settleAttentionSend(seeded.state, sendOf(seeded), true);
+}
 
 describe('attention send: whether the shell tells the core', () => {
-  it('sends the first totals even when nothing arrived', async () => {
-    const api = await attentionSendApi();
-    const { send } = api.beginAttentionSend(api.emptyAttentionSendState(), totals(0, 0), false);
+  it('sends the first totals even when nothing arrived', () => {
+    const { send } = beginAttentionSend(emptyAttentionSendState(), totals(0, 0), false);
     expect(send).toEqual({ needsYou: 0, pendingPermissions: 0, arrived: false });
   });
 
-  it('sends again only when the totals moved or something arrived', async () => {
-    const api = await attentionSendApi();
-    const first = api.beginAttentionSend(api.emptyAttentionSendState(), totals(1, 0), false);
+  it('sends again only when the totals moved or something arrived', () => {
+    const first = beginAttentionSend(emptyAttentionSendState(), totals(1, 0), false);
     expect(first.send).not.toBeNull();
-    const sent = api.settleAttentionSend(first.state, sendOf(first), true);
+    const sent = settleAttentionSend(first.state, sendOf(first), true);
 
-    expect(api.beginAttentionSend(sent, totals(1, 0), false).send).toBeNull();
-    expect(api.beginAttentionSend(sent, totals(1, 1), false).send).toEqual({
+    expect(beginAttentionSend(sent, totals(1, 0), false).send).toBeNull();
+    expect(beginAttentionSend(sent, totals(1, 1), false).send).toEqual({
       needsYou: 1,
       pendingPermissions: 1,
       arrived: false,
     });
-    expect(api.beginAttentionSend(sent, totals(2, 0), false).send).toEqual({
+    expect(beginAttentionSend(sent, totals(2, 0), false).send).toEqual({
       needsYou: 2,
       pendingPermissions: 0,
       arrived: false,
     });
-    expect(
-      api.beginAttentionSend(api.noteAttentionArrival(sent), totals(1, 0), false).send
-    ).toEqual({ needsYou: 1, pendingPermissions: 0, arrived: true });
+    expect(beginAttentionSend(noteAttentionArrival(sent), totals(1, 0), false).send).toEqual({
+      needsYou: 1,
+      pendingPermissions: 0,
+      arrived: true,
+    });
   });
 
-  it('sends unchanged totals when told to send always', async () => {
-    const api = await attentionSendApi();
-    const first = api.beginAttentionSend(api.emptyAttentionSendState(), totals(1, 0), false);
-    const sent = api.settleAttentionSend(first.state, sendOf(first), true);
-    expect(api.beginAttentionSend(sent, totals(1, 0), true).send).toEqual({
+  it('sends unchanged totals when told to send always', () => {
+    const sent = seededState();
+    expect(beginAttentionSend(sent, totals(1, 0), true).send).toEqual({
       needsYou: 1,
       pendingPermissions: 0,
       arrived: false,
     });
   });
 
-  it('clears the arrival once a send carrying it succeeds', async () => {
-    const api = await attentionSendApi();
-    const seeded = api.beginAttentionSend(api.emptyAttentionSendState(), totals(1, 0), false);
-    const sent = api.settleAttentionSend(seeded.state, sendOf(seeded), true);
+  it('clears the arrival once a send carrying it succeeds', () => {
+    const sent = seededState();
 
-    const carrying = api.beginAttentionSend(api.noteAttentionArrival(sent), totals(1, 0), false);
+    const carrying = beginAttentionSend(noteAttentionArrival(sent), totals(1, 0), false);
     expect(carrying.send?.arrived).toBe(true);
-    const after = api.settleAttentionSend(carrying.state, sendOf(carrying), true);
-    expect(api.beginAttentionSend(after, totals(1, 0), false).send).toBeNull();
+    const after = settleAttentionSend(carrying.state, sendOf(carrying), true);
+    expect(beginAttentionSend(after, totals(1, 0), false).send).toBeNull();
   });
 
-  it('keeps the arrival and the last sent totals when the send fails', async () => {
-    const api = await attentionSendApi();
-    const seeded = api.beginAttentionSend(api.emptyAttentionSendState(), totals(1, 0), false);
-    const sent = api.settleAttentionSend(seeded.state, sendOf(seeded), true);
+  it('keeps the arrival and the last sent totals when the send fails', () => {
+    const sent = seededState();
 
-    const carrying = api.beginAttentionSend(api.noteAttentionArrival(sent), totals(1, 0), false);
-    const failed = api.settleAttentionSend(carrying.state, sendOf(carrying), false);
-    expect(api.beginAttentionSend(failed, totals(1, 0), false).send).toEqual({
+    const carrying = beginAttentionSend(noteAttentionArrival(sent), totals(1, 0), false);
+    const failed = settleAttentionSend(carrying.state, sendOf(carrying), false);
+    expect(beginAttentionSend(failed, totals(1, 0), false).send).toEqual({
       needsYou: 1,
       pendingPermissions: 0,
       arrived: true,
     });
 
-    const moved = api.beginAttentionSend(sent, totals(2, 0), false);
-    const movedFailed = api.settleAttentionSend(moved.state, sendOf(moved), false);
-    expect(api.beginAttentionSend(movedFailed, totals(2, 0), false).send).toEqual({
+    const moved = beginAttentionSend(sent, totals(2, 0), false);
+    const movedFailed = settleAttentionSend(moved.state, sendOf(moved), false);
+    expect(beginAttentionSend(movedFailed, totals(2, 0), false).send).toEqual({
       needsYou: 2,
       pendingPermissions: 0,
       arrived: false,
@@ -680,39 +650,71 @@ describe('attention send: whether the shell tells the core', () => {
 });
 
 describe('attention send: an arrival during a send in flight', () => {
-  it('is carried by the next send when the send in flight succeeds', async () => {
-    const api = await attentionSendApi();
-    const seeded = api.beginAttentionSend(api.emptyAttentionSendState(), totals(1, 0), false);
-    const sent = api.settleAttentionSend(seeded.state, sendOf(seeded), true);
+  it('is carried by the next send when the send in flight succeeds', () => {
+    const sent = seededState();
 
-    const inFlight = api.beginAttentionSend(api.noteAttentionArrival(sent), totals(1, 0), false);
-    const arrivedMeanwhile = api.noteAttentionArrival(inFlight.state);
-    const settled = api.settleAttentionSend(arrivedMeanwhile, sendOf(inFlight), true);
-    expect(api.beginAttentionSend(settled, totals(1, 0), false).send).toEqual({
+    const inFlight = beginAttentionSend(noteAttentionArrival(sent), totals(1, 0), false);
+    const arrivedMeanwhile = noteAttentionArrival(inFlight.state);
+    const settled = settleAttentionSend(arrivedMeanwhile, sendOf(inFlight), true);
+    expect(beginAttentionSend(settled, totals(1, 0), false).send).toEqual({
       needsYou: 1,
       pendingPermissions: 0,
       arrived: true,
     });
   });
 
-  it('is not lost when the later send fails and the earlier one succeeds after it', async () => {
-    const api = await attentionSendApi();
-    const seeded = api.beginAttentionSend(api.emptyAttentionSendState(), totals(1, 0), false);
-    const sent = api.settleAttentionSend(seeded.state, sendOf(seeded), true);
+  it('is not lost when the later send fails and the earlier one succeeds after it', () => {
+    const sent = seededState();
 
-    const earlier = api.beginAttentionSend(api.noteAttentionArrival(sent), totals(1, 0), false);
-    const later = api.beginAttentionSend(
-      api.noteAttentionArrival(earlier.state),
-      totals(1, 0),
-      false
-    );
+    const earlier = beginAttentionSend(noteAttentionArrival(sent), totals(1, 0), false);
+    const later = beginAttentionSend(noteAttentionArrival(earlier.state), totals(1, 0), false);
     expect(later.send?.arrived).toBe(true);
-    const laterFailed = api.settleAttentionSend(later.state, sendOf(later), false);
-    const earlierSucceeded = api.settleAttentionSend(laterFailed, sendOf(earlier), true);
-    expect(api.beginAttentionSend(earlierSucceeded, totals(1, 0), false).send).toEqual({
+    const laterFailed = settleAttentionSend(later.state, sendOf(later), false);
+    const earlierSucceeded = settleAttentionSend(laterFailed, sendOf(earlier), true);
+    expect(beginAttentionSend(earlierSucceeded, totals(1, 0), false).send).toEqual({
       needsYou: 1,
       pendingPermissions: 0,
       arrived: true,
+    });
+  });
+});
+
+describe('attention send: an arrival already carried by a send in flight', () => {
+  it('is not carried again by a send started before the first one settles', () => {
+    const sent = seededState();
+
+    const carrier = beginAttentionSend(noteAttentionArrival(sent), totals(1, 0), false);
+    expect(carrier.send?.arrived).toBe(true);
+    // The totals move with no new arrival while the carrier is still unsettled.
+    const next = beginAttentionSend(carrier.state, totals(2, 0), false);
+    expect(next.send).toEqual({ needsYou: 2, pendingPermissions: 0, arrived: false });
+  });
+
+  it('is carried by the next send when the carrier fails', () => {
+    const sent = seededState();
+
+    const carrier = beginAttentionSend(noteAttentionArrival(sent), totals(1, 0), false);
+    const during = beginAttentionSend(carrier.state, totals(2, 0), false);
+    const carrierFailed = settleAttentionSend(during.state, sendOf(carrier), false);
+    const duringFailed = settleAttentionSend(carrierFailed, sendOf(during), false);
+    expect(beginAttentionSend(duringFailed, totals(2, 0), false).send).toEqual({
+      needsYou: 2,
+      pendingPermissions: 0,
+      arrived: true,
+    });
+  });
+
+  it('is not carried by any later send once the carrier succeeds', () => {
+    const sent = seededState();
+
+    const carrier = beginAttentionSend(noteAttentionArrival(sent), totals(1, 0), false);
+    const during = beginAttentionSend(carrier.state, totals(2, 0), false);
+    const carrierSucceeded = settleAttentionSend(during.state, sendOf(carrier), true);
+    const duringSucceeded = settleAttentionSend(carrierSucceeded, sendOf(during), true);
+    expect(beginAttentionSend(duringSucceeded, totals(3, 0), false).send).toEqual({
+      needsYou: 3,
+      pendingPermissions: 0,
+      arrived: false,
     });
   });
 });

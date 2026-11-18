@@ -250,7 +250,13 @@ export function beginAttentionSend(
   totals: AttentionTotals,
   always: boolean
 ): { state: AttentionSendState; send: AttentionSend | null } {
-  const arrived = state.arrivals > state.acknowledged;
+  // An arrival already carried by a send in flight is not carried again; if that send
+  // fails it leaves `inFlight` and the arrival is owed once more.
+  const carried = state.inFlight.reduce(
+    (most, entry) => (entry.send.arrived ? Math.max(most, entry.through) : most),
+    state.acknowledged
+  );
+  const arrived = state.arrivals > carried;
   const last = state.lastSent;
   const moved =
     last === null ||
@@ -265,7 +271,10 @@ export function beginAttentionSend(
     arrived,
   };
   return {
-    state: { ...state, inFlight: [...state.inFlight, { send, through: state.arrivals }] },
+    state: {
+      ...state,
+      inFlight: [...state.inFlight, { send, through: arrived ? state.arrivals : carried }],
+    },
     send,
   };
 }
