@@ -10,11 +10,14 @@ import {
   describeDiscardedKeymapEntries as renderDescribeDiscardedKeymapEntries,
   describeExit as renderDescribeExit,
   describeExitCode as renderDescribeExitCode,
+  describeExitedWindow as renderDescribeExitedWindow,
+  describeGoToWindow as renderDescribeGoToWindow,
   describeHaltReason as renderDescribeHaltReason,
   describeInterruptHint as renderDescribeInterruptHint,
   describeOperationFailure,
   describePaneNotice as renderDescribePaneNotice,
   describeQueuedMessages as renderDescribeQueuedMessages,
+  describeReopenOffer as renderDescribeReopenOffer,
   describeRestoreBanner as renderDescribeRestoreBanner,
   describeRestoreSelectionCount as renderDescribeRestoreSelectionCount,
   describeRoomTitle as renderDescribeRoomTitle,
@@ -82,6 +85,36 @@ export const tickets = messages.tickets;
 
 /** The settings panel's text: its tabs and the Profiles tab's rows. */
 export const settings = messages.settings;
+
+/** The work area's text while it shows no window. */
+export const workArea = messages.workArea;
+
+/**
+ * Describes the card that stands in for a window that ended without this GUI
+ * closing it.
+ * @param name the window's display name
+ * @param exitCode the exit code, or null if not yet determined
+ */
+export function describeExitedWindow(name: string, exitCode: number | null): string {
+  return renderDescribeExitedWindow(messages, name, exitCode);
+}
+
+/**
+ * Describes the button that goes to another window.
+ * @param name the window's display name
+ */
+export function describeGoToWindow(name: string): string {
+  return renderDescribeGoToWindow(messages, name);
+}
+
+/**
+ * Describes the empty work area's offer to reopen the windows of the last session.
+ * @param count the number of restore candidates
+ * @param timestamp the formatted recording time, `null` when unknown
+ */
+export function describeReopenOffer(count: number, timestamp: string | null): string {
+  return renderDescribeReopenOffer(messages, count, timestamp);
+}
 
 /**
  * Describes how one chat message landed in one addressed window.

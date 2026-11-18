@@ -2934,6 +2934,17 @@
     isRestoreDialogOpen = false;
   }
 
+  // The one offer to reopen the last session's windows. With no window open the
+  // work area makes it, so the banner and the work area never make it together.
+  $: restoreOffer =
+    restoreCandidates.length > 0 && !isRestoreBannerDismissed
+      ? {
+          count: restoreCandidates.length,
+          timestamp:
+            restoreTakenAtEpochS === null ? null : formatRestoreTimestamp(restoreTakenAtEpochS),
+        }
+      : null;
+
   function dismissRestoreBanner(): void {
     isRestoreBannerDismissed = true;
   }
@@ -3426,12 +3437,10 @@
     <div class="restore-load-failed" role="alert">{notice}</div>
   {/each}
 
-  {#if restoreCandidates.length > 0 && !isRestoreBannerDismissed}
+  {#if restoreOffer !== null && $registry.windows.length > 0}
     <RestoreBanner
-      count={restoreCandidates.length}
-      timestamp={restoreTakenAtEpochS === null
-        ? null
-        : formatRestoreTimestamp(restoreTakenAtEpochS)}
+      count={restoreOffer.count}
+      timestamp={restoreOffer.timestamp}
       onChoose={openRestoreDialog}
       onDismiss={dismissRestoreBanner}
     />
@@ -3524,6 +3533,13 @@
       onRename={handleRenameWindow}
       onPressed={(entry: WindowEntry, pressOnControl: boolean) =>
         activateWindow({ byUser: true, target: entry.windowId, pressOnControl })}
+      exitedCard={$shell.exitedCard}
+      keys={$keymapStore.keys}
+      platform={keyboardPlatform}
+      reopen={$registry.windows.length === 0 ? restoreOffer : null}
+      onNewWindow={openAddDialog}
+      onChooseWindows={openRestoreDialog}
+      onExitedCardGoTo={() => dispatchShell({ type: 'exitedCardGoTo' })}
     />
   </div>
 </main>

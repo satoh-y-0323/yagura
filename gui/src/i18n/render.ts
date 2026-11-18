@@ -35,6 +35,40 @@ export function describeExitCode(messages: Messages, exitCode: number): string {
 }
 
 /**
+ * Describes the card that stands in for a window that ended without this GUI
+ * closing it: the window's name, and its exit code once known.
+ *
+ * @param name the window's display name, already prepared for display
+ */
+export function describeExitedWindow(
+  messages: Messages,
+  name: string,
+  exitCode: number | null
+): string {
+  return exitCode === null
+    ? messages.workArea.windowExited(name)
+    : messages.workArea.windowExitedWithCode(name, exitCode);
+}
+
+/**
+ * Describes the button that goes to another window.
+ *
+ * @param name the window's display name, already prepared for display
+ */
+export function describeGoToWindow(messages: Messages, name: string): string {
+  return messages.workArea.goToWindow(name);
+}
+
+/** Describes the empty work area's offer to reopen the windows of the last session. */
+export function describeReopenOffer(
+  messages: Messages,
+  count: number,
+  timestamp: string | null
+): string {
+  return messages.workArea.reopenFromLastSession(count, timestamp);
+}
+
+/**
  * Describes a sidebar row as its accessible name: the window's name and its
  * status word, and whether the window waits for the user's permission.
  *

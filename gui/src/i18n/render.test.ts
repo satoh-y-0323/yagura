@@ -20,6 +20,7 @@ import {
   describeStatus,
   describeExit,
   describeExitCode,
+  describeExitedWindow,
   describeWindowHeader,
   describeWindowRow,
   describePaneNotice,
@@ -498,5 +499,16 @@ describe('describeExit: with an exit code', () => {
 
   it('is the bare label without an exit code', () => {
     expect(describeExit(english, null)).toBe(english.sessionPhaseLabels.exited);
+  });
+});
+
+describe('describeExitedWindow', () => {
+  it('names the window without an exit code until one is known, and with it after', () => {
+    expect(describeExitedWindow(dummyMessages, 'reviewer', null)).toBe(
+      dummyMessages.workArea.windowExited('reviewer')
+    );
+    expect(describeExitedWindow(dummyMessages, 'reviewer', 0)).toBe(
+      dummyMessages.workArea.windowExitedWithCode('reviewer', 0)
+    );
   });
 });

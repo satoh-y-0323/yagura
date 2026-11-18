@@ -55,6 +55,21 @@ const CASES: ReadonlyArray<[string, () => unknown, () => unknown]> = [
   ],
   ['describeExit', () => facade.describeExit(3), () => render.describeExit(messages, 3)],
   [
+    'describeExitedWindow',
+    () => facade.describeExitedWindow('reviewer', 1),
+    () => render.describeExitedWindow(messages, 'reviewer', 1),
+  ],
+  [
+    'describeGoToWindow',
+    () => facade.describeGoToWindow('implementer'),
+    () => render.describeGoToWindow(messages, 'implementer'),
+  ],
+  [
+    'describeReopenOffer',
+    () => facade.describeReopenOffer(6, '2026-01-02 03:04'),
+    () => render.describeReopenOffer(messages, 6, '2026-01-02 03:04'),
+  ],
+  [
     'describeStatus',
     () => facade.describeStatus('running'),
     () => render.describeStatus(messages, 'running'),

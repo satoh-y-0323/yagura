@@ -450,6 +450,21 @@ export const dummyMessages: Messages = {
     minimized: 'DUMMY_sidebar_minimized',
     awaitingPermission: 'DUMMY_sidebar_awaitingPermission',
   },
+  workArea: {
+    noWindowsTitle: 'DUMMY_workArea_noWindowsTitle',
+    noWindowsBody: 'DUMMY_workArea_noWindowsBody',
+    newWindow: 'DUMMY_workArea_newWindow',
+    nextWindowNeedingYou: 'DUMMY_workArea_nextWindowNeedingYou',
+    nextWindow: 'DUMMY_workArea_nextWindow',
+    settings: 'DUMMY_workArea_settings',
+    reopenFromLastSession: (count: number, timestamp: string | null) =>
+      `DUMMY_workArea_reopenFromLastSession(${count},${timestamp})`,
+    windowExited: (name: string) => `DUMMY_workArea_windowExited(${name})`,
+    windowExitedWithCode: (name: string, code: number) =>
+      `DUMMY_workArea_windowExitedWithCode(${name},${code})`,
+    exitedBody: 'DUMMY_workArea_exitedBody',
+    goToWindow: (name: string) => `DUMMY_workArea_goToWindow(${name})`,
+  },
 
   /** The chat panel, its delivery chips, its halt banner and its badge. */
   chat: {

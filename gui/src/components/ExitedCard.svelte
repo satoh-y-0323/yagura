@@ -1,0 +1,55 @@
+<script lang="ts">
+  /**
+   * What Focus shows in place of a window that ended without this GUI closing
+   * it. Display only, and it never takes the keyboard focus: a key being typed
+   * must not press its button. Without a next window it offers what the empty
+   * work area offers.
+   */
+  import type { KeyboardPlatform } from '../keymap/keyboard-platform';
+  import type { Keys } from '../keymap/keymap-model';
+  import type { ExitedCard } from '../session/shell-state';
+  import { describeExitedWindow, describeGoToWindow, workArea } from '../ui-messages';
+  import EmptyState from './EmptyState.svelte';
+  import Icon from './Icon.svelte';
+
+  export let card: ExitedCard;
+  export let keys: Keys;
+  export let platform: KeyboardPlatform;
+  /** The last session's windows on offer, `null` while none are offered here. */
+  export let reopen: { count: number; timestamp: string | null } | null;
+  /** Goes to the window the card names; the shell's reducer decides which. */
+  export let onGoTo: () => void;
+  export let onNewWindow: () => void;
+  export let onChooseWindows: () => void;
+</script>
+
+<div class="work-state exited-card">
+  <span class="work-state__icon"><Icon name="circle-x" size="xl" /></span>
+  <h2 class="work-state__title">{describeExitedWindow(card.name, card.exitCode)}</h2>
+  <p class="work-state__body">{workArea.exitedBody}</p>
+  {#if card.next !== null && card.nextWindowId !== null}
+    <div class="exited-card__actions">
+      <button type="button" class="btn btn-secondary" on:click={onGoTo}>
+        {describeGoToWindow(card.next)}
+      </button>
+      <button type="button" class="btn btn-ghost" on:click={onNewWindow}>
+        {workArea.newWindow}
+      </button>
+    </div>
+  {:else}
+    <EmptyState {keys} {platform} {reopen} {onNewWindow} {onChooseWindows}>
+      <svelte:fragment slot="heading" />
+    </EmptyState>
+  {/if}
+</div>
+
+<style>
+  .exited-card {
+    max-width: 460px;
+  }
+
+  .exited-card__actions {
+    display: flex;
+    gap: var(--space-2);
+  }
+</style>

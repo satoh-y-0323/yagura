@@ -218,3 +218,48 @@
 .queued-mark__icon {
   flex: 0 0 auto;
 }
+
+/* What the work area shows in place of a window (EmptyState.svelte and
+   ExitedCard.svelte): a centred column under one icon and one heading. */
+.work-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-3);
+  text-align: center;
+}
+
+.work-state__icon {
+  display: inline-flex;
+  color: var(--fg-faint);
+}
+
+.work-state__title {
+  margin: 0;
+  font-size: var(--text-xl);
+  font-weight: var(--weight-semibold);
+}
+
+.work-state__body {
+  margin: 0;
+  color: var(--fg-muted);
+}
+
+/* The key a button or a row is bound to, as the keymap currently has it. */
+.key-hint {
+  padding: 0 var(--space-1_5);
+  border: var(--line-width) solid var(--line);
+  border-radius: var(--radius-sm);
+  color: var(--fg-muted);
+  font-family: inherit;
+  font-size: var(--text-2xs);
+  line-height: var(--leading-2xs);
+  white-space: nowrap;
+}
+
+/* On a primary button the key keeps the button's own text colour. */
+.key-hint--on-accent {
+  border-color: currentColor;
+  color: inherit;
+  opacity: 0.8;
+}

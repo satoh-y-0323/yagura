@@ -938,4 +938,25 @@ export const messagesEn = {
     minimized: 'Minimized',
     awaitingPermission: 'Waiting for your permission',
   },
+
+  /** The work area when it shows no window: no window is open, or the shown one ended. */
+  workArea: {
+    noWindowsTitle: 'No windows open',
+    noWindowsBody: 'Open a CLI in a project folder to get started.',
+    newWindow: 'New window',
+    nextWindowNeedingYou: 'Next window that needs you',
+    nextWindow: 'Next window',
+    settings: 'Settings',
+    reopenFromLastSession: (count: number, timestamp: string | null): string => {
+      const subject = count === 1 ? '1 window' : `${count} windows`;
+      const base = `Reopen ${subject} from your last session`;
+      return timestamp === null ? base : `${base} (saved ${timestamp})`;
+    },
+    windowExited: (name: string): string => `“${name}” exited`,
+    windowExitedWithCode: (name: string, code: number): string =>
+      `“${name}” exited (exit code ${code})`,
+    exitedBody:
+      "yagura didn't switch to another window, so nothing you type goes to a different CLI.",
+    goToWindow: (name: string): string => `Go to ${name}`,
+  },
 };
