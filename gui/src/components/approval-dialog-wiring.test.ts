@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 
-import appSource from '../App.svelte?raw';
+import appSource from '../shell/AppShell.svelte?raw';
 import sessionClientSource from '../ipc/session-client.ts?raw';
 import approvalDialogSource from './ApprovalDialog.svelte?raw';
 import modalDialogSource from './ModalDialog.svelte?raw';

@@ -58,8 +58,8 @@ const NO_JAPANESE_TEXT = [
   { selector: `SvelteLiteral[value=/${JAPANESE}/]`, message: JAPANESE_MESSAGE },
 ];
 
-// Shortcuts are dispatched from one window-level keydown listener, which App.svelte owns.
-const GLOBAL_KEYDOWN_MESSAGE = 'App.svelte owns the one window-level keydown listener.';
+// Shortcuts are dispatched from one window-level keydown listener, which the app shell owns.
+const GLOBAL_KEYDOWN_MESSAGE = 'AppShell.svelte owns the one window-level keydown listener.';
 const SPECIAL_WINDOW_ELEMENT =
   "SvelteElement[kind='special'][name.name=/^svelte:(window|document|body)$/]";
 const NO_GLOBAL_KEYDOWN = [
@@ -208,13 +208,13 @@ export default [
   },
   {
     files: ['src/**/*.svelte'],
-    ignores: ['src/App.svelte'],
+    ignores: ['src/shell/AppShell.svelte'],
     rules: {
       'no-restricted-syntax': ['error', ...SOURCE_SYNTAX, ...NO_LITERAL_MARKUP_TEXT],
     },
   },
   {
-    files: ['src/App.svelte'],
+    files: ['src/shell/AppShell.svelte'],
     rules: {
       'no-restricted-syntax': [
         'error',
