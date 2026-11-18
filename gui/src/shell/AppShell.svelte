@@ -235,7 +235,16 @@
   import { confirmCopy, type ConfirmOperation } from '../session/confirm-target';
   import { pairPanes, type Pane } from '../session/pane-plan';
   import { createAttentionNavigation } from '../session/attention-navigation';
-  import { currentWindow, isWindowVisible } from '../session/current-window';
+  import { currentWindowFor, isWindowVisibleFor } from '../session/current-window';
+  import {
+    firstWindowAtStartup,
+    initialShellState,
+    readWorkMode,
+    reduceShell,
+    workViewOf,
+    type ShellState,
+  } from '../session/shell-state';
+  import { createGuardedLocalStorage } from '../storage/guarded-storage';
   import { createRoomActions } from '../session/room-actions';
   import {
     createPendingFocus,
@@ -660,6 +669,27 @@
 
   const registry = createWindowRegistry();
 
+  // The work area's state: the current window is derived from it together with
+  // the registry, never from the placement alone.
+  const shell = writable<ShellState>(
+    initialShellState(
+      readWorkMode({ getItem: (key: string) => createGuardedLocalStorage(key).read() })
+    )
+  );
+
+  function selectWindow(windowId: string): void {
+    shell.update((state) => reduceShell(state, { type: 'select', windowId }).state);
+  }
+
+  function isFocusMode(): boolean {
+    return get(shell).workMode === 'focus';
+  }
+
+  /** The current window as of now, for handlers that run outside the reactive graph. */
+  function currentWindowNow(): WindowEntry | null {
+    return currentWindowFor(workViewOf(get(shell)), get(registry).windows);
+  }
+
   // Sidebar room bundling: the collapsed set lives in this process
   // only, and the per-room operations share the same tile
   // measurement as the header's tile-all button (measureTileArea, below).
@@ -780,8 +810,9 @@
     .map((windowId) => $registry.windows.find((entry) => entry.windowId === windowId))
     .filter((entry): entry is WindowEntry => entry !== undefined);
   $: activeTabEntry = $registry.windows.find((entry) => entry.display.isMaximized);
+  $: workView = workViewOf($shell);
   // The window keyboard operations act on; derived so no second record of it can drift.
-  $: current = currentWindow($registry.windows);
+  $: current = currentWindowFor(workView, $registry.windows);
 
   // The single source the float-area render loop pairs from: an
   // entry only renders once its pane exists, so no flush can read a pane off
@@ -2000,16 +2031,31 @@
   // its dialog, which shows the refusal itself.
   // Maximizing and minimizing are the user's own choice of front window, so the
   // keyboard follows (activateWindow).
+  // In Focus, going to a window only chooses the one Focus shows, and minimize
+  // and maximize do nothing: Focus never writes the canvas placement.
   const actions: WindowActions = {
     ...contractedActions,
+    focus: (entry) => {
+      if (isFocusMode()) {
+        selectWindow(entry.windowId);
+      } else {
+        contractedActions.focus(entry);
+      }
+    },
     close: (entry) => reportFailures(errors.closeWindowFailed, contractedActions.close(entry)),
     interrupt: (entry) =>
       reportFailures(errors.interruptWindowFailed, contractedActions.interrupt(entry)),
     minimize: (entry) => {
+      if (isFocusMode()) {
+        return;
+      }
       contractedActions.minimize(entry);
       returnFocusIfLost();
     },
     maximize: (entry) => {
+      if (isFocusMode()) {
+        return;
+      }
       contractedActions.maximize(entry);
       focusTerminalOf(entry.windowId);
     },
@@ -2024,7 +2070,10 @@
     focus: actions.focus,
     focusTerminal: focusTerminalOf,
   };
-  const attentionNavigation = createAttentionNavigation(revealDeps);
+  const attentionNavigation = createAttentionNavigation({
+    ...revealDeps,
+    current: currentWindowNow,
+  });
 
   const FOCUSABLE =
     'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
@@ -2059,9 +2108,7 @@
         firstFocusable(sidebarElement)?.focus();
         return;
       case 'current-if-lost':
-        runFocusMove(
-          lostFocusMove(focusFacts(document.activeElement), currentWindow(get(registry).windows))
-        );
+        runFocusMove(lostFocusMove(focusFacts(document.activeElement), currentWindowNow()));
         return;
       case 'none':
         return;
@@ -2180,7 +2227,7 @@
         modalReturnTarget<PanelId, HTMLElement>({
           subject: opened.subject,
           origin: opened.origin,
-          current: currentWindow(get(registry).windows),
+          current: currentWindowNow(),
           isUsable: (element: HTMLElement) => isInputTarget(focusFacts(element)),
           isOpen: isPanelOpen,
         })
@@ -2194,7 +2241,7 @@
     moveFocus(
       sidebarToggleMove(
         focusInSidebar,
-        currentWindow(get(registry).windows),
+        currentWindowNow(),
         (windowId: string) => sidebarRow(windowId) !== null
       )
     );
@@ -2206,7 +2253,8 @@
   }
 
   const runShortcut = createShortcutRunner<WindowEntry>({
-    windows: () => get(registry).windows,
+    current: currentWindowNow,
+    workMode: () => get(shell).workMode,
     displayOrder: () => windowsInDisplayOrder(sidebarGroups()),
     groups: sidebarGroups,
     expandRoom: collapsedRooms.expand,
@@ -2310,7 +2358,7 @@
       isOpen: isPanelOpen,
       isConnected: (element: HTMLElement) => element.isConnected,
       recentPanels,
-      current: currentWindow(get(registry).windows),
+      current: currentWindowNow(),
     });
     panelOrigins.delete(panel);
     recentPanels = recentPanels.filter((open) => open !== panel);
@@ -2475,6 +2523,16 @@
     }
 
     await refreshWindowList();
+    if (isFocusMode()) {
+      // Not the user's choice, so the keyboard stays where it is.
+      const first = firstWindowAtStartup(
+        windowsInDisplayOrder(sidebarGroups()),
+        currentWindowFor({ mode: 'canvas' }, get(registry).windows)
+      );
+      if (first !== null) {
+        selectWindow(first.windowId);
+      }
+    }
 
     unsubscribeWindowList = await subscribeWindowList(
       (payload) => {
@@ -3111,9 +3169,11 @@
     // The pane is created from the window list, the same path the core's
     // poll takes, so opening twice cannot produce two panes for one window.
     await refreshWindowList();
-    // A window opened while in tab mode joins the strip and is switched to;
-    // otherwise it is raised. Either way the keyboard follows it.
-    if (isTabMode()) {
+    // The user opened it, so it is what Focus shows next; on the canvas it joins
+    // the tab strip or is raised. Either way the keyboard follows it.
+    if (isFocusMode()) {
+      selectWindow(windowId);
+    } else if (isTabMode()) {
       switchToTab(windowId);
     } else {
       registry.bringWindowToFront(windowId);
@@ -3393,7 +3453,7 @@
     <div class="sidebar-resize" aria-hidden="true" use:pointerDrag={sidebarDrag}></div>
 
     <section class="main-content" bind:this={mainContentElement}>
-      {#if activeTabEntry !== undefined}
+      {#if workView.mode === 'canvas' && activeTabEntry !== undefined}
         <TabBar
           entries={tabEntries}
           activeEntry={activeTabEntry}
@@ -3422,7 +3482,7 @@
             {themeStore}
             controller={rendered.pane.controller}
             sessionStore={rendered.pane.sessionStore}
-            isVisible={isWindowVisible(rendered.entry, activeTabEntry)}
+            isVisible={isWindowVisibleFor(workView, rendered.entry, $registry.windows)}
             isCurrent={rendered.entry.windowId === current?.windowId}
             onRename={() => handleRenameWindow(rendered.entry)}
             onPressed={(pressOnControl: boolean) =>

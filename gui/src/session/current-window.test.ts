@@ -1,6 +1,7 @@
 /**
- * The window keyboard operations act on, derived from what is on screen, and
- * the next / previous window in the sidebar's order.
+ * The window keyboard operations act on, derived from the work view (the
+ * canvas placement, or the window Focus shows), and the next / previous window
+ * in the sidebar's order.
  *
  * The module is read through `import.meta.glob` so that, while it does not
  * exist, every case below reports its own unmet contract instead of the whole
@@ -20,12 +21,15 @@ interface PlacedWindow {
   display: { zOrder: number; isMinimized: boolean; isMaximized: boolean };
 }
 
+type WorkView = { mode: 'canvas' } | { mode: 'focus'; focusedWindowId: string | null };
+
 interface CurrentWindowModule {
-  isWindowVisible: (
-    entry: PlacedWindow,
-    activeTabEntry: { windowId: string } | undefined
+  isWindowVisibleFor: <T extends PlacedWindow>(
+    view: WorkView,
+    entry: T,
+    windows: readonly T[]
   ) => boolean;
-  currentWindow: <T extends PlacedWindow>(windows: readonly T[]) => T | null;
+  currentWindowFor: <T extends PlacedWindow>(view: WorkView, windows: readonly T[]) => T | null;
   neighborWindow: <T extends { windowId: string }>(
     order: readonly T[],
     current: { windowId: string } | null,
@@ -45,6 +49,12 @@ function currentWindowModule(): CurrentWindowModule {
   return found;
 }
 
+const CANVAS: WorkView = { mode: 'canvas' };
+
+function focusOn(focusedWindowId: string | null): WorkView {
+  return { mode: 'focus', focusedWindowId };
+}
+
 interface Placement {
   z: number;
   minimized?: boolean;
@@ -62,107 +72,107 @@ function placed(windowId: string, placement: Placement): PlacedWindow {
   };
 }
 
-/** The active tab exactly as the view derives it: the maximized window, if any. */
-function activeTabOf(windows: readonly PlacedWindow[]): PlacedWindow | undefined {
-  return windows.find((entry) => entry.display.isMaximized);
-}
-
 describe('current-window module', () => {});
 
-describe('isWindowVisible: the one definition of a window being on screen', () => {
+describe('isWindowVisibleFor in Canvas: the one definition of a window being on screen', () => {
   it('shows every window that is not minimized while no window is maximized', () => {
-    const { isWindowVisible } = currentWindowModule();
+    const { isWindowVisibleFor } = currentWindowModule();
+    const a = placed('a', { z: 1 });
+    const b = placed('b', { z: 9 });
 
-    expect(isWindowVisible(placed('a', { z: 1 }), undefined)).toBe(true);
-    expect(isWindowVisible(placed('b', { z: 9 }), undefined)).toBe(true);
+    expect(isWindowVisibleFor(CANVAS, a, [a, b])).toBe(true);
+    expect(isWindowVisibleFor(CANVAS, b, [a, b])).toBe(true);
   });
 
   it('hides a minimized window', () => {
-    const { isWindowVisible } = currentWindowModule();
+    const { isWindowVisibleFor } = currentWindowModule();
+    const minimized = placed('a', { z: 9, minimized: true });
 
-    expect(isWindowVisible(placed('a', { z: 9, minimized: true }), undefined)).toBe(false);
+    expect(isWindowVisibleFor(CANVAS, minimized, [minimized, placed('b', { z: 1 })])).toBe(false);
   });
 
-  it('in tab mode shows the active tab and hides every other window, even one that is not minimized', () => {
-    const { isWindowVisible } = currentWindowModule();
-    const tab = placed('tab', { z: 1, maximized: true });
+  it('shows a maximized window and hides every other window behind it, even one that is not minimized', () => {
+    const { isWindowVisibleFor } = currentWindowModule();
+    const maximized = placed('max', { z: 1, maximized: true });
     const other = placed('other', { z: 9 });
 
-    expect(isWindowVisible(tab, tab)).toBe(true);
-    expect(isWindowVisible(other, tab)).toBe(false);
+    expect(isWindowVisibleFor(CANVAS, maximized, [maximized, other])).toBe(true);
+    expect(isWindowVisibleFor(CANVAS, other, [maximized, other])).toBe(false);
   });
 
-  it('hides the active tab itself once it is minimized', () => {
-    const { isWindowVisible } = currentWindowModule();
-    const tab = placed('tab', { z: 1, maximized: true, minimized: true });
+  it('hides a maximized window itself once it is minimized', () => {
+    const { isWindowVisibleFor } = currentWindowModule();
+    const maximized = placed('max', { z: 1, maximized: true, minimized: true });
 
-    expect(isWindowVisible(tab, tab)).toBe(false);
+    expect(isWindowVisibleFor(CANVAS, maximized, [maximized])).toBe(false);
   });
 });
 
-describe('currentWindow: picked from the windows on screen', () => {
+describe('currentWindowFor in Canvas: picked from the windows on screen', () => {
   it('picks the window with the highest zOrder when none is maximized', () => {
-    const { currentWindow } = currentWindowModule();
+    const { currentWindowFor } = currentWindowModule();
     const windows = [placed('a', { z: 3 }), placed('b', { z: 7 }), placed('c', { z: 5 })];
 
-    expect(currentWindow(windows)?.windowId).toBe('b');
+    expect(currentWindowFor(CANVAS, windows)?.windowId).toBe('b');
   });
 
   it('skips a minimized window even when it holds the highest zOrder', () => {
-    const { currentWindow } = currentWindowModule();
+    const { currentWindowFor } = currentWindowModule();
     const windows = [
       placed('a', { z: 3 }),
       placed('b', { z: 90, minimized: true }),
       placed('c', { z: 5 }),
     ];
 
-    expect(currentWindow(windows)?.windowId).toBe('c');
+    expect(currentWindowFor(CANVAS, windows)?.windowId).toBe('c');
   });
 
   it('breaks a zOrder tie in favour of the window later in the list (the one opened later)', () => {
-    const { currentWindow } = currentWindowModule();
+    const { currentWindowFor } = currentWindowModule();
+    const ab = [placed('a', { z: 4 }), placed('b', { z: 4 })];
+    const ba = [placed('b', { z: 4 }), placed('a', { z: 4 })];
 
-    expect(currentWindow([placed('a', { z: 4 }), placed('b', { z: 4 })])?.windowId).toBe('b');
-    expect(currentWindow([placed('b', { z: 4 }), placed('a', { z: 4 })])?.windowId).toBe('a');
+    expect(currentWindowFor(CANVAS, ab)?.windowId).toBe('b');
+    expect(currentWindowFor(CANVAS, ba)?.windowId).toBe('a');
   });
 
   it('picks the maximized window even when its zOrder is the lowest (it renders on top regardless)', () => {
-    const { currentWindow } = currentWindowModule();
-    const windows = [placed('front', { z: 90 }), placed('tab', { z: 1, maximized: true })];
+    const { currentWindowFor } = currentWindowModule();
+    const windows = [placed('front', { z: 90 }), placed('max', { z: 1, maximized: true })];
 
-    expect(currentWindow(windows)?.windowId).toBe('tab');
+    expect(currentWindowFor(CANVAS, windows)?.windowId).toBe('max');
   });
 
-  it('returns null when the maximized window is minimized: the windows behind the tab are hidden too', () => {
-    // Minimizing keeps isMaximized, so neither the minimized tab nor the
+  it('returns null when the maximized window is minimized: the windows behind it are hidden too', () => {
+    // Minimizing keeps isMaximized, so neither the minimized window nor the
     // windows hidden behind it may become the target.
-    const { currentWindow } = currentWindowModule();
+    const { currentWindowFor } = currentWindowModule();
     const windows = [
       placed('behind', { z: 90 }),
-      placed('tab', { z: 1, maximized: true, minimized: true }),
+      placed('max', { z: 1, maximized: true, minimized: true }),
     ];
 
-    expect(currentWindow(windows)).toBeNull();
+    expect(currentWindowFor(CANVAS, windows)).toBeNull();
   });
 
   it('returns null when there is no window', () => {
-    const { currentWindow } = currentWindowModule();
+    const { currentWindowFor } = currentWindowModule();
 
-    expect(currentWindow([])).toBeNull();
+    expect(currentWindowFor(CANVAS, [])).toBeNull();
   });
 
   it('returns null when every window is minimized', () => {
-    const { currentWindow } = currentWindowModule();
+    const { currentWindowFor } = currentWindowModule();
     const windows = [
       placed('a', { z: 3, minimized: true }),
       placed('b', { z: 7, minimized: true }),
     ];
 
-    expect(currentWindow(windows)).toBeNull();
+    expect(currentWindowFor(CANVAS, windows)).toBeNull();
   });
 
-  it('agrees with isWindowVisible on every fixture: null exactly when nothing is visible, otherwise a visible window', () => {
-    const { currentWindow, isWindowVisible } = currentWindowModule();
+  it('agrees with isWindowVisibleFor on every fixture: null exactly when nothing is visible, otherwise a visible window', () => {
+    const { currentWindowFor, isWindowVisibleFor } = currentWindowModule();
     const fixtures: PlacedWindow[][] = [
       [placed('a', { z: 1 }), placed('b', { z: 2 })],
       [placed('a', { z: 5, minimized: true }), placed('b', { z: 2 })],
@@ -173,9 +183,8 @@ describe('currentWindow: picked from the windows on screen', () => {
     ];
 
     for (const windows of fixtures) {
-      const activeTab = activeTabOf(windows);
-      const visible = windows.filter((entry) => isWindowVisible(entry, activeTab));
-      const picked = currentWindow(windows);
+      const visible = windows.filter((entry) => isWindowVisibleFor(CANVAS, entry, windows));
+      const picked = currentWindowFor(CANVAS, windows);
       if (visible.length === 0) {
         expect(picked).toBeNull();
       } else {
@@ -186,21 +195,72 @@ describe('currentWindow: picked from the windows on screen', () => {
   });
 
   it('follows the registry: maximizing then minimizing a window leaves no current window, and un-maximizing brings the other back', () => {
-    const { currentWindow } = currentWindowModule();
+    const { currentWindowFor } = currentWindowModule();
     const registry = createWindowRegistry();
     registry.openWindow(windowInfo('w-a'));
     registry.openWindow(windowInfo('w-b'));
     registry.setWindowMaximized('w-a', true);
 
-    expect(currentWindow(get(registry).windows)?.windowId).toBe('w-a');
+    expect(currentWindowFor(CANVAS, get(registry).windows)?.windowId).toBe('w-a');
 
     registry.setWindowsMinimized(['w-a'], true);
 
-    expect(currentWindow(get(registry).windows)).toBeNull();
+    expect(currentWindowFor(CANVAS, get(registry).windows)).toBeNull();
 
     registry.setWindowMaximized('w-a', false);
 
-    expect(currentWindow(get(registry).windows)?.windowId).toBe('w-b');
+    expect(currentWindowFor(CANVAS, get(registry).windows)?.windowId).toBe('w-b');
+  });
+});
+
+describe('currentWindowFor and isWindowVisibleFor in Focus: the window Focus shows, whatever the placement', () => {
+  // On the canvas, `max` would be current and would hide everything behind it.
+  const front = placed('front', { z: 90 });
+  const chosen = placed('chosen', { z: 1 });
+  const max = placed('max', { z: 5, maximized: true });
+  const windows = [front, chosen, max];
+
+  it('makes the chosen window current even when another is maximized or in front', () => {
+    const { currentWindowFor } = currentWindowModule();
+
+    expect(currentWindowFor(focusOn('chosen'), windows)).toBe(chosen);
+  });
+
+  it('shows the chosen window and hides every other one, the maximized one included', () => {
+    const { isWindowVisibleFor } = currentWindowModule();
+    const view = focusOn('chosen');
+
+    expect(windows.map((entry) => isWindowVisibleFor(view, entry, windows))).toEqual([
+      false,
+      true,
+      false,
+    ]);
+  });
+
+  it('shows a window minimized on the canvas (Focus has no minimize, so the mark would strand it)', () => {
+    const { currentWindowFor, isWindowVisibleFor } = currentWindowModule();
+    const hidden = placed('hidden', { z: 1, minimized: true });
+    const others = [placed('a', { z: 9 }), hidden];
+    const view = focusOn('hidden');
+
+    expect(currentWindowFor(view, others)).toBe(hidden);
+    expect(isWindowVisibleFor(view, hidden, others)).toBe(true);
+  });
+
+  it('has no current window and shows none when the chosen window is not in the registry', () => {
+    const { currentWindowFor, isWindowVisibleFor } = currentWindowModule();
+    const view = focusOn('gone');
+
+    expect(currentWindowFor(view, windows)).toBeNull();
+    expect(windows.some((entry) => isWindowVisibleFor(view, entry, windows))).toBe(false);
+  });
+
+  it('has no current window and shows none when no window is chosen', () => {
+    const { currentWindowFor, isWindowVisibleFor } = currentWindowModule();
+    const view = focusOn(null);
+
+    expect(currentWindowFor(view, windows)).toBeNull();
+    expect(windows.some((entry) => isWindowVisibleFor(view, entry, windows))).toBe(false);
   });
 });
 
@@ -291,9 +351,9 @@ describe('neighborWindow over the sidebar order: collapsed rooms and minimized w
   );
 
   it('steps from the current window onto a minimized window next in the sidebar', () => {
-    const { currentWindow, neighborWindow } = currentWindowModule();
+    const { currentWindowFor, neighborWindow } = currentWindowModule();
 
-    const next = neighborWindow(displayOrder, currentWindow(entries), 1);
+    const next = neighborWindow(displayOrder, currentWindowFor(CANVAS, entries), 1);
 
     expect(next?.windowId).toBe('a2');
   });

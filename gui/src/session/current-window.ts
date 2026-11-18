@@ -1,7 +1,8 @@
 /**
- * The window keyboard operations act on, derived from what is on screen, and
- * the next / previous window in the sidebar's order. No second record of "the
- * current window" exists anywhere: everything reads this derivation.
+ * The window keyboard operations act on, derived from the work view, and the
+ * next / previous window in the sidebar's order. No second record of "the
+ * current window" exists anywhere: everything reads this derivation, and the
+ * only way in takes a {@link WorkView}, so no caller can skip the mode.
  */
 
 /** The part of a window entry the derivation reads. */
@@ -11,34 +12,38 @@ export interface PlacedWindow {
 }
 
 /**
- * Whether a window is on screen. This is the single definition shared by the
- * view (what is drawn) and {@link currentWindow} (what is operated on).
- *
- * @param activeTabEntry the maximized window while in tab mode, else undefined;
- * in tab mode every other window is hidden behind it.
+ * What the current window is derived from: the canvas placement, or the one
+ * window Focus shows (null when Focus shows none).
  */
-export function isWindowVisible(
-  entry: PlacedWindow,
-  activeTabEntry: { windowId: string } | undefined
-): boolean {
+export type WorkView = { mode: 'canvas' } | { mode: 'focus'; focusedWindowId: string | null };
+
+/** The work area's mode: one window filling it, or the floating canvas. */
+export type WorkMode = WorkView['mode'];
+
+/**
+ * Whether a window is on the canvas. Kept private so that no caller can read
+ * the placement while Focus decides what is shown.
+ *
+ * @param maximizedEntry the maximized window, else undefined; every other
+ * window is hidden behind it.
+ */
+function isOnCanvas(entry: PlacedWindow, maximizedEntry: PlacedWindow | undefined): boolean {
   return (
     !entry.display.isMinimized &&
-    (activeTabEntry === undefined || entry.windowId === activeTabEntry.windowId)
+    (maximizedEntry === undefined || entry.windowId === maximizedEntry.windowId)
   );
 }
 
 /**
- * The window keyboard operations act on: the maximized one if it is on screen,
- * otherwise the on-screen window with the highest `zOrder` (the later one in
- * the list wins a tie).
- *
- * @returns null when no window is on screen.
+ * The canvas's current window: the maximized one if it is on screen, otherwise
+ * the on-screen window with the highest `zOrder` (the later one in the list
+ * wins a tie).
  */
-export function currentWindow<T extends PlacedWindow>(windows: readonly T[]): T | null {
-  const activeTab = windows.find((entry) => entry.display.isMaximized);
+function canvasCurrent<T extends PlacedWindow>(windows: readonly T[]): T | null {
+  const maximized = windows.find((entry) => entry.display.isMaximized);
   let picked: T | null = null;
   for (const entry of windows) {
-    if (!isWindowVisible(entry, activeTab)) {
+    if (!isOnCanvas(entry, maximized)) {
       continue;
     }
     if (picked === null || entry.display.zOrder >= picked.display.zOrder) {
@@ -46,6 +51,47 @@ export function currentWindow<T extends PlacedWindow>(windows: readonly T[]): T 
     }
   }
   return picked;
+}
+
+/**
+ * The window keyboard operations act on. Canvas reads the placement; Focus
+ * reads only the window it shows and ignores the canvas's minimize mark,
+ * because Focus has no way to un-minimize.
+ *
+ * @returns null when no window is on screen, or when the window Focus shows is
+ * not in `windows`.
+ */
+export function currentWindowFor<T extends PlacedWindow>(
+  view: WorkView,
+  windows: readonly T[]
+): T | null {
+  if (view.mode === 'canvas') {
+    return canvasCurrent(windows);
+  }
+  const { focusedWindowId } = view;
+  if (focusedWindowId === null) {
+    return null;
+  }
+  return windows.find((entry) => entry.windowId === focusedWindowId) ?? null;
+}
+
+/**
+ * Whether a window is on screen: the single definition shared by the view
+ * (what is drawn and sized) and {@link currentWindowFor} (what is operated on).
+ * In Focus only the current window is on screen.
+ */
+export function isWindowVisibleFor<T extends PlacedWindow>(
+  view: WorkView,
+  entry: T,
+  windows: readonly T[]
+): boolean {
+  if (view.mode === 'canvas') {
+    return isOnCanvas(
+      entry,
+      windows.find((other) => other.display.isMaximized)
+    );
+  }
+  return currentWindowFor(view, windows)?.windowId === entry.windowId;
 }
 
 /**

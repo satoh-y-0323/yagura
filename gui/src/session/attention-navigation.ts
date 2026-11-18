@@ -11,14 +11,12 @@
 import type { DetectedStatusView } from '../ipc/session-boundary';
 import { windowsInDisplayOrder, type RoomGroup } from '../sidebar/room-groups';
 import { windowsNeedingYou } from '../status-tone';
-import { currentWindow } from './current-window';
 import { revealWindow, roomOfWindow, type RevealDeps } from './room-navigation';
 
 /** The part of a window entry the jump reads. */
 export interface NavigableWindow {
   windowId: string;
   detected: DetectedStatusView;
-  display: { zOrder: number; isMinimized: boolean; isMaximized: boolean };
 }
 
 /** The window to jump to, with the room that has to be expanded to reach it. */
@@ -28,7 +26,10 @@ export interface AttentionTarget<T> {
 }
 
 /** What the jump acts through; the view injects the store and the actions. */
-export type AttentionNavigationDeps<T extends NavigableWindow> = RevealDeps<T>;
+export interface AttentionNavigationDeps<T extends NavigableWindow> extends RevealDeps<T> {
+  /** The window the jump starts from: the current window of the work view. */
+  current: () => { windowId: string } | null;
+}
 
 /** The jump, bound to its dependencies. */
 export interface AttentionNavigation<T> {
@@ -47,15 +48,18 @@ export interface AttentionNavigation<T> {
  * and the badge counting it can never disagree.
  *
  * @param groups the sidebar's rooms, in the order they are rendered.
+ * @param current the current window of the work view; one absent from
+ * `groups` starts the search from the top too.
  * @returns the target and its room, or null when no window is waiting.
  */
 export function nextWindowNeedingYou<T extends NavigableWindow>(
-  groups: readonly RoomGroup<T>[]
+  groups: readonly RoomGroup<T>[],
+  current: { windowId: string } | null
 ): AttentionTarget<T> | null {
   const onScreen = windowsInDisplayOrder(groups);
   const waiting = windowsNeedingYou(onScreen);
-  const current = currentWindow(onScreen);
-  const from = onScreen.findIndex((entry) => entry === current);
+  const from =
+    current === null ? -1 : onScreen.findIndex((entry) => entry.windowId === current.windowId);
   const next = waiting.find((entry) => onScreen.indexOf(entry) > from) ?? waiting[0];
   if (next === undefined) {
     return null;
@@ -70,7 +74,7 @@ export function createAttentionNavigation<T extends NavigableWindow>(
 ): AttentionNavigation<T> {
   return {
     goToNextWindowNeedingYou: () => {
-      const target = nextWindowNeedingYou(deps.groups());
+      const target = nextWindowNeedingYou(deps.groups(), deps.current());
       if (target === null) {
         return null;
       }

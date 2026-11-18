@@ -1,6 +1,8 @@
 /**
- * The "next window that needs you" jump starts from the window keyboard
- * operations act on, so the two can never disagree about where the user is.
+ * The "next window that needs you" jump starts from the current window it is
+ * given, so it and the keyboard operations can never disagree about where the
+ * user is. How the current window is derived is measured in
+ * `current-window.test.ts`.
  */
 import { describe, it, expect } from 'vitest';
 import { get } from 'svelte/store';
@@ -21,8 +23,6 @@ interface Entry {
 interface Placement {
   z: number;
   waiting?: boolean;
-  minimized?: boolean;
-  maximized?: boolean;
 }
 
 /** The screen order is the order below: room-a (a1, a2), then room-b (b1, b2). */
@@ -38,8 +38,8 @@ function entry(windowId: string, placement: Placement): Entry {
     detected: { status },
     display: {
       zOrder: placement.z,
-      isMinimized: placement.minimized ?? false,
-      isMaximized: placement.maximized ?? false,
+      isMinimized: false,
+      isMaximized: false,
     },
   };
 }
@@ -49,44 +49,25 @@ function groupsOf(entries: readonly Entry[], collapsed: ReadonlySet<string> = ne
 }
 
 describe('nextWindowNeedingYou starts from the current window', () => {
-  it('does not start from a minimized window, even one holding the highest zOrder', () => {
-    // Current is b1; starting from the minimized a2 instead would pick b1 itself.
-    const entries = [
-      entry('a1', { z: 1, waiting: true }),
-      entry('a2', { z: 90, minimized: true }),
-      entry('b1', { z: 5, waiting: true }),
-      entry('b2', { z: 1 }),
-    ];
-
-    expect(nextWindowNeedingYou(groupsOf(entries))?.entry.windowId).toBe('a1');
-  });
-
-  it('starts from the maximized window even when a hidden window holds a higher zOrder', () => {
-    // Current is the tab b1; starting from the higher-zOrder a2 would pick b1.
+  it('starts from the top of the list when there is no current window, whatever the placement', () => {
+    // a2 is in front on the canvas; starting from it would pick b2.
     const entries = [
       entry('a1', { z: 1 }),
-      entry('a2', { z: 90 }),
-      entry('b1', { z: 1, maximized: true, waiting: true }),
+      entry('a2', { z: 90, waiting: true }),
+      entry('b1', { z: 1 }),
       entry('b2', { z: 1, waiting: true }),
     ];
 
-    expect(nextWindowNeedingYou(groupsOf(entries))?.entry.windowId).toBe('b2');
-  });
-
-  it('starts from the top of the list when no window is on screen', () => {
-    const entries = [
-      entry('a1', { z: 1, minimized: true }),
-      entry('a2', { z: 1, minimized: true, waiting: true }),
-      entry('b1', { z: 90, minimized: true }),
-      entry('b2', { z: 1, minimized: true, waiting: true }),
-    ];
-
-    expect(nextWindowNeedingYou(groupsOf(entries))?.entry.windowId).toBe('a2');
+    expect(nextWindowNeedingYou(groupsOf(entries), null)?.entry.windowId).toBe('a2');
   });
 });
 
 describe('goToNextWindowNeedingYou reports where it went', () => {
-  function navigationOver(entries: readonly Entry[], collapsedRoomIds: readonly string[]) {
+  function navigationOver(
+    entries: readonly Entry[],
+    collapsedRoomIds: readonly string[],
+    current: { windowId: string } | null
+  ) {
     const collapsedRooms = createCollapsedRooms();
     for (const roomId of collapsedRoomIds) {
       collapsedRooms.toggle(roomId);
@@ -94,6 +75,7 @@ describe('goToNextWindowNeedingYou reports where it went', () => {
     const calls: string[] = [];
     const navigation = createAttentionNavigation<Entry>({
       groups: () => groupsOf(entries, get(collapsedRooms)),
+      current: () => current,
       expandRoom: (roomId) => {
         calls.push(`expand:${roomId}`);
         collapsedRooms.expand(roomId);
@@ -115,7 +97,9 @@ describe('goToNextWindowNeedingYou reports where it went', () => {
       entry('b1', { z: 1 }),
       entry('b2', { z: 1, waiting: true }),
     ];
-    const { navigation, calls, collapsedRooms } = navigationOver(entries, ['room-b']);
+    const { navigation, calls, collapsedRooms } = navigationOver(entries, ['room-b'], {
+      windowId: 'a1',
+    });
 
     const landed: Entry | null = navigation.goToNextWindowNeedingYou();
 
@@ -126,7 +110,9 @@ describe('goToNextWindowNeedingYou reports where it went', () => {
 
   it('returns null and touches nothing when no window is waiting', () => {
     const entries = [entry('a1', { z: 5 }), entry('b1', { z: 1 })];
-    const { navigation, calls, collapsedRooms } = navigationOver(entries, ['room-b']);
+    const { navigation, calls, collapsedRooms } = navigationOver(entries, ['room-b'], {
+      windowId: 'a1',
+    });
 
     const landed: Entry | null = navigation.goToNextWindowNeedingYou();
 

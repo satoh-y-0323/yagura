@@ -1,11 +1,11 @@
 /**
  * What each shortcut action does once the dispatcher has matched it. Window
  * operations go through the same actions the title bar and the sidebar use,
- * so confirmation and tab-mode handling live in one place.
+ * so confirmation and the work mode's handling live in one place.
  */
 
-import { currentWindow, neighborWindow, type PlacedWindow } from '../session/current-window';
-import { revealWindow, type RevealDeps } from '../session/room-navigation';
+import { neighborWindow, type WorkMode } from '../session/current-window';
+import { revealWindow, type RevealDeps, type RoomMember } from '../session/room-navigation';
 import type { RoomGroup } from '../sidebar/room-groups';
 import type { ActionId } from './key-binding';
 
@@ -15,14 +15,15 @@ export interface ShortcutWindowActions<T> {
   interrupt: (entry: T) => Promise<void>;
   minimize: (entry: T) => void;
   maximize: (entry: T) => void;
-  /** Brings a window to the front, un-minimizing or switching tabs as needed. */
+  /** Brings a window on screen in the current work mode. */
   focus: (entry: T) => void;
 }
 
 /** What the runner reads and acts through; the view injects its own functions. */
-export interface ShortcutRunnerDeps<T extends PlacedWindow> {
-  /** Every open window. */
-  windows: () => readonly T[];
+export interface ShortcutRunnerDeps<T extends RoomMember> {
+  /** The current window of the work view, or null when none is on screen. */
+  current: () => T | null;
+  workMode: () => WorkMode;
   /** The windows in the order the sidebar renders them, top to bottom. */
   displayOrder: () => readonly T[];
   /** The sidebar's rooms as they are currently rendered, top to bottom. */
@@ -43,16 +44,16 @@ export interface ShortcutRunnerDeps<T extends PlacedWindow> {
 
 /**
  * Builds the function that runs a shortcut action. Operations on "the current
- * window" act on {@link currentWindow} and do nothing when no window is on
- * screen; next / previous walk the sidebar order and wrap at both ends.
+ * window" act on the injected one and do nothing without it; minimize and
+ * maximize do nothing in Focus, which has neither. Next / previous walk the
+ * sidebar order and wrap at both ends.
  *
  * @returns a function whose promise settles once the action, including any
  * confirmation it asked for, has finished.
  */
-export function createShortcutRunner<T extends PlacedWindow>(
+export function createShortcutRunner<T extends RoomMember>(
   deps: ShortcutRunnerDeps<T>
 ): (action: ActionId) => Promise<void> {
-  const current = (): T | null => currentWindow(deps.windows());
   const reveal: RevealDeps<T> = {
     groups: deps.groups,
     expandRoom: deps.expandRoom,
@@ -61,14 +62,14 @@ export function createShortcutRunner<T extends PlacedWindow>(
   };
 
   function goToNeighbor(step: 1 | -1): void {
-    const target = neighborWindow(deps.displayOrder(), current(), step);
+    const target = neighborWindow(deps.displayOrder(), deps.current(), step);
     if (target !== null) {
       revealWindow(reveal, target);
     }
   }
 
   async function onCurrent(operate: (entry: T) => void | Promise<void>): Promise<void> {
-    const target = current();
+    const target = deps.current();
     if (target !== null) {
       await operate(target);
     }
@@ -95,10 +96,14 @@ export function createShortcutRunner<T extends PlacedWindow>(
         await onCurrent(deps.actions.interrupt);
         return;
       case 'minimize-window':
-        await onCurrent(deps.actions.minimize);
+        if (deps.workMode() === 'canvas') {
+          await onCurrent(deps.actions.minimize);
+        }
         return;
       case 'toggle-maximize-window':
-        await onCurrent(deps.actions.maximize);
+        if (deps.workMode() === 'canvas') {
+          await onCurrent(deps.actions.maximize);
+        }
         return;
       case 'toggle-sidebar-focus':
         deps.toggleSidebarFocus();

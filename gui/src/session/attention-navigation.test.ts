@@ -33,6 +33,8 @@ interface AttentionTarget<T> {
 /** What the jump acts through; the view injects the store and the actions. */
 interface AttentionNavigationDeps<T extends NavigableWindow> {
   groups: () => readonly RoomGroup<T>[];
+  /** The window the jump starts from: the current window of the work view. */
+  current: () => { windowId: string } | null;
   expandRoom: (roomId: string) => void;
   focus: (entry: T) => void;
   focusTerminal: (windowId: string) => void;
@@ -44,7 +46,8 @@ interface AttentionNavigation {
 
 interface AttentionNavigationModule {
   nextWindowNeedingYou: <T extends NavigableWindow>(
-    groups: readonly RoomGroup<T>[]
+    groups: readonly RoomGroup<T>[],
+    current: { windowId: string } | null
   ) => AttentionTarget<T> | null;
   createAttentionNavigation: <T extends NavigableWindow>(
     deps: AttentionNavigationDeps<T>
@@ -112,9 +115,10 @@ function makeEntry(windowId: string, roomId: string, status: WindowStatus, zOrde
 /**
  * The four windows of the two-room fixture. `waiting` names the ones whose
  * status makes them need the user; `front` names the one holding the highest
- * `zOrder`, which the jump reads as the starting point of the cycle.
+ * `zOrder` on the canvas, which is not where the jump starts: it starts from
+ * the current window it is given.
  */
-function fourWindows(waiting: readonly string[], front: string): Entry[] {
+function fourWindows(waiting: readonly string[], front = 'b1'): Entry[] {
   return LAYOUT.map(([windowId, roomId]) =>
     makeEntry(
       windowId,
@@ -153,7 +157,11 @@ interface Harness {
  * collapsed room" and "does not collapse one that is already open" are read
  * from the store's own state rather than from a stub that cannot be wrong.
  */
-function harnessOf(entries: readonly Entry[], collapsedRoomIds: readonly string[]): Harness {
+function harnessOf(
+  entries: readonly Entry[],
+  collapsedRoomIds: readonly string[],
+  current: string | null
+): Harness {
   const collapsedRooms = createCollapsedRooms();
   for (const roomId of collapsedRoomIds) {
     collapsedRooms.toggle(roomId);
@@ -161,11 +169,12 @@ function harnessOf(entries: readonly Entry[], collapsedRoomIds: readonly string[
   const state = { entries: [...entries] };
   const calls: string[] = [];
   const focused: string[] = [];
-  let nextZOrder = FRONT_Z_ORDER + 1;
+  let currentId = current;
 
   const { createAttentionNavigation } = attentionNavigationModule();
   const navigation = createAttentionNavigation<Entry>({
     groups: () => groupsOf(state.entries, get(collapsedRooms)),
+    current: () => (currentId === null ? null : { windowId: currentId }),
     expandRoom: (roomId) => {
       calls.push(`expand:${roomId}`);
       collapsedRooms.expand(roomId);
@@ -176,14 +185,9 @@ function harnessOf(entries: readonly Entry[], collapsedRoomIds: readonly string[
     focus: (entry) => {
       calls.push(`focus:${entry.windowId}`);
       focused.push(entry.windowId);
-      // Models `WindowActions.focus`: it raises the window to the front, and
-      // the front window is what the jump takes as the next press's origin.
-      const zOrder = nextZOrder++;
-      state.entries = state.entries.map((candidate) =>
-        candidate.windowId === entry.windowId
-          ? { ...candidate, display: { ...candidate.display, zOrder } }
-          : candidate
-      );
+      // Models going to a window in Focus: it becomes the current window and
+      // the placement is left alone.
+      currentId = entry.windowId;
     },
   });
 
@@ -210,56 +214,67 @@ function harnessOf(entries: readonly Entry[], collapsedRoomIds: readonly string[
 describe('attention-navigation module (the jump lives in session/)', () => {});
 
 describe('nextWindowNeedingYou: the next waiting window in screen order', () => {
-  it('reads the list top to bottom, not in tab order: from the front window it picks a1, the window the screen shows next', () => {
+  it('reads the list top to bottom, not in tab order: from the current window a2 it picks a1, the window the screen shows next', () => {
     // In tab order the waiting windows read b2, a1 -- the opposite order --
     // so picking b2 here would mean the cycle followed `tabOrder` globally.
     const { nextWindowNeedingYou } = attentionNavigationModule();
 
-    const target = nextWindowNeedingYou(groupsOf(fourWindows(['a1', 'b2'], 'a2')));
+    const target = nextWindowNeedingYou(groupsOf(fourWindows(['a1', 'b2'])), { windowId: 'a2' });
 
     expect(target?.entry.windowId).toBe('a1');
   });
 
-  it('crosses into the next room when the front window is the previous target', () => {
+  it('starts from the current window it is given, not from the window placed in front', () => {
+    // Focus does not move the placement: a2 stays in front while a1 is shown.
     const { nextWindowNeedingYou } = attentionNavigationModule();
 
-    const target = nextWindowNeedingYou(groupsOf(fourWindows(['a1', 'b2'], 'a1')));
+    const target = nextWindowNeedingYou(groupsOf(fourWindows(['a1', 'b2'], 'a2')), {
+      windowId: 'a1',
+    });
+
+    expect(target?.entry.windowId).toBe('b2');
+  });
+
+  it('crosses into the next room when the current window is the previous target', () => {
+    const { nextWindowNeedingYou } = attentionNavigationModule();
+
+    const target = nextWindowNeedingYou(groupsOf(fourWindows(['a1', 'b2'])), { windowId: 'a1' });
 
     expect(target?.entry.windowId).toBe('b2');
   });
 
   it('names the room of the window it returns, so the caller can expand it', () => {
     const { nextWindowNeedingYou } = attentionNavigationModule();
-    const groups = groupsOf(fourWindows(['b2'], 'a2'));
+    const groups = groupsOf(fourWindows(['b2']));
 
     // groups[1] is room-b, whose first entry on screen is b2.
     expect(groups[1]?.entries[0]?.windowId).toBe('b2');
 
-    const target = nextWindowNeedingYou(groups);
+    const target = nextWindowNeedingYou(groups, { windowId: 'a2' });
 
     expect(target).toEqual({ entry: groups[1]?.entries[0], roomId: 'room-b' });
   });
 
-  it('wraps to the first waiting window when the front window sits below the last one', () => {
+  it('wraps to the first waiting window when the current window sits below the last one', () => {
     const { nextWindowNeedingYou } = attentionNavigationModule();
 
-    const target = nextWindowNeedingYou(groupsOf(fourWindows(['a1', 'b2'], 'b1')));
+    const target = nextWindowNeedingYou(groupsOf(fourWindows(['a1', 'b2'])), { windowId: 'b1' });
 
     expect(target?.entry.windowId).toBe('a1');
   });
 
-  it('skips the front window itself when it is waiting, and wraps past the end', () => {
+  it('skips the current window itself when it is waiting, and wraps past the end', () => {
     const { nextWindowNeedingYou } = attentionNavigationModule();
 
-    const target = nextWindowNeedingYou(groupsOf(fourWindows(['a1', 'b2'], 'b2')));
+    const target = nextWindowNeedingYou(groupsOf(fourWindows(['a1', 'b2'])), { windowId: 'b2' });
 
     expect(target?.entry.windowId).toBe('a1');
   });
 
-  it('returns the only waiting window even when it is the front window (jumping back to it is harmless)', () => {
+  it('returns the only waiting window even when it is the current window (jumping back to it is harmless)', () => {
     const { nextWindowNeedingYou } = attentionNavigationModule();
 
-    const target = nextWindowNeedingYou(groupsOf(fourWindows(['a1'], 'a1')));
+    const target = nextWindowNeedingYou(groupsOf(fourWindows(['a1'])), { windowId: 'a1' });
 
     expect(target?.entry.windowId).toBe('a1');
   });
@@ -267,19 +282,21 @@ describe('nextWindowNeedingYou: the next waiting window in screen order', () => 
   it('returns null when no window is waiting', () => {
     const { nextWindowNeedingYou } = attentionNavigationModule();
 
-    expect(nextWindowNeedingYou(groupsOf(fourWindows([], 'a2')))).toBeNull();
+    expect(nextWindowNeedingYou(groupsOf(fourWindows([])), { windowId: 'a2' })).toBeNull();
   });
 
   it('returns null when there is no room at all', () => {
     const { nextWindowNeedingYou } = attentionNavigationModule();
 
-    expect(nextWindowNeedingYou(groupsOf([]))).toBeNull();
+    expect(nextWindowNeedingYou(groupsOf([]), null)).toBeNull();
   });
 
   it('reaches a waiting window inside a collapsed room (collapsing hides a room, it does not mute it)', () => {
     const { nextWindowNeedingYou } = attentionNavigationModule();
 
-    const target = nextWindowNeedingYou(groupsOf(fourWindows(['b2'], 'a2'), new Set(['room-b'])));
+    const target = nextWindowNeedingYou(groupsOf(fourWindows(['b2']), new Set(['room-b'])), {
+      windowId: 'a2',
+    });
 
     expect(target?.entry.windowId).toBe('b2');
   });
@@ -291,7 +308,7 @@ describe('nextWindowNeedingYou: the next waiting window in screen order', () => 
 
 describe('createAttentionNavigation: expanding and focusing', () => {
   it('expands the target room before focusing the window', () => {
-    const harness = harnessOf(fourWindows(['b2'], 'a2'), ['room-a', 'room-b']);
+    const harness = harnessOf(fourWindows(['b2']), ['room-a', 'room-b'], 'a2');
 
     harness.navigation.goToNextWindowNeedingYou();
 
@@ -300,7 +317,7 @@ describe('createAttentionNavigation: expanding and focusing', () => {
   });
 
   it('leaves a room that is already expanded expanded (an expand written as a toggle would close it)', () => {
-    const harness = harnessOf(fourWindows(['b2'], 'a2'), []);
+    const harness = harnessOf(fourWindows(['b2']), [], 'a2');
 
     harness.navigation.goToNextWindowNeedingYou();
 
@@ -309,7 +326,7 @@ describe('createAttentionNavigation: expanding and focusing', () => {
   });
 
   it('leaves the collapsed state of every other room alone (nothing the user did not ask for moves)', () => {
-    const harness = harnessOf(fourWindows(['a1'], 'a2'), ['room-a', 'room-b']);
+    const harness = harnessOf(fourWindows(['a1']), ['room-a', 'room-b'], 'a2');
 
     harness.navigation.goToNextWindowNeedingYou();
 
@@ -317,7 +334,7 @@ describe('createAttentionNavigation: expanding and focusing', () => {
   });
 
   it('does not collapse the room it jumped into afterwards', () => {
-    const harness = harnessOf(fourWindows(['a1', 'b2'], 'a2'), ['room-a']);
+    const harness = harnessOf(fourWindows(['a1', 'b2']), ['room-a'], 'a2');
 
     harness.navigation.goToNextWindowNeedingYou();
     harness.navigation.goToNextWindowNeedingYou();
@@ -326,7 +343,7 @@ describe('createAttentionNavigation: expanding and focusing', () => {
   });
 
   it('changes neither the room order nor the order within a room', () => {
-    const harness = harnessOf(fourWindows(['a1', 'b2'], 'a2'), []);
+    const harness = harnessOf(fourWindows(['a1', 'b2']), [], 'a2');
     const before = orderSnapshot(harness.currentEntries(), get(harness.collapsedRooms));
 
     harness.navigation.goToNextWindowNeedingYou();
@@ -337,7 +354,7 @@ describe('createAttentionNavigation: expanding and focusing', () => {
   });
 
   it('does nothing at all when no window is waiting', () => {
-    const harness = harnessOf(fourWindows([], 'a2'), ['room-b']);
+    const harness = harnessOf(fourWindows([]), ['room-b'], 'a2');
 
     harness.navigation.goToNextWindowNeedingYou();
 
@@ -351,7 +368,7 @@ describe('createAttentionNavigation: repeated presses (no cursor is held)', () =
     // Waiting in screen order: a1, b2, b1. A cursor remembering "I handed out
     // index 0" would read index 1 of the shrunken list (b2, b1) and hand out
     // b1, skipping b2.
-    const harness = harnessOf(fourWindows(['a1', 'b2', 'b1'], 'a2'), []);
+    const harness = harnessOf(fourWindows(['a1', 'b2', 'b1']), [], 'a2');
 
     harness.navigation.goToNextWindowNeedingYou();
     harness.stopWaiting('a1');
@@ -361,7 +378,7 @@ describe('createAttentionNavigation: repeated presses (no cursor is held)', () =
   });
 
   it('walks the waiting windows in screen order and wraps back to the first', () => {
-    const harness = harnessOf(fourWindows(['a1', 'b2'], 'a2'), []);
+    const harness = harnessOf(fourWindows(['a1', 'b2']), [], 'a2');
 
     harness.navigation.goToNextWindowNeedingYou();
     harness.navigation.goToNextWindowNeedingYou();
