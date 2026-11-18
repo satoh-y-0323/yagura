@@ -22,22 +22,20 @@ pub struct AttentionUpdate {
 }
 
 /// The attention decision: remembers the title stem and instance id captured
-/// at startup and the previously observed waiting total.
+/// at startup. It holds no per-observation state.
 #[derive(Debug, Clone)]
 pub struct AttentionState {
     stem: String,
     id: Option<String>,
-    last_total: Option<u32>,
 }
 
 impl AttentionState {
-    /// Starts with no baseline, so the first observation only records its total.
+    /// Captures the title stem and instance id.
     #[must_use]
     pub fn new(stem: &str, id: Option<&str>) -> Self {
         Self {
             stem: stem.to_owned(),
             id: id.map(str::to_owned),
-            last_total: None,
         }
     }
 
@@ -48,32 +46,24 @@ impl AttentionState {
         compose_window_title(&self.stem, self.id.as_deref(), total)
     }
 
-    /// Records one summary from the view and decides what to show.
+    /// Decides what to show for one summary from the view.
     ///
-    /// Attention is requested only when the total rises above a recorded
-    /// baseline while the main window lacks focus. `baseline` drops the
-    /// baseline (the view is about to reload its whole list, e.g. after a
-    /// reconnect), so the next observation only records its total.
+    /// The title and badge follow the sum of the counts. Attention is
+    /// requested only when the view reports that something `arrived` and the
+    /// main window lacks focus; a rising total alone is not an arrival.
+    #[must_use]
     pub fn observe(
-        &mut self,
+        &self,
         needs_you: u32,
         pending_permissions: u32,
-        baseline: bool,
+        arrived: bool,
         focused: bool,
     ) -> AttentionUpdate {
         let total = needs_you.saturating_add(pending_permissions);
-        let request_attention = if baseline {
-            self.last_total = None;
-            false
-        } else {
-            let rose = self.last_total.is_some_and(|last| total > last);
-            self.last_total = Some(total);
-            rose && !focused
-        };
         AttentionUpdate {
             title: self.title(total),
             total,
-            request_attention,
+            request_attention: arrived && !focused,
         }
     }
 }

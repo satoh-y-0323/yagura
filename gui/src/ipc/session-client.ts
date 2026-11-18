@@ -1141,8 +1141,9 @@ export async function invokeReconnectDaemon(): Promise<void> {
 /**
  * Hands the core the counts of windows waiting for the user and of pending
  * permission requests; the core decides the title and whether to request the
- * user's attention. `baseline` tells that the whole list is about to reload
- * (e.g. after a reconnect), so the next counts are only recorded.
+ * user's attention. `arrived` tells that something newly started waiting for
+ * the user; only then (and only while the main window lacks focus) is the
+ * user's attention requested.
  *
  * @throws when the core rejects the counts (not non-negative 32-bit integers)
  * or cannot apply them to the main window.
@@ -1150,12 +1151,12 @@ export async function invokeReconnectDaemon(): Promise<void> {
 export async function invokeSetAttentionSummary(
   needsYou: number,
   pendingPermissions: number,
-  baseline?: boolean
+  arrived: boolean
 ): Promise<void> {
   await invoke<unknown>('set_attention_summary', {
     needs_you: needsYou,
     pending_permissions: pendingPermissions,
-    baseline,
+    arrived,
   });
 }
 

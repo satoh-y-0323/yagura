@@ -6,7 +6,7 @@
 //! names across the boundary, matching the event payloads and the daemon
 //! protocol.
 
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::Arc;
 
 use tauri::{AppHandle, Manager, State, UserAttentionType};
 use yagura_protocol::{
@@ -696,12 +696,11 @@ pub fn get_recovery_status(recovery: State<'_, RecoverySupervisorState>) -> Reco
 }
 
 /// Shows how many things wait for the user outside the WebView: the count in
-/// the main window's title, a request for the user's attention when the count
-/// rises while the main window lacks focus, and on macOS the Dock badge.
+/// the main window's title, a request for the user's attention when something
+/// `arrived` while the main window lacks focus, and on macOS the Dock badge.
 ///
-/// Only counts cross the boundary, so no daemon-provided text reaches the
-/// title. `baseline` (default `false`) tells that the view is about to reload
-/// its whole list, so the next summary only records its count.
+/// Only counts and a flag cross the boundary, so no daemon-provided text
+/// reaches the title.
 ///
 /// # Errors
 /// Returns a human-readable message when the title, the attention request or
@@ -709,10 +708,10 @@ pub fn get_recovery_status(recovery: State<'_, RecoverySupervisorState>) -> Reco
 #[tauri::command(rename_all = "snake_case")]
 pub fn set_attention_summary(
     app: AppHandle,
-    attention: State<'_, Mutex<AttentionState>>,
+    attention: State<'_, AttentionState>,
     needs_you: u32,
     pending_permissions: u32,
-    baseline: Option<bool>,
+    arrived: bool,
 ) -> Result<(), String> {
     let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) else {
         return Ok(());
@@ -720,17 +719,7 @@ pub fn set_attention_summary(
     // An unreadable focus counts as unfocused: a needless request is
     // ignored by a focused window, while a missed one leaves the user unaware.
     let focused = window.is_focused().unwrap_or(false);
-    // `observe` cannot panic midway, so a poisoned lock still holds a
-    // consistent state.
-    let update = attention
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .observe(
-            needs_you,
-            pending_permissions,
-            baseline.unwrap_or(false),
-            focused,
-        );
+    let update = attention.observe(needs_you, pending_permissions, arrived, focused);
     window
         .set_title(&update.title)
         .map_err(|error| error.to_string())?;

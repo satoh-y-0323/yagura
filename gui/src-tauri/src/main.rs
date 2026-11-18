@@ -5,7 +5,7 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use anyhow::Context;
 use tauri::{App, Manager};
@@ -68,7 +68,7 @@ fn main() -> anyhow::Result<()> {
             if let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) {
                 let _ = window.set_title(&attention.title(0));
             }
-            app.manage(Mutex::new(attention));
+            app.manage(attention);
 
             // The GUI owns every shortcut it handles; the browser's own keys
             // (print, find, ...) would open browser features inside the app.

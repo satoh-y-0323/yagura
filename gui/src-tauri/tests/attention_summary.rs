@@ -1,91 +1,66 @@
 //! Integration test: the attention decision behind `set_attention_summary`.
 //! The state is driven without a window: each observation takes the waiting
-//! counts, the `baseline` flag and whether the main window has focus, and
-//! returns the title to set and whether to request the user's attention.
+//! counts, whether something newly arrived and whether the main window has
+//! focus, and returns the title to set and whether to request the user's
+//! attention.
 
 use yagura_gui::attention::AttentionState;
 
 const UNFOCUSED: bool = false;
 const FOCUSED: bool = true;
-const NO_BASELINE: bool = false;
-const BASELINE: bool = true;
+const NOT_ARRIVED: bool = false;
+const ARRIVED: bool = true;
 
 #[test]
-fn the_first_observation_only_records_the_total_and_titles_it() {
-    let mut state = AttentionState::new("yagura", Some("dev"));
+fn the_title_follows_the_sum_of_the_counts_and_nothing_arrived_requests_nothing() {
+    let state = AttentionState::new("yagura", Some("dev"));
 
-    let update = state.observe(2, 1, NO_BASELINE, UNFOCUSED);
+    let first = state.observe(2, 1, NOT_ARRIVED, UNFOCUSED);
+    assert_eq!(first.title, "(3) yagura [dev]");
+    assert!(!first.request_attention);
 
-    assert!(!update.request_attention);
-    assert_eq!(update.title, "(3) yagura [dev]");
-}
+    // The same counts again: the title is rebuilt from the startup stem.
+    let again = state.observe(2, 1, NOT_ARRIVED, UNFOCUSED);
+    assert_eq!(again.title, "(3) yagura [dev]");
 
-#[test]
-fn a_rise_while_unfocused_requests_attention_once_and_titles_from_the_startup_stem() {
-    let mut state = AttentionState::new("yagura", Some("dev"));
-    state.observe(3, 0, NO_BASELINE, UNFOCUSED);
+    // Moving a count between the two sources keeps the sum.
+    let moved = state.observe(0, 3, NOT_ARRIVED, UNFOCUSED);
+    assert_eq!(moved.title, "(3) yagura [dev]");
 
-    let risen = state.observe(3, 1, NO_BASELINE, UNFOCUSED);
-    assert!(risen.request_attention);
-    assert_eq!(risen.title, "(4) yagura [dev]");
-
-    let same = state.observe(3, 1, NO_BASELINE, UNFOCUSED);
-    assert!(!same.request_attention);
-    assert_eq!(same.title, "(4) yagura [dev]");
-
-    let fallen = state.observe(1, 0, NO_BASELINE, UNFOCUSED);
-    assert!(!fallen.request_attention);
-    assert_eq!(fallen.title, "(1) yagura [dev]");
-
-    let risen_again = state.observe(2, 0, NO_BASELINE, UNFOCUSED);
-    assert!(risen_again.request_attention);
-
-    let cleared = state.observe(0, 0, NO_BASELINE, UNFOCUSED);
-    assert!(!cleared.request_attention);
-    assert_eq!(cleared.title, "yagura [dev]");
-}
-
-#[test]
-fn the_total_is_the_sum_of_windows_needing_you_and_pending_permissions() {
-    let mut state = AttentionState::new("yagura", None);
-    state.observe(1, 0, NO_BASELINE, UNFOCUSED);
-
-    let moved = state.observe(0, 1, NO_BASELINE, UNFOCUSED);
-    assert!(!moved.request_attention);
-    assert_eq!(moved.title, "(1) yagura");
-
-    let permission_arrived = state.observe(0, 2, NO_BASELINE, UNFOCUSED);
-    assert!(permission_arrived.request_attention);
-    assert_eq!(permission_arrived.title, "(2) yagura");
-}
-
-#[test]
-fn a_rise_while_the_main_window_has_focus_requests_nothing() {
-    let mut state = AttentionState::new("yagura", None);
-    state.observe(0, 0, NO_BASELINE, FOCUSED);
-
-    let risen = state.observe(2, 1, NO_BASELINE, FOCUSED);
-
+    // A rising total alone is not an arrival.
+    let risen = state.observe(5, 3, NOT_ARRIVED, UNFOCUSED);
+    assert_eq!(risen.title, "(8) yagura [dev]");
     assert!(!risen.request_attention);
-    assert_eq!(risen.title, "(3) yagura");
 
-    let lost_focus = state.observe(2, 1, NO_BASELINE, UNFOCUSED);
-    assert!(!lost_focus.request_attention);
+    let cleared = state.observe(0, 0, NOT_ARRIVED, UNFOCUSED);
+    assert_eq!(cleared.title, "yagura [dev]");
+    assert!(!cleared.request_attention);
 }
 
 #[test]
-fn a_baseline_reset_makes_the_next_observation_only_record_the_total() {
-    let mut state = AttentionState::new("yagura", None);
-    state.observe(1, 0, NO_BASELINE, UNFOCUSED);
+fn an_arrival_while_the_main_window_lacks_focus_requests_attention() {
+    let state = AttentionState::new("yagura", None);
 
-    let reset = state.observe(0, 0, BASELINE, UNFOCUSED);
-    assert!(!reset.request_attention);
+    // The very first observation is not held back.
+    let first = state.observe(1, 0, ARRIVED, UNFOCUSED);
+    assert!(first.request_attention);
+    assert_eq!(first.title, "(1) yagura");
 
-    // Reconnecting delivers the whole window list at once.
-    let reloaded = state.observe(5, 0, NO_BASELINE, UNFOCUSED);
-    assert!(!reloaded.request_attention);
-    assert_eq!(reloaded.title, "(5) yagura");
+    // A new arrival requests again even when the total did not rise.
+    let replaced = state.observe(0, 1, ARRIVED, UNFOCUSED);
+    assert!(replaced.request_attention);
+    assert_eq!(replaced.title, "(1) yagura");
+}
 
-    let risen = state.observe(6, 0, NO_BASELINE, UNFOCUSED);
-    assert!(risen.request_attention);
+#[test]
+fn an_arrival_while_the_main_window_has_focus_requests_nothing() {
+    let state = AttentionState::new("yagura", None);
+
+    let focused = state.observe(2, 1, ARRIVED, FOCUSED);
+    assert!(!focused.request_attention);
+    assert_eq!(focused.title, "(3) yagura");
+
+    // Focus is read per observation: the same arrival without focus requests.
+    let unfocused = state.observe(2, 1, ARRIVED, UNFOCUSED);
+    assert!(unfocused.request_attention);
 }
