@@ -24,6 +24,7 @@ use yagura_protocol::{
     CellPosition, InputModes, Modifiers, Palette, PointerButton, PointerInput, PointerKind,
     ScreenCopy, ScreenCursor, ScreenLine, ScreenPush,
 };
+use yagura_test_support::conpty::place_bundled_conpty;
 use yagura_test_support::frame::Grid;
 use yagura_test_support::paths::{TempDir, unique_suffix};
 
@@ -135,6 +136,11 @@ impl Rig {
     }
 
     fn start(&self, launch: &HolderLaunch) -> Holder {
+        place_bundled_conpty(
+            Path::new(HOLDER)
+                .parent()
+                .expect("the holder path names a file"),
+        );
         let mut child = Command::new(HOLDER)
             .arg(&self.window_id)
             .arg(&self.instance)

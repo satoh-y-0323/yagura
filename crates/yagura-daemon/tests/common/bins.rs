@@ -10,21 +10,26 @@
 use std::path::{Path, PathBuf};
 
 use yagura_daemon::DaemonConfig;
+use yagura_test_support::conpty::place_bundled_conpty;
 use yagura_test_support::detection::CONTROL_READY_MARKER;
 use yagura_test_support::process::{composer_arguments, install_exe, profile_source};
 
 /// The profile directory every bin of the workspace is uplifted to: the one
 /// holding this package's `yagura-daemon`. Every path to another package's
-/// bin goes through here.
+/// bin goes through here, so the holder found there, and the one a daemon
+/// started from there runs, has the bundled pseudoconsole beside it.
 ///
 /// # Panics
 ///
-/// Panics if Cargo's path for `yagura-daemon` has no parent directory.
+/// Panics if Cargo's path for `yagura-daemon` has no parent directory, or as
+/// [`place_bundled_conpty`] does.
 pub fn profile_dir() -> PathBuf {
-    Path::new(env!("CARGO_BIN_EXE_yagura-daemon"))
+    let dir = Path::new(env!("CARGO_BIN_EXE_yagura-daemon"))
         .parent()
         .expect("CARGO_BIN_EXE_yagura-daemon names a file inside the profile directory")
-        .to_path_buf()
+        .to_path_buf();
+    place_bundled_conpty(&dir);
+    dir
 }
 
 /// `name` from `package`, in [`profile_dir`].
@@ -105,22 +110,19 @@ pub fn daemon_exe() -> PathBuf {
 
 /// Copies into `dir` what a daemon installed there needs beside it to open a
 /// window: the holder and, on Unix, the watcher the holder starts beside
-/// itself, or on Windows the bundled pseudoconsole pair placed beside the
-/// built holder.
+/// itself, or on Windows the bundled pseudoconsole pair.
 ///
 /// # Panics
 ///
-/// Panics if one of them is not built, or if a copy fails.
+/// Panics if one of them is not built, if a copy fails, or as
+/// [`place_bundled_conpty`] does.
 pub fn install_window_runtime(dir: &Path) {
     let holder = holder_path();
     let name = holder.file_name().expect("the holder path names a file");
     install_exe(&holder, &dir.join(name));
     #[cfg(unix)]
     install_exe(&watcher_path(), &dir.join("yagura-watcher"));
-    #[cfg(windows)]
-    for pair in ["conpty.dll", "OpenConsole.exe"] {
-        install_exe(&holder.with_file_name(pair), &dir.join(pair));
-    }
+    place_bundled_conpty(dir);
 }
 
 /// `base` with the holder of [`holder_path`] when it names none. A holder the

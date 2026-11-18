@@ -20,6 +20,7 @@ use yagura_protocol::holder::{
     HOLDER_PROTOCOL, HolderFault, HolderFrame, HolderFrameBuffer, HolderLaunch, HolderRecord,
     encode_holder_frame, encode_holder_launch, read_holder_record,
 };
+use yagura_test_support::conpty::place_bundled_conpty;
 use yagura_test_support::paths::{TempDir, unique_suffix};
 
 const POLL: Duration = Duration::from_millis(20);
@@ -184,6 +185,7 @@ impl Rig {
         stdout: Stdio,
         environment: impl FnOnce(&mut Command),
     ) -> Holder {
+        place_bundled_conpty(Path::new(exe).parent().expect("a holder path names a file"));
         let mut command = Command::new(exe);
         command
             .arg(&self.window_id)

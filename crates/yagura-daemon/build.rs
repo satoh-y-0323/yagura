@@ -2,12 +2,12 @@
 //! profiles into the daemon binary.
 //! Ensures version skew is impossible: the same *.toml files built in are used.
 //!
-//! On Windows it also checks the vendored pseudoconsole against its pinned hashes
-//! and places it beside the daemon's executable and the test executables.
+//! On Windows it also checks the vendored pseudoconsole against its pinned
+//! hashes; it does not copy it anywhere.
 
 use std::process::ExitCode;
 
-use yagura_build_support::{EmbedTomlDir, KeysConst, embed_toml_dir, place_bundled_conpty};
+use yagura_build_support::{EmbedTomlDir, KeysConst, check_bundled_conpty, embed_toml_dir};
 
 /// Included by `detector/definition.rs`.
 const BUNDLED_DEFINITIONS: EmbedTomlDir<'static> = EmbedTomlDir {
@@ -48,7 +48,7 @@ fn main() -> ExitCode {
     let result = embed_toml_dir(&BUNDLED_DEFINITIONS)
         .and_then(|()| embed_toml_dir(&BUNDLED_PROFILES))
         .map_err(|error| error.to_string())
-        .and_then(|()| place_bundled_conpty(VENDORED_CONPTY_DIR));
+        .and_then(|()| check_bundled_conpty(VENDORED_CONPTY_DIR));
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {

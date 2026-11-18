@@ -14,6 +14,7 @@ use std::time::Duration;
 /// hung. Reaching it fails the test; nothing is judged by waiting this long.
 pub const HANG_GUARD: Duration = Duration::from_secs(60);
 
+pub mod conpty;
 pub mod detection;
 pub mod frame;
 pub mod ipc;

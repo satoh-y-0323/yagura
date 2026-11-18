@@ -1,6 +1,5 @@
 //! Build script: on Windows, checks the vendored pseudoconsole against its
-//! pinned hashes and places it beside the holder's executable and the test
-//! executables.
+//! pinned hashes; it does not copy it anywhere.
 
 use std::process::ExitCode;
 
@@ -8,7 +7,7 @@ use std::process::ExitCode;
 const VENDORED_CONPTY_DIR: &str = "../../vendor/conpty/x64";
 
 fn main() -> ExitCode {
-    match yagura_build_support::place_bundled_conpty(VENDORED_CONPTY_DIR) {
+    match yagura_build_support::check_bundled_conpty(VENDORED_CONPTY_DIR) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("{error}");

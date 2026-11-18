@@ -36,6 +36,14 @@ pub fn verify_beside(dir: &Path) -> Result<(), BundledConptyError> {
     Ok(())
 }
 
+/// The names of the files that make up the pair, in the order
+/// [`verify_beside`] checks them. Their pinned contents stay private.
+pub fn file_names() -> impl Iterator<Item = &'static str> {
+    bundled_conpty_pins::PINNED_FILES
+        .iter()
+        .map(|pinned| pinned.name)
+}
+
 pub(crate) fn executable_dir() -> Result<PathBuf, BundledConptyError> {
     let exe = std::env::current_exe().map_err(BundledConptyError::NoExecutable)?;
     exe.parent().map(Path::to_path_buf).ok_or_else(|| {
