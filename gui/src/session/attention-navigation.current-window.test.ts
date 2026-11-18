@@ -78,6 +78,7 @@ describe('goToNextWindowNeedingYou reports where it went', () => {
     const navigation = createAttentionNavigation<Entry>({
       groups: () => groupsOf(entries, get(collapsedRooms)),
       current: () => current,
+      view: () => null,
       expandRoom: (roomId) => {
         calls.push(`expand:${roomId}`);
         collapsedRooms.expand(roomId);

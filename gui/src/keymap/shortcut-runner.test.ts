@@ -268,3 +268,52 @@ describe('focus after an operation', () => {
     expect(none.calls).toEqual(['attention']);
   });
 });
+
+describe('next and previous window with the Needs you filter on', () => {
+  it('walk the visible rows in the view order, settled and unknown rows included', async () => {
+    // The function's name has no source line yet; it is read here so a different name fails only this test.
+    const { nextNeedsYouView } = await import('../sidebar/needs-you-view');
+    const visible = (await import('../sidebar/needs-you-view')) as unknown as {
+      visibleWindowOrder: (groups: unknown, view: unknown) => Win[];
+    };
+    type Row = Win & {
+      cwd: string;
+      displayCwd: string;
+      room: null;
+      detected: { status: string; reason?: null };
+    };
+    const at = (id: string, zOrder: number, status: string): Row => ({
+      ...win(id, zOrder, 'room-x'),
+      cwd: '/work/x',
+      displayCwd: 'x',
+      room: null,
+      detected: status === 'unknown' ? { status, reason: null } : { status },
+    });
+    // Sidebar order a, b, c, u. The rows were b, c; then a joined and b settled: rows b (settled), c, a; u is unknown.
+    const before = [
+      at('a', 1, 'running'),
+      at('b', 2, 'waiting_input'),
+      at('c', 3, 'waiting_input'),
+      at('u', 4, 'running'),
+    ];
+    const now = [
+      at('a', 1, 'waiting_input'),
+      at('b', 2, 'running'),
+      at('c', 3, 'waiting_input'),
+      at('u', 4, 'unknown'),
+    ];
+    const groupsNow = groupsOf(now) as unknown as Parameters<typeof nextNeedsYouView>[1];
+    const first = nextNeedsYouView(null, groupsOf(before) as never, true);
+    const view = nextNeedsYouView(first, groupsNow, false);
+    const order = visible.visibleWindowOrder(groupsNow, view);
+    expect(order.map((entry) => entry.windowId)).toEqual(['b', 'c', 'a', 'u']);
+
+    const forward = harness({ windows: now, order, current: now[2] ?? null });
+    await forward.run('focus-next-window');
+    expect(forward.calls).toContain('goTo:a');
+
+    const backward = harness({ windows: now, order, current: now[1] ?? null });
+    await backward.run('focus-previous-window');
+    expect(backward.calls).toContain('goTo:u');
+  });
+});

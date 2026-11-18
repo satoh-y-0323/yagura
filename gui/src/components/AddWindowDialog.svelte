@@ -297,8 +297,7 @@
 </ModalDialog>
 
 <style>
-  /* justify-content: space-between for .dialog-header is consolidated into
-     components.css (shared with .status-panel__header). */
+  /* .dialog-header's layout lives in components.css. */
   .dialog-warning {
     padding: var(--space-xs) var(--space-sm);
     border-radius: var(--radius-sm);

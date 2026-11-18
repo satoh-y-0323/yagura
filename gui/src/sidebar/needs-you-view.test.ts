@@ -8,6 +8,7 @@ import { describe, it, expect } from 'vitest';
 
 import type { DetectedStatusView, TaskReportMark, WindowStatus } from '../ipc/session-boundary';
 import { groupByRoom } from './room-groups';
+import type { NeedsYouView } from './needs-you-view';
 
 interface Entry {
   windowId: string;
@@ -242,5 +243,184 @@ describe('nextNeedsYouView: the empty states', () => {
     expect(view.rows).toEqual([]);
     expect(view.unknown.map((row) => row.windowId)).toEqual(['u']);
     expect(view.showsNothingNeedsYou).toBe(false);
+  });
+});
+
+// The two functions below have no source line naming them yet; each test reads its function
+// through these helpers so a different name fails only the tests that use it.
+interface SectionShape {
+  roomId: string;
+  name: string;
+  rows: { windowId: string }[];
+}
+
+async function visibleOrderOf(
+  groups: ReturnType<typeof groupsOf>,
+  view: NeedsYouView | null
+): Promise<string[]> {
+  const module = (await needsYouView()) as unknown as {
+    visibleWindowOrder: (groups: unknown, view: unknown) => Entry[];
+  };
+  return module.visibleWindowOrder(groups, view).map((entry) => entry.windowId);
+}
+
+async function sectionsOf(rows: readonly { windowId: string }[]): Promise<SectionShape[]> {
+  const module = (await needsYouView()) as unknown as {
+    needsYouSections: (rows: unknown) => SectionShape[];
+  };
+  return module.needsYouSections(rows);
+}
+
+describe('visibleWindowOrder: the order the keys walk', () => {
+  it('is the sidebar order, collapsed rooms included, while the filter is off', async () => {
+    const entries = [
+      makeEntry('a1', 'running', { room: ROOM_A }),
+      makeEntry('b1', 'waiting_input', { room: ROOM_B }),
+      makeEntry('a2', 'idle', { room: ROOM_A }),
+    ];
+    const groups = groupByRoom(entries, new Set(['room-b']), ['a2', 'b1', 'a1']);
+
+    expect(await visibleOrderOf(groups, null)).toEqual(['a2', 'a1', 'b1']);
+  });
+
+  it('is the view rows in their own order, then the unknown windows, once the filter is on', async () => {
+    const { nextNeedsYouView } = await needsYouView();
+    // Sidebar order: a, b, c, d, u. The rows were b, d; then a and c joined, and b settled.
+    const first = nextNeedsYouView(
+      null,
+      groupsOf([
+        makeEntry('a', 'running'),
+        makeEntry('b', 'waiting_input'),
+        makeEntry('c', 'running'),
+        makeEntry('d', 'waiting_input'),
+        makeEntry('u', 'running'),
+      ]),
+      true
+    );
+    const groups = groupsOf([
+      makeEntry('a', 'waiting_input'),
+      makeEntry('b', 'running'),
+      makeEntry('c', 'waiting_input'),
+      makeEntry('d', 'waiting_input'),
+      makeEntry('u', 'unknown'),
+      makeEntry('r', 'running'),
+    ]);
+    const view = nextNeedsYouView(first, groups, false);
+
+    expect(view.rows.map((row) => row.windowId)).toEqual(['b', 'd', 'a', 'c']);
+    // The settled b stays; the unknown u follows; the running r is not visible at all.
+    expect(await visibleOrderOf(groups, view)).toEqual(['b', 'd', 'a', 'c', 'u']);
+  });
+
+  it('lists a kept row whose window turned unknown once', async () => {
+    const { nextNeedsYouView } = await needsYouView();
+    const first = nextNeedsYouView(null, groupsOf([makeEntry('a', 'waiting_input')]), true);
+    const groups = groupsOf([makeEntry('a', 'unknown'), makeEntry('u', 'unknown')]);
+    const view = nextNeedsYouView(first, groups, false);
+
+    expect(await visibleOrderOf(groups, view)).toEqual(['a', 'u']);
+  });
+});
+
+describe('needsYouSections: a heading per run of rows of one room', () => {
+  it('starts a heading at each change of room, keeping the rows in the view order', async () => {
+    const { nextNeedsYouView } = await needsYouView();
+    const view = nextNeedsYouView(
+      null,
+      groupsOf([
+        makeEntry('a1', 'waiting_input', { room: ROOM_A }),
+        makeEntry('a2', 'waiting_input', { room: ROOM_A }),
+        makeEntry('b1', 'waiting_input', { room: ROOM_B }),
+      ]),
+      true
+    );
+
+    const sections = await sectionsOf(view.rows);
+
+    expect(sections.map((s) => [s.roomId, s.name, s.rows.map((r) => r.windowId)])).toEqual([
+      ['room-a', 'Room A', ['a1', 'a2']],
+      ['room-b', 'Room B', ['b1']],
+    ]);
+  });
+
+  it('repeats a room heading before a row that joined after the rows of another room, without moving it', async () => {
+    const { nextNeedsYouView } = await needsYouView();
+    const first = nextNeedsYouView(
+      null,
+      groupsOf([
+        makeEntry('a1', 'waiting_input', { room: ROOM_A }),
+        makeEntry('a2', 'running', { room: ROOM_A }),
+        makeEntry('b1', 'waiting_input', { room: ROOM_B }),
+      ]),
+      true
+    );
+    const view = nextNeedsYouView(
+      first,
+      groupsOf([
+        makeEntry('a1', 'waiting_input', { room: ROOM_A }),
+        makeEntry('a2', 'waiting_input', { room: ROOM_A }),
+        makeEntry('b1', 'waiting_input', { room: ROOM_B }),
+      ]),
+      false
+    );
+    expect(view.rows.map((row) => row.windowId)).toEqual(['a1', 'b1', 'a2']);
+
+    const sections = await sectionsOf(view.rows);
+
+    expect(sections.map((s) => [s.roomId, s.name, s.rows.map((r) => r.windowId)])).toEqual([
+      ['room-a', 'Room A', ['a1']],
+      ['room-b', 'Room B', ['b1']],
+      ['room-a', 'Room A', ['a2']],
+    ]);
+  });
+
+  it('heads a kept row by the room its window is in now, not the room it was listed under', async () => {
+    const { nextNeedsYouView } = await needsYouView();
+    const first = nextNeedsYouView(
+      null,
+      groupsOf([
+        makeEntry('a1', 'waiting_input', { room: ROOM_A }),
+        makeEntry('b1', 'waiting_input', { room: ROOM_B }),
+      ]),
+      true
+    );
+    const view = nextNeedsYouView(
+      first,
+      groupsOf([
+        makeEntry('a1', 'waiting_input', { room: ROOM_B }),
+        makeEntry('b1', 'waiting_input', { room: ROOM_B }),
+      ]),
+      false
+    );
+
+    const sections = await sectionsOf(view.rows);
+
+    expect(sections.map((s) => [s.roomId, s.name, s.rows.map((r) => r.windowId)])).toEqual([
+      ['room-b', 'Room B', ['a1', 'b1']],
+    ]);
+  });
+
+  it('gives windows without a room a heading keyed by their folder and named by its display form', async () => {
+    const { nextNeedsYouView } = await needsYouView();
+    const view = nextNeedsYouView(
+      null,
+      groupsOf([
+        makeEntry('f1', 'waiting_input', { cwd: '/raw/one', displayCwd: 'one' }),
+        makeEntry('f2', 'waiting_input', { cwd: '/raw/one', displayCwd: 'one' }),
+        makeEntry('g1', 'waiting_input', { cwd: '/raw/two', displayCwd: 'two' }),
+      ]),
+      true
+    );
+
+    const sections = await sectionsOf(view.rows);
+
+    expect(sections.map((s) => [s.roomId, s.name, s.rows.map((r) => r.windowId)])).toEqual([
+      ['/raw/one', 'one', ['f1', 'f2']],
+      ['/raw/two', 'two', ['g1']],
+    ]);
+  });
+
+  it('has no heading for no rows', async () => {
+    expect(await sectionsOf([])).toEqual([]);
   });
 });

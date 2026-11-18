@@ -12,7 +12,7 @@
   import type { Rect } from '../components/menu-position';
   import type { WorkMode } from '../session/current-window';
   import type { RoomActions } from '../session/room-actions';
-  import type { NeedsYouView } from '../sidebar/needs-you-view';
+  import { needsYouSections, type NeedsYouView } from '../sidebar/needs-you-view';
   import type { RoomGroup } from '../sidebar/room-groups';
   import { attentionCount, summarizeWindowStatuses } from '../status-tone';
   import type { WindowEntry } from '../stores/window-registry';
@@ -30,7 +30,7 @@
   export let currentWindowId: string | null;
   export let workMode: WorkMode;
   /** The windows a permission request waits on. */
-  export let awaitingPermission: readonly string[];
+  export let awaitingPermission: ReadonlySet<string>;
   /** What the Needs you filter lists; `null` while the filter is off. */
   export let needsYouView: NeedsYouView | null;
   export let roomActions: RoomActions;
@@ -55,6 +55,7 @@
 
   $: needingCount = attentionCount(entries);
   $: isCanvas = workMode === 'canvas';
+  $: sections = needsYouView === null ? [] : needsYouSections(needsYouView.rows);
   // The room menu belongs to a heading the full list draws; it goes when that heading does.
   $: menuGroup =
     needsYouView === null ? groups.find((group) => group.roomId === menuRoomId) : undefined;
@@ -75,6 +76,10 @@
 
   function entryOf(windowId: string): WindowEntry | undefined {
     return entries.find((entry) => entry.windowId === windowId);
+  }
+
+  function groupOf(roomId: string): RoomGroup<WindowEntry> | undefined {
+    return groups.find((group) => group.roomId === roomId);
   }
 
   function closeViewMenu(reason: MenuReason): void {
@@ -183,9 +188,21 @@
           >
         </div>
       {/if}
-      {#if needsYouView.rows.length > 0}
+      <!-- A section starts at its first row, and rows never move, so that row names the section. -->
+      {#each sections as section (section.rows[0]?.windowId)}
+        {@const group = groupOf(section.roomId)}
+        {@const count = group?.entries.length ?? section.rows.length}
+        <!-- A static heading: the filter shows a collapsed room's rows too, so it does not toggle. -->
+        <h3
+          class="navigator__room-heading navigator__room-label"
+          aria-label={describeRoomTitle(section.name, count)}
+        >
+          <Icon name={group?.kind === 'folder' ? 'folder' : 'messages-square'} size="sm" />
+          <span class="navigator__room-name">{section.name}</span>
+          <span class="navigator__room-count">{count}</span>
+        </h3>
         <ul class="navigator__rows">
-          {#each needsYouView.rows as row (row.windowId)}
+          {#each section.rows as row (row.windowId)}
             {@const entry = entryOf(row.windowId)}
             {#if entry !== undefined}
               <NavigatorRow
@@ -193,13 +210,13 @@
                 isCurrent={entry.windowId === currentWindowId}
                 isMinimized={isCanvas && entry.display.isMinimized}
                 isSettled={row.settled}
-                isAwaitingPermission={awaitingPermission.includes(entry.windowId)}
+                isAwaitingPermission={awaitingPermission.has(entry.windowId)}
                 onSelect={onSelectWindow}
               />
             {/if}
           {/each}
         </ul>
-      {/if}
+      {/each}
       {#if needsYouView.unknown.length > 0}
         <h3 class="navigator__section">{sidebar.statusUnknown}</h3>
         <ul class="navigator__rows">
@@ -210,7 +227,7 @@
                 {entry}
                 isCurrent={entry.windowId === currentWindowId}
                 isMinimized={isCanvas && entry.display.isMinimized}
-                isAwaitingPermission={awaitingPermission.includes(entry.windowId)}
+                isAwaitingPermission={awaitingPermission.has(entry.windowId)}
                 onSelect={onSelectWindow}
               />
             {/if}
@@ -276,7 +293,7 @@
                   {entry}
                   isCurrent={entry.windowId === currentWindowId}
                   isMinimized={isCanvas && entry.display.isMinimized}
-                  isAwaitingPermission={awaitingPermission.includes(entry.windowId)}
+                  isAwaitingPermission={awaitingPermission.has(entry.windowId)}
                   onSelect={onSelectWindow}
                 />
               {/each}
@@ -499,6 +516,16 @@
   .navigator__room-toggle:focus-visible {
     outline: var(--line-width-strong) solid var(--ring);
     outline-offset: -2px;
+  }
+
+  .navigator__room-label {
+    gap: var(--space-1_5);
+    height: var(--row-height);
+    margin-bottom: 0;
+    padding: 0 var(--space-1_5);
+    color: var(--fg-muted);
+    font-size: var(--text-xs);
+    font-weight: var(--weight-semibold);
   }
 
   .navigator__room-name {

@@ -9,7 +9,8 @@
  */
 
 import type { DetectedStatusView } from '../ipc/session-boundary';
-import { windowsInDisplayOrder, type RoomGroup } from '../sidebar/room-groups';
+import { visibleWindowOrder, type NeedsYouView } from '../sidebar/needs-you-view';
+import type { RoomGroup } from '../sidebar/room-groups';
 import { windowsNeedingYou } from '../status-tone';
 import { revealWindow, roomOfWindow, type RevealDeps } from './room-navigation';
 
@@ -29,6 +30,8 @@ export interface AttentionTarget<T> {
 export interface AttentionNavigationDeps<T extends NavigableWindow> extends RevealDeps<T> {
   /** The window the jump starts from: the current window of the work view. */
   current: () => { windowId: string } | null;
+  /** The Needs you filter's view, `null` while it is off. */
+  view: () => NeedsYouView | null;
 }
 
 /** The jump, bound to its dependencies. */
@@ -39,8 +42,9 @@ export interface AttentionNavigation<T> {
 
 /**
  * The window the jump would go to next: the first window needing the user
- * below the current one in the list the sidebar renders, wrapping to the top of
- * the list when the current window sits below the last of them. The current
+ * below the current one in the list the sidebar shows ({@link visibleWindowOrder}:
+ * the filter's rows while it is on), wrapping to the top of the list when the
+ * current window sits below the last of them. The current
  * window itself is never the answer unless it is the only window waiting. With
  * no current window the search starts from the top of the list.
  *
@@ -48,15 +52,17 @@ export interface AttentionNavigation<T> {
  * and the badge counting it can never disagree.
  *
  * @param groups the sidebar's rooms, in the order they are rendered.
- * @param current the current window of the work view; one absent from
- * `groups` starts the search from the top too.
+ * @param current the current window of the work view; one absent from the
+ * shown list starts the search from the top too.
+ * @param view the Needs you filter's view, or `null` while it is off.
  * @returns the target and its room, or null when no window is waiting.
  */
 export function nextWindowNeedingYou<T extends NavigableWindow>(
   groups: readonly RoomGroup<T>[],
-  current: { windowId: string } | null
+  current: { windowId: string } | null,
+  view: NeedsYouView | null = null
 ): AttentionTarget<T> | null {
-  const onScreen = windowsInDisplayOrder(groups);
+  const onScreen = visibleWindowOrder(groups, view);
   const waiting = windowsNeedingYou(onScreen);
   const from =
     current === null ? -1 : onScreen.findIndex((entry) => entry.windowId === current.windowId);
@@ -74,7 +80,7 @@ export function createAttentionNavigation<T extends NavigableWindow>(
 ): AttentionNavigation<T> {
   return {
     goToNextWindowNeedingYou: () => {
-      const target = nextWindowNeedingYou(deps.groups(), deps.current());
+      const target = nextWindowNeedingYou(deps.groups(), deps.current(), deps.view());
       if (target === null) {
         return null;
       }

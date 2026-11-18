@@ -35,6 +35,8 @@ interface AttentionNavigationDeps<T extends NavigableWindow> {
   groups: () => readonly RoomGroup<T>[];
   /** The window the jump starts from: the current window of the work view. */
   current: () => { windowId: string } | null;
+  /** The Needs you filter's view, `null` while it is off. */
+  view: () => unknown;
   expandRoom: (roomId: string) => void;
   goTo: (entry: T) => void;
   focusTerminal: (windowId: string) => void;
@@ -177,6 +179,7 @@ function harnessOf(
   const navigation = createAttentionNavigation<Entry>({
     groups: () => groupsOf(state.entries, get(collapsedRooms)),
     current: () => (currentId === null ? null : { windowId: currentId }),
+    view: () => null,
     expandRoom: (roomId) => {
       calls.push(`expand:${roomId}`);
       collapsedRooms.expand(roomId);
@@ -387,5 +390,54 @@ describe('createAttentionNavigation: repeated presses (no cursor is held)', () =
     harness.navigation.goToNextWindowNeedingYou();
 
     expect(harness.focused).toEqual(['a1', 'b2', 'a1']);
+  });
+});
+
+describe('nextWindowNeedingYou: while the Needs you filter is on', () => {
+  // The third argument (the filter's view) has no source line yet; it is passed through a loosened
+  // signature so a different shape fails only these tests.
+  type WithView = (
+    groups: readonly RoomGroup<Entry>[],
+    current: { windowId: string } | null,
+    view: unknown
+  ) => AttentionTarget<Entry> | null;
+
+  async function filteredView() {
+    const { nextNeedsYouView } = await import('../sidebar/needs-you-view');
+    const first = nextNeedsYouView(null, groupsOf(fourWindows(['a1', 'b1'])), true);
+    // a2 and b2 started waiting and a1 stopped: rows a1 (settled), b1, a2, b2, whereas the sidebar reads a2, a1, b2, b1.
+    const groups = groupsOf(fourWindows(['a2', 'b1', 'b2']));
+    return { groups, view: nextNeedsYouView(first, groups, false) };
+  }
+
+  it('walks the rows in the view order, not the sidebar order', async () => {
+    const { nextWindowNeedingYou } = attentionNavigationModule();
+    const { groups, view } = await filteredView();
+    expect(view.rows.map((row) => row.windowId)).toEqual(['a1', 'b1', 'a2', 'b2']);
+
+    const target = (nextWindowNeedingYou as unknown as WithView)(groups, { windowId: 'a1' }, view);
+
+    expect(target?.entry.windowId).toBe('b1');
+  });
+
+  it('skips a settled row and starts from the top of the rows when there is no current window', async () => {
+    const { nextWindowNeedingYou } = attentionNavigationModule();
+    const { groups, view } = await filteredView();
+
+    const target = (nextWindowNeedingYou as unknown as WithView)(groups, null, view);
+
+    expect(target?.entry.windowId).toBe('b1');
+  });
+
+  it('walks the sidebar order when the filter is off', () => {
+    const { nextWindowNeedingYou } = attentionNavigationModule();
+
+    const target = (nextWindowNeedingYou as unknown as WithView)(
+      groupsOf(fourWindows(['a1', 'b2'])),
+      { windowId: 'a2' },
+      null
+    );
+
+    expect(target?.entry.windowId).toBe('a1');
   });
 });

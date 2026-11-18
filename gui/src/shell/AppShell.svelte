@@ -279,7 +279,11 @@
   } from '../session/restore-model';
   import { SessionController } from '../session/session-controller';
   import { createCollapsedRooms } from '../sidebar/collapsed-rooms';
-  import { nextNeedsYouView, type NeedsYouView } from '../sidebar/needs-you-view';
+  import {
+    nextNeedsYouView,
+    visibleWindowOrder,
+    type NeedsYouView,
+  } from '../sidebar/needs-you-view';
   import {
     groupByRoom,
     roomIdsOf,
@@ -2071,14 +2075,15 @@
     goTo: actions.goTo,
     focusTerminal: focusTerminalOf,
   };
-  const attentionNavigation = createAttentionNavigation({
-    ...revealDeps,
-    current: currentWindowNow,
-  });
-
   // What the Needs you filter lists, `null` while it is off. Only the user's
   // own acts rebuild it, so its rows never move on their own.
   let needsYouView: NeedsYouView | null = null;
+
+  const attentionNavigation = createAttentionNavigation({
+    ...revealDeps,
+    current: currentWindowNow,
+    view: () => needsYouView,
+  });
 
   function toggleNeedsYouFilter(): void {
     needsYouView = needsYouView === null ? nextNeedsYouView(null, sidebarGroups(), true) : null;
@@ -2122,7 +2127,7 @@
   $: sidebarGroupsNow = groupByRoom($registry.windows, $collapsedRooms, $registry.tabOrder);
   $: advanceNeedsYouView(false, sidebarGroupsNow);
   // A request names the window that asked; that window's row wears the mark.
-  $: permissionWaiters = approvals.items.flatMap((request) => request.requester.window_id ?? []);
+  $: permissionWaiters = approvalQueue.windowsAwaitingPermission(approvals);
 
   function firstFocusable(
     root: ParentNode | null,
@@ -2322,7 +2327,7 @@
   const runShortcut = createShortcutRunner<WindowEntry>({
     current: currentWindowNow,
     workMode: () => get(shell).workMode,
-    displayOrder: () => windowsInDisplayOrder(sidebarGroups()),
+    displayOrder: () => visibleWindowOrder(sidebarGroups(), needsYouView),
     groups: sidebarGroups,
     expandRoom: collapsedRooms.expand,
     actions,

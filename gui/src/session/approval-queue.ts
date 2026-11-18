@@ -152,6 +152,16 @@ export function size(state: ApprovalQueueState): number {
 }
 
 /**
+ * The windows that have a request pending, in-flight ones included: the user
+ * has not seen the outcome yet. A request that did not come from a window
+ * names none.
+ * @param state the current queue
+ */
+export function windowsAwaitingPermission(state: ApprovalQueueState): ReadonlySet<string> {
+  return new Set(state.items.flatMap((request) => request.requester.window_id ?? []));
+}
+
+/**
  * Marks a request's decision as sent to the daemon, awaiting a reply.
  * @param state the current queue
  * @param requestId the request whose decision is in flight
