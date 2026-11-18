@@ -21,6 +21,7 @@ import {
   describeExitCode,
   describeExitedWindow,
   describeWindowHeader,
+  describeWindowLocation,
   describeWindowRow,
   describePaneNotice,
   describeDetectionWarning,
@@ -410,6 +411,24 @@ describe('describeWindowRow', () => {
       dummyMessages.formats.windowRowAwaitingPermission(
         dummyMessages.formats.windowRow('reviewer', dummyMessages.statusLabels.waiting_input)
       )
+    );
+  });
+});
+
+describe('describeWindowLocation', () => {
+  it('is the header description without any mark', () => {
+    const facts: WindowHeaderFacts = {
+      vendor: 'claude-code',
+      cwd: '/work/yagura',
+      showsMcpMark: false,
+      showsStatusReportMark: false,
+      queuedCount: undefined,
+    };
+    expect(describeWindowLocation(dummyMessages, facts)).toBe(
+      describeWindowHeader(dummyMessages, facts)
+    );
+    expect(describeWindowLocation(dummyMessages, { ...facts, vendor: null })).toBe(
+      describeWindowHeader(dummyMessages, { ...facts, vendor: null })
     );
   });
 });

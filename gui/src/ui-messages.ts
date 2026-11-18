@@ -27,6 +27,7 @@ import {
   describeUnknownExplanation as renderDescribeUnknownExplanation,
   describeUnknownReasonSuffix as renderDescribeUnknownReasonSuffix,
   describeWindowHeader as renderDescribeWindowHeader,
+  describeWindowLocation as renderDescribeWindowLocation,
   describeWindowRow as renderDescribeWindowRow,
   EXTERNAL_TEXT_MAX_CODE_POINTS,
   foldExternalText,
@@ -175,6 +176,14 @@ export type { WindowHeaderFacts };
  */
 export function describeWindowHeader(facts: WindowHeaderFacts): string {
   return renderDescribeWindowHeader(messages, facts);
+}
+
+/**
+ * Describes where a window runs.
+ * @param facts the window's vendor and working directory, prepared for display
+ */
+export function describeWindowLocation(facts: Pick<WindowHeaderFacts, 'vendor' | 'cwd'>): string {
+  return renderDescribeWindowLocation(messages, facts);
 }
 
 /**

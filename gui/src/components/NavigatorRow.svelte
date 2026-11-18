@@ -7,7 +7,7 @@
   import { needsYou } from '../status-tone';
   import {
     describeUnknownExplanation,
-    describeWindowHeader,
+    describeWindowLocation,
     describeWindowRow,
     nav,
     sidebar,
@@ -42,16 +42,10 @@
   // Unknown is not counted as needing the user, but it is not quiet either.
   $: isProminent = !isSettled && (needsYou(entry) || entry.detected.status === 'unknown');
   $: explanation = describeUnknownExplanation(entry.detected, entry.displayDetectionWarning);
-  // The card repeats what the window's header says: where it runs (the header
-  // description's first sentence) and why its status is unknown.
+  // The card repeats what the window's header says: where it runs and why its
+  // status is unknown.
   $: cardDetails = [
-    describeWindowHeader({
-      vendor: entry.displayVendor,
-      cwd: entry.displayCwd,
-      showsMcpMark: false,
-      showsStatusReportMark: false,
-      queuedCount: undefined,
-    }),
+    describeWindowLocation({ vendor: entry.displayVendor, cwd: entry.displayCwd }),
     explanation,
   ].filter((line) => line !== '');
   $: nameId = `navigator-row-name-${entry.windowId}`;

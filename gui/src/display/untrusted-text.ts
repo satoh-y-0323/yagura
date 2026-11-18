@@ -6,6 +6,10 @@
 /** Longest display field kept before truncation (code points, not bytes). */
 export const MAX_DISPLAY_FIELD_CHARS = 4096;
 
+/** The one list of hidden characters, as the body of a regular expression class. */
+const HIDDEN_CLASS =
+  '\\p{Cc}\\u061C\\u200B\\u200E\\u200F\\u2028\\u2029\\u2060\\uFEFF\\u202A-\\u202E\\u2066-\\u2069';
+
 /**
  * The hidden characters: the Unicode `Cc` category (C0, DEL, C1), the rest of
  * the daemon's forbidden label characters (`is_forbidden_label_char` in
@@ -13,16 +17,14 @@ export const MAX_DISPLAY_FIELD_CHARS = 4096;
  * have no width. ZWNJ and ZWJ are not among them: labels in some scripts and
  * emoji sequences need them.
  */
-const HIDDEN_CHARS =
-  /[\p{Cc}\u061C\u200B\u200E\u200F\u2028\u2029\u2060\uFEFF\u202A-\u202E\u2066-\u2069]/gu;
+const HIDDEN_CHARS = new RegExp(`[${HIDDEN_CLASS}]`, 'gu');
 
 /**
  * The characters written out rather than drawn: {@link HIDDEN_CHARS} plus every
  * default ignorable code point. Removing them is no defence where two values
  * must not look alike, since the removed form equals another value.
  */
-const WRITTEN_OUT_CHARS =
-  /[\p{Cc}\p{Default_Ignorable_Code_Point}\u061C\u200B\u200E\u200F\u2028\u2029\u2060\uFEFF\u202A-\u202E\u2066-\u2069]/gu;
+const WRITTEN_OUT_CHARS = new RegExp(`[${HIDDEN_CLASS}\\p{Default_Ignorable_Code_Point}]`, 'gu');
 
 function capCodePoints(value: string, maxChars: number): string {
   const codePoints = Array.from(value);

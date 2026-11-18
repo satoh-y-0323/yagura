@@ -144,6 +144,33 @@
   $: menuMoves =
     menuEntry !== undefined && isReorderable ? rowMoves(menuEntry.windowId, order, entries) : null;
   $: dropMark = drag === null ? null : dropMarkOf(drag);
+  // What every row's props are drawn from; one object so the rows re-render when any part changes.
+  $: rowContext = {
+    currentWindowId,
+    tabStopId,
+    isCanvas,
+    awaitingPermission,
+    menuWindowId: rowMenu?.windowId,
+    dropMark,
+    draggingWindowId: drag?.windowId,
+  };
+
+  /** The props every row takes, so the three lists draw their rows alike. */
+  function rowProps(entry: WindowEntry, context: typeof rowContext) {
+    const id = entry.windowId;
+    return {
+      entry,
+      isCurrent: id === context.currentWindowId,
+      isTabStop: id === context.tabStopId,
+      isMinimized: context.isCanvas && entry.display.isMinimized,
+      isAwaitingPermission: context.awaitingPermission.has(id),
+      onSelect: selectRow,
+      onOpenMenu: toggleRowMenu,
+      isMenuOpen: context.menuWindowId === id,
+      isDragging: context.dropMark !== null && context.draggingWindowId === id,
+      dropEdge: context.dropMark?.windowId === id ? context.dropMark.edge : null,
+    };
+  }
 
   function rectOf(target: HTMLElement): Rect {
     const rect = target.getBoundingClientRect();
@@ -539,19 +566,7 @@
           {#each section.rows as row (row.windowId)}
             {@const entry = entryOf(row.windowId)}
             {#if entry !== undefined}
-              <NavigatorRow
-                {entry}
-                isCurrent={entry.windowId === currentWindowId}
-                isTabStop={entry.windowId === tabStopId}
-                isMinimized={isCanvas && entry.display.isMinimized}
-                isSettled={row.settled}
-                isAwaitingPermission={awaitingPermission.has(entry.windowId)}
-                onSelect={selectRow}
-                onOpenMenu={toggleRowMenu}
-                isMenuOpen={rowMenu?.windowId === entry.windowId}
-                isDragging={dropMark !== null && drag?.windowId === entry.windowId}
-                dropEdge={dropMark?.windowId === entry.windowId ? dropMark.edge : null}
-              />
+              <NavigatorRow {...rowProps(entry, rowContext)} isSettled={row.settled} />
             {/if}
           {/each}
         </ul>
@@ -562,18 +577,7 @@
           {#each needsYouView.unknown as row (row.windowId)}
             {@const entry = entryOf(row.windowId)}
             {#if entry !== undefined}
-              <NavigatorRow
-                {entry}
-                isCurrent={entry.windowId === currentWindowId}
-                isTabStop={entry.windowId === tabStopId}
-                isMinimized={isCanvas && entry.display.isMinimized}
-                isAwaitingPermission={awaitingPermission.has(entry.windowId)}
-                onSelect={selectRow}
-                onOpenMenu={toggleRowMenu}
-                isMenuOpen={rowMenu?.windowId === entry.windowId}
-                isDragging={dropMark !== null && drag?.windowId === entry.windowId}
-                dropEdge={dropMark?.windowId === entry.windowId ? dropMark.edge : null}
-              />
+              <NavigatorRow {...rowProps(entry, rowContext)} />
             {/if}
           {/each}
         </ul>
@@ -633,18 +637,7 @@
           {#if !group.collapsed}
             <ul class="navigator__rows">
               {#each group.entries as entry (entry.windowId)}
-                <NavigatorRow
-                  {entry}
-                  isCurrent={entry.windowId === currentWindowId}
-                  isTabStop={entry.windowId === tabStopId}
-                  isMinimized={isCanvas && entry.display.isMinimized}
-                  isAwaitingPermission={awaitingPermission.has(entry.windowId)}
-                  onSelect={selectRow}
-                  onOpenMenu={toggleRowMenu}
-                  isMenuOpen={rowMenu?.windowId === entry.windowId}
-                  isDragging={dropMark !== null && drag?.windowId === entry.windowId}
-                  dropEdge={dropMark?.windowId === entry.windowId ? dropMark.edge : null}
-                />
+                <NavigatorRow {...rowProps(entry, rowContext)} />
               {/each}
             </ul>
           {/if}

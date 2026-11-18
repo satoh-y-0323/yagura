@@ -89,16 +89,29 @@ export interface WindowHeaderFacts {
   queuedCount: number | undefined;
 }
 
+function windowLocationSentence(
+  messages: Messages,
+  facts: Pick<WindowHeaderFacts, 'vendor' | 'cwd'>
+): string {
+  return facts.vendor === null
+    ? messages.formats.windowHeaderCwd(facts.cwd)
+    : messages.formats.windowHeaderVendorCwd(facts.vendor, facts.cwd);
+}
+
+/** Describes where a window runs: the sentence a header and a hover card both open with. */
+export function describeWindowLocation(
+  messages: Messages,
+  facts: Pick<WindowHeaderFacts, 'vendor' | 'cwd'>
+): string {
+  return messages.formats.sentences([windowLocationSentence(messages, facts)]);
+}
+
 /**
  * Describes a window header as its accessible description: where the window
  * runs, then what each mark it shows means, so the marks are not icon-only.
  */
 export function describeWindowHeader(messages: Messages, facts: WindowHeaderFacts): string {
-  const sentences = [
-    facts.vendor === null
-      ? messages.formats.windowHeaderCwd(facts.cwd)
-      : messages.formats.windowHeaderVendorCwd(facts.vendor, facts.cwd),
-  ];
+  const sentences = [windowLocationSentence(messages, facts)];
   if (facts.showsMcpMark) {
     sentences.push(messages.hints.mcpConnected);
   }
