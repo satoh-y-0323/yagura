@@ -4579,6 +4579,37 @@ pub(crate) fn window_status_wire(status: WindowStatus) -> String {
 }
 
 #[cfg(test)]
+impl WindowRegistry {
+    /// Opens `req` as a window whose holder this test plays in its own
+    /// process, and returns that holder with the opened window.
+    pub(crate) async fn open_played(
+        &self,
+        req: OpenWindowRequest,
+    ) -> (OpenedWindow, crate::pty::PlayedHolder) {
+        let (endpoint, listener) = crate::pty::bind_holder_endpoint("window").await;
+        self.holder_host.queue_played(endpoint);
+        let opening = self.open(req);
+        let accepting = crate::pty::PlayedHolder::accept(listener);
+        tokio::pin!(opening);
+        tokio::pin!(accepting);
+        let (mut opened, mut holder): (Option<OpenedWindow>, Option<crate::pty::PlayedHolder>) =
+            (None, None);
+        while opened.is_none() || holder.is_none() {
+            tokio::select! {
+                result = &mut opening, if opened.is_none() => {
+                    opened = Some(result.expect("a played window must open"));
+                }
+                played = &mut accepting, if holder.is_none() => holder = Some(played),
+            }
+        }
+        match (opened, holder) {
+            (Some(opened), Some(holder)) => (opened, holder),
+            _ => unreachable!("the loop ends only once both are set"),
+        }
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use std::time::Duration;
 
@@ -4587,6 +4618,44 @@ mod tests {
     /// On a paused clock, reached only once nothing else can run: a lookup
     /// that has not finished by then is waiting on something other than time.
     const UNTIL_IDLE: Duration = Duration::from_secs(3600);
+
+    fn played_request() -> OpenWindowRequest {
+        OpenWindowRequest {
+            command: vec!["played-child".to_owned()],
+            cwd: None,
+            name: None,
+            vendor: None,
+            detection: None,
+            on_name_taken: Default::default(),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_played_window_registers_and_terminate_all_ends_without_the_holder_answering() {
+        let registry = WindowRegistry::new(DaemonConfig::default());
+        let (opened, _holder) = registry.open_played(played_request()).await;
+        assert!(registry.get(&opened.window_id).is_some());
+
+        tokio::time::timeout(Duration::from_secs(30), registry.terminate_all())
+            .await
+            .expect("terminate_all ends although the played holder never answers");
+    }
+
+    #[tokio::test]
+    async fn a_played_window_is_exited_only_once_its_holder_connection_ends() {
+        let registry = WindowRegistry::new(DaemonConfig::default());
+        let (_opened, holder) = registry.open_played(played_request()).await;
+        assert_ne!(registry.list()[0].status, WindowStatus::Exited);
+
+        drop(holder);
+        tokio::time::timeout(Duration::from_secs(30), async {
+            while registry.list()[0].status != WindowStatus::Exited {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("a window whose holder connection ended becomes Exited");
+    }
 
     #[tokio::test(start_paused = true)]
     async fn a_lookup_waits_for_an_open_in_progress_and_then_finds_the_registered_window() {

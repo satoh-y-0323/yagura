@@ -87,6 +87,9 @@ pub struct HolderHost {
     anonymous_windows: AtomicU64,
     fallback_logged: Arc<AtomicBool>,
     links: Arc<LiveLinks>,
+    /// Endpoints of holders a test plays, taken by the next windows opened.
+    #[cfg(test)]
+    played: Mutex<std::collections::VecDeque<String>>,
 }
 
 enum Place {
@@ -132,7 +135,19 @@ impl HolderHost {
             anonymous_windows: AtomicU64::new(0),
             fallback_logged: Arc::new(AtomicBool::new(false)),
             links: Arc::default(),
+            #[cfg(test)]
+            played: Mutex::default(),
         })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn queue_played(&self, endpoint: String) {
+        lock_recover(&self.played).push_back(endpoint);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn take_played(&self) -> Option<String> {
+        lock_recover(&self.played).pop_front()
     }
 
     /// Identifies this daemon run: what every holder is told in `Hello`.

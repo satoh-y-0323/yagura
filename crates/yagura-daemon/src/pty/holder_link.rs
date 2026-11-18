@@ -1750,7 +1750,7 @@ impl Reader<'_> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use std::sync::Mutex;
 
     use yagura_os::PeerAuth;
@@ -1833,7 +1833,9 @@ mod tests {
     }
 
     /// Binds a fresh endpoint for a played holder.
-    async fn bind_holder_endpoint(tag: &str) -> (String, <PlatformIpc as IpcTransport>::Listener) {
+    pub(crate) async fn bind_holder_endpoint(
+        tag: &str,
+    ) -> (String, <PlatformIpc as IpcTransport>::Listener) {
         let endpoint = yagura_test_support::ipc::unique_endpoint_name("holder-link", tag);
         let ipc = PlatformIpc::default();
         let security = ipc.endpoint_security().expect("endpoint security");
@@ -2002,7 +2004,7 @@ mod tests {
         }
     }
 
-    mod played {
+    pub(in crate::pty) mod played {
         //! A holder played by the test in its own process, over the holder's
         //! endpoint, so the daemon's side of the link is driven frame by frame.
 
@@ -2051,7 +2053,7 @@ region = "bottom"
                 .expect("the played holder lets the daemon in")
         }
 
-        fn line(index: u16, text: &str) -> ScreenLine {
+        pub(crate) fn line(index: u16, text: &str) -> ScreenLine {
             ScreenLine {
                 line: index,
                 cells: text
@@ -2069,7 +2071,7 @@ region = "bottom"
             }
         }
 
-        struct Holder {
+        pub(crate) struct Holder {
             connection: <PlatformIpc as PeerAuth>::Connection,
             frames: HolderFrameBuffer,
             number: u64,
@@ -2083,7 +2085,9 @@ region = "bottom"
             /// Takes the daemon's connection, answers its `Hello` with a
             /// `Welcome` of `COLS` x `ROWS`, and sends the whole copy that
             /// follows a welcome, showing `first`.
-            async fn accept(mut listener: <PlatformIpc as IpcTransport>::Listener) -> Self {
+            pub(crate) async fn accept(
+                mut listener: <PlatformIpc as IpcTransport>::Listener,
+            ) -> Self {
                 let ipc = PlatformIpc::default();
                 let connection = ipc.accept(&mut listener).await.expect("accept the daemon");
                 let mut holder = Self {
@@ -2143,7 +2147,12 @@ region = "bottom"
 
             /// Sends a copy numbered after the last one, taking in one more
             /// output, and returns its number.
-            async fn push(&mut self, full: bool, lines: &[ScreenLine], generation: u64) -> u64 {
+            pub(crate) async fn push(
+                &mut self,
+                full: bool,
+                lines: &[ScreenLine],
+                generation: u64,
+            ) -> u64 {
                 self.number += 1;
                 self.outputs_fed += 1;
                 let number = self.number;

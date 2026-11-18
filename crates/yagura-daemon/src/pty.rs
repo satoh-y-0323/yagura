@@ -19,6 +19,8 @@ use crate::holder_host::HolderHost;
 
 mod env;
 mod holder_link;
+#[cfg(test)]
+pub(crate) use holder_link::tests::{bind_holder_endpoint, played::Holder as PlayedHolder};
 mod views;
 
 use holder_link::{ExitReport, Link, Writer};
@@ -516,6 +518,18 @@ impl PtySession {
             record: spawn.record,
             scopes: spawn.scopes,
         };
+        #[cfg(test)]
+        if let Some(endpoint) = host.take_played() {
+            // A test plays this window's holder in its own process.
+            let (shared, sink) = Shared::new(Self::INITIAL_COLS, Self::INITIAL_ROWS);
+            let started = holder_link::start_over(
+                endpoint,
+                std::process::id(),
+                (Self::INITIAL_COLS, Self::INITIAL_ROWS),
+                sink,
+            )?;
+            return Self::open(started, shared, key_records_flattened, host).await;
+        }
         let context = host.link_context().await?;
         let (shared, sink) = Shared::new(Self::INITIAL_COLS, Self::INITIAL_ROWS);
         let started = holder_link::start(context, launch, sink, spawn.lost)?;
