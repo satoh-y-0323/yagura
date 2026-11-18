@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import ctypes
+import importlib.util
 import json
 import os
 import platform
@@ -29,6 +30,7 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+DEP_AUDIT = Path(__file__).resolve().parents[1] / "dep-audit" / "dep_audit.py"
 RESULT_FORMAT = 2
 
 DEFAULT_PROCS = ("yagura-daemon.exe", "yagura-gui.exe", "yagura-holder.exe")
@@ -539,16 +541,50 @@ class Build:
         self.procs = ProcessSet(procs, bin_dir)
 
 
-def stage_build(source: Path, staged: Path) -> Path:
+def _dep_audit():
+    """Loads scripts/dep-audit/dep_audit.py, the one reader of the ConPTY pins."""
+    name = "yagura_dep_audit"
+    if name not in sys.modules:
+        spec = importlib.util.spec_from_file_location(name, DEP_AUDIT)
+        module = importlib.util.module_from_spec(spec)
+        # dataclasses resolves annotations through sys.modules, so register before executing.
+        sys.modules[name] = module
+        try:
+            spec.loader.exec_module(module)
+        except BaseException:
+            del sys.modules[name]
+            raise
+    return sys.modules[name]
+
+
+def stage_build(source: Path, staged: Path, vendor_dir: Optional[Path] = None) -> Path:
     """Copies the top-level files of `source` into `staged` and returns it.
 
     Identical binaries run from a cargo target directory measured 2-3% more CPU
     than from a plain copy (README.md section 4), so every build runs from a
-    sibling directory of the same kind."""
+    sibling directory of the same kind.
+
+    On Windows the bundled ConPTY pair is placed from `vendor_dir` (default
+    `vendor/conpty`) beside the binaries and checked against the pins the daemon
+    carries; a mismatch stops the run, because the daemon would open no window."""
     staged.mkdir(parents=True, exist_ok=True)
     for entry in source.iterdir():
         if entry.is_file():
             shutil.copy2(entry, staged / entry.name)
+    if os.name == "nt":
+        audit = _dep_audit()
+        vendor = vendor_dir if vendor_dir is not None else audit.CONPTY_DIR
+        for name, relpath in audit.CONPTY_FILES.items():
+            try:
+                shutil.copy2(vendor / relpath, staged / name)
+            except OSError as exc:
+                raise BenchError(f"cannot place {name} from {vendor}: {exc}") from exc
+        try:
+            problems = audit.conpty_problems(staged)
+        except OSError as exc:
+            raise BenchError(f"cannot read the ConPTY pins: {exc}") from exc
+        if problems:
+            raise BenchError("bundled ConPTY does not match the pins: " + "; ".join(problems))
     return staged
 
 

@@ -63,10 +63,13 @@ jobs:
         # bundle.externalBin makes tauri-build resolve the staged sidecars (the daemon, the
         # holder and the MCP bridge) at cargo build time. CI does not bundle, so empty
         # placeholders are sufficient; real staging (gui/scripts/prepare-sidecar.mjs) stays a
-        # local/bundle concern. Whenever the GUI build script runs, it copies them over
-        # target/debug/<name>.exe. It has nothing new to run for by the test step, which links
-        # the real daemon and holder back there (cargo relinks a bin even when it is fresh)
-        # before any test starts a window.
+        # local/bundle concern. Whenever the GUI build script runs, tauri-build copies them
+        # three directories above its OUT_DIR (a build script has no supported way to find the
+        # target directory: cargo#9661, which took over cargo#5457, closed as not planned):
+        # target/debug/ on Cargo 1.99 and earlier, target/debug/build/ on 1.100. Where that is
+        # target/debug/, they overwrite the linked daemon, holder and MCP bridge: in the build
+        # step cargo links the real binaries after the script runs, but in the test step a rerun
+        # of the script alone leaves the empty copies in place and the tests that start a window fail.
         run: |
           New-Item -ItemType Directory -Force -Path gui/src-tauri/binaries
           New-Item -ItemType File -Force -Path gui/src-tauri/binaries/yagura-daemon-x86_64-pc-windows-msvc.exe

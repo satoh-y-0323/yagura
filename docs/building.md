@@ -49,21 +49,33 @@ building; the process that holds it keeps running from the renamed file, and the
 takes effect the next time that process is started. See `scripts/stash-rebuild/README.md` for
 details.
 
-**On Windows, the daemon's build places the bundled ConPTY.** Every Windows window runs under the
-ConPTY that ships with yagura rather than the one built into Windows. Its two files, `conpty.dll`
-and `OpenConsole.exe` (`Microsoft.Windows.Console.ConPTY` 1.25.260930003, x64, MIT), are tracked
-in `vendor/conpty/x64/`; `vendor/conpty/README.md` records where they come from and their SHA-256.
-The `yagura-daemon` build script checks both files against the hashes pinned in
-`crates/yagura-os/src/bundled_conpty_pins.rs` and fails the build when either is missing or
-different. It then copies them into the Cargo profile directory (for example `target/debug/`),
-beside the daemon's executable, and into its `deps/`, beside the test executables. A copy that
-already has the pinned contents is left alone, so a running daemon that holds it open does not
-break the build. The files are vendored for x86_64 only, so a Windows build for another
-architecture fails. At run time the daemon checks the same pins beside its own executable, and
-that the `conpty.dll` it loaded is that one; if not, it opens no window and reports
-`spawn_failed` asking for a reinstall, stays running, and lists the problem in its
-`get_daemon_health` answer, which the GUI shows as a banner. To update the ConPTY, follow `vendor/conpty/README.md` and
-change the hashes in both places.
+**On Windows, every window runs under the ConPTY that ships with yagura.** It is used instead of
+the one built into Windows. Its two files, `conpty.dll` and `OpenConsole.exe`
+(`Microsoft.Windows.Console.ConPTY` 1.25.260930003, x64, MIT), are tracked in `vendor/conpty/x64/`;
+`vendor/conpty/README.md` records where they come from and their SHA-256. The `yagura-daemon` and
+`yagura-holder` build scripts check both files against the hashes pinned in
+`crates/yagura-os/src/bundled_conpty_pins.rs` and fail the build when either is missing or
+different; they copy nothing, because a build script has no supported way to find the target
+directory (cargo#9661, which took over cargo#5457, closed as not planned). The files are vendored
+for x86_64 only, so a Windows build for another architecture fails.
+
+Where the files end up beside a build depends on how it is made:
+
+- A build that includes `yagura-gui` (`tauri dev`, `cargo build --workspace`) runs tauri-build,
+  which copies the two files and the sidecars (`gui/src-tauri/binaries/`) three directories above
+  its `OUT_DIR`. That is `target/<profile>/` on Cargo 1.99 and earlier and
+  `target/<profile>/build/` on Cargo 1.100, so on 1.100 they do not land beside the daemon.
+- The tests do not rely on that copy. Before starting a holder they check the pair beside it
+  against the pins and, when it does not match, place it from `vendor/conpty/`.
+- To run a daemon straight from `target/<profile>` on Windows, copy `vendor/conpty/x64/conpty.dll`
+  and `vendor/conpty/x64/OpenConsole.exe` next to `yagura-daemon.exe` (and so `yagura-holder.exe`).
+  Without them the daemon opens no window and says so in `get_daemon_health`.
+- The installer carries them through `bundle.resources`.
+
+At run time the daemon checks the same pins beside its own executable, and that the `conpty.dll` it
+loaded is that one; if not, it opens no window and reports `spawn_failed` asking for a reinstall,
+stays running, and lists the problem in its `get_daemon_health` answer, which the GUI shows as a
+banner. To update the ConPTY, follow `vendor/conpty/README.md` and change the hashes in both places.
 
 **Before pushing, check the dependencies for known vulnerabilities** with
 `python scripts/dep-audit/dep_audit.py`, which runs `cargo audit` and `npm audit` with the same

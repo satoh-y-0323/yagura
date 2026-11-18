@@ -91,16 +91,46 @@ def _checks(platform: str) -> dict:
     }
 
 
+def _pinned_hash(pins: str, name: str) -> Optional[str]:
+    found = re.search(rf'name:\s*"{re.escape(name)}",\s*sha256:\s*"([0-9a-f]{{64}})"', pins)
+    return found.group(1) if found else None
+
+
+def conpty_pinned_hashes() -> Dict[str, Optional[str]]:
+    """Maps each bundled file name to the SHA-256 the daemon pins; None when not found.
+
+    Raises OSError when the pins file cannot be read."""
+    pins = CONPTY_PINS.read_text(encoding="utf-8")
+    return {name: _pinned_hash(pins, name) for name in CONPTY_FILES}
+
+
+def conpty_problems(directory: Path, nested: bool = False) -> List[str]:
+    """Checks the bundled pair in `directory` against the pinned hashes.
+
+    `nested` reads the vendor layout (`x64/<name>`); otherwise the files sit directly in
+    `directory`. Returns one line per problem; empty when the pair matches the pins."""
+    problems = []
+    for name, pinned in conpty_pinned_hashes().items():
+        path = directory / (CONPTY_FILES[name] if nested else name)
+        if pinned is None:
+            problems.append(f"{name}: no pinned hash found")
+            continue
+        try:
+            actual = hashlib.sha256(path.read_bytes()).hexdigest()
+        except OSError as exc:
+            problems.append(f"{name}: cannot read {path}: {exc}")
+            continue
+        if actual != pinned:
+            problems.append(f"{name}: file {actual}, pinned in code {pinned}")
+    return problems
+
+
 def _recorded_conpty_hashes(readme: str, pins: str) -> dict:
     """Maps each bundled file name to (README hash, pinned-in-code hash); None when absent."""
     found = {}
     for name, relpath in CONPTY_FILES.items():
         in_readme = re.search(rf"`{re.escape(relpath)}`\s*\|\s*`([0-9a-f]{{64}})`", readme)
-        in_pins = re.search(rf'name:\s*"{re.escape(name)}",\s*sha256:\s*"([0-9a-f]{{64}})"', pins)
-        found[name] = (
-            in_readme.group(1) if in_readme else None,
-            in_pins.group(1) if in_pins else None,
-        )
+        found[name] = (in_readme.group(1) if in_readme else None, _pinned_hash(pins, name))
     return found
 
 

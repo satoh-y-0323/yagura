@@ -12,7 +12,9 @@ tool: CI never calls it, and it is not a test.
   Unix-socket endpoint and `/proc` / `ps` statistics are not written. `compare` runs anywhere.
 - `python` on `PATH` (measured with 3.11.9). **Standard library only**; no dependency is added.
 - A release build of the daemon, the holder it starts for each window from beside itself, and the
-  `hex_echo` fixture, with the bundled ConPTY beside them:
+  `hex_echo` fixture. `run` places the bundled ConPTY (`vendor/conpty/x64/`) beside the staged
+  copy of each build and checks it against the pins in the daemon (read through
+  `scripts/dep-audit/dep_audit.py`); a mismatch stops the run:
 
   ```bash
   CARGO_TARGET_DIR=D:/yagura-build/target-t1051 cargo build --release -p yagura-daemon -p yagura-holder --bins
@@ -21,7 +23,8 @@ tool: CI never calls it, and it is not a test.
 ## 2. What it does
 
 `run` takes one `--bin-dir` per build (normally two: the base and the new one). It first copies the
-top-level files of each into `<out stem>-work/bin-<i>/` and runs every build from there (see §4).
+top-level files of each into `<out stem>-work/bin-<i>/`, places the ConPTY pair there and runs
+every build from there (see §4).
 Each build gets its own instance, `<--instance>-<i>` (default `bench-t1051-0`, `bench-t1051-1`), so
 a newer build migrating its store never meets an older one. Every `YAGURA_*` variable other than
 `YAGURA_INSTANCE` is removed from the daemon's environment.

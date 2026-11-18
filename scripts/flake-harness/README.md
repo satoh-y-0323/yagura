@@ -96,7 +96,9 @@ python scripts/flake-harness/flake_harness.py run --run-id measure-status-token 
 python scripts/flake-harness/flake_harness.py run --run-id confirm-status-token --target cargo --form binary --saturate --crate yagura-daemon --test-file daemon --arg status_token:: --iterations 40
 
 # (3) direct executable x single test x saturation on - the control arm (no cargo step)
-python scripts/flake-harness/flake_harness.py run --run-id control-prefix --target exe --form single --saturate --exe 'C:/Users/you/scratch/prefix-target/debug/deps/daemon-1a2b3c4d5e6f7890.exe' --test-name status_token::window_verify_status_token_accepts_the_configured_override --iterations 60 --extra-target-dir 'C:/Users/you/scratch/prefix-target'
+# <executable> is the test binary's path as Cargo reports it: the `executable` field of the
+# `compiler-artifact` message in `cargo test -p yagura-daemon --test daemon --no-run --message-format=json`.
+python scripts/flake-harness/flake_harness.py run --run-id control-prefix --target exe --form single --saturate --exe '<executable>' --test-name status_token::window_verify_status_token_accepts_the_configured_override --iterations 60 --extra-target-dir 'C:/Users/you/scratch/prefix-target'
 
 # (4) arbitrary executable and argument list x single x saturation off - synthetic commands
 python scripts/flake-harness/flake_harness.py run --run-id demo-fail --target command --form single --exe python --arg=-c --arg 'print("synthetic fail"); raise SystemExit(1)' --iterations 2
