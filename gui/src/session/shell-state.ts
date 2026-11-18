@@ -24,9 +24,11 @@ export interface ExitedCard {
   name: string;
   /** `null` until the exit code is known. */
   exitCode: number | null;
-  /** The name of the window the card offers to go to. */
+  /** The name of the window the card offers to go to, which Next window also goes to. */
   next: string | null;
   nextWindowId: string | null;
+  /** The window Previous window goes to while the card is shown. */
+  previousWindowId: string | null;
 }
 
 /** What the work area holds besides the canvas placement. */
@@ -134,13 +136,20 @@ export function diffAppearedWindows(
   return windowIds.length === 0 ? [] : [{ type: 'windowsAppeared', windowIds }];
 }
 
-/** The window after `windowId` in `order`, else the one before it; never wraps around. */
-function adjacentWindow(order: readonly OrderedWindow[], windowId: string): OrderedWindow | null {
+/**
+ * The window one `step` from `windowId` in `order`, else the one on the other
+ * side; never wraps around, so an end does not jump to the far end.
+ */
+function adjacentWindow(
+  order: readonly OrderedWindow[],
+  windowId: string,
+  step: 1 | -1
+): OrderedWindow | null {
   const index = order.findIndex((entry) => entry.windowId === windowId);
   if (index === -1) {
     return null;
   }
-  return order[index + 1] ?? order[index - 1] ?? null;
+  return order[index + step] ?? order[index - step] ?? null;
 }
 
 function withoutMember(set: ReadonlySet<string>, member: string): ReadonlySet<string> {
@@ -161,13 +170,31 @@ function withoutKey(map: ReadonlyMap<string, number>, key: string): ReadonlyMap<
   return next;
 }
 
-/** Keeps the card's button off a window that has since left the list as well. */
+/** Keeps the card's targets off a window that has since left the list as well. */
 function retargetCard(card: ExitedCard | null, event: WindowGoneEvent): ExitedCard | null {
-  if (card === null || card.nextWindowId !== event.windowId) {
-    return card;
+  if (card === null) {
+    return null;
   }
-  const next = adjacentWindow(event.orderBefore, event.windowId);
-  return { ...card, next: next?.name ?? null, nextWindowId: next?.windowId ?? null };
+  let retargeted = card;
+  if (card.nextWindowId === event.windowId) {
+    const next = adjacentWindow(event.orderBefore, event.windowId, 1);
+    retargeted = { ...retargeted, next: next?.name ?? null, nextWindowId: next?.windowId ?? null };
+  }
+  if (card.previousWindowId === event.windowId) {
+    const previous = adjacentWindow(event.orderBefore, event.windowId, -1);
+    retargeted = { ...retargeted, previousWindowId: previous?.windowId ?? null };
+  }
+  return retargeted;
+}
+
+/**
+ * Where Next window (`step` 1) or Previous window (`step` -1) goes while the
+ * card is shown: from where the ended window stood, by the rule its button uses.
+ *
+ * @returns null when no window is left to go to.
+ */
+export function exitedCardNeighbor(card: ExitedCard, step: 1 | -1): string | null {
+  return step === 1 ? card.nextWindowId : card.previousWindowId;
 }
 
 /**
@@ -188,7 +215,7 @@ function reduceWindowGone(state: ShellState, event: WindowGoneEvent): ShellStep 
   if (state.workMode !== 'focus' || state.focusedWindowId !== event.windowId) {
     return { state: base, effects: [], goneByUser };
   }
-  const next = adjacentWindow(event.orderBefore, event.windowId);
+  const next = adjacentWindow(event.orderBefore, event.windowId, 1);
   if (goneByUser) {
     return {
       state: { ...base, focusedWindowId: next?.windowId ?? null, exitedCard: null },
@@ -207,6 +234,7 @@ function reduceWindowGone(state: ShellState, event: WindowGoneEvent): ShellStep 
         exitCode,
         next: next?.name ?? null,
         nextWindowId: next?.windowId ?? null,
+        previousWindowId: adjacentWindow(event.orderBefore, event.windowId, -1)?.windowId ?? null,
       },
     },
     effects: [],

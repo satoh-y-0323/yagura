@@ -736,3 +736,72 @@ describe('reduceShell: going to the canvas while a card is shown', () => {
     expect(step.effects).toEqual([]);
   });
 });
+
+/**
+ * The key-driven neighbour of an ended window's card. No name is fixed for it
+ * anywhere yet, so it is looked up inside each case and only these cases fail
+ * while it is missing.
+ */
+type CardNeighbor = (card: ExitedCard, step: 1 | -1) => string | null;
+
+function cardNeighborOf(card: ExitedCard | null, step: 1 | -1): string | null {
+  const found = (shellStateModule() as unknown as Record<string, unknown>)['exitedCardNeighbor'];
+  if (typeof found !== 'function' || card === null) {
+    throw new Error('exitedCardNeighbor (gui/src/session/shell-state.ts) is not provided');
+  }
+  return (found as CardNeighbor)(card, step);
+}
+
+function cardedAmong(windowId: string, order: readonly OrderedWindow[]): ShellState {
+  const { reduceShell } = shellStateModule();
+  return reduceShell(focusShowing(windowId), gone(windowId, order)).state;
+}
+
+describe('the card of an ended window: Next window and Previous window start from where it stood', () => {
+  it('Next window goes where the card offers to go, and Previous window to the window before it', () => {
+    const { reduceShell } = shellStateModule();
+    const carded = cardedAmong('b', ORDER_ABC);
+
+    const next = cardNeighborOf(carded.exitedCard, 1);
+    const previous = cardNeighborOf(carded.exitedCard, -1);
+    const pressed = reduceShell(carded, { type: 'exitedCardGoTo' });
+
+    expect(next).toBe('c');
+    expect(next).toBe(pressed.state.focusedWindowId);
+    expect(previous).toBe('a');
+  });
+
+  it('treats the ends as the card does: no wrapping, the window on the other side instead', () => {
+    const { reduceShell } = shellStateModule();
+    const last = cardedAmong('c', ORDER_ABC);
+    const first = cardedAmong('a', ORDER_ABC);
+
+    expect(cardNeighborOf(last.exitedCard, 1)).toBe('b');
+    expect(cardNeighborOf(last.exitedCard, 1)).toBe(
+      reduceShell(last, { type: 'exitedCardGoTo' }).state.focusedWindowId
+    );
+    expect(cardNeighborOf(last.exitedCard, -1)).toBe('b');
+    expect(cardNeighborOf(first.exitedCard, 1)).toBe('b');
+    expect(cardNeighborOf(first.exitedCard, -1)).toBe('b');
+  });
+
+  it('has no neighbour when no window is left', () => {
+    const alone = cardedAmong('b', [ordered('b')]);
+
+    expect(cardNeighborOf(alone.exitedCard, 1)).toBeNull();
+    expect(cardNeighborOf(alone.exitedCard, -1)).toBeNull();
+  });
+
+  it('keeps both keys on windows still listed when the window on either side leaves too', () => {
+    const { reduceShell } = shellStateModule();
+    const carded = cardedAmong('b', ORDER_ABC);
+
+    const afterCLeft = reduceShell(carded, gone('c', [ordered('a'), ordered('c')])).state;
+    const afterALeft = reduceShell(carded, gone('a', [ordered('a'), ordered('c')])).state;
+
+    expect(cardNeighborOf(afterCLeft.exitedCard, 1)).toBe('a');
+    expect(cardNeighborOf(afterCLeft.exitedCard, -1)).toBe('a');
+    expect(cardNeighborOf(afterALeft.exitedCard, 1)).toBe('c');
+    expect(cardNeighborOf(afterALeft.exitedCard, -1)).toBe('c');
+  });
+});

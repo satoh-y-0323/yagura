@@ -7,6 +7,7 @@
 import { describe, expect, it } from 'vitest';
 
 import type { PlacedWindow } from '../session/current-window';
+import type { ExitedCard } from '../session/shell-state';
 import type { RoomGroup } from '../sidebar/room-groups';
 import { ACTION_IDS, type ActionId } from './key-binding';
 import { createShortcutRunner, type ShortcutRunnerDeps } from './shortcut-runner';
@@ -34,13 +35,17 @@ function win(
 
 interface Setup {
   windows: Win[];
-  /** The sidebar order; defaults to `windows`. */
+  /** The order next / previous walk; defaults to `windows`. */
   order?: Win[];
+  /** The sidebar's whole order when a filter narrows `order`; defaults to `order`. */
+  sidebar?: Win[];
   /** The current window of the work view; defaults to none. */
   current?: Win | null;
   /** Defaults to Canvas. */
   workMode?: 'focus' | 'canvas';
   attentionTarget?: Win | null;
+  /** The card of an ended window Focus shows; defaults to none. */
+  exitedCard?: ExitedCard | null;
 }
 
 interface Harness {
@@ -73,12 +78,14 @@ function harness(setup: Setup): Harness {
   const calls: string[] = [];
   const live: Win[] = [...setup.windows];
   const order = setup.order ?? setup.windows;
+  const sidebar = setup.sidebar ?? order;
   const deps: ShortcutRunnerDeps<Win> = {
     current: (): Win | null => setup.current ?? null,
     workMode: (): 'focus' | 'canvas' => setup.workMode ?? 'canvas',
+    exitedCard: (): ExitedCard | null => setup.exitedCard ?? null,
     displayOrder: (): readonly Win[] => order.filter((entry) => live.includes(entry)),
     groups: (): readonly RoomGroup<Win>[] =>
-      groupsOf(order.filter((entry) => live.includes(entry))),
+      groupsOf(sidebar.filter((entry) => live.includes(entry))),
     expandRoom: (roomId: string): void => {
       calls.push(`expand:${roomId}`);
     },
@@ -315,5 +322,55 @@ describe('next and previous window with the Needs you filter on', () => {
     const backward = harness({ windows: now, order, current: now[1] ?? null });
     await backward.run('focus-previous-window');
     expect(backward.calls).toContain('goTo:u');
+  });
+});
+
+describe("next and previous window while an ended window's card is shown", () => {
+  /** The card of a window that left; the ends of the list do not stand in for its place. */
+  function cardFor(windowId: string, next: Win | null, previous: Win | null): ExitedCard {
+    return {
+      windowId,
+      name: windowId,
+      exitCode: 1,
+      next: next?.windowId ?? null,
+      nextWindowId: next?.windowId ?? null,
+      previousWindowId: previous?.windowId ?? null,
+    };
+  }
+
+  it('go to the windows on either side of where the card stands, not to the ends of the list', async () => {
+    const between = cardFor('wgone-b', C, A);
+    const next = harness({ windows: [A, C], workMode: 'focus', exitedCard: between });
+    await next.run('focus-next-window');
+    expect(next.calls).toEqual(['expand:room-c', `goTo:${C.windowId}`, `terminal:${C.windowId}`]);
+
+    const previous = harness({ windows: [A, C], workMode: 'focus', exitedCard: between });
+    await previous.run('focus-previous-window');
+    expect(previous.calls).toEqual([
+      'expand:room-a',
+      `goTo:${A.windowId}`,
+      `terminal:${A.windowId}`,
+    ]);
+  });
+
+  it('reach a window the Needs you filter hides, and do nothing when the card has none', async () => {
+    const hiddenByFilter = harness({
+      windows: [A, C],
+      order: [A],
+      sidebar: [A, C],
+      workMode: 'focus',
+      exitedCard: cardFor('wgone-b', C, A),
+    });
+    await hiddenByFilter.run('focus-next-window');
+    expect(hiddenByFilter.calls).toContain(`goTo:${C.windowId}`);
+
+    const alone = harness({
+      windows: [A],
+      workMode: 'focus',
+      exitedCard: cardFor('wgone-b', null, null),
+    });
+    await alone.run('focus-next-window');
+    await alone.run('focus-previous-window');
+    expect(alone.calls).toEqual([]);
   });
 });

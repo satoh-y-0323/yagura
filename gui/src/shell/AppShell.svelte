@@ -2333,6 +2333,7 @@
   const runShortcut = createShortcutRunner<WindowEntry>({
     current: currentWindowNow,
     workMode: () => get(shell).workMode,
+    exitedCard: () => get(shell).exitedCard,
     displayOrder: () => visibleWindowOrder(sidebarGroups(), needsYouView),
     groups: sidebarGroups,
     expandRoom: collapsedRooms.expand,

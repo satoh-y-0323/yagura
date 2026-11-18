@@ -5,6 +5,7 @@
    * must not press its button. Without a next window it offers what the empty
    * work area offers.
    */
+  import { formatChord } from '../keymap/key-chord';
   import type { KeyboardPlatform } from '../keymap/keyboard-platform';
   import type { Keys } from '../keymap/keymap-model';
   import type { ExitedCard } from '../session/shell-state';
@@ -21,6 +22,10 @@
   export let onGoTo: () => void;
   export let onNewWindow: () => void;
   export let onChooseWindows: () => void;
+
+  // Next window goes where the button does, so the button shows its key; a key switched off shows none.
+  $: goToChord = keys['focus-next-window'];
+  $: goToKey = goToChord === null ? null : formatChord(goToChord, platform).join('+');
 </script>
 
 <div class="work-state exited-card">
@@ -29,8 +34,9 @@
   <p class="work-state__body">{workArea.exitedBody}</p>
   {#if card.next !== null && card.nextWindowId !== null}
     <div class="exited-card__actions">
-      <button type="button" class="btn btn-secondary" on:click={onGoTo}>
+      <button type="button" class="btn btn-secondary exited-card__go-to" on:click={onGoTo}>
         {describeGoToWindow(card.next)}
+        {#if goToKey !== null}<kbd class="key-hint">{goToKey}</kbd>{/if}
       </button>
       <button type="button" class="btn btn-ghost" on:click={onNewWindow}>
         {workArea.newWindow}
@@ -50,6 +56,12 @@
 
   .exited-card__actions {
     display: flex;
+    gap: var(--space-2);
+  }
+
+  .exited-card__go-to {
+    display: inline-flex;
+    align-items: center;
     gap: var(--space-2);
   }
 </style>

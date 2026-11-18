@@ -6,7 +6,8 @@
 
 import { neighborWindow, type WorkMode } from '../session/current-window';
 import { revealWindow, type RevealDeps, type RoomMember } from '../session/room-navigation';
-import type { RoomGroup } from '../sidebar/room-groups';
+import { exitedCardNeighbor, type ExitedCard } from '../session/shell-state';
+import { windowsInDisplayOrder, type RoomGroup } from '../sidebar/room-groups';
 import type { ActionId } from './key-binding';
 
 /** The window operations a shortcut can start. */
@@ -24,6 +25,8 @@ export interface ShortcutRunnerDeps<T extends RoomMember> {
   /** The current window of the work view, or null when none is on screen. */
   current: () => T | null;
   workMode: () => WorkMode;
+  /** The card standing in for the window Focus showed, or null while there is none. */
+  exitedCard: () => ExitedCard | null;
   /** The windows in the order the sidebar renders them, top to bottom. */
   displayOrder: () => readonly T[];
   /** The sidebar's rooms as they are currently rendered, top to bottom. */
@@ -46,7 +49,8 @@ export interface ShortcutRunnerDeps<T extends RoomMember> {
  * Builds the function that runs a shortcut action. Operations on "the current
  * window" act on the injected one and do nothing without it; minimize and
  * maximize do nothing in Focus, which has neither. Next / previous walk the
- * sidebar order and wrap at both ends.
+ * sidebar order and wrap at both ends; while an ended window's card is shown
+ * they go where the card's rule says instead, so the key and its button agree.
  *
  * @returns a function whose promise settles once the action, including any
  * confirmation it asked for, has finished.
@@ -61,8 +65,19 @@ export function createShortcutRunner<T extends RoomMember>(
     focusTerminal: deps.focusTerminal,
   };
 
+  function neighborOf(step: 1 | -1): T | null {
+    const card = deps.exitedCard();
+    if (card === null) {
+      return neighborWindow(deps.displayOrder(), deps.current(), step);
+    }
+    const targetId = exitedCardNeighbor(card, step);
+    return (
+      windowsInDisplayOrder(deps.groups()).find((entry) => entry.windowId === targetId) ?? null
+    );
+  }
+
   function goToNeighbor(step: 1 | -1): void {
-    const target = neighborWindow(deps.displayOrder(), deps.current(), step);
+    const target = neighborOf(step);
     if (target !== null) {
       revealWindow(reveal, target);
     }
