@@ -6,6 +6,7 @@
 //! The binary target is a thin shell over this library: it only assembles the
 //! Tauri application, so every item it needs is public here.
 
+pub mod attention;
 pub mod client_config;
 pub mod commands;
 pub mod config_paths;

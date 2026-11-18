@@ -1132,6 +1132,27 @@ export async function invokeReconnectDaemon(): Promise<void> {
   await invoke<unknown>('reconnect_daemon');
 }
 
+/**
+ * Hands the core the counts of windows waiting for the user and of pending
+ * permission requests; the core decides the title and whether to request the
+ * user's attention. `baseline` tells that the whole list is about to reload
+ * (e.g. after a reconnect), so the next counts are only recorded.
+ *
+ * @throws when the core rejects the counts (not non-negative 32-bit integers)
+ * or cannot apply them to the main window.
+ */
+export async function invokeSetAttentionSummary(
+  needsYou: number,
+  pendingPermissions: number,
+  baseline?: boolean
+): Promise<void> {
+  await invoke<unknown>('set_attention_summary', {
+    needs_you: needsYou,
+    pending_permissions: pendingPermissions,
+    baseline,
+  });
+}
+
 /** One reason `load_keymap` could not produce keys from the keymap file. */
 export type KeymapLoadFailure = 'not_found' | 'read_failed' | 'invalid_toml' | 'too_large';
 

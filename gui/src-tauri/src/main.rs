@@ -5,13 +5,14 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use anyhow::Context;
-use tauri::Manager;
+use tauri::{App, Manager};
 
+use yagura_gui::attention::{AttentionState, MAIN_WINDOW_LABEL};
 use yagura_gui::connection_pool::ConnectionPool;
-use yagura_gui::instance::{StartupContext, compose_window_title};
+use yagura_gui::instance::StartupContext;
 use yagura_gui::{commands, config_paths, daemon_supervisor, window_list_poll};
 
 fn main() -> anyhow::Result<()> {
@@ -57,24 +58,23 @@ fn main() -> anyhow::Result<()> {
                     poll_pool,
                     app.handle().clone(),
                 ));
-                // A non-default instance gets a distinguishable title so the
-                // taskbar and Alt+Tab tell the GUIs apart. The
-                // stem is read at run time rather than hardcoded, and a
-                // `title()` failure leaves the title as `tauri.conf.json`
-                // set it (degrade and continue).
-                if let Some(id) = namespace.id()
-                    && let Some(window) = app.get_webview_window("main")
-                    && let Ok(stem) = window.title()
-                {
-                    let _ = window.set_title(&compose_window_title(&stem, Some(id)));
-                }
             }
+
+            // A non-default instance gets a distinguishable title so the
+            // taskbar and Alt+Tab tell the GUIs apart; every later title,
+            // with the waiting count, is composed from the same state.
+            let instance_id = startup.resolution().as_ref().ok().and_then(|ns| ns.id());
+            let attention = startup_attention_state(app, instance_id);
+            if let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) {
+                let _ = window.set_title(&attention.title(0));
+            }
+            app.manage(Mutex::new(attention));
 
             // The GUI owns every shortcut it handles; the browser's own keys
             // (print, find, ...) would open browser features inside the app.
             // A failure only leaves those keys working, so startup goes on.
             #[cfg(windows)]
-            if let Some(window) = app.get_webview_window("main") {
+            if let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) {
                 let applied = window.with_webview(|webview| {
                     if let Err(error) =
                         yagura_os::webview::turn_off_browser_accelerator_keys(&webview.controller())
@@ -149,8 +149,28 @@ fn main() -> anyhow::Result<()> {
             commands::save_keymap,
             commands::load_themes,
             commands::reconnect_daemon,
-            commands::get_recovery_status
+            commands::get_recovery_status,
+            commands::set_attention_summary
         ])
         .run(tauri::generate_context!())
         .context("failed to run the yagura GUI")
+}
+
+/// The attention state with the title stem read at run time from the main
+/// window rather than hardcoded. A `title()` failure falls back to the title
+/// `tauri.conf.json` gives the window (degrade and continue).
+fn startup_attention_state(app: &App, instance_id: Option<&str>) -> AttentionState {
+    let stem = app
+        .get_webview_window(MAIN_WINDOW_LABEL)
+        .and_then(|window| window.title().ok())
+        .or_else(|| {
+            app.config()
+                .app
+                .windows
+                .iter()
+                .find(|window| window.label == MAIN_WINDOW_LABEL)
+                .map(|window| window.title.clone())
+        })
+        .unwrap_or_else(|| app.package_info().name.clone());
+    AttentionState::new(&stem, instance_id)
 }

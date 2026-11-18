@@ -6,9 +6,9 @@
 //! names across the boundary, matching the event payloads and the daemon
 //! protocol.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, Manager, State, UserAttentionType};
 use yagura_protocol::{
     CHAT_READ_LIMIT_MAX, ClientMessage, DEFAULT_PALETTES_MAX_VENDORS, DefaultPalettes, Frame,
     MAX_LAYOUT_JSON_BYTES, OnNameTaken, Palette, TerminalSize, check_input_bounds,
@@ -16,6 +16,7 @@ use yagura_protocol::{
     validate_window_vendor,
 };
 
+use crate::attention::{AttentionState, MAIN_WINDOW_LABEL};
 use crate::connection_pool::ConnectionPool;
 use crate::constants::{MAX_PTY_DIMENSION, MIN_PTY_COLS, MIN_PTY_ROWS};
 use crate::daemon_supervisor::RecoverySupervisorState;
@@ -692,6 +693,59 @@ pub async fn reconnect_daemon(
 #[tauri::command(rename_all = "snake_case")]
 pub fn get_recovery_status(recovery: State<'_, RecoverySupervisorState>) -> RecoveryStatusReport {
     crate::daemon_supervisor::recovery_snapshot(&recovery)
+}
+
+/// Shows how many things wait for the user outside the WebView: the count in
+/// the main window's title, a request for the user's attention when the count
+/// rises while the main window lacks focus, and on macOS the Dock badge.
+///
+/// Only counts cross the boundary, so no daemon-provided text reaches the
+/// title. `baseline` (default `false`) tells that the view is about to reload
+/// its whole list, so the next summary only records its count.
+///
+/// # Errors
+/// Returns a human-readable message when the title, the attention request or
+/// the badge cannot be applied to the main window.
+#[tauri::command(rename_all = "snake_case")]
+pub fn set_attention_summary(
+    app: AppHandle,
+    attention: State<'_, Mutex<AttentionState>>,
+    needs_you: u32,
+    pending_permissions: u32,
+    baseline: Option<bool>,
+) -> Result<(), String> {
+    let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) else {
+        return Ok(());
+    };
+    // An unreadable focus counts as unfocused: a needless request is
+    // ignored by a focused window, while a missed one leaves the user unaware.
+    let focused = window.is_focused().unwrap_or(false);
+    // `observe` cannot panic midway, so a poisoned lock still holds a
+    // consistent state.
+    let update = attention
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .observe(
+            needs_you,
+            pending_permissions,
+            baseline.unwrap_or(false),
+            focused,
+        );
+    window
+        .set_title(&update.title)
+        .map_err(|error| error.to_string())?;
+    if update.request_attention {
+        window
+            .request_user_attention(Some(UserAttentionType::Informational))
+            .map_err(|error| error.to_string())?;
+    }
+    // Only macOS shows the count on the Dock; Windows has no badge count and
+    // its overlay icon would need an image per count.
+    #[cfg(target_os = "macos")]
+    window
+        .set_badge_count((update.total > 0).then(|| i64::from(update.total)))
+        .map_err(|error| error.to_string())?;
+    Ok(())
 }
 
 /// Closes a window, terminating its process tree.

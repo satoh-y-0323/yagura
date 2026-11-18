@@ -107,12 +107,18 @@ impl StartupContext {
 }
 
 /// Composes a window title from `stem` (read at run time from the window's
-/// current title, never hardcoded here) and the instance identifier, if the
-/// instance is not the default one.
+/// startup title, never hardcoded here), the instance identifier if the
+/// instance is not the default one, and a `(N) ` prefix when `waiting` things
+/// wait for the user.
 #[must_use]
-pub fn compose_window_title(stem: &str, id: Option<&str>) -> String {
-    match id {
+pub fn compose_window_title(stem: &str, id: Option<&str>, waiting: u32) -> String {
+    let base = match id {
         Some(id) => format!("{stem} [{id}]"),
         None => stem.to_owned(),
+    };
+    if waiting == 0 {
+        base
+    } else {
+        format!("({waiting}) {base}")
     }
 }
