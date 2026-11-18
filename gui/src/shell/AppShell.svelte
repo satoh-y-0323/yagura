@@ -2219,7 +2219,7 @@
   function runFocusReturn(target: FocusReturn): void {
     switch (target.kind) {
       case 'element':
-        target.element.focus();
+        focusAsLastInput(target.element);
         return;
       case 'panel':
         void focusPanelStart(
@@ -2550,7 +2550,10 @@
     targetSelector: string = FOCUSABLE
   ): Promise<void> {
     await tick();
-    firstFocusable(document.querySelector(panelSelector), targetSelector)?.focus();
+    const target = firstFocusable(document.querySelector(panelSelector), targetSelector);
+    if (target !== null) {
+      focusAsLastInput(target);
+    }
   }
 
   /** Clears the banner, then shows the operation's failure in it if it fails. */
