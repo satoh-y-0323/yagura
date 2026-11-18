@@ -215,7 +215,6 @@ pub(crate) fn send_frame(
 /// Runs the watcher as its holder started it: `yagura-watcher <fd>`, the
 /// holder's socket as the descriptor `fd`. Ends with `0` once its sweep is
 /// over, and with `2` when it could not start the window's child.
-#[must_use]
 pub fn run() -> ExitCode {
     match start() {
         Ok(watcher) => {

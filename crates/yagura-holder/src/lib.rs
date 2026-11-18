@@ -46,7 +46,6 @@ const MAX_LAUNCH_BYTES: u64 = 1024 * 1024;
 
 /// Runs the holder with the process's arguments and standard input. A launch
 /// that names a fault is refused as a child that could not start.
-#[must_use]
 pub fn run() -> ExitCode {
     run_with(session::Faults::Refused)
 }
@@ -54,7 +53,6 @@ pub fn run() -> ExitCode {
 /// Runs the holder as [`run`] does, but acting out the fault its launch
 /// names. For the fault-injecting binary (`holder_fault`) that tests start;
 /// the shipped binary never calls it.
-#[must_use]
 pub fn run_fault_injection() -> ExitCode {
     run_with(session::Faults::ActedOut)
 }
