@@ -44,10 +44,21 @@ export function emptyQueue(): ApprovalQueueState {
  * @param request the request the daemon submitted
  */
 export function enqueue(state: ApprovalQueueState, request: ApprovalRequest): ApprovalQueueState {
-  if (state.items.some((entry) => entry.request_id === request.request_id)) {
+  if (holds(state, request.request_id)) {
     return state;
   }
   return { ...state, items: [...state.items, request] };
+}
+
+/**
+ * Whether the queue holds a request with `requestId`, in-flight ones included.
+ * Read before {@link enqueue} on a pushed request: the push is a new arrival
+ * only when this is false, so a resend of a queued id does not count again.
+ * @param state the current queue
+ * @param requestId the request's id
+ */
+export function holds(state: ApprovalQueueState, requestId: string): boolean {
+  return state.items.some((entry) => entry.request_id === requestId);
 }
 
 /**

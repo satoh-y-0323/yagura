@@ -7,11 +7,18 @@
  */
 import { describe, it, expect } from 'vitest';
 
-import type { DetectedStatusView, WindowStatus } from './ipc/session-boundary';
+import type {
+  DetectedStatusView,
+  StatusBoot,
+  TaskReportMark,
+  WindowStatus,
+} from './ipc/session-boundary';
 import { STATUS_PRESENTATION } from './status-presentation';
+import * as statusTone from './status-tone';
 import {
   attentionCount,
   needsYou,
+  observeNeedsYouArrivals,
   summarizeWindowStatuses,
   windowsNeedingYou,
 } from './status-tone';
@@ -269,5 +276,317 @@ describe('Rail summary of a group of windows', () => {
   it('has count 0, no mark and no unknownOnly for an empty group', () => {
     const { summary } = summarize([]);
     expect(summary).toEqual({ count: 0, mark: null, unknownOnly: false });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// observeNeedsYouArrivals: which windows newly started waiting on the user in
+// one observation. Each sequence below is one window observed poll after poll;
+// the expected value lists, per observation, the windows that arrived.
+// ---------------------------------------------------------------------------
+
+/** What one observation of a window carries into `observeNeedsYouArrivals`. */
+interface ArrivalEntry {
+  windowId: string;
+  detected: DetectedStatusView;
+  statusBoot: StatusBoot | null;
+  taskReport?: TaskReportMark;
+}
+
+type ArrivalMemory = Parameters<typeof observeNeedsYouArrivals>[0];
+
+/** An empty memory, as the shell starts with (and starts again with after a WebView reload). */
+function emptyMemory(): ArrivalMemory {
+  // The constructor's name has no source line yet; it is read here so a different name fails only this helper.
+  const tone = statusTone as unknown as { emptyArrivalMemory: () => ArrivalMemory };
+  return tone.emptyArrivalMemory();
+}
+
+const ORIGIN = 7;
+type Boot = 'boot1' | 'boot2' | null;
+
+/** A fresh boot object each time, as each window list and status push decodes its own. */
+function bootOf(boot: Boot): StatusBoot | null {
+  if (boot === null) {
+    return null;
+  }
+  return { origin: ORIGIN, seq: boot === 'boot1' ? 1 : 2 };
+}
+
+/** One observation of a window: its status, the boot it was counted in, and its report mark. */
+interface Seen {
+  status: WindowStatus;
+  boot?: Boot;
+  report?: TaskReportMark['state'];
+  seq?: number;
+}
+
+function arrivalEntry(windowId: string, seen: Seen): ArrivalEntry {
+  const { status } = seen;
+  const detected: DetectedStatusView = status === 'unknown' ? { status, reason: null } : { status };
+  const entry: ArrivalEntry = {
+    windowId,
+    detected,
+    statusBoot: bootOf(seen.boot === undefined ? 'boot1' : seen.boot),
+  };
+  return seen.report === undefined
+    ? entry
+    : { ...entry, taskReport: { seq: seen.seq ?? 1, state: seen.report } };
+}
+
+/** Runs the observations in order from an empty memory; returns the sorted arrivals of each. */
+function observeAll(observations: readonly (readonly ArrivalEntry[])[]): string[][] {
+  let memory = emptyMemory();
+  return observations.map((entries) => {
+    const result = observeNeedsYouArrivals(memory, entries);
+    memory = result.memory;
+    return [...result.arrived].sort();
+  });
+}
+
+/** One window `w` observed once per step; `null` is an observation the window is absent from. */
+function watch(steps: readonly (Seen | WindowStatus | null)[]): string[][] {
+  return observeAll(
+    steps.map((step) => {
+      if (step === null) {
+        return [];
+      }
+      return [arrivalEntry('w', typeof step === 'string' ? { status: step } : step)];
+    })
+  );
+}
+
+const NONE: string[] = [];
+const W = ['w'];
+
+describe('observeNeedsYouArrivals: a window seen for the first time (a fresh memory, as after a WebView reload)', () => {
+  it.each(['waiting_input', 'running', 'idle'] as WindowStatus[])(
+    'does not arrive when first seen %s',
+    (status) => {
+      expect(watch([status])).toEqual([NONE]);
+    }
+  );
+
+  it('arrives when first seen waiting_approval, and again at the input wait after it is answered', () => {
+    expect(watch(['waiting_approval'])).toEqual([W]);
+    expect(watch(['waiting_approval', 'waiting_input'])).toEqual([W, W]);
+  });
+});
+
+describe('observeNeedsYouArrivals: (B) a turn the GUI saw open ends in an input wait', () => {
+  it('arrives at running -> waiting_input, also when unknown comes in between', () => {
+    expect(watch(['running', 'waiting_input'])).toEqual([NONE, W]);
+    expect(watch(['running', 'unknown', 'waiting_input'])).toEqual([NONE, NONE, W]);
+  });
+
+  it('does not arrive at unknown -> waiting_input, nor when a waiting window wobbles through unknown', () => {
+    expect(watch(['unknown', 'waiting_input'])).toEqual([NONE, NONE]);
+    expect(watch(['waiting_input', 'unknown', 'waiting_input'])).toEqual([NONE, NONE, NONE]);
+  });
+
+  it.each(['idle', 'interrupted', 'exited'] as WindowStatus[])(
+    'does not arrive at running -> %s -> waiting_input: the turn closed before the input wait',
+    (closing) => {
+      expect(watch(['running', closing, 'waiting_input'])).toEqual([NONE, NONE, NONE]);
+    }
+  );
+
+  it('arrives twice at running -> waiting_approval -> waiting_input: the approval does not close the turn', () => {
+    expect(watch(['running', 'waiting_approval', 'waiting_input'])).toEqual([NONE, W, W]);
+  });
+
+  it('arrives once when the list shows the end of a turn after a reconnect, and not again on the next identical list', () => {
+    expect(watch(['running', 'waiting_input', 'waiting_input'])).toEqual([NONE, W, NONE]);
+  });
+});
+
+describe('observeNeedsYouArrivals: (A) a window starts waiting for approval', () => {
+  it('arrives at waiting_input -> waiting_approval', () => {
+    expect(watch(['waiting_input', 'waiting_approval'])).toEqual([NONE, W]);
+  });
+
+  it('does not arrive again at waiting_approval -> unknown -> waiting_approval, nor on a repeated list', () => {
+    expect(watch(['waiting_approval', 'unknown', 'waiting_approval'])).toEqual([W, NONE, NONE]);
+    expect(watch(['waiting_approval', 'waiting_approval'])).toEqual([W, NONE]);
+  });
+
+  it('arrives twice at waiting_input -> waiting_approval -> waiting_input, without running in between', () => {
+    expect(watch(['waiting_input', 'waiting_approval', 'waiting_input'])).toEqual([NONE, W, W]);
+  });
+});
+
+describe('observeNeedsYouArrivals: the memory carries over a daemon restart', () => {
+  it.each([
+    ['boot1', 'boot2'],
+    [null, null],
+  ] as [Boot, Boot][])(
+    'arrives when a turn seen running in %s ends in %s after unknown',
+    (before, after) => {
+      expect(
+        watch([
+          { status: 'running', boot: before },
+          { status: 'unknown', boot: after },
+          { status: 'waiting_input', boot: after },
+        ])
+      ).toEqual([NONE, NONE, W]);
+    }
+  );
+
+  it.each([
+    ['boot1', 'boot2'],
+    [null, null],
+  ] as [Boot, Boot][])(
+    'does not arrive for a window that was already waiting for input in %s and is taken back in %s',
+    (before, after) => {
+      expect(
+        watch([
+          { status: 'waiting_input', boot: before },
+          { status: 'unknown', boot: after },
+          { status: 'waiting_input', boot: after },
+        ])
+      ).toEqual([NONE, NONE, NONE]);
+    }
+  );
+
+  it('does not arrive at the approval taken back, and arrives at the input wait after it is answered', () => {
+    expect(
+      watch([
+        { status: 'waiting_approval', boot: 'boot1' },
+        { status: 'unknown', boot: 'boot2' },
+        { status: 'waiting_approval', boot: 'boot2' },
+        { status: 'waiting_input', boot: 'boot2' },
+      ])
+    ).toEqual([W, NONE, NONE, W]);
+  });
+
+  it('does not arrive for a window whose standing report the new boot dropped', () => {
+    expect(
+      watch([
+        { status: 'running', boot: 'boot1' },
+        { status: 'waiting_input', boot: 'boot1', report: 'standing' },
+        { status: 'unknown', boot: 'boot2' },
+        { status: 'waiting_input', boot: 'boot2' },
+      ])
+    ).toEqual([NONE, NONE, NONE, NONE]);
+  });
+});
+
+describe('observeNeedsYouArrivals: (C) the reader of a standing report is gone', () => {
+  it('does not arrive anywhere when the report is released by an instruction and the window wobbles', () => {
+    expect(
+      watch([
+        'running',
+        { status: 'waiting_input', report: 'standing' },
+        { status: 'waiting_input', report: 'instruction' },
+        { status: 'unknown', report: 'instruction' },
+        { status: 'waiting_input', report: 'instruction' },
+      ])
+    ).toEqual([NONE, NONE, NONE, NONE, NONE]);
+  });
+
+  it('arrives once when the report is left with no reader, and not on the wobble after it', () => {
+    expect(
+      watch([
+        'running',
+        { status: 'waiting_input', report: 'standing' },
+        { status: 'waiting_input', report: 'no_reader' },
+        { status: 'unknown', report: 'no_reader' },
+        { status: 'waiting_input', report: 'no_reader' },
+      ])
+    ).toEqual([NONE, NONE, W, NONE, NONE]);
+  });
+
+  it('arrives when the window settles on waiting_input, not when no_reader comes while it is unknown', () => {
+    expect(
+      watch([
+        'running',
+        { status: 'waiting_input', report: 'standing' },
+        { status: 'unknown', report: 'standing' },
+        { status: 'unknown', report: 'no_reader' },
+        { status: 'waiting_input', report: 'no_reader' },
+      ])
+    ).toEqual([NONE, NONE, NONE, NONE, W]);
+  });
+
+  it('does not arrive when the mark turns unknown', () => {
+    expect(
+      watch([
+        'running',
+        { status: 'waiting_input', report: 'standing' },
+        { status: 'waiting_input', report: 'unknown' },
+        { status: 'unknown', report: 'unknown' },
+        { status: 'waiting_input', report: 'unknown' },
+      ])
+    ).toEqual([NONE, NONE, NONE, NONE, NONE]);
+  });
+
+  it('arrives at the approval and at the input wait only, when the owner dies during the approval and the window wobbles', () => {
+    expect(
+      watch([
+        'running',
+        { status: 'waiting_input', report: 'standing' },
+        { status: 'waiting_approval', report: 'standing' },
+        { status: 'waiting_approval', report: 'no_reader' },
+        { status: 'waiting_input', report: 'no_reader' },
+        { status: 'unknown', report: 'no_reader' },
+        { status: 'waiting_input', report: 'no_reader' },
+      ])
+    ).toEqual([NONE, NONE, W, NONE, W, NONE, NONE]);
+  });
+
+  it('arrives once when the turn ends and the reader is gone in the same observation, and not on the wobble after it', () => {
+    expect(
+      watch([
+        'running',
+        { status: 'running', report: 'standing' },
+        { status: 'running', report: 'no_reader' },
+        { status: 'waiting_input', report: 'no_reader' },
+        { status: 'unknown', report: 'no_reader' },
+        { status: 'waiting_input', report: 'no_reader' },
+      ])
+    ).toEqual([NONE, NONE, NONE, W, NONE, NONE]);
+  });
+
+  it('arrives once at the end of the turn for a report born with no reader, and not on the wobble after it', () => {
+    expect(
+      watch([
+        'running',
+        { status: 'waiting_input', report: 'no_reader' },
+        { status: 'unknown', report: 'no_reader' },
+        { status: 'waiting_input', report: 'no_reader' },
+      ])
+    ).toEqual([NONE, W, NONE, NONE]);
+  });
+
+  it('does not arrive when a daemon naming no boot delivers a no_reader list after the instruction that released the same report', () => {
+    expect(
+      watch([
+        { status: 'running', boot: null },
+        { status: 'waiting_input', boot: null, report: 'standing' },
+        { status: 'unknown', boot: null, report: 'instruction' },
+        { status: 'waiting_input', boot: null, report: 'no_reader' },
+      ])
+    ).toEqual([NONE, NONE, NONE, NONE]);
+  });
+});
+
+describe('observeNeedsYouArrivals: windows in one observation', () => {
+  it('starts a window that left the entries and came back as one seen for the first time', () => {
+    expect(watch(['waiting_approval', null, 'waiting_approval'])).toEqual([W, NONE, W]);
+    expect(watch(['running', null, 'waiting_input'])).toEqual([NONE, NONE, NONE]);
+  });
+
+  it('lists each arriving window once, and leaves out the windows that did not arrive', () => {
+    const first = [
+      arrivalEntry('a', { status: 'running' }),
+      arrivalEntry('b', { status: 'waiting_input' }),
+      arrivalEntry('c', { status: 'running' }),
+    ];
+    const second = [
+      arrivalEntry('a', { status: 'waiting_input' }),
+      arrivalEntry('b', { status: 'waiting_approval' }),
+      arrivalEntry('c', { status: 'running' }),
+    ];
+    expect(observeAll([first, second])).toEqual([[], ['a', 'b']]);
   });
 });

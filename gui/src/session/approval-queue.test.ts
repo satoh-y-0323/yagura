@@ -21,6 +21,7 @@ import {
   markShown,
   wasShown,
   head,
+  holds,
   size,
   isWithinGuard,
   markInFlight,
@@ -549,5 +550,68 @@ describe('windowsAwaitingPermission: which windows wear the permission mark', ()
 
     expect((await waiting(withdraw(state, 'req-a'))).size).toBe(0);
     expect((await waiting(emptyQueue())).size).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// `holds` is read before `enqueue` on each pushed request: a push arrives as
+// a new request only when it adds an id the queue does not hold. `reset` and
+// `merge` never make one.
+// ---------------------------------------------------------------------------
+
+describe('holds: whether a pushed request is new to the queue', () => {
+  /** Applies one push the way the shell does: reads `holds`, then enqueues. */
+  function push(state: ApprovalQueueState, requestId: string): [ApprovalQueueState, boolean] {
+    const arrived = !holds(state, requestId);
+    return [enqueue(state, makeRequest(requestId)), arrived];
+  }
+
+  it('is false for an id the queue does not hold and true once it is enqueued', () => {
+    const state = emptyQueue();
+    expect(holds(state, 'req-a')).toBe(false);
+    expect(holds(enqueue(state, makeRequest('req-a')), 'req-a')).toBe(true);
+    expect(holds(enqueue(state, makeRequest('req-a')), 'req-b')).toBe(false);
+  });
+
+  it('makes a push of a new id arrive, and a resend of the same id not arrive', () => {
+    let state = emptyQueue();
+    let arrived: boolean;
+
+    [state, arrived] = push(state, 'req-a');
+    expect(arrived).toBe(true);
+    [state, arrived] = push(state, 'req-a');
+    expect(arrived).toBe(false);
+    [state, arrived] = push(state, 'req-b');
+    expect(arrived).toBe(true);
+  });
+
+  it('does not make the resend that follows a registration reset arrive', () => {
+    let state = enqueue(emptyQueue(), makeRequest('req-a'));
+    state = reset(state, [makeRequest('req-a'), makeRequest('req-b')]);
+
+    const [afterA, arrivedA] = push(state, 'req-a');
+    const [, arrivedB] = push(afterA, 'req-b');
+
+    expect(arrivedA).toBe(false);
+    expect(arrivedB).toBe(false);
+  });
+
+  it('does not make a push arrive for a request a pull already merged in after a WebView reload', () => {
+    let state = merge(emptyQueue(), [makeRequest('req-a')]);
+    let arrived: boolean;
+
+    [state, arrived] = push(state, 'req-a');
+    expect(arrived).toBe(false);
+    [, arrived] = push(state, 'req-new');
+    expect(arrived).toBe(true);
+  });
+
+  it('holds a request whose decision is in flight, and not one that was resolved or withdrawn', () => {
+    let state = enqueue(enqueue(emptyQueue(), makeRequest('req-a')), makeRequest('req-b'));
+    state = markInFlight(state, 'req-a');
+
+    expect(holds(state, 'req-a')).toBe(true);
+    expect(holds(resolve(state, 'req-a'), 'req-a')).toBe(false);
+    expect(holds(withdraw(state, 'req-b'), 'req-b')).toBe(false);
   });
 });

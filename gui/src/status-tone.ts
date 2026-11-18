@@ -1,4 +1,9 @@
-import type { DetectedStatusView, TaskReportMark, WindowStatus } from './ipc/session-boundary';
+import type {
+  DetectedStatusView,
+  StatusBoot,
+  TaskReportMark,
+  WindowStatus,
+} from './ipc/session-boundary';
 import { STATUS_PRESENTATION } from './status-presentation';
 
 /**
@@ -66,4 +71,138 @@ export function summarizeWindowStatuses<T extends NeedsYouInput>(
   }
   const count = attentionCount(entries);
   return { count, mark, unknownOnly: count === 0 && hasUnknown };
+}
+
+/**
+ * What {@link observeNeedsYouArrivals} reads from an entry: the "needs you"
+ * input, the window it belongs to, and the daemon boot its report mark was
+ * counted in.
+ */
+export interface NeedsYouArrivalInput extends NeedsYouInput {
+  windowId: string;
+  statusBoot: StatusBoot | null;
+}
+
+/** The key a report mark is matched on: the boot it was counted in and its `seq` there. */
+interface ReportKey {
+  readonly boot: StatusBoot | null;
+  readonly seq: number;
+}
+
+/** What one window's arrivals are decided against, carried from one observation to the next. */
+export interface WindowArrivalMemory {
+  /** The last status applied other than `unknown`; `null` while none has been. */
+  readonly settled: WindowStatus | null;
+  /** `running` or `waiting_approval` was applied after the last status that closes a turn. */
+  readonly turnOpen: boolean;
+  /** {@link needsYou} at the previous observation. */
+  readonly needs: boolean;
+  /** The key of the report last seen standing, while it can still be left with no reader. */
+  readonly standingKey: ReportKey | null;
+}
+
+/**
+ * Per-window memory of {@link observeNeedsYouArrivals}, keyed by window id.
+ * Kept across daemon restarts and reconnects; only a fresh shell starts empty.
+ */
+export type NeedsYouArrivalMemory = ReadonlyMap<string, WindowArrivalMemory>;
+
+/** The memory a shell starts with: no window seen yet. */
+export function emptyArrivalMemory(): NeedsYouArrivalMemory {
+  return new Map();
+}
+
+// A window seen for the first time is decided against this: with no open turn
+// and no standing key, (B) and (C) cannot hold, so only (A) can arrive.
+const UNSEEN: WindowArrivalMemory = {
+  settled: null,
+  turnOpen: false,
+  needs: false,
+  standingKey: null,
+};
+
+/**
+ * Applies one observation of the windows and names those that started waiting
+ * on the user in it. A window arrives at most once per observation, when any
+ * of these holds against its memory from before the observation:
+ * - (A) it is now `waiting_approval` and the last settled status was not;
+ * - (B) it is now `waiting_input`, needs the user, and a turn was open;
+ * - (C) it did not need the user and now does, because the report it was
+ *   last seen standing on is now left with no reader.
+ *
+ * Every field of the memory is then updated by its own rule, whichever rule
+ * (if any) made the window arrive. Windows absent from `entries` are dropped,
+ * so one that comes back is seen for the first time again.
+ * @param memory the memory returned by the previous observation
+ * @param entries every window as this observation sees it
+ * @returns the memory to pass to the next observation, and the arrived window ids in input order
+ */
+export function observeNeedsYouArrivals(
+  memory: NeedsYouArrivalMemory,
+  entries: readonly NeedsYouArrivalInput[]
+): { memory: NeedsYouArrivalMemory; arrived: string[] } {
+  const next = new Map<string, WindowArrivalMemory>();
+  const arrived: string[] = [];
+  for (const entry of entries) {
+    const before = memory.get(entry.windowId) ?? UNSEEN;
+    const { status } = entry.detected;
+    const needs = needsYou(entry);
+    const reportState = entry.taskReport?.state;
+    const reportKey: ReportKey | null =
+      entry.taskReport === undefined ? null : { boot: entry.statusBoot, seq: entry.taskReport.seq };
+    const leftByItsReader =
+      reportState === 'no_reader' &&
+      before.standingKey !== null &&
+      reportKey !== null &&
+      sameReportKey(before.standingKey, reportKey);
+
+    const approvalBegan = status === 'waiting_approval' && before.settled !== 'waiting_approval';
+    const turnEnded = status === 'waiting_input' && before.turnOpen && needs;
+    const readerLeft = !before.needs && needs && leftByItsReader;
+    if (approvalBegan || turnEnded || readerLeft) {
+      arrived.push(entry.windowId);
+    }
+
+    next.set(entry.windowId, {
+      settled: status === 'unknown' ? before.settled : status,
+      turnOpen: turnOpenAfter(status, before.turnOpen),
+      needs,
+      // Seeing the window need the user while its report no longer stands
+      // counts as the reader's leaving having been shown, so the key goes.
+      standingKey:
+        reportState === 'standing'
+          ? reportKey
+          : leftByItsReader && !needs
+            ? before.standingKey
+            : null,
+    });
+  }
+  return { memory: next, arrived };
+}
+
+/** Whether a turn is open after `status` is applied; `unknown` leaves it as it was. */
+function turnOpenAfter(status: WindowStatus, wasOpen: boolean): boolean {
+  switch (status) {
+    case 'running':
+    case 'waiting_approval':
+      return true;
+    case 'waiting_input':
+    case 'idle':
+    case 'interrupted':
+    case 'exited':
+      return false;
+    case 'unknown':
+      return wasOpen;
+  }
+}
+
+/** Two report keys are equal when their `seq` and their boot are; two unnamed boots are equal. */
+function sameReportKey(a: ReportKey, b: ReportKey): boolean {
+  if (a.seq !== b.seq) {
+    return false;
+  }
+  if (a.boot === null || b.boot === null) {
+    return a.boot === b.boot;
+  }
+  return a.boot.origin === b.boot.origin && a.boot.seq === b.boot.seq;
 }
