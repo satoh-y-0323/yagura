@@ -183,8 +183,8 @@ export interface PendingFocusDeps<M> {
   isModalOpen: () => boolean;
   /** Resolves once the view has rendered what the move targets. */
   settle: () => Promise<void>;
-  /** Performs the move. */
-  run: (move: M) => void;
+  /** Performs the move; a returned promise must settle, since {@link createPendingFocus} waits for it. */
+  run: (move: M) => void | Promise<void>;
 }
 
 /**
@@ -195,8 +195,12 @@ export interface PendingFocusDeps<M> {
 export function createPendingFocus<M>(deps: PendingFocusDeps<M>): {
   request(move: M): void;
   offer(move: M): void;
+  settled(): Promise<void>;
 } {
   let held: M | null = null;
+  // Each started attempt, wrapped so a rejection is swallowed here and never
+  // left unhandled or passed on to `settled`.
+  const started = new Set<Promise<void>>();
 
   const attempt = async (): Promise<void> => {
     await deps.settle();
@@ -205,14 +209,20 @@ export function createPendingFocus<M>(deps: PendingFocusDeps<M>): {
     }
     const move = held;
     held = null;
-    deps.run(move);
+    await deps.run(move);
+  };
+
+  const start = (): void => {
+    const done = attempt().then(noop, noop);
+    started.add(done);
+    void done.then(() => started.delete(done));
   };
 
   return {
     /** Replaces the held move with `move` and tries to run it. */
     request(move: M): void {
       held = move;
-      void attempt();
+      start();
     },
     /**
      * Holds `move` only when nothing is held, then tries to run what is held. A
@@ -221,7 +231,17 @@ export function createPendingFocus<M>(deps: PendingFocusDeps<M>): {
      */
     offer(move: M): void {
       held ??= move;
-      void attempt();
+      start();
+    },
+    /**
+     * Resolves once every attempt started before this call has finished,
+     * including the promise its move returned; never rejects. A move still held
+     * behind an open modal does not keep it waiting.
+     */
+    async settled(): Promise<void> {
+      await Promise.all([...started]);
     },
   };
 }
+
+function noop(): void {}

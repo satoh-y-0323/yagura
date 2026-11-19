@@ -982,7 +982,7 @@
     // room list has come back; the rail simply shows no rows.
     if (isChatOpen) {
       panelOrigins.set('chat', focusOrigin());
-      void focusPanelStart('.chat-panel', '.chat-input');
+      pendingFocus.request({ kind: 'panel', panel: 'chat' });
       // The list itself may be stale too: participant counts follow the window
       // registry, which moves without any chat push. Awaited so
       // the default-room pick below sees the refreshed list, not a snapshot
@@ -1208,7 +1208,7 @@
     // everything it shows.
     if (isPlansOpen) {
       panelOrigins.set('plans', focusOrigin());
-      void focusPanelStart('.plans-panel');
+      pendingFocus.request({ kind: 'panel', panel: 'plans' });
       void readTicketWorkspaces();
       await applyPlanReload({ list: true, roles: true, planId: selectedPlanId });
       if (planBoardBecameVisible({ open: false, tab: plansTab }, { open: true, tab: plansTab })) {
@@ -1274,7 +1274,7 @@
       return;
     }
     panelOrigins.set('settings', focusOrigin());
-    void focusPanelStart('.settings-panel');
+    pendingFocus.request({ kind: 'panel', panel: 'settings' });
     // Neither list is pushed while the panel is closed, so opening it reads
     // both again.
     await Promise.all([loadProfiles(), readRoles()]);
@@ -2226,17 +2226,16 @@
   type FocusReturn = PanelReturn<PanelId, HTMLElement>;
 
   /** Performs one return: an element, the start of a panel, or a focus move. */
-  function runFocusReturn(target: FocusReturn): void {
+  function runFocusReturn(target: FocusReturn): void | Promise<void> {
     switch (target.kind) {
       case 'element':
         focusAsLastInput(target.element);
         return;
       case 'panel':
-        void focusPanelStart(
+        return focusPanelStart(
           PANEL_SELECTORS[target.panel],
           target.panel === 'chat' ? '.chat-input' : FOCUSABLE
         );
-        return;
       case 'move':
         runFocusMove(target.move);
         return;

@@ -124,18 +124,39 @@ function drain(): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, 0));
 }
 
-function harness(initialModals = 0) {
+/**
+ * @param options.settle replaces the hand-released settle step
+ * @param options.afterRun what `run` returns after recording the move
+ */
+function harness(
+  initialModals = 0,
+  options: { settle?: () => Promise<void>; afterRun?: () => Promise<void> } = {}
+) {
   const state = { modals: initialModals };
   const ran: FocusMove[] = [];
   const gate = manualSettle();
   const pending = createPendingFocus({
     isModalOpen: (): boolean => state.modals > 0,
-    settle: gate.settle,
-    run: (move: FocusMove): void => {
+    settle: options.settle ?? gate.settle,
+    run: (move: FocusMove) => {
       ran.push(move);
+      return options.afterRun?.();
     },
   });
   return { state, ran, gate, pending };
+}
+
+/** Records whether `settled()` has resolved, and what had run by then. */
+function watchSettled(
+  settled: Promise<void>,
+  ran: readonly FocusMove[]
+): { done: boolean; ranThen: FocusMove[] | null } {
+  const watch: { done: boolean; ranThen: FocusMove[] | null } = { done: false, ranThen: null };
+  void settled.then(() => {
+    watch.done = true;
+    watch.ranThen = [...ran];
+  });
+  return watch;
 }
 
 const TO_B: FocusMove = { kind: 'terminal', windowId: 'wB' };
@@ -149,12 +170,15 @@ describe('createPendingFocus without an open modal', () => {
     const { ran, gate, pending } = harness();
 
     pending.request(TO_B);
+    const settled = watchSettled(pending.settled(), ran);
     await drain();
     expect(ran).toEqual([]);
+    expect(settled.done).toBe(false);
 
     gate.release();
     await drain();
     expect(ran).toEqual([TO_B]);
+    expect(settled.ranThen).toEqual([TO_B]);
   });
 
   it('does not run a move that already ran again when a modal closes later; only the new offer runs', async () => {
@@ -164,10 +188,42 @@ describe('createPendingFocus without an open modal', () => {
     gate.release();
     await drain();
     pending.offer(BACK_TO_A);
+    const settled = watchSettled(pending.settled(), ran);
+    await drain();
+    expect(settled.done).toBe(false);
     gate.release();
     await drain();
 
     expect(ran).toEqual([TO_B, BACK_TO_A]);
+    expect(settled.ranThen).toEqual([TO_B, BACK_TO_A]);
+  });
+
+  it('does not settle until the promise the move returned has resolved', async () => {
+    const finish = manualSettle();
+    const { ran, gate, pending } = harness(0, { afterRun: finish.settle });
+
+    pending.request(TO_B);
+    const settled = watchSettled(pending.settled(), ran);
+    gate.release();
+    await drain();
+    expect(ran).toEqual([TO_B]);
+    expect(settled.done).toBe(false);
+
+    finish.release();
+    await drain();
+    expect(settled.done).toBe(true);
+  });
+
+  it('settles instead of rejecting when the settle step of a started attempt rejects', async () => {
+    const { ran, pending } = harness(0, {
+      settle: () => Promise.reject(new Error('render failed')),
+    });
+
+    pending.request(TO_B);
+    const settled = pending.settled();
+
+    await expect(settled).resolves.toBeUndefined();
+    expect(ran).toEqual([]);
   });
 });
 
@@ -176,8 +232,12 @@ describe('createPendingFocus with a modal open', () => {
     const { state, ran, gate, pending } = harness(1);
 
     pending.request(TO_B);
+    const settled = watchSettled(pending.settled(), ran);
+    await drain();
+    expect(settled.done).toBe(false);
     gate.release();
     await drain();
+    expect(settled.done).toBe(true);
     pending.offer(BACK_TO_A);
     gate.release();
     await drain();
