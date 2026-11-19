@@ -16,6 +16,8 @@
 //! `--shutdown` returns only once the daemon it asked has ended, and fails
 //! when that end cannot be confirmed.
 
+mod shutdown;
+
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -871,22 +873,14 @@ async fn send_shutdown(ipc: &PlatformIpc, endpoint: &str) -> Result<()> {
     })?;
     // Watched before the message is sent, so the daemon's end cannot be missed.
     let watch = watch_server_exit(ipc, &client);
-    if matches!(watch, Ok(None)) {
-        return Ok(());
-    }
     let frame = frame_encode(&encode_client_message(&ClientMessage::Shutdown));
-    client
-        .write_all(&frame)
-        .await
-        .context("failed to send the shutdown message")?;
-    let unconfirmed = "the shutdown message was sent, but the daemon's end could not be confirmed";
-    let Some(watch) = watch.context(unconfirmed)? else {
-        return Ok(());
-    };
-    tokio::task::spawn_blocking(move || watch.wait())
-        .await
-        .context(unconfirmed)?
-        .context(unconfirmed)
+    let client = &mut client;
+    shutdown::shut_down_and_confirm(
+        watch,
+        move || async move { Ok(client.write_all(&frame).await?) },
+        |watch| async move { Ok(tokio::task::spawn_blocking(move || watch.wait()).await??) },
+    )
+    .await
 }
 
 /// A watch of the end of the process serving `client`'s endpoint; `None`
