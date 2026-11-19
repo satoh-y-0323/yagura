@@ -1,7 +1,6 @@
 #!/usr/bin/env node
 // The dev run's `beforeDevCommand`: builds the binaries the GUI starts from beside itself into the
 // dev run's target directory and, on Windows, places the bundled ConPTY there too.
-import { spawnSync } from 'node:child_process';
 import { join } from 'node:path';
 import {
   WORKSPACE_ROOT,
@@ -9,6 +8,7 @@ import {
   cargoTargetDirectory,
   exitWith,
   isDevRunTargetDirectory,
+  runOrExit,
 } from './workspace-bins.mjs';
 
 const TOOL = 'prepare-dev';
@@ -30,14 +30,13 @@ buildBinPackages(TOOL, { release: false });
 // The pins and the placing live in yagura-test-support; this only hands it the directory.
 if (process.platform === 'win32') {
   const besideGui = join(targetDirectory, 'debug');
-  const result = spawnSync(
+  const result = runOrExit(
+    TOOL,
+    'cargo run',
     'cargo',
     ['run', '-p', 'yagura-test-support', '--bin', 'place-bundled-conpty', '--', besideGui],
-    { cwd: WORKSPACE_ROOT, stdio: 'inherit' }
+    { cwd: WORKSPACE_ROOT }
   );
-  if (result.error) {
-    exitWith(TOOL, `cargo run could not start: ${result.error.message}`);
-  }
   if (result.status !== 0) {
     exitWith(
       TOOL,

@@ -7,6 +7,7 @@ import { execFileSync } from 'node:child_process';
 import { copyFileSync, existsSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import {
+  GUI_DIR,
   WORKSPACE_ROOT,
   buildBinPackages,
   cargoTargetDirectory,
@@ -14,7 +15,7 @@ import {
 } from './workspace-bins.mjs';
 
 const TOOL = 'prepare-sidecar';
-const binariesDir = join(WORKSPACE_ROOT, 'gui', 'src-tauri', 'binaries');
+const binariesDir = join(GUI_DIR, 'src-tauri', 'binaries');
 
 // The binaries staged as sidecars, in the order each platform's `bundle.externalBin`
 // names them. The holder's package builds the watcher too; Windows ships none, its job
