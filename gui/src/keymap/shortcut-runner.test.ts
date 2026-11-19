@@ -6,11 +6,17 @@
  */
 import { describe, expect, it } from 'vitest';
 
+import type { WindowStatus } from '../ipc/session-boundary';
 import type { PlacedWindow } from '../session/current-window';
 import type { ExitedCard } from '../session/shell-state';
 import type { RoomGroup } from '../sidebar/room-groups';
+import { actionAvailability, type ActionBlockReason } from './action-availability';
 import { ACTION_IDS, type ActionId } from './key-binding';
-import { createShortcutRunner, type ShortcutRunnerDeps } from './shortcut-runner';
+import {
+  availabilityContext,
+  createShortcutRunner,
+  type ShortcutRunnerDeps,
+} from './shortcut-runner';
 
 interface Win extends PlacedWindow {
   roomId: string;
@@ -46,11 +52,14 @@ interface Setup {
   attentionTarget?: Win | null;
   /** The card of an ended window Focus shows; defaults to none. */
   exitedCard?: ExitedCard | null;
+  /** Each window's status by id; a window not listed is running. */
+  statuses?: Readonly<Record<string, WindowStatus>>;
 }
 
 interface Harness {
   run: (action: ActionId) => Promise<void>;
   calls: string[];
+  deps: ShortcutRunnerDeps<Win>;
 }
 
 /** The sidebar's rooms over `order`, each room placed where its first window is. */
@@ -112,6 +121,8 @@ function harness(setup: Setup): Harness {
       calls.push('attention');
       return setup.attentionTarget ?? null;
     },
+    nextAttention: (): Win | null => setup.attentionTarget ?? null,
+    statusOf: (entry: Win): WindowStatus => setup.statuses?.[entry.windowId] ?? 'running',
     focusTerminal: (windowId: string): void => {
       calls.push(`terminal:${windowId}`);
     },
@@ -150,7 +161,7 @@ function harness(setup: Setup): Harness {
     },
   };
   const run = createShortcutRunner(deps);
-  return { run, calls };
+  return { run, calls, deps };
 }
 
 // B sits between A and C in the sidebar; C holds the highest zOrder, so a
@@ -242,31 +253,155 @@ describe('the window an operation acts on', () => {
     await h.run('interrupt-window');
     expect(h.calls).toEqual([`close:${A.windowId}`, `interrupt:${A.windowId}`]);
   });
+});
 
-  it.each<ActionId>([
-    'close-window',
-    'interrupt-window',
-    'rename-window',
-    'minimize-window',
-    'toggle-maximize-window',
-  ])('%s does nothing when there is no current window', async (action: ActionId) => {
-    const h = harness({ windows: [A, B, C], current: null });
-    await h.run(action);
-    expect(h.calls).toEqual([]);
+/** The card of a window that left; the ends of the list do not stand in for its place. */
+function cardFor(windowId: string, next: Win | null, previous: Win | null): ExitedCard {
+  return {
+    windowId,
+    name: windowId,
+    exitCode: 1,
+    next: next?.windowId ?? null,
+    nextWindowId: next?.windowId ?? null,
+    previousWindowId: previous?.windowId ?? null,
+  };
+}
+
+interface Refusal {
+  when: string;
+  action: ActionId;
+  setup: Setup;
+  reason: ActionBlockReason;
+}
+
+const NO_ROWS_SHOWN: Setup = { windows: [A, B, C], order: [], sidebar: [A, B, C], current: B };
+const LONE_CARD: Setup = {
+  windows: [A],
+  workMode: 'focus',
+  exitedCard: cardFor('wgone-b', null, null),
+};
+
+const REFUSALS: readonly Refusal[] = [
+  {
+    when: 'no current window',
+    action: 'close-window',
+    setup: { windows: [A, B, C] },
+    reason: 'no-window-on-screen',
+  },
+  {
+    when: 'no current window',
+    action: 'rename-window',
+    setup: { windows: [A, B, C] },
+    reason: 'no-window-on-screen',
+  },
+  {
+    when: 'no current window',
+    action: 'interrupt-window',
+    setup: { windows: [A, B, C] },
+    reason: 'no-window-on-screen',
+  },
+  {
+    when: 'the current window is unknown',
+    action: 'interrupt-window',
+    setup: { windows: [A, B, C], current: B, statuses: { [B.windowId]: 'unknown' } },
+    reason: 'unknown',
+  },
+  {
+    when: 'the current window has exited',
+    action: 'interrupt-window',
+    setup: { windows: [A, B, C], current: B, statuses: { [B.windowId]: 'exited' } },
+    reason: 'exited',
+  },
+  {
+    when: 'no current window',
+    action: 'minimize-window',
+    setup: { windows: [A, B, C] },
+    reason: 'no-window-on-screen',
+  },
+  {
+    when: 'no current window',
+    action: 'toggle-maximize-window',
+    setup: { windows: [A, B, C] },
+    reason: 'no-window-on-screen',
+  },
+  {
+    when: 'in Focus',
+    action: 'minimize-window',
+    setup: { windows: [A, B, C], current: B, workMode: 'focus' },
+    reason: 'canvas-only',
+  },
+  {
+    when: 'in Focus',
+    action: 'toggle-maximize-window',
+    setup: { windows: [A, B, C], current: B, workMode: 'focus' },
+    reason: 'canvas-only',
+  },
+  {
+    when: 'in Focus',
+    action: 'tile-windows',
+    setup: { windows: [A, B, C], current: B, workMode: 'focus' },
+    reason: 'canvas-only',
+  },
+  {
+    when: 'no window is open',
+    action: 'tile-windows',
+    setup: { windows: [] },
+    reason: 'no-windows',
+  },
+  {
+    when: 'the Needs you filter shows no rows',
+    action: 'focus-next-window',
+    setup: NO_ROWS_SHOWN,
+    reason: 'nowhere-to-go',
+  },
+  {
+    when: 'the Needs you filter shows no rows',
+    action: 'focus-previous-window',
+    setup: NO_ROWS_SHOWN,
+    reason: 'nowhere-to-go',
+  },
+  {
+    when: "the ended window's card has no neighbour",
+    action: 'focus-next-window',
+    setup: LONE_CARD,
+    reason: 'nowhere-to-go',
+  },
+  {
+    when: "the ended window's card has no neighbour",
+    action: 'focus-previous-window',
+    setup: LONE_CARD,
+    reason: 'nowhere-to-go',
+  },
+  {
+    when: 'no window needs the user',
+    action: 'focus-next-attention',
+    setup: { windows: [A, B, C], current: B, attentionTarget: null },
+    reason: 'nothing-needs-you',
+  },
+];
+
+describe('an action with nothing to act on', () => {
+  it.each(REFUSALS)(
+    '$action does nothing when $when, and is refused as $reason',
+    async ({ action, setup, reason }: Refusal) => {
+      const h = harness(setup);
+      await h.run(action);
+      expect(h.calls).toEqual([]);
+      expect(actionAvailability(action, availabilityContext(h.deps))).toEqual({
+        ok: false,
+        reason,
+      });
+    }
+  );
+
+  it('has no next window when the Needs you filter shows no rows', () => {
+    const h = harness(NO_ROWS_SHOWN);
+    expect(availabilityContext(h.deps).hasNeighbor.next).toBe(false);
   });
 });
 
 describe('in Focus', () => {
-  it.each<ActionId>(['minimize-window', 'toggle-maximize-window'])(
-    '%s does nothing (Focus has no minimize or maximize)',
-    async (action: ActionId) => {
-      const h = harness({ windows: [A, B, C], current: B, workMode: 'focus' });
-      await h.run(action);
-      expect(h.calls).toEqual([]);
-    }
-  );
-
-  it.each<ActionId>(['close-window', 'interrupt-window', 'focus-next-window'])(
+  it.each<ActionId>(['close-window', 'interrupt-window', 'rename-window', 'focus-next-window'])(
     '%s still acts as in Canvas',
     async (action: ActionId) => {
       const h = harness({ windows: [A, B, C], current: B, workMode: 'focus' });
@@ -274,18 +409,6 @@ describe('in Focus', () => {
       expect(h.calls).toEqual(EXPECTED_CALLS[action]);
     }
   );
-});
-
-describe('focus after an operation', () => {
-  it('leaves the terminal focus after the attention jump to the jump itself', async () => {
-    const found = harness({ windows: [A, B, C], current: B, attentionTarget: C });
-    await found.run('focus-next-attention');
-    expect(found.calls).toEqual(['attention']);
-
-    const none = harness({ windows: [A, B], current: B, attentionTarget: null });
-    await none.run('focus-next-attention');
-    expect(none.calls).toEqual(['attention']);
-  });
 });
 
 describe('next and previous window with the Needs you filter on', () => {
@@ -308,18 +431,6 @@ describe('next and previous window with the Needs you filter on', () => {
 });
 
 describe("next and previous window while an ended window's card is shown", () => {
-  /** The card of a window that left; the ends of the list do not stand in for its place. */
-  function cardFor(windowId: string, next: Win | null, previous: Win | null): ExitedCard {
-    return {
-      windowId,
-      name: windowId,
-      exitCode: 1,
-      next: next?.windowId ?? null,
-      nextWindowId: next?.windowId ?? null,
-      previousWindowId: previous?.windowId ?? null,
-    };
-  }
-
   it('go to the windows on either side of where the card stands, not to the ends of the list', async () => {
     const between = cardFor('wgone-b', C, A);
     const next = harness({ windows: [A, C], workMode: 'focus', exitedCard: between });

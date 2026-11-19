@@ -249,7 +249,14 @@ export default [
   {
     // Display-only parts read props and call back; the shell owns IPC and stores.
     // `display/` holds the text preparation they draw through, so it is one of them.
-    files: ['src/banner-model.ts', 'src/components/**/*.{ts,svelte}', 'src/display/**/*.ts'],
+    // `keymap/action-availability.ts` is the judgment those parts and the runner share, so it
+    // reads no IPC or store either.
+    files: [
+      'src/banner-model.ts',
+      'src/components/**/*.{ts,svelte}',
+      'src/display/**/*.ts',
+      'src/keymap/action-availability.ts',
+    ],
     ignores: [...TEST_SOURCES, 'src/components/TerminalPane.svelte'],
     rules: {
       '@typescript-eslint/no-restricted-imports': [

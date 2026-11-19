@@ -32,6 +32,9 @@ export interface WindowActionsIpcClient {
 /**
  * Asks the user to approve a destructive operation.
  *
+ * Raises the dialog's open flag before it returns, so a gate holding the
+ * approval dialog back while another modal is open already sees this one.
+ *
  * @returns whether the operation was approved.
  */
 export type ConfirmPort = (operation: WindowOperation, entry: WindowEntry) => Promise<boolean>;

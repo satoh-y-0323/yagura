@@ -146,7 +146,12 @@ describe('window-actions: close honors resolveConfirmTarget instead of re-implem
     const confirmPort = approvingConfirmPort();
     const { actions, ipc } = buildActions({ confirmPort });
 
-    await actions.close(makeEntry({ status: 'unknown' }));
+    const done = actions.close(makeEntry({ status: 'unknown' }));
+    expect(confirmPort, 'before the returned promise is awaited').toHaveBeenCalledWith(
+      'close',
+      expect.objectContaining({ windowId: 'w-1' })
+    );
+    await done;
 
     expect(ipc.invokeCloseWindow).toHaveBeenCalledWith('w-1');
   });
@@ -372,7 +377,12 @@ describe('window-actions: interrupt is suppressed for unknown windows, offered o
     const confirmPort = approvingConfirmPort();
     const { actions, ipc } = buildActions({ confirmPort });
 
-    await actions.interrupt(makeEntry({ status: 'running' }));
+    const done = actions.interrupt(makeEntry({ status: 'running' }));
+    expect(confirmPort, 'before the returned promise is awaited').toHaveBeenCalledWith(
+      'interrupt',
+      expect.objectContaining({ windowId: 'w-1' })
+    );
+    await done;
 
     expect(confirmPort).toHaveBeenCalledWith(
       'interrupt',

@@ -4,6 +4,7 @@
  */
 import { resolveMessages } from './i18n/messages';
 import {
+  describeActionBlock as renderDescribeActionBlock,
   describeAttentionBadge as renderDescribeAttentionBadge,
   describeDeliveryState as renderDescribeDeliveryState,
   describeDetectionWarning as renderDescribeDetectionWarning,
@@ -34,6 +35,7 @@ import {
   type WindowHeaderFacts,
 } from './i18n/render';
 import type { ChatDeliveryOutcome, DetectedStatusView } from './ipc/session-boundary';
+import type { ActionBlockReason } from './keymap/action-availability';
 import type { ConfirmTarget } from './session/confirm-target';
 
 const messages = resolveMessages();
@@ -307,4 +309,12 @@ export function describeUndeliveredUnknownReason(outcome: ChatDeliveryOutcome): 
  */
 export function describeInterruptHint(target: ConfirmTarget): string {
   return renderDescribeInterruptHint(messages, target);
+}
+
+/**
+ * Describes why an action does nothing right now.
+ * @param reason the reason the availability judgment gave
+ */
+export function describeActionBlock(reason: ActionBlockReason): string {
+  return renderDescribeActionBlock(messages, reason);
 }

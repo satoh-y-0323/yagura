@@ -4,10 +4,18 @@
  * so confirmation and the work mode's handling live in one place.
  */
 
+import type { WindowStatus } from '../ipc/session-boundary';
 import { neighborWindow, type WorkMode } from '../session/current-window';
 import { revealWindow, type RevealDeps, type RoomMember } from '../session/room-navigation';
 import { exitedCardNeighbor, type ExitedCard } from '../session/shell-state';
 import { windowsInDisplayOrder, type RoomGroup } from '../sidebar/room-groups';
+import {
+  actionAvailability,
+  isWindowAction,
+  windowActionAvailability,
+  type AvailabilityContext,
+  type WindowActionId,
+} from './action-availability';
 import type { ActionId } from './key-binding';
 
 /** The window operations a shortcut can start. */
@@ -39,6 +47,10 @@ export interface ShortcutRunnerDeps<T extends RoomMember> {
   actions: ShortcutWindowActions<T>;
   /** Brings the next window needing the user on screen; returns it, or null when none waits. */
   goToNextWindowNeedingYou: () => T | null;
+  /** The window {@link goToNextWindowNeedingYou} would bring on screen now, without moving. */
+  nextAttention: () => T | null;
+  /** The detected status of `entry`. */
+  statusOf: (entry: T) => WindowStatus;
   /** Asks for keyboard focus to move into a window's terminal. */
   focusTerminal: (windowId: string) => void;
   /** Opens the new-window dialog, raising its open flag within this call. */
@@ -58,11 +70,45 @@ export interface ShortcutRunnerDeps<T extends RoomMember> {
 }
 
 /**
- * Builds the function that runs a shortcut action. Operations on "the current
- * window" act on the injected one and do nothing without it; minimize, maximize
- * and tile do nothing in Focus, which has none of them. Next / previous walk the
- * sidebar order and wrap at both ends; while an ended window's card is shown
- * they go where the card's rule says instead, so the key and its button agree.
+ * The window next / previous go to: along the sidebar order, wrapping at both
+ * ends, or where an ended window's card says while one is shown, so the key
+ * and the card's button agree.
+ *
+ * @returns the window, or null when there is none to go to
+ */
+export function neighborOf<T extends RoomMember>(
+  deps: ShortcutRunnerDeps<T>,
+  step: 1 | -1
+): T | null {
+  const card = deps.exitedCard();
+  if (card === null) {
+    return neighborWindow(deps.displayOrder(), deps.current(), step);
+  }
+  const targetId = exitedCardNeighbor(card, step);
+  return windowsInDisplayOrder(deps.groups()).find((entry) => entry.windowId === targetId) ?? null;
+}
+
+/**
+ * What {@link actionAvailability} judges, read from the same deps the runner
+ * acts through, so the palette and the Navigator judge what the runner would do.
+ */
+export function availabilityContext<T extends RoomMember>(
+  deps: ShortcutRunnerDeps<T>
+): AvailabilityContext<T> {
+  const entry = deps.current();
+  return {
+    current: entry === null ? null : { entry, status: deps.statusOf(entry) },
+    workMode: deps.workMode(),
+    hasNeighbor: { next: neighborOf(deps, 1) !== null, previous: neighborOf(deps, -1) !== null },
+    hasAttentionTarget: deps.nextAttention() !== null,
+    windowCount: windowsInDisplayOrder(deps.groups()).length,
+  };
+}
+
+/**
+ * Builds the function that runs a shortcut action. An action
+ * {@link actionAvailability} refuses does nothing; a window action acts on
+ * the window that judgment hands back.
  *
  * @returns a function whose promise settles once the action, including any
  * confirmation it asked for, has finished. Each action's deps are called before
@@ -78,32 +124,49 @@ export function createShortcutRunner<T extends RoomMember>(
     focusTerminal: deps.focusTerminal,
   };
 
-  function neighborOf(step: 1 | -1): T | null {
-    const card = deps.exitedCard();
-    if (card === null) {
-      return neighborWindow(deps.displayOrder(), deps.current(), step);
-    }
-    const targetId = exitedCardNeighbor(card, step);
-    return (
-      windowsInDisplayOrder(deps.groups()).find((entry) => entry.windowId === targetId) ?? null
-    );
-  }
-
   function goToNeighbor(step: 1 | -1): void {
-    const target = neighborOf(step);
+    const target = neighborOf(deps, step);
     if (target !== null) {
       revealWindow(reveal, target);
     }
   }
 
-  async function onCurrent(operate: (entry: T) => void | Promise<void>): Promise<void> {
-    const target = deps.current();
-    if (target !== null) {
-      await operate(target);
+  async function runOnWindow(action: WindowActionId, window: T): Promise<void> {
+    switch (action) {
+      case 'close-window':
+        await deps.actions.close(window);
+        return;
+      case 'interrupt-window':
+        await deps.actions.interrupt(window);
+        return;
+      case 'rename-window':
+        deps.renameWindow(window);
+        return;
+      case 'minimize-window':
+        deps.actions.minimize(window);
+        return;
+      case 'toggle-maximize-window':
+        deps.actions.maximize(window);
+        return;
+      default: {
+        const unhandled: never = action;
+        return unhandled;
+      }
     }
   }
 
   return async (action: ActionId): Promise<void> => {
+    const context = availabilityContext(deps);
+    if (isWindowAction(action)) {
+      const verdict = windowActionAvailability(action, context);
+      if (verdict.ok) {
+        await runOnWindow(action, verdict.window);
+      }
+      return;
+    }
+    if (!actionAvailability(action, context).ok) {
+      return;
+    }
     switch (action) {
       case 'open-window-picker':
         deps.openPicker('windows');
@@ -123,32 +186,11 @@ export function createShortcutRunner<T extends RoomMember>(
       case 'open-window-form':
         deps.openWindowForm();
         return;
-      case 'close-window':
-        await onCurrent(deps.actions.close);
-        return;
-      case 'interrupt-window':
-        await onCurrent(deps.actions.interrupt);
-        return;
-      case 'rename-window':
-        await onCurrent(deps.renameWindow);
-        return;
-      case 'minimize-window':
-        if (deps.workMode() === 'canvas') {
-          await onCurrent(deps.actions.minimize);
-        }
-        return;
-      case 'toggle-maximize-window':
-        if (deps.workMode() === 'canvas') {
-          await onCurrent(deps.actions.maximize);
-        }
-        return;
       case 'toggle-work-mode':
         deps.toggleWorkMode();
         return;
       case 'tile-windows':
-        if (deps.workMode() === 'canvas') {
-          deps.tileWindows();
-        }
+        deps.tileWindows();
         return;
       case 'toggle-sidebar-focus':
         deps.toggleSidebarFocus();

@@ -1,8 +1,9 @@
 import type { Messages } from './messages';
 import type { ChatDeliveryOutcome, DetectedStatusView } from '../ipc/session-boundary';
+import type { ActionBlockReason } from '../keymap/action-availability';
 // Type-only: the gate itself reaches this module through `ui-messages.ts`, so
 // a value import here would close that loop at runtime.
-import type { ConfirmTarget } from '../session/confirm-target';
+import type { ConfirmTarget, InterruptBlockReason } from '../session/confirm-target';
 
 /**
  * True if `key` is an own key of `record`, narrowing an externally supplied
@@ -378,16 +379,48 @@ export function describeDetectionWarning(messages: Messages, detail: unknown): s
  * @param target the gate's verdict for `interrupt` on that window
  */
 export function describeInterruptHint(messages: Messages, target: ConfirmTarget): string {
-  if (target.allowed) {
-    return messages.hints.interruptWindow;
-  }
-  switch (target.reason) {
+  return target.allowed
+    ? messages.hints.interruptWindow
+    : describeInterruptBlock(messages, target.reason);
+}
+
+function describeInterruptBlock(messages: Messages, reason: InterruptBlockReason): string {
+  switch (reason) {
     case 'exited':
       return messages.hints.interruptUnavailableExited;
     case 'unknown':
       return messages.hints.interruptUnavailableUnknown;
     default: {
-      const unreachable: never = target.reason;
+      const unreachable: never = reason;
+      return unreachable;
+    }
+  }
+}
+
+/**
+ * Describes why an action does nothing right now, for the palette's row and the
+ * menu item that stands for it.
+ *
+ * @param messages the resolved locale
+ * @param reason the reason the availability judgment gave
+ */
+export function describeActionBlock(messages: Messages, reason: ActionBlockReason): string {
+  switch (reason) {
+    case 'no-window-on-screen':
+      return messages.actionBlocks.noWindowOnScreen;
+    case 'canvas-only':
+      return messages.sidebar.canvasOnly;
+    case 'no-windows':
+      return messages.actionBlocks.noWindows;
+    case 'nowhere-to-go':
+      return messages.actionBlocks.nowhereToGo;
+    case 'nothing-needs-you':
+      return messages.actionBlocks.nothingNeedsYou;
+    case 'exited':
+    case 'unknown':
+      return describeInterruptBlock(messages, reason);
+    default: {
+      const unreachable: never = reason;
       return unreachable;
     }
   }

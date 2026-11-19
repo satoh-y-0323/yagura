@@ -166,7 +166,13 @@
   import { createKeymapStore } from '../keymap/keymap-store';
   import type { KeymapLoadStatus } from '../settings/keyboard-settings-model';
   import { createShortcutDispatcher } from '../keymap/shortcut-dispatcher';
-  import { createShortcutRunner, type PickerMode } from '../keymap/shortcut-runner';
+  import { actionAvailability, type ActionVerdict } from '../keymap/action-availability';
+  import {
+    availabilityContext,
+    createShortcutRunner,
+    type PickerMode,
+    type ShortcutRunnerDeps,
+  } from '../keymap/shortcut-runner';
   import { cascadeRect, type Size } from '../layout/float-layout';
   import { clampSidebarWidth, createSidebarWidthStorage } from '../layout/sidebar-width';
   import { offeredProfiles } from '../profile/offered-profiles';
@@ -231,7 +237,7 @@
   } from '../session/recovery-types';
   import { confirmCopy, type ConfirmOperation } from '../session/confirm-target';
   import { pairPanes, type Pane } from '../session/pane-plan';
-  import { createAttentionNavigation } from '../session/attention-navigation';
+  import { createAttentionNavigation, nextWindowNeedingYou } from '../session/attention-navigation';
   import { currentWindowFor, type WorkMode } from '../session/current-window';
   import {
     diffAppearedWindows,
@@ -2414,7 +2420,7 @@
   const unsubscribeArrivals = registry.subscribe(observeArrivals);
   $: sendAttentionSummary(get(registry), approvals, false);
 
-  const runShortcut = createShortcutRunner<WindowEntry>({
+  const runnerDeps: ShortcutRunnerDeps<WindowEntry> = {
     current: currentWindowNow,
     workMode: () => get(shell).workMode,
     exitedCard: () => get(shell).exitedCard,
@@ -2423,6 +2429,9 @@
     expandRoom: collapsedRooms.expand,
     actions,
     goToNextWindowNeedingYou,
+    nextAttention: () =>
+      nextWindowNeedingYou(sidebarGroups(), currentWindowNow(), needsYouView)?.entry ?? null,
+    statusOf: (entry) => entry.detected.status,
     focusTerminal: focusTerminalOf,
     openWindowForm: openAddDialog,
     renameWindow: handleRenameWindow,
@@ -2438,7 +2447,16 @@
     togglePlans,
     toggleSettings,
     toggleSidebarFocus,
-  });
+  };
+  const runShortcut = createShortcutRunner(runnerDeps);
+
+  // `$:` tracks only names written in the statement, and the runner's deps read through get(),
+  // so every source those deps read is listed here.
+  let tileAvailability: ActionVerdict;
+  $: {
+    void [$shell, $registry, $collapsedRooms, needsYouView];
+    tileAvailability = actionAvailability('tile-windows', availabilityContext(runnerDeps));
+  }
 
   // The window-level capture listener below is the only place keys are judged as
   // shortcuts, so it sees every key before the terminal and the inputs do.
@@ -3614,6 +3632,7 @@
       onToggleNeedsYou={toggleNeedsYouFilter}
       onSelectWindow={goToWindowFromSidebar}
       onChooseWorkMode={chooseWorkMode}
+      {tileAvailability}
       onTileWindows={handleArrangeWindows}
       onNewWindow={openAddDialog}
       onOpenChat={openChatForRoom}

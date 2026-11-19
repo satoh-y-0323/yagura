@@ -13,6 +13,7 @@
   import StatusBadge from '../components/StatusBadge.svelte';
   import WindowMenu from '../components/WindowMenu.svelte';
   import type { Rect } from '../components/menu-position';
+  import type { ActionVerdict } from '../keymap/action-availability';
   import type { WorkMode } from '../session/current-window';
   import type { RoomActions } from '../session/room-actions';
   import {
@@ -34,6 +35,7 @@
   import type { ThemeStore } from '../theme/theme-store';
   import { windowThemeOptions } from '../theme/window-theme-options';
   import {
+    describeActionBlock,
     describeAttentionBadge,
     describeRoomTitle,
     describeStatus,
@@ -62,6 +64,8 @@
   export let onToggleNeedsYou: () => void;
   export let onSelectWindow: (entry: WindowEntry) => void;
   export let onChooseWorkMode: (mode: WorkMode) => void;
+  /** Whether the view menu's Tile does anything now, judged as the shortcut runner judges it. */
+  export let tileAvailability: ActionVerdict;
   export let onTileWindows: () => void;
   export let onNewWindow: () => void;
   export let onOpenChat: (roomId: string) => void;
@@ -698,11 +702,13 @@
     type="button"
     class="popup-menu__item"
     role="menuitem"
-    disabled={!isCanvas}
+    disabled={!tileAvailability.ok}
     on:click={() => chooseFromViewMenu(onTileWindows)}
   >
     <span class="popup-menu__label">{hints.tileWindows}</span>
-    {#if !isCanvas}<span class="popup-menu__badge">{sidebar.canvasOnly}</span>{/if}
+    {#if !tileAvailability.ok}<span class="popup-menu__badge"
+        >{describeActionBlock(tileAvailability.reason)}</span
+      >{/if}
   </button>
 </PopupMenu>
 

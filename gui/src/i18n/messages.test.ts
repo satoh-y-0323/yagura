@@ -459,6 +459,12 @@ export const dummyMessages: Messages = {
     exitedBody: 'DUMMY_workArea_exitedBody',
     goToWindow: (name: string) => `DUMMY_workArea_goToWindow(${name})`,
   },
+  actionBlocks: {
+    noWindowOnScreen: 'DUMMY_actionBlocks_noWindowOnScreen',
+    nowhereToGo: 'DUMMY_actionBlocks_nowhereToGo',
+    noWindows: 'DUMMY_actionBlocks_noWindows',
+    nothingNeedsYou: 'DUMMY_actionBlocks_nothingNeedsYou',
+  },
 
   /** The chat panel, its delivery chips, its halt banner and its badge. */
   chat: {

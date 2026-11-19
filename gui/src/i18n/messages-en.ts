@@ -959,4 +959,12 @@ export const messagesEn = {
       "yagura didn't switch to another window, so nothing you type goes to a different CLI.",
     goToWindow: (name: string): string => `Go to ${name}`,
   },
+
+  /** Why an action does nothing right now, shown beside it in the palette and the menus. */
+  actionBlocks: {
+    noWindowOnScreen: 'No window on screen',
+    nowhereToGo: 'No window to go to',
+    noWindows: 'No windows open',
+    nothingNeedsYou: 'Nothing needs you',
+  },
 };
