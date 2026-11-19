@@ -1,27 +1,34 @@
 # Keymap Guide
 
-yagura runs twelve operations from the keyboard. This guide lists them with their default keys,
+yagura runs its operations from the keyboard. This guide lists them with their default keys,
 explains how to change a key from Settings or by editing `keymap.toml`, and says which keys yagura
 refuses to bind and why.
 
 ## Default Keys
 
-Every operation has one key. Windows and Linux share a table; macOS has its own. On macOS `Cmd`
-is the `Meta` modifier in the file (see [Writing a Key](#writing-a-key)).
+Most operations have a default key; the ones marked "—" have none until you give them one. Windows
+and Linux share a table; macOS has its own. On macOS `Cmd` is the `Meta` modifier in the file (see
+[Writing a Key](#writing-a-key)).
 
 | Action id                | Operation                               | Windows / Linux     | macOS         |
 | ------------------------ | --------------------------------------- | ------------------- | ------------- |
+| `open-window-picker`     | Go to a window (search by name)         | `Ctrl+Shift+o`      | `Meta+p`      |
+| `open-command-palette`   | Commands (search the operations)        | `Ctrl+Shift+p`      | `Shift+Meta+p` |
 | `focus-next-window`      | Next window (in sidebar order)          | `Ctrl+Shift+f`      | `Shift+Meta+]` |
 | `focus-previous-window`  | Previous window                         | `Ctrl+Shift+b`      | `Shift+Meta+[` |
 | `focus-next-attention`   | Next window needing you                 | `Ctrl+Shift+j`      | `Shift+Meta+a` |
 | `open-window-form`       | New window                              | `Ctrl+Shift+n`      | `Meta+n`      |
 | `close-window`           | Close the current window                | `Ctrl+Shift+w`      | `Shift+Meta+w` |
 | `interrupt-window`       | Interrupt the current window            | `Ctrl+Shift+k`      | `Meta+.`      |
+| `rename-window`          | Rename the current window               | —                   | —             |
 | `minimize-window`        | Minimize the current window             | `Ctrl+Shift+m`      | `Shift+Meta+m` |
 | `toggle-maximize-window` | Maximize or restore the current window  | `Ctrl+Shift+Enter`  | `Shift+Meta+Enter` |
+| `toggle-work-mode`       | Switch between Focus and Canvas         | —                   | —             |
+| `tile-windows`           | Tile the windows (Canvas only)          | —                   | —             |
 | `toggle-sidebar-focus`   | Move to the sidebar / back to a window  | `Ctrl+Shift+e`      | `Shift+Meta+e` |
+| `toggle-needs-you-filter` | Turn the Needs you filter on or off    | —                   | —             |
 | `toggle-chat`            | Chat panel                              | `Ctrl+Shift+l`      | `Shift+Meta+l` |
-| `toggle-plans`           | Plans panel                             | `Ctrl+Shift+p`      | `Shift+Meta+p` |
+| `toggle-plans`           | Board panel                             | `Ctrl+Shift+t`      | `Shift+Meta+t` |
 | `toggle-settings`        | Settings panel                          | `Ctrl+Shift+s`      | `Meta+,`      |
 
 yagura has two work views. In **Focus** (the default) the current window fills the work area and
@@ -55,9 +62,54 @@ context menu key opens the row's menu, whose **Move up** and **Move down** reord
 its room. Reordering is not offered while the **Needs you** filter is on. The **Windows** button in
 the rail sends the keyboard to the current window's terminal.
 
+### Go to Window and Commands
+
+One search box does two jobs. `open-window-picker` opens it to find a window; `open-command-palette`
+opens it already in the commands mode. The **Go to window…** button under the sidebar header opens
+it for windows too (it is left out while no window is open), and the empty work area shows the key
+of Commands.
+
+**Windows.** Type to narrow the list. Every word you type has to be found in the window's name, its
+room (or its folder, for a window in no room), its working directory, its vendor or its status as
+the sidebar words it; case and character width are ignored.
+
+- With nothing typed, the windows that need you come first under **Needs you**, then the rest under
+  **Other windows**; a window whose status is unknown leads the rest. The current window comes last
+  in its list.
+- With text typed, the list is one run: a window whose whole name is what you typed comes first,
+  then names that start with it, names with a word that starts with it, names that contain it, and
+  last the windows found only through another field. Within a group, windows that need you (or whose
+  status is unknown) come first, then the status and the sidebar order. The current window comes
+  last.
+- With nothing typed and no window open, the list offers **New window** instead.
+
+**Commands.** A leading `>` turns the list into the operations, so the same box serves both modes:
+type `>` in the windows mode to switch, delete it to switch back. The list holds every operation
+except Commands itself, under the headings of the Keyboard tab, with the key of each at its right
+end. Typing narrows it by name, by words the name does not show (`stop` finds Interrupt window) and
+by heading. The matches are ordered as the window names are (whole name, start, word start, inside,
+other fields), and within one group the operations that can run come before those that cannot.
+
+- An operation that would do nothing right now stays in the list, dimmed, with the reason beside it:
+  **No window on screen**, **Canvas only**, **No windows open**, **No window to go to**,
+  **Nothing needs you**, or why a window cannot be interrupted. `Enter` does nothing on it. The key
+  of such an operation does nothing either, and **Tile windows** in the sidebar's view menu shows
+  the same reason.
+- **Go to window…** in the list switches the box to the windows mode and keeps it open.
+
+**Choosing.** `↑` and `↓` move, `PageUp` and `PageDown` move by a page, `Enter` or a click chooses,
+and `Esc` closes. The box closes first, and the window or the operation you chose starts after that,
+from where the focus was before you opened the box. An approval dialog never opens on top of the
+box: it waits until the box has closed and the chosen row has started.
+
+**While it is open.** The key that opens the other mode switches to that mode; the key of the mode
+you are in does nothing. The other shortcuts do nothing, as they do in any dialog. The list follows
+the windows as they change without moving the rows under you: a window that is gone loses its row,
+and a new window is added at the end of its list.
+
 ### Escape Closes a Panel
 
-Pressing a plain `Esc` closes the Chat, Plans or Settings panel. This is fixed and not part of the
+Pressing a plain `Esc` closes the Chat, Board or Settings panel. This is fixed and not part of the
 keymap. It does not apply while the panel has already used the key (for example, an open mention
 list in Chat), and an `Esc` typed inside a window still goes to the program running there.
 
@@ -92,6 +144,9 @@ list in Chat), and an `Esc` typed inside a window still goes to the program runn
   window either: in Focus a card says which window ended and with what exit code, and offers
   **Go to** the next window or a new window; focus stays where it was, so what you type does not
   reach another CLI. Only a window you close yourself moves you to the next one.
+- When you choose a row in the Go to window and Commands box, the box closes first. A window you
+  chose gets what you type next; an operation you chose runs from where the focus was before the
+  box opened.
 
 ### How Keys Reach the Program
 
@@ -175,8 +230,8 @@ toggle-chat = ""
 ```
 
 Only the operations you want to change need a line. The file is merged **on top of** the defaults:
-an operation without a line keeps its default key, unless a line took that key for another
-operation, in which case it has no key. The Keyboard tab writes only the operations that differ
+an operation without a line keeps its default key (none, for the operations marked "—"), unless a
+line took that key for another operation, in which case it has no key. The Keyboard tab writes only the operations that differ
 from the defaults.
 
 Anything outside `[keys]` is ignored. A file whose `[keys]` table is missing or empty simply
@@ -225,7 +280,7 @@ Keyboard tab, the default table and the file.
 
 When yagura reads the file, an entry is discarded, and the rest of the file stays in effect, when:
 
-- its name is not one of the twelve action ids,
+- its name is not one of the action ids in the table at the top of this page,
 - its key is refused by a rule above,
 - an earlier operation (in the order of the table at the top of this page) already took the same
   key.
@@ -282,7 +337,7 @@ None of these keys can be given to an operation.
 On Windows, the keys that open the web view's own browser features do nothing in yagura: print
 (`Ctrl+P`), find (`Ctrl+F`), zoom, history navigation and the like. This covers every
 key the web view handles as a browser, including combinations yagura has no default for, so a key
-you remove from an operation (for example `Ctrl+Shift+P`) does not open a browser feature either.
+you remove from an operation (for example `Ctrl+Shift+T`) does not open a browser feature either.
 Keys that edit or move through text (`Ctrl+A`, `Ctrl+C`, `Ctrl+V`, `Ctrl+Z`, the arrow keys) keep
 working, and so do yagura's own shortcuts.
 
