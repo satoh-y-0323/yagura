@@ -235,12 +235,12 @@ describe('createWindowRegistry: the room a window belongs to', () => {
       makeWindowInfo({
         window_id: 'w-a',
         name: 'renamed-a',
-        room: { room_id: 'r-beta', name: 'orca' },
+        room: { room_id: 'r-beta', name: 'harbor' },
       })
     );
 
     expect(get(registry).windows).toEqual([
-      openedEntry('w-a', 'renamed-a', { roomId: 'r-beta', name: 'orca' }),
+      openedEntry('w-a', 'renamed-a', { roomId: 'r-beta', name: 'harbor' }),
     ]);
   });
 
