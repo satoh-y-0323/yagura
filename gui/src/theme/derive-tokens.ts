@@ -133,6 +133,8 @@ export function deriveTokens(palette: Palette): DerivedTokens {
     '--bg-hover': withAlpha(foreground, hover),
     '--bg-pressed': withAlpha(foreground, pressed),
     '--bg-selected': withAlpha(foreground, selected),
+    // Its own token, though the value matches the input tint: a search match is not a status.
+    '--bg-mark': withAlpha(primary, tintAlpha),
     '--line': toHex(parseHex(palette['color-border'])),
     '--line-strong': toHex(strongLine(background, foreground, [background, chrome, surface])),
     '--fg-default': toHex(parseHex(palette['color-text-primary'])),

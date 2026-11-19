@@ -34,6 +34,7 @@ const DERIVED_REQUIRED = [
   '--bg-hover',
   '--bg-pressed',
   '--bg-selected',
+  '--bg-mark',
   '--line',
   '--line-strong',
   '--fg-default',

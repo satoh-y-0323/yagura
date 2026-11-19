@@ -99,6 +99,19 @@ describe.each(THEME_NAMES)('the tokens derived from the built-in %s palette', (t
     }
   });
 
+  it('keeps --fg-default at 4.5:1 on a search match, in a selected row or not', () => {
+    const tokens = map();
+    const mark = parseColor(tokenOf(tokens, '--bg-mark'));
+    const selected = parseColor(tokenOf(tokens, '--bg-selected'));
+    const fg = parseColor(tokenOf(tokens, '--fg-default'));
+    for (const surface of SURFACES) {
+      for (const row of [solid(tokens, surface), over(selected, solid(tokens, surface))]) {
+        const ground = over(mark, row);
+        expect(contrast(over(fg, ground), ground), `on ${surface}`).toBeGreaterThanOrEqual(4.5);
+      }
+    }
+  });
+
   it.each([
     '--st-approval',
     '--st-input',

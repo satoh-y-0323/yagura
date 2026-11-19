@@ -783,9 +783,15 @@
     font-size: inherit;
   }
 
+  /* Weight alone fails in an already-bold name, and a light tint alone is too faint against
+     its row, so a match carries all three. */
   mark {
-    background-color: transparent;
+    border-radius: 2px;
+    background-color: var(--bg-mark);
     color: var(--fg-default);
+    text-decoration: underline;
+    text-decoration-thickness: 1px;
+    text-underline-offset: 3px;
     font-weight: var(--weight-semibold);
   }
 
@@ -810,7 +816,7 @@
   }
 
   @media (forced-colors: active) {
-    /* A transparent mark keeps MarkText on the Canvas color, which can hide the text. */
+    /* Forced colors drop the fill, leaving MarkText on Canvas, which can hide the text. */
     mark {
       background-color: Mark;
       color: MarkText;
