@@ -60,6 +60,30 @@ const KEYBOARD_ACTION_NAMES = {
   toggleSettings: 'Settings',
 };
 
+/**
+ * Extra words the command palette finds an action by, never shown. English
+ * UI words only; no vendor is named.
+ */
+const PICKER_ACTION_KEYWORDS: Readonly<Record<string, string>> = {
+  openWindowPicker: 'find search switch jump',
+  focusNextWindow: 'switch cycle',
+  focusPreviousWindow: 'switch cycle back',
+  focusNextAttention: 'waiting approval input jump',
+  openWindowForm: 'open add create launch',
+  closeWindow: 'quit exit',
+  interruptWindow: 'stop cancel',
+  renameWindow: 'name title',
+  minimizeWindow: 'hide',
+  toggleMaximizeWindow: 'zoom full screen expand',
+  toggleWorkMode: 'focus canvas view layout',
+  tileWindows: 'arrange grid layout',
+  toggleSidebarFocus: 'navigator list',
+  toggleNeedsYouFilter: 'waiting attention',
+  toggleChat: 'room messages',
+  togglePlans: 'plans tickets',
+  toggleSettings: 'preferences options keyboard theme',
+};
+
 /** The one row that says more than its name: the next-window order follows the sidebar. */
 const KEYBOARD_ACTION_NOTES: Readonly<Record<string, string>> = {
   focusNextWindow: 'In sidebar order',
@@ -966,5 +990,30 @@ export const messagesEn = {
     nowhereToGo: 'No window to go to',
     noWindows: 'No windows open',
     nothingNeedsYou: 'Nothing needs you',
+  },
+
+  /** The go-to-window picker and the command palette: one dialog with two modes. */
+  picker: {
+    windowsTitle: 'Go to window',
+    commandsTitle: 'Commands',
+    placeholder: 'Search windows by name, room, folder, or status',
+    windowsFooter: '↑↓ Move · Enter Open · Esc Close · > Commands',
+    commandsFooter: '↑↓ Move · Enter Run · Esc Close',
+    needsYouHeading: 'Needs you',
+    otherWindowsHeading: 'Other windows',
+    current: 'Current',
+    noWindows: 'No windows open',
+    noWindowMatch: (query: string): string => `No windows match “${query}”.`,
+    noWindowMatchHint: 'Type > to search commands.',
+    noCommandMatch: (query: string): string => `No commands match “${query}”.`,
+    noCommandMatchHint: 'Delete > to search windows.',
+    windowCount: (count: number): string => (count === 1 ? '1 window' : `${count} windows`),
+    commandCount: (count: number): string => (count === 1 ? '1 command' : `${count} commands`),
+    /** A window row's accessible name, after the sidebar row's: where the window is. */
+    windowRowPlace: (label: string, place: string): string => `${label}, in ${place}`,
+    windowRowCurrent: (label: string): string => `${label}, current`,
+    actionRowKey: (name: string, key: string): string => `${name}, ${key}`,
+    actionKeywords: (action: KebabCase<keyof typeof KEYBOARD_ACTION_NAMES>): string =>
+      PICKER_ACTION_KEYWORDS[camelCase(action)] ?? '',
   },
 };

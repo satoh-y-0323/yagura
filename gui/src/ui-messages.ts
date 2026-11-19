@@ -16,6 +16,10 @@ import {
   describeInterruptHint as renderDescribeInterruptHint,
   describeOperationFailure,
   describePaneNotice as renderDescribePaneNotice,
+  describePickerActionRow as renderDescribePickerActionRow,
+  describePickerEmpty as renderDescribePickerEmpty,
+  describePickerResults as renderDescribePickerResults,
+  describePickerWindowRow as renderDescribePickerWindowRow,
   describeQueuedMessages as renderDescribeQueuedMessages,
   describeReopenOffer as renderDescribeReopenOffer,
   describeRestoreBanner as renderDescribeRestoreBanner,
@@ -32,8 +36,10 @@ import {
   describeWindowRow as renderDescribeWindowRow,
   EXTERNAL_TEXT_MAX_CODE_POINTS,
   foldExternalText,
+  type PickerWindowRowFacts,
   type WindowHeaderFacts,
 } from './i18n/render';
+import type { PickerEmpty, PickerMode } from './command-picker/picker-model';
 import type { ChatDeliveryOutcome, DetectedStatusView } from './ipc/session-boundary';
 import type { ActionBlockReason } from './keymap/action-availability';
 import type { ConfirmTarget } from './session/confirm-target';
@@ -87,6 +93,9 @@ export const settings = messages.settings;
 
 /** The work area's text while it shows no window. */
 export const workArea = messages.workArea;
+
+/** The go-to-window picker and the command palette. */
+export const picker = messages.picker;
 
 /**
  * Describes the card that stands in for a window that ended without this GUI
@@ -317,4 +326,48 @@ export function describeInterruptHint(target: ConfirmTarget): string {
  */
 export function describeActionBlock(reason: ActionBlockReason): string {
   return renderDescribeActionBlock(messages, reason);
+}
+
+export type { PickerWindowRowFacts };
+
+/**
+ * Describes a picker window row as its accessible name.
+ * @param facts the window's name, status and place, and whether it is the current one
+ */
+export function describePickerWindowRow(facts: PickerWindowRowFacts): string {
+  return renderDescribePickerWindowRow(messages, facts);
+}
+
+/**
+ * Describes a palette action row as its accessible name.
+ * @param name the action's name
+ * @param key the key as the row shows it, `null` when the action has none
+ */
+export function describePickerActionRow(name: string, key: string | null): string {
+  return renderDescribePickerActionRow(messages, name, key);
+}
+
+/**
+ * Describes why the picker lists nothing, or only the New window offer.
+ * @param empty the picker's empty state
+ */
+export function describePickerEmpty(empty: NonNullable<PickerEmpty>): {
+  title: string;
+  hint: string | null;
+} {
+  return renderDescribePickerEmpty(messages, empty);
+}
+
+/**
+ * Describes what the picker lists, for the screen reader.
+ * @param mode the mode the rows are in
+ * @param rowCount how many rows are listed
+ * @param empty the picker's empty state
+ */
+export function describePickerResults(
+  mode: PickerMode,
+  rowCount: number,
+  empty: PickerEmpty
+): string {
+  return renderDescribePickerResults(messages, mode, rowCount, empty);
 }

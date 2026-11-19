@@ -1,4 +1,5 @@
 import type { Messages } from './messages';
+import type { PickerEmpty, PickerMode } from '../command-picker/picker-model';
 import type { ChatDeliveryOutcome, DetectedStatusView } from '../ipc/session-boundary';
 import type { ActionBlockReason } from '../keymap/action-availability';
 // Type-only: the gate itself reaches this module through `ui-messages.ts`, so
@@ -424,4 +425,85 @@ export function describeActionBlock(messages: Messages, reason: ActionBlockReaso
       return unreachable;
     }
   }
+}
+
+/** What a picker window row is read out as; see {@link describePickerWindowRow}. */
+export interface PickerWindowRowFacts {
+  /** The window's display name, already prepared for display. */
+  name: string;
+  status: string;
+  isAwaitingPermission: boolean;
+  /** The room's display name, or the folder for a window in no room. */
+  place: string;
+  isCurrent: boolean;
+}
+
+/**
+ * Describes a picker window row as its accessible name: the sidebar row's name,
+ * then where the window is, then whether it is the current one.
+ */
+export function describePickerWindowRow(messages: Messages, facts: PickerWindowRowFacts): string {
+  const row = describeWindowRow(messages, facts.name, facts.status, facts.isAwaitingPermission);
+  const placed = messages.picker.windowRowPlace(row, facts.place);
+  return facts.isCurrent ? messages.picker.windowRowCurrent(placed) : placed;
+}
+
+/**
+ * Describes a palette action row as its accessible name: the action's name, and
+ * its key when it has one.
+ *
+ * @param key the key as the row shows it, `null` when the action has none
+ */
+export function describePickerActionRow(
+  messages: Messages,
+  name: string,
+  key: string | null
+): string {
+  return key === null ? name : messages.picker.actionRowKey(name, key);
+}
+
+/**
+ * Describes why the picker lists nothing, or only the New window offer: what
+ * the user sees, and how to search the other mode when there is a way.
+ */
+export function describePickerEmpty(
+  messages: Messages,
+  empty: NonNullable<PickerEmpty>
+): { title: string; hint: string | null } {
+  switch (empty.kind) {
+    case 'no-windows':
+      return { title: messages.picker.noWindows, hint: null };
+    case 'no-window-match':
+      return {
+        title: messages.picker.noWindowMatch(empty.query),
+        hint: messages.picker.noWindowMatchHint,
+      };
+    case 'no-command-match':
+      return {
+        title: messages.picker.noCommandMatch(empty.query),
+        hint: messages.picker.noCommandMatchHint,
+      };
+    default: {
+      const unreachable: never = empty;
+      return unreachable;
+    }
+  }
+}
+
+/**
+ * Describes what the picker lists, for the screen reader once typing pauses:
+ * how many rows there are, or why there are none.
+ */
+export function describePickerResults(
+  messages: Messages,
+  mode: PickerMode,
+  rowCount: number,
+  empty: PickerEmpty
+): string {
+  if (empty !== null) {
+    return describePickerEmpty(messages, empty).title;
+  }
+  return mode === 'commands'
+    ? messages.picker.commandCount(rowCount)
+    : messages.picker.windowCount(rowCount);
 }

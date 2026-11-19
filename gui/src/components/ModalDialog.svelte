@@ -9,9 +9,14 @@
   export let onCancel: () => void;
   /**
    * Overrides the dialog's max-width; `null`/unset keeps the
-   * 400px default set in `.modal-dialog` below.
+   * 400px default set in `.modal-dialog` below. It is inline, so it wins over
+   * the width a `variant` sets.
    */
   export let maxWidth: string | null = null;
+  /** The dialog's accessible name; `null` leaves the dialog without one. */
+  export let label: string | null = null;
+  /** `picker` is the command picker's frame: wider, near the top, and edge to edge inside. */
+  export let variant: 'form' | 'picker' = 'form';
   /** The window the dialog is about, or null; decides where focus goes once it closes. */
   export let subject: string | null = null;
   /**
@@ -103,13 +108,15 @@
 
 <dialog
   class="modal-dialog"
+  data-variant={variant}
+  aria-label={label ?? undefined}
   bind:this={dialogElement}
   style:max-width={maxWidth}
   on:keydown={handleKeydown}
   on:cancel|preventDefault={handleCancel}
   on:click={handleBackdropClick}
 >
-  <div class="modal-body">
+  <div class="modal-body" data-variant={variant}>
     <slot />
   </div>
   <!-- Where tooltips and menus opened from inside this dialog are drawn: the dialog
@@ -135,5 +142,22 @@
 
   .modal-body {
     padding: var(--space-md);
+  }
+
+  /* The top margin is fixed and the bottom one is not, so the frame stays put
+     while the rows below it are filtered. */
+  .modal-dialog[data-variant='picker'] {
+    width: min(560px, 100vw - 32px);
+    max-width: none;
+    margin: 15vh auto auto;
+    border: var(--line-width) solid var(--line);
+    border-radius: var(--radius-lg);
+    background-color: var(--bg-raised);
+    color: var(--fg-default);
+    box-shadow: var(--shadow-modal);
+  }
+
+  .modal-body[data-variant='picker'] {
+    padding: 0;
   }
 </style>

@@ -465,6 +465,28 @@ export const dummyMessages: Messages = {
     noWindows: 'DUMMY_actionBlocks_noWindows',
     nothingNeedsYou: 'DUMMY_actionBlocks_nothingNeedsYou',
   },
+  picker: {
+    windowsTitle: 'DUMMY_picker_windowsTitle',
+    commandsTitle: 'DUMMY_picker_commandsTitle',
+    placeholder: 'DUMMY_picker_placeholder',
+    windowsFooter: 'DUMMY_picker_windowsFooter',
+    commandsFooter: 'DUMMY_picker_commandsFooter',
+    needsYouHeading: 'DUMMY_picker_needsYouHeading',
+    otherWindowsHeading: 'DUMMY_picker_otherWindowsHeading',
+    current: 'DUMMY_picker_current',
+    noWindows: 'DUMMY_picker_noWindows',
+    noWindowMatch: (query: string) => `DUMMY_picker_noWindowMatch(${query})`,
+    noWindowMatchHint: 'DUMMY_picker_noWindowMatchHint',
+    noCommandMatch: (query: string) => `DUMMY_picker_noCommandMatch(${query})`,
+    noCommandMatchHint: 'DUMMY_picker_noCommandMatchHint',
+    windowCount: (count: number) => `DUMMY_picker_windowCount(${count})`,
+    commandCount: (count: number) => `DUMMY_picker_commandCount(${count})`,
+    windowRowPlace: (label: string, place: string) =>
+      `DUMMY_picker_windowRowPlace(${label},${place})`,
+    windowRowCurrent: (label: string) => `DUMMY_picker_windowRowCurrent(${label})`,
+    actionRowKey: (name: string, key: string) => `DUMMY_picker_actionRowKey(${name},${key})`,
+    actionKeywords: (action: string) => `DUMMY_picker_actionKeywords(${action})`,
+  },
 
   /** The chat panel, its delivery chips, its halt banner and its badge. */
   chat: {
