@@ -1,12 +1,14 @@
 /**
- * The built-in chord of every action, per host platform. A keymap file only
- * overrides actions; everything it leaves out falls back to this table.
+ * The built-in chord of every action, per host platform, or `null` for an action
+ * that ships without one. A keymap file only overrides actions; everything it
+ * leaves out falls back to this table.
  */
 
 import type { KeyboardPlatform } from './keyboard-platform';
 import type { ActionId } from './key-binding';
 
-type DefaultKeys = Readonly<Record<ActionId, string>>;
+/** The default chord of every action, or `null` for an action without one. */
+export type DefaultKeys = Readonly<Record<ActionId, string | null>>;
 
 const WINDOWS_AND_LINUX: DefaultKeys = Object.freeze({
   'focus-next-window': 'Ctrl+Shift+f',
@@ -40,8 +42,8 @@ const MAC: DefaultKeys = Object.freeze({
 });
 
 /**
- * The default chord of every action on `platform`, in the canonical chord form.
- * Windows and Linux share one table. The returned table is frozen.
+ * The default chord of every action on `platform`, in the canonical chord form,
+ * or `null` where it has none. Windows and Linux share one table. The returned table is frozen.
  */
 export function defaultKeysFor(platform: KeyboardPlatform): DefaultKeys {
   return platform === 'mac' ? MAC : WINDOWS_AND_LINUX;

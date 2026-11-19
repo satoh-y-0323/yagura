@@ -8,7 +8,7 @@ import { writable, type Readable } from 'svelte/store';
 
 import type { LoadKeymapResult } from '../ipc/session-client';
 import { validateBinding, type BindingRejection } from '../keymap/binding-rules';
-import { defaultKeysFor } from '../keymap/default-keymap';
+import type { DefaultKeys } from '../keymap/default-keymap';
 import type { KeyboardPlatform } from '../keymap/keyboard-platform';
 import { ACTION_IDS, type ActionId } from '../keymap/key-binding';
 import { assignChord, removeAction, resetAction, type Keys } from '../keymap/keymap-model';
@@ -47,10 +47,7 @@ export interface KeyboardRow {
 }
 
 /** The rows of the tab, one per action in `ACTION_IDS` order, judged against `defaults`. */
-export function keyboardRows(
-  keys: Keys,
-  defaults: Readonly<Record<ActionId, string>>
-): KeyboardRow[] {
+export function keyboardRows(keys: Keys, defaults: DefaultKeys): KeyboardRow[] {
   return ACTION_IDS.map((action) => {
     const chord = keys[action];
     const isChanged = chord !== defaults[action];
@@ -164,6 +161,8 @@ export interface KeyboardTabState {
 /** What the controller needs from the shell. */
 export interface KeyboardTabDeps {
   platform: KeyboardPlatform;
+  /** The default table the rows are judged against; pass the one given to `keyboardRows`. */
+  defaults: DefaultKeys;
   /** The keys now in force, read when a press happens. */
   keys: () => Keys;
   /** Why editing is refused now, or `null`; read when a press happens. */
@@ -193,8 +192,7 @@ export interface KeyboardTabController extends Readable<KeyboardTabState> {
  * its save finishes, and a move is shown only once the save was kept.
  */
 export function createKeyboardTabController(deps: KeyboardTabDeps): KeyboardTabController {
-  const { platform } = deps;
-  const defaults = defaultKeysFor(platform);
+  const { platform, defaults } = deps;
   let current: KeyboardTabState = { recording: null, notices: {} };
   const state = writable<KeyboardTabState>(current);
   // Identifies the recording that is under way, so a stale one reports into the void.
@@ -260,14 +258,15 @@ export function createKeyboardTabController(deps: KeyboardTabDeps): KeyboardTabC
     endRecording();
     update({ notices: withoutNotice(action) });
     const keys = deps.keys();
-    if (keys[action] === defaults[action]) return;
+    const chord = defaults[action];
+    if (keys[action] === chord) return;
+    // Without a default chord, a reset takes the chord off and moves nothing, so there is no notice.
+    if (chord === null) {
+      await deps.commit((table) => resetAction(table, defaults, action).keys);
+      return;
+    }
     const movedFrom = resetAction(keys, defaults, action).movedFrom;
-    await save(
-      action,
-      defaults[action],
-      movedFrom,
-      (table) => resetAction(table, defaults, action).keys
-    );
+    await save(action, chord, movedFrom, (table) => resetAction(table, defaults, action).keys);
   }
 
   async function remove(action: ActionId): Promise<void> {

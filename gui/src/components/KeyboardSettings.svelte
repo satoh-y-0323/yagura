@@ -30,8 +30,10 @@
   export let onCancelRecording: () => void;
   export let onCommit: (edit: (keys: Keys) => Keys) => Promise<boolean>;
 
+  const defaults = defaultKeysFor(platform);
   const controller = createKeyboardTabController({
     platform,
+    defaults,
     keys: () => keys,
     editBlock: () => keymapEditBlock(loadStatus),
     beginRecording: (onResult) => onBeginRecording(onResult),
@@ -41,7 +43,7 @@
 
   onDestroy(() => controller.dispose());
 
-  $: rows = keyboardRows(keys, defaultKeysFor(platform));
+  $: rows = keyboardRows(keys, defaults);
   $: block = keymapEditBlock(loadStatus);
 
   /** A chord as the sentences of the notices quote it. */

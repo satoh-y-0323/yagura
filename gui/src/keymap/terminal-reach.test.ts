@@ -1,6 +1,5 @@
 import { describe, expect, it } from 'vitest';
 import { validateBinding, type BindingRejection } from './binding-rules';
-import { defaultKeysFor } from './default-keymap';
 import type { KeyboardPlatform } from './keyboard-platform';
 import terminalKeys from './terminal-key-bytes.generated.json';
 
@@ -88,17 +87,6 @@ describe('a chord with Ctrl is bindable when Ctrl adds nothing the daemon would 
 
   it('covers the chords the table holds with Ctrl', () => {
     expect(ctrlChordsInTable().length).toBeGreaterThan(200);
-  });
-});
-
-describe('the default key table', () => {
-  it.each(PLATFORMS)('is accepted in full on %s', (platform) => {
-    const rejected: string[] = [];
-    for (const [action, chord] of Object.entries(defaultKeysFor(platform))) {
-      const actual = validateBinding(chord, platform);
-      if (actual !== null) rejected.push(`${action} ${chord}: ${actual}`);
-    }
-    expect(rejected).toEqual([]);
   });
 });
 

@@ -5,13 +5,12 @@
  */
 
 import { validateBinding } from './binding-rules';
+import type { DefaultKeys } from './default-keymap';
 import type { KeyboardPlatform } from './keyboard-platform';
 import { ACTION_IDS, type ActionId, type KeyMap } from './key-binding';
 
 /** The chord of every action, or `null` for an action without one. */
 export type Keys = Readonly<Record<ActionId, string | null>>;
-
-type DefaultKeys = Readonly<Record<ActionId, string>>;
 
 const KNOWN_ACTIONS: ReadonlySet<string> = new Set<string>(ACTION_IDS);
 
@@ -31,7 +30,7 @@ function hasOwn(record: object, key: string): boolean {
  * `validateBinding` refuses its chord on `platform`, or when an earlier override
  * already took the chord. An empty chord leaves the action without a chord and
  * is not counted. An action without a usable override keeps its default chord
- * unless an override took that chord, in which case it has none.
+ * unless it has none or an override took that chord, in which case it has none.
  *
  * @returns The chord of every action (one to one) and the number of discarded overrides.
  */
@@ -61,6 +60,7 @@ export function effectiveKeys(
     const override = overridden.get(action);
     if (override !== undefined) return override;
     const chord = defaults[action];
+    if (chord === null) return null;
     // A default an override took is left out; the default tables hold each chord once.
     return taken.has(chord) ? null : chord;
   });
@@ -98,14 +98,17 @@ export function assignChord(
 
 /**
  * Restores the default chord of `action`, taking it from whichever action holds
- * it now, exactly as assigning that chord would.
+ * it now, exactly as assigning that chord would. An action without a default
+ * chord is left without one, as `removeAction` does, and nothing moves.
  */
 export function resetAction(
   keys: Keys,
   defaults: DefaultKeys,
   action: ActionId
 ): { keys: Keys; movedFrom: ActionId | null } {
-  return assignChord(keys, action, defaults[action]);
+  const chord = defaults[action];
+  if (chord === null) return { keys: removeAction(keys, action), movedFrom: null };
+  return assignChord(keys, action, chord);
 }
 
 /** Leaves `action` without a chord. */
@@ -115,7 +118,7 @@ export function removeAction(keys: Keys, action: ActionId): Keys {
 
 /**
  * The overrides that bring back `keys` on top of `defaults`: only the actions
- * whose chord differs from the default, with `""` for an action without a chord.
+ * whose chord differs from the default (`null` included), with `""` for an action without a chord.
  */
 export function overridesOf(defaults: DefaultKeys, keys: Keys): Record<string, string> {
   const overrides: Record<string, string> = {};

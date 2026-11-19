@@ -20,11 +20,27 @@ import {
 
 const PLATFORMS: readonly KeyboardPlatform[] = ['windows', 'mac', 'linux'];
 
-type Defaults = Readonly<Record<ActionId, string>>;
+type Defaults = Readonly<Record<ActionId, string | null>>;
 
 function defaultsOf(platform: KeyboardPlatform): Defaults {
   return defaultKeysFor(platform);
 }
+
+/** The Windows default chord of an action that has one. */
+function defaultChordOf(action: ActionId): string {
+  const chord = defaultsOf('windows')[action];
+  if (chord === null) throw new Error(`${action} has no default chord`);
+  return chord;
+}
+
+/** A table in which two actions have no default chord, as the built-in table may have. */
+const NO_DEFAULT: ActionId = 'minimize-window';
+const ALSO_NO_DEFAULT: ActionId = 'toggle-maximize-window';
+const WITH_GAPS: Defaults = {
+  ...defaultsOf('windows'),
+  [NO_DEFAULT]: null,
+  [ALSO_NO_DEFAULT]: null,
+};
 
 function untouched(platform: KeyboardPlatform): Keys {
   return effectiveKeys(defaultsOf(platform), {}, platform).keys;
@@ -64,6 +80,31 @@ describe('effectiveKeys without overrides', () => {
   it('has a chord or null for exactly the twelve actions', () => {
     const { keys } = effectiveKeys(defaultsOf('windows'), { 'close-window': '' }, 'windows');
     expect(Object.keys(keys).sort()).toEqual([...ACTION_IDS].sort());
+  });
+
+  it('leaves an action without a default chord without one', () => {
+    const result = effectiveKeys(WITH_GAPS, {}, 'windows');
+    expect({ ...result.keys }).toEqual({ ...WITH_GAPS });
+    expect(result.keys[NO_DEFAULT]).toBeNull();
+    expect(result.discarded).toBe(0);
+  });
+
+  it('lets an override give a chord to an action without a default chord', () => {
+    const result = effectiveKeys(WITH_GAPS, { [NO_DEFAULT]: 'Ctrl+Shift+q' }, 'windows');
+    expect({ ...result.keys }).toEqual({ ...WITH_GAPS, [NO_DEFAULT]: 'Ctrl+Shift+q' });
+    expect(result.discarded).toBe(0);
+  });
+
+  it('leaves the action whose default chord such an override took without a chord', () => {
+    const taken = defaultChordOf('close-window');
+    const result = effectiveKeys(WITH_GAPS, { [NO_DEFAULT]: taken }, 'windows');
+    expect({ ...result.keys }).toEqual({
+      ...WITH_GAPS,
+      [NO_DEFAULT]: taken,
+      'close-window': null,
+    });
+    expect(result.discarded).toBe(0);
+    expectOneToOne(result.keys);
   });
 });
 
@@ -127,13 +168,15 @@ describe('effectiveKeys: an override takes the chord away from the action that h
   });
 
   it('lets two actions swap their default chords', () => {
+    const plansChord = defaultChordOf('toggle-plans');
+    const chatChord = defaultChordOf('toggle-chat');
     const result = effectiveKeys(
       defaultsOf('windows'),
-      { 'toggle-chat': 'Ctrl+Shift+p', 'toggle-plans': 'Ctrl+Shift+l' },
+      { 'toggle-chat': plansChord, 'toggle-plans': chatChord },
       'windows'
     );
     expect({ ...result.keys }).toEqual(
-      defaultsWith('windows', { 'toggle-chat': 'Ctrl+Shift+p', 'toggle-plans': 'Ctrl+Shift+l' })
+      defaultsWith('windows', { 'toggle-chat': plansChord, 'toggle-plans': chatChord })
     );
     expect(result.discarded).toBe(0);
   });
@@ -170,7 +213,7 @@ describe('effectiveKeys: an empty chord means no chord', () => {
     expect(empty.discarded).toBe(0);
     expect(refused.discarded).toBe(1);
     expect(empty.keys['toggle-plans']).toBeNull();
-    expect(refused.keys['toggle-plans']).toBe('Ctrl+Shift+p');
+    expect(refused.keys['toggle-plans']).toBe(defaultsOf('windows')['toggle-plans']);
   });
 });
 
@@ -269,7 +312,7 @@ describe('effectiveKeys: two overrides on one chord', () => {
     };
     const result = effectiveKeys(defaultsOf('windows'), overrides, 'windows');
     expect(result.keys['toggle-chat']).toBe('Ctrl+Shift+q');
-    expect(result.keys['toggle-plans']).toBe('Ctrl+Shift+p');
+    expect(result.keys['toggle-plans']).toBe(defaultsOf('windows')['toggle-plans']);
     expect(result.discarded).toBe(1);
     expectOneToOne(result.keys);
   });
@@ -443,6 +486,22 @@ describe('resetAction', () => {
     const result = resetAction(changed, defaults, 'toggle-plans');
     expect({ ...result.keys }).toEqual({ ...changed });
   });
+
+  it('takes the chord off an action without a default and reports no move, beside another such action', () => {
+    const given = effectiveKeys(WITH_GAPS, { [NO_DEFAULT]: 'Ctrl+Shift+q' }, 'windows').keys;
+    expect(given[ALSO_NO_DEFAULT]).toBeNull();
+    const result = resetAction(given, WITH_GAPS, NO_DEFAULT);
+    expect({ ...result.keys }).toEqual({ ...removeAction(given, NO_DEFAULT) });
+    expect(result.movedFrom).toBeNull();
+  });
+
+  it('takes the chord off an action without a default and reports no move, beside a removed chord', () => {
+    const overrides = { [NO_DEFAULT]: 'Ctrl+Shift+q', [ALSO_NO_DEFAULT]: 'Ctrl+Shift+x' };
+    const given = removeAction(effectiveKeys(WITH_GAPS, overrides, 'windows').keys, 'close-window');
+    const result = resetAction(given, WITH_GAPS, NO_DEFAULT);
+    expect({ ...result.keys }).toEqual({ ...removeAction(given, NO_DEFAULT) });
+    expect(result.movedFrom).toBeNull();
+  });
 });
 
 describe('removeAction', () => {
@@ -502,6 +561,17 @@ describe('overridesOf', () => {
     const keys = untouched('windows');
     expect(overridesOf(older, keys)).toEqual({ 'close-window': 'Ctrl+Shift+w' });
   });
+
+  it('leaves out an action without a default that still has no chord', () => {
+    const keys = effectiveKeys(WITH_GAPS, {}, 'windows').keys;
+    expect(overridesOf(WITH_GAPS, keys)).toEqual({});
+  });
+
+  it('writes the chord given to an action without a default', () => {
+    const start = effectiveKeys(WITH_GAPS, {}, 'windows').keys;
+    const keys = assignChord(start, NO_DEFAULT, 'Ctrl+Shift+q').keys;
+    expect(overridesOf(WITH_GAPS, keys)).toEqual({ [NO_DEFAULT]: 'Ctrl+Shift+q' });
+  });
 });
 
 function seeded(seed: number): () => number {
@@ -529,9 +599,10 @@ const EXTRA_CHORDS: readonly string[] = [
 describe('what the Keyboard tab saves brings back the same keys', () => {
   it.each(PLATFORMS)('after any run of edits on %s', (platform) => {
     const defaults = defaultsOf(platform);
-    const pool = [...Object.values(defaults), ...EXTRA_CHORDS].filter(
-      (chord) => validateBinding(chord, platform) === null
-    );
+    const pool = [
+      ...Object.values(defaults).filter((chord): chord is string => chord !== null),
+      ...EXTRA_CHORDS,
+    ].filter((chord) => validateBinding(chord, platform) === null);
     expect(pool.length).toBeGreaterThanOrEqual(15);
 
     for (let seed = 1; seed <= 60; seed += 1) {
@@ -576,19 +647,23 @@ describe('what the Keyboard tab saves brings back the same keys', () => {
 });
 
 describe('bindingsOf', () => {
-  it('maps each chord to its action, one to one', () => {
-    const keys = untouched('windows');
-    const map: KeyMap = bindingsOf(keys);
-    expect(map.size).toBe(ACTION_IDS.length);
+  it('maps each default chord to its action, one to one, and no action without a default chord', () => {
+    const defaults = defaultsOf('windows');
+    const map: KeyMap = bindingsOf(untouched('windows'));
+    const withChord = ACTION_IDS.filter((action) => defaults[action] !== null);
+    expect(map.size).toBe(withChord.length);
     for (const action of ACTION_IDS) {
-      expect(map.get(defaultsOf('windows')[action]), action).toBe(action);
+      const chord = defaults[action];
+      if (chord === null) expect([...map.values()], action).not.toContain(action);
+      else expect(map.get(chord), action).toBe(action);
     }
   });
 
   it('leaves out an action without a chord', () => {
     const keys = removeAction(untouched('windows'), 'close-window');
     const map: KeyMap = bindingsOf(keys);
-    expect(map.size).toBe(ACTION_IDS.length - 1);
+    const withChord = ACTION_IDS.filter((action) => defaultsOf('windows')[action] !== null);
+    expect(map.size).toBe(withChord.length - 1);
     expect([...map.values()]).not.toContain('close-window');
     expect(map.has('Ctrl+Shift+w')).toBe(false);
   });

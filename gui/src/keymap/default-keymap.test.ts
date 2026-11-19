@@ -12,7 +12,7 @@ import { ACTION_IDS, type ActionId } from './key-binding';
 
 const PLATFORMS: readonly KeyboardPlatform[] = ['windows', 'mac', 'linux'];
 
-const WINDOWS_AND_LINUX: Readonly<Record<ActionId, string>> = {
+const WINDOWS_AND_LINUX: Readonly<Record<ActionId, string | null>> = {
   'focus-next-window': 'Ctrl+Shift+f',
   'focus-previous-window': 'Ctrl+Shift+b',
   'focus-next-attention': 'Ctrl+Shift+j',
@@ -27,7 +27,7 @@ const WINDOWS_AND_LINUX: Readonly<Record<ActionId, string>> = {
   'toggle-settings': 'Ctrl+Shift+s',
 };
 
-const MAC: Readonly<Record<ActionId, string>> = {
+const MAC: Readonly<Record<ActionId, string | null>> = {
   'focus-next-window': 'Shift+Meta+]',
   'focus-previous-window': 'Shift+Meta+[',
   'focus-next-attention': 'Shift+Meta+a',
@@ -42,43 +42,52 @@ const MAC: Readonly<Record<ActionId, string>> = {
   'toggle-settings': 'Meta+,',
 };
 
-const EXPECTED: Readonly<Record<KeyboardPlatform, Readonly<Record<ActionId, string>>>> = {
+const EXPECTED: Readonly<Record<KeyboardPlatform, Readonly<Record<ActionId, string | null>>>> = {
   windows: WINDOWS_AND_LINUX,
   linux: WINDOWS_AND_LINUX,
   mac: MAC,
 };
 
+/** The chords a table holds, in `ACTION_IDS` order; an action without a default has none. */
+function chordsOf(table: Readonly<Record<ActionId, string | null>>): string[] {
+  return ACTION_IDS.flatMap((action) => {
+    const chord = table[action];
+    return chord === null ? [] : [chord];
+  });
+}
+
 describe.each(PLATFORMS)('the default table on %s', (platform) => {
-  const table: Readonly<Record<ActionId, string>> = defaultKeysFor(platform);
+  const table: Readonly<Record<ActionId, string | null>> = defaultKeysFor(platform);
 
   it('is the agreed table', () => {
     expect({ ...table }).toEqual({ ...EXPECTED[platform] });
   });
 
-  it('gives every action a chord and names no other action', () => {
+  it('names only the actions of ACTION_IDS, each with a non-empty chord or null', () => {
     expect(Object.keys(table).sort()).toEqual([...ACTION_IDS].sort());
     for (const action of ACTION_IDS) {
-      expect(table[action], action).not.toBe('');
+      const chord = table[action];
+      if (chord !== null) expect(chord, action).not.toBe('');
     }
   });
 
   it('never puts one chord on two actions', () => {
-    const chords = ACTION_IDS.map((action) => table[action]);
+    const chords = chordsOf(table);
     expect(new Set(chords).size).toBe(chords.length);
   });
 
   it('breaks none of the rules a user binding has to obey', () => {
-    for (const action of ACTION_IDS) {
-      expect(validateBinding(table[action], platform), `${action}: ${table[action]}`).toBeNull();
+    for (const chord of chordsOf(table)) {
+      expect(validateBinding(chord, platform), chord).toBeNull();
     }
   });
 });
 
 describe('the default tables of different platforms', () => {
   it('use Meta on mac and never on the other platforms', () => {
-    const others = Object.values(defaultKeysFor('windows'));
+    const others = chordsOf(defaultKeysFor('windows'));
     expect(others.filter((chord) => chord.includes('Meta'))).toEqual([]);
-    const mac = Object.values(defaultKeysFor('mac'));
+    const mac = chordsOf(defaultKeysFor('mac'));
     expect(mac.filter((chord) => chord.includes('Meta')).length).toBeGreaterThan(0);
   });
 });

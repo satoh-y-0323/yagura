@@ -11,7 +11,7 @@ import { get } from 'svelte/store';
 import tauriConf from '../../src-tauri/tauri.conf.json';
 import type { KeyboardPlatform } from '../keymap/keyboard-platform';
 import type { BindingRejection } from '../keymap/binding-rules';
-import { defaultKeysFor } from '../keymap/default-keymap';
+import { defaultKeysFor, type DefaultKeys } from '../keymap/default-keymap';
 import { ACTION_IDS, type ActionId } from '../keymap/key-binding';
 import {
   assignChord,
@@ -39,6 +39,15 @@ function defaultKeys(platform: KeyboardPlatform): Keys {
   return effectiveKeys(defaultKeysFor(platform), {}, platform).keys;
 }
 
+/** A table in which two actions have no default chord, as the built-in table may have. */
+const NO_DEFAULT: ActionId = 'minimize-window';
+const ALSO_NO_DEFAULT: ActionId = 'toggle-maximize-window';
+const WITH_GAPS: DefaultKeys = {
+  ...defaultKeysFor('windows'),
+  [NO_DEFAULT]: null,
+  [ALSO_NO_DEFAULT]: null,
+};
+
 /** The group each row belongs to, in the order the mock shows them. */
 const EXPECTED_GROUPS: Readonly<Record<ActionId, 'windows' | 'focus-and-panels'>> = {
   'focus-next-window': 'windows',
@@ -59,7 +68,7 @@ describe('keyboardRows', () => {
   it('has one row per action in ACTION_IDS order', () => {
     const rows = keyboardRows(defaultKeys('windows'), defaultKeysFor('windows'));
     expect(rows.map((row) => row.action)).toEqual([...ACTION_IDS]);
-    expect(rows).toHaveLength(12);
+    expect(rows).toHaveLength(ACTION_IDS.length);
   });
 
   it('puts the first eight rows in the windows group and the last four in focus-and-panels', () => {
@@ -74,25 +83,40 @@ describe('keyboardRows', () => {
   });
 
   it.each(PLATFORMS)(
-    'shows the default table on %s as unchanged, resettable never, removable',
+    'shows the default table on %s as unchanged, resettable never, removable where a default chord exists',
     (p) => {
       const rows = keyboardRows(defaultKeys(p), defaultKeysFor(p));
       for (const row of rows) {
         expect(row.chord, row.action).toBe(defaultKeysFor(p)[row.action]);
         expect(row.isChanged, row.action).toBe(false);
         expect(row.canReset, row.action).toBe(false);
-        expect(row.canRemove, row.action).toBe(true);
+        expect(row.canRemove, row.action).toBe(defaultKeysFor(p)[row.action] !== null);
       }
     }
   );
 
+  it('shows a row without a default chord as unchanged and with nothing to reset or remove, until it gets a chord', () => {
+    const untouched = effectiveKeys(WITH_GAPS, {}, 'windows').keys;
+    const before = keyboardRows(untouched, WITH_GAPS).find((each) => each.action === NO_DEFAULT);
+    expect(before?.chord).toBeNull();
+    expect(before?.isChanged).toBe(false);
+    expect(before?.canReset).toBe(false);
+    expect(before?.canRemove).toBe(false);
+
+    const given = assignChord(untouched, NO_DEFAULT, 'Ctrl+Shift+q').keys;
+    const after = keyboardRows(given, WITH_GAPS).find((each) => each.action === NO_DEFAULT);
+    expect(after?.isChanged).toBe(true);
+    expect(after?.canReset).toBe(true);
+    expect(after?.canRemove).toBe(true);
+  });
+
   it('marks only the row whose chord differs from its default as changed and resettable', () => {
-    const keys = assignChord(defaultKeys('windows'), 'toggle-chat', 'Ctrl+Shift+o').keys;
+    const keys = assignChord(defaultKeys('windows'), 'toggle-chat', 'Ctrl+Shift+q').keys;
     const rows = keyboardRows(keys, defaultKeysFor('windows'));
     const changed = rows.filter((row) => row.isChanged).map((row) => row.action);
     expect(changed).toEqual(['toggle-chat']);
     const row = rows.find((each) => each.action === 'toggle-chat');
-    expect(row?.chord).toBe('Ctrl+Shift+o');
+    expect(row?.chord).toBe('Ctrl+Shift+q');
     expect(row?.canReset).toBe(true);
     expect(row?.canRemove).toBe(true);
   });
@@ -109,7 +133,7 @@ describe('keyboardRows', () => {
   });
 
   it('is unchanged again once the default chord is back', () => {
-    const changed = assignChord(defaultKeys('windows'), 'toggle-chat', 'Ctrl+Shift+o').keys;
+    const changed = assignChord(defaultKeys('windows'), 'toggle-chat', 'Ctrl+Shift+q').keys;
     const back = resetAction(changed, defaultKeysFor('windows'), 'toggle-chat').keys;
     const row = keyboardRows(back, defaultKeysFor('windows')).find(
       (each) => each.action === 'toggle-chat'
@@ -163,13 +187,13 @@ describe('applyRecordedChord', () => {
 
   it('accepts a free chord and returns the table assignChord would', () => {
     const keys = defaultKeys('windows');
-    const outcome = applyRecordedChord(keys, 'toggle-chat', 'Ctrl+Shift+o', 'windows');
+    const outcome = applyRecordedChord(keys, 'toggle-chat', 'Ctrl+Shift+q', 'windows');
     expect(outcome.kind).toBe('assigned');
     if (outcome.kind === 'assigned') {
-      const expected = assignChord(keys, 'toggle-chat', 'Ctrl+Shift+o');
+      const expected = assignChord(keys, 'toggle-chat', 'Ctrl+Shift+q');
       expect(outcome.keys).toEqual(expected.keys);
       expect(outcome.movedFrom).toBeNull();
-      expect(outcome.chord).toBe('Ctrl+Shift+o');
+      expect(outcome.chord).toBe('Ctrl+Shift+q');
     }
   });
 
@@ -202,7 +226,7 @@ describe('keymapEditBlock', () => {
   it('lets a file that was read be edited', () => {
     expect(keymapEditBlock(loaded({ keys: {}, legacy_entries: 0 }))).toBeNull();
     expect(
-      keymapEditBlock(loaded({ keys: { 'toggle-chat': 'Ctrl+Shift+o' }, legacy_entries: 2 }))
+      keymapEditBlock(loaded({ keys: { 'toggle-chat': 'Ctrl+Shift+q' }, legacy_entries: 2 }))
     ).toBeNull();
   });
 
@@ -250,7 +274,7 @@ describe('rowNotices', () => {
 
   it('shows nothing for an assignment that took no chord from anyone', () => {
     expect(
-      rowNotices('toggle-chat', { kind: 'assigned', chord: 'Ctrl+Shift+o', movedFrom: null })
+      rowNotices('toggle-chat', { kind: 'assigned', chord: 'Ctrl+Shift+q', movedFrom: null })
     ).toEqual({});
   });
 
@@ -275,10 +299,17 @@ describe('rowNotices', () => {
 });
 
 /** A dispatcher and a store that record what the controller asks of them. */
-function harness(options: { block?: KeymapEditBlock | null; platform?: KeyboardPlatform } = {}) {
+function harness(
+  options: {
+    block?: KeymapEditBlock | null;
+    platform?: KeyboardPlatform;
+    defaults?: DefaultKeys;
+  } = {}
+) {
   const platform = options.platform ?? 'windows';
+  const defaults = options.defaults ?? defaultKeysFor(platform);
   const state = {
-    keys: defaultKeys(platform),
+    keys: effectiveKeys(defaults, {}, platform).keys,
     block: options.block ?? null,
     began: [] as Array<(chord: string | null) => void>,
     cancels: 0,
@@ -287,6 +318,7 @@ function harness(options: { block?: KeymapEditBlock | null; platform?: KeyboardP
   };
   const controller: KeyboardTabController = createKeyboardTabController({
     platform,
+    defaults,
     keys: () => state.keys,
     editBlock: () => state.block,
     beginRecording: (onResult) => {
@@ -340,7 +372,7 @@ describe('the Keyboard tab controller: recording', () => {
   it('stops showing the row as recording the moment a chord arrives, before the save finishes', () => {
     const { state, controller } = harness();
     controller.change('toggle-chat');
-    lastResult(state)('Ctrl+Shift+o');
+    lastResult(state)('Ctrl+Shift+q');
     expect(state.edits).toHaveLength(1);
     expect(get(controller).recording).toBeNull();
   });
@@ -365,7 +397,7 @@ describe('the Keyboard tab controller: recording', () => {
     const stale = lastResult(state);
     controller.change('toggle-plans');
     expect(get(controller).recording).toBe('toggle-plans');
-    stale('Ctrl+Shift+o');
+    stale('Ctrl+Shift+q');
     await flush();
     expect(state.edits).toHaveLength(0);
     expect(get(controller).recording).toBe('toggle-plans');
@@ -386,10 +418,10 @@ describe('the Keyboard tab controller: saving a recorded chord', () => {
   it('hands the store an edit that gives the action the chord', () => {
     const { state, controller } = harness();
     controller.change('toggle-chat');
-    lastResult(state)('Ctrl+Shift+o');
+    lastResult(state)('Ctrl+Shift+q');
     const edit = state.edits[0];
     expect(edit).toBeDefined();
-    const expected = applyRecordedChord(state.keys, 'toggle-chat', 'Ctrl+Shift+o', 'windows');
+    const expected = applyRecordedChord(state.keys, 'toggle-chat', 'Ctrl+Shift+q', 'windows');
     expect(expected.kind).toBe('assigned');
     if (expected.kind === 'assigned') {
       expect(edit?.(state.keys)).toEqual(expected.keys);
@@ -399,10 +431,10 @@ describe('the Keyboard tab controller: saving a recorded chord', () => {
   it('hands the store an edit, not a table: a change made in between is kept', () => {
     const { state, controller } = harness();
     controller.change('toggle-chat');
-    lastResult(state)('Ctrl+Shift+o');
+    lastResult(state)('Ctrl+Shift+q');
     const meanwhile = removeAction(state.keys, 'toggle-plans');
     const result = state.edits[0]?.(meanwhile);
-    expect(result?.['toggle-chat']).toBe('Ctrl+Shift+o');
+    expect(result?.['toggle-chat']).toBe('Ctrl+Shift+q');
     expect(result?.['toggle-plans']).toBeNull();
   });
 
@@ -434,7 +466,7 @@ describe('the Keyboard tab controller: saving a recorded chord', () => {
 describe('the Keyboard tab controller: Reset and Remove', () => {
   it('saves a Reset as an edit that restores the default chord', async () => {
     const { state, controller } = harness();
-    state.keys = assignChord(state.keys, 'toggle-chat', 'Ctrl+Shift+o').keys;
+    state.keys = assignChord(state.keys, 'toggle-chat', 'Ctrl+Shift+q').keys;
     const pending = controller.reset('toggle-chat');
     expect(state.edits).toHaveLength(1);
     expect(state.edits[0]?.(state.keys)).toEqual(
@@ -446,7 +478,7 @@ describe('the Keyboard tab controller: Reset and Remove', () => {
 
   it('hands the store edits, not tables, for Reset and Remove: a change made in between is kept', () => {
     const { state, controller } = harness();
-    state.keys = assignChord(state.keys, 'toggle-chat', 'Ctrl+Shift+o').keys;
+    state.keys = assignChord(state.keys, 'toggle-chat', 'Ctrl+Shift+q').keys;
     void controller.reset('toggle-chat');
     void controller.remove('toggle-settings');
     const meanwhile = removeAction(state.keys, 'toggle-plans');
@@ -456,7 +488,7 @@ describe('the Keyboard tab controller: Reset and Remove', () => {
     const afterRemove = state.edits[1]?.(meanwhile);
     expect(afterRemove?.['toggle-settings']).toBeNull();
     expect(afterRemove?.['toggle-plans']).toBeNull();
-    expect(afterRemove?.['toggle-chat']).toBe('Ctrl+Shift+o');
+    expect(afterRemove?.['toggle-chat']).toBe('Ctrl+Shift+q');
   });
 
   it('saves nothing for a Reset on a row that is already at its default', async () => {
@@ -468,7 +500,7 @@ describe('the Keyboard tab controller: Reset and Remove', () => {
   it('shows the move when a Reset takes its default chord back from another row', async () => {
     const { state, controller } = harness();
     const defaultChat = state.keys['toggle-chat'] ?? '';
-    state.keys = assignChord(state.keys, 'toggle-chat', 'Ctrl+Shift+o').keys;
+    state.keys = assignChord(state.keys, 'toggle-chat', 'Ctrl+Shift+q').keys;
     state.keys = assignChord(state.keys, 'toggle-plans', defaultChat).keys;
     const pending = controller.reset('toggle-chat');
     state.settle[0]?.(true);
@@ -484,6 +516,21 @@ describe('the Keyboard tab controller: Reset and Remove', () => {
       chord: defaultChat,
       to: 'toggle-chat',
     });
+  });
+
+  it('saves a Reset on a row without a default chord as its Remove, shows no notice, and saves nothing once the row has no chord', async () => {
+    const { state, controller } = harness({ defaults: WITH_GAPS });
+    expect(state.keys[ALSO_NO_DEFAULT]).toBeNull();
+    state.keys = assignChord(state.keys, NO_DEFAULT, 'Ctrl+Shift+q').keys;
+    const pending = controller.reset(NO_DEFAULT);
+    expect(state.edits).toHaveLength(1);
+    expect(state.edits[0]?.(state.keys)).toEqual(removeAction(state.keys, NO_DEFAULT));
+    state.settle[0]?.(true);
+    await pending;
+    expect(get(controller).notices).toEqual({});
+
+    await controller.reset(ALSO_NO_DEFAULT);
+    expect(state.edits).toHaveLength(1);
   });
 
   it('saves a Remove as an edit that leaves the action without a chord', async () => {
@@ -504,7 +551,7 @@ describe('the Keyboard tab controller: Reset and Remove', () => {
 
   it('ends a recording that is under way when Reset or Remove is pressed', async () => {
     const { state, controller } = harness();
-    state.keys = assignChord(state.keys, 'toggle-plans', 'Ctrl+Shift+o').keys;
+    state.keys = assignChord(state.keys, 'toggle-plans', 'Ctrl+Shift+q').keys;
     controller.change('toggle-chat');
     const pending = controller.reset('toggle-plans');
     expect(get(controller).recording).toBeNull();
@@ -534,7 +581,7 @@ describe('the Keyboard tab controller: editing is refused', () => {
     'does nothing on Change, Reset or Remove while the block is %s',
     async (block) => {
       const { state, controller } = harness({ block });
-      state.keys = assignChord(state.keys, 'toggle-chat', 'Ctrl+Shift+o').keys;
+      state.keys = assignChord(state.keys, 'toggle-chat', 'Ctrl+Shift+q').keys;
       controller.change('toggle-chat');
       await controller.reset('toggle-chat');
       await controller.remove('toggle-chat');
@@ -546,7 +593,7 @@ describe('the Keyboard tab controller: editing is refused', () => {
 
   it('does the same three things when nothing blocks (the control for the refusals above)', async () => {
     const { state, controller } = harness({ block: null });
-    state.keys = assignChord(state.keys, 'toggle-chat', 'Ctrl+Shift+o').keys;
+    state.keys = assignChord(state.keys, 'toggle-chat', 'Ctrl+Shift+q').keys;
     controller.change('toggle-chat');
     expect(state.began).toHaveLength(1);
     const reset = controller.reset('toggle-chat');
@@ -636,7 +683,7 @@ describe('the Keyboard tab controller: notices and stale recordings', () => {
     controller.dispose();
     controller.change('toggle-plans');
 
-    stale('Ctrl+Shift+o');
+    stale('Ctrl+Shift+q');
     await flush();
 
     expect(state.edits).toHaveLength(0);
@@ -650,7 +697,7 @@ describe('the Keyboard tab controller: notices and stale recordings', () => {
     await controller.reset('toggle-settings');
     controller.change('toggle-plans');
 
-    stale('Ctrl+Shift+o');
+    stale('Ctrl+Shift+q');
     await flush();
 
     expect(state.edits).toHaveLength(0);

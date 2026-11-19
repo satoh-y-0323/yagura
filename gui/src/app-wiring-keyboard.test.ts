@@ -42,9 +42,9 @@ describe('the terminal key handling stays an input converter', () => {
     (platform) => {
       const keys = defaultKeysFor(platform);
       for (const action of ACTION_IDS) {
-        expect(decideKeyDown(keydownOf(keys[action]), platform).kind, keys[action]).not.toBe(
-          'clipboard'
-        );
+        const chord = keys[action];
+        if (chord === null) continue;
+        expect(decideKeyDown(keydownOf(chord), platform).kind, chord).not.toBe('clipboard');
       }
     }
   );
