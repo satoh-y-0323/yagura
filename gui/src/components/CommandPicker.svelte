@@ -810,6 +810,12 @@
   }
 
   @media (forced-colors: active) {
+    /* A transparent mark keeps MarkText on the Canvas color, which can hide the text. */
+    mark {
+      background-color: Mark;
+      color: MarkText;
+    }
+
     .command-picker__option[aria-selected='true'] {
       outline: var(--line-width-strong) solid Highlight;
       outline-offset: -2px;
