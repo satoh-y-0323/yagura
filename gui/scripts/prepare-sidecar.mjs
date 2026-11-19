@@ -1,20 +1,20 @@
 #!/usr/bin/env node
-// Stages the release binaries Tauri bundles as sidecars (`bundle.externalBin`):
-// the daemon, the holder the daemon starts for each window from beside itself,
-// on Linux and macOS the watcher each holder starts from beside itself, and the
-// MCP bridge. `tauri-build` resolves `externalBin` at cargo build time, so
-// every cargo build of the workspace depends on this having run.
+// Stages the release binaries the distribution bundles as sidecars (`bundle.externalBin` of each
+// OS's distribution config): the daemon, the holder the daemon starts for each window from beside
+// itself, on Linux and macOS the watcher each holder starts from beside itself, and the MCP bridge.
+// Only the distribution's bundle step reads the staged copies.
 import { execFileSync } from 'node:child_process';
 import { copyFileSync, existsSync, mkdirSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { join } from 'node:path';
+import {
+  WORKSPACE_ROOT,
+  buildBinPackages,
+  cargoTargetDirectory,
+  exitWith,
+} from './workspace-bins.mjs';
 
-const scriptDir = dirname(fileURLToPath(import.meta.url));
-const workspaceRoot = resolve(scriptDir, '..', '..');
-const binariesDir = join(workspaceRoot, 'gui', 'src-tauri', 'binaries');
-
-// The packages the sidecars are built from.
-const SIDECAR_PACKAGES = ['yagura-daemon', 'yagura-holder', 'yagura-mcp'];
+const TOOL = 'prepare-sidecar';
+const binariesDir = join(WORKSPACE_ROOT, 'gui', 'src-tauri', 'binaries');
 
 // The binaries staged as sidecars, in the order each platform's `bundle.externalBin`
 // names them. The holder's package builds the watcher too; Windows ships none, its job
@@ -25,45 +25,17 @@ const SIDECAR_BINARIES =
     : ['yagura-daemon', 'yagura-holder', 'yagura-watcher', 'yagura-mcp'];
 
 function fail(message) {
-  console.error(`prepare-sidecar: ${message}`);
-  process.exit(1);
-}
-
-function capture(command, args) {
-  return execFileSync(command, args, {
-    cwd: workspaceRoot,
-    encoding: 'utf8',
-    maxBuffer: 64 * 1024 * 1024,
-  });
+  exitWith(TOOL, message);
 }
 
 // Step 1: build every sidecar package, so a re-run always stages the current sources.
-try {
-  execFileSync(
-    'cargo',
-    ['build', '--release', ...SIDECAR_PACKAGES.flatMap((name) => ['-p', name])],
-    { cwd: workspaceRoot, stdio: 'inherit' }
-  );
-} catch {
-  fail(
-    'cargo build --release failed; see the cargo output above for the reason. ' +
-      'It may be caused by a running yagura-daemon holding a lock on its executable in the ' +
-      'target directory (os error 5); if so, stop it and re-run.'
-  );
-}
+buildBinPackages(TOOL, { release: true });
 
 // Step 2: locate the cargo target directory, shared by every staged package.
-let targetDirectory;
-try {
-  // --no-deps keeps the JSON small; target_directory is reported either way.
-  const metadata = JSON.parse(capture('cargo', ['metadata', '--format-version', '1', '--no-deps']));
-  targetDirectory = metadata.target_directory;
-} catch {
-  fail('cargo metadata --format-version 1 failed; cannot locate the cargo target directory.');
-}
+const targetDirectory = cargoTargetDirectory(TOOL);
 
 // Step 3: the host triple Tauri expects each sidecar to be named with.
-const hostLine = capture('rustc', ['-vV'])
+const hostLine = execFileSync('rustc', ['-vV'], { cwd: WORKSPACE_ROOT, encoding: 'utf8' })
   .split('\n')
   .map((line) => line.trim())
   .find((line) => line.startsWith('host: '));

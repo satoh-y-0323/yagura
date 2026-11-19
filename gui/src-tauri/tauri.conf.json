@@ -5,7 +5,7 @@
   "identifier": "io.github.satoh-y-0323.yagura",
   "build": {
     "beforeBuildCommand": "npm run type-check && node scripts/prepare-sidecar.mjs",
-    "beforeDevCommand": "",
+    "beforeDevCommand": { "script": "node scripts/prepare-dev.mjs", "wait": true },
     "beforeBundleCommand": "node scripts/refuse-bundle.mjs",
     "frontendDist": "../dist"
   },
