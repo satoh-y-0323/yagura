@@ -307,7 +307,7 @@ describe('picker-model: the windows as the user types', () => {
     expect(idsOf(state)).toEqual(['w4', 'w9', 'w2', 'w10', 'w6']);
   });
 
-  it('orders one stage as needs you, unknown, the reported input wait and then the quiet statuses, current last', () => {
+  it('orders one stage by fewer words found outside the name, then as needs you, unknown, the reported input wait and the quiet statuses, current last', () => {
     const inYagura = MIXED.map((w) => ({ ...w, place: 'yagura' }));
     expect(idsOf(typed(source(inYagura, 'w9'), 'yagura'))).toEqual([
       'w4',
@@ -458,7 +458,7 @@ describe('picker-model: the actions', () => {
     expect(actionRowOf(state, 'close-window').showsSection).toBe(false);
   });
 
-  it('orders typed matches by stage, then the ones that can run, then the action order', () => {
+  it('orders typed matches by stage, then fewer words found outside the name, then the ones that can run, then the action order', () => {
     const src = source(
       [],
       null,

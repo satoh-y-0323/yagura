@@ -499,7 +499,7 @@ function collapseSpaces(text: string): string {
 /** Where a row ranks: its stage first (lower comes first), then its words found outside the name. */
 interface Rank {
   stage: number;
-  /** The words found only in a field other than the name; fewer comes first within a stage. */
+  /** The words found only in a field other than the name; fewer comes first. Only the other-field stage can hold any. */
   outsideNameWords: number;
 }
 
