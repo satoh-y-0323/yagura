@@ -14,6 +14,8 @@
   import WindowMenu from '../components/WindowMenu.svelte';
   import type { Rect } from '../components/menu-position';
   import type { ActionVerdict } from '../keymap/action-availability';
+  import { ariaKeyShortcutsOf, formatChord } from '../keymap/key-chord';
+  import type { KeyboardPlatform } from '../keymap/keyboard-platform';
   import type { WorkMode } from '../session/current-window';
   import type { RoomActions } from '../session/room-actions';
   import {
@@ -68,6 +70,11 @@
   export let tileAvailability: ActionVerdict;
   export let onTileWindows: () => void;
   export let onNewWindow: () => void;
+  /** The chord that opens the window picker, `null` while the user has it switched off. */
+  export let goToWindowChord: string | null;
+  export let platform: KeyboardPlatform;
+  /** Opens the window picker, as its key does. */
+  export let onGoToWindow: () => void;
   export let onOpenChat: (roomId: string) => void;
   export let onRenameWindow: (entry: WindowEntry) => void;
   /** Moves a window to `targetIndex` of {@link order}. */
@@ -115,6 +122,8 @@
 
   $: needingCount = attentionCount(entries);
   $: isCanvas = workMode === 'canvas';
+  $: goToWindowKey =
+    goToWindowChord === null ? null : formatChord(goToWindowChord, platform).join('+');
   $: sections = needsYouView === null ? [] : needsYouSections(needsYouView.rows);
   // The room menu belongs to a heading the full list draws; it goes when that heading does.
   $: menuGroup =
@@ -540,6 +549,21 @@
     </IconButton>
   </div>
 
+  <!-- With no window the picker would open empty, so the way in is left out. -->
+  {#if entries.length > 0}
+    <button
+      type="button"
+      class="navigator__go-to"
+      aria-keyshortcuts={goToWindowChord === null ? undefined : ariaKeyShortcutsOf(goToWindowChord)}
+      on:click={onGoToWindow}
+    >
+      <Icon name="search" size="sm" />
+      <span class="navigator__go-to-label">{sidebar.goToWindow}</span>
+      {#if goToWindowKey !== null}<kbd class="key-hint" aria-hidden="true">{goToWindowKey}</kbd
+        >{/if}
+    </button>
+  {/if}
+
   <div class="navigator__list" bind:this={listElement} use:rowGestures>
     {#if entries.length === 0}
       <p class="navigator__empty">{sidebar.empty}</p>
@@ -832,6 +856,42 @@
   .navigator__filter-count {
     font-weight: var(--weight-semibold);
     font-variant-numeric: tabular-nums;
+  }
+
+  /* Drawn as a search field, since it opens the search by name, yet it is a button. */
+  .navigator__go-to {
+    display: flex;
+    flex: 0 0 auto;
+    align-items: center;
+    gap: var(--space-2);
+    height: var(--row-height);
+    margin: 0 var(--space-2) var(--space-1_5);
+    padding: 0 var(--space-1_5) 0 var(--space-2);
+    border: var(--line-width) solid var(--line);
+    border-radius: var(--radius-sm);
+    background-color: var(--bg-canvas);
+    color: var(--fg-muted);
+    font-family: inherit;
+    font-size: var(--text-xs);
+    text-align: left;
+    cursor: pointer;
+  }
+
+  .navigator__go-to:hover {
+    background-image: linear-gradient(var(--bg-hover), var(--bg-hover));
+  }
+
+  .navigator__go-to:focus-visible {
+    outline: var(--line-width-strong) solid var(--ring);
+    outline-offset: 1px;
+  }
+
+  .navigator__go-to-label {
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   .navigator__list {

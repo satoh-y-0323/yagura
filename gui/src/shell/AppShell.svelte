@@ -3697,6 +3697,9 @@
       {tileAvailability}
       onTileWindows={handleArrangeWindows}
       onNewWindow={openAddDialog}
+      goToWindowChord={$keymapStore.keys['open-window-picker']}
+      platform={keyboardPlatform}
+      onGoToWindow={() => void runAction('open-window-picker')}
       onOpenChat={openChatForRoom}
       onRenameWindow={handleRenameWindow}
       onMoveWindow={registry.moveTab}

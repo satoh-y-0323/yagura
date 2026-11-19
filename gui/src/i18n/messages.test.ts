@@ -429,6 +429,7 @@ export const dummyMessages: Messages = {
     canvasMode: 'DUMMY_sidebar_canvasMode',
     canvasOnly: 'DUMMY_sidebar_canvasOnly',
     newWindow: 'DUMMY_sidebar_newWindow',
+    goToWindow: 'DUMMY_sidebar_goToWindow',
     roomActions: 'DUMMY_sidebar_roomActions',
     folderActions: 'DUMMY_sidebar_folderActions',
     tileRoom: 'DUMMY_sidebar_tileRoom',
@@ -448,8 +449,7 @@ export const dummyMessages: Messages = {
     noWindowsTitle: 'DUMMY_workArea_noWindowsTitle',
     noWindowsBody: 'DUMMY_workArea_noWindowsBody',
     newWindow: 'DUMMY_workArea_newWindow',
-    nextWindowNeedingYou: 'DUMMY_workArea_nextWindowNeedingYou',
-    nextWindow: 'DUMMY_workArea_nextWindow',
+    commands: 'DUMMY_workArea_commands',
     settings: 'DUMMY_workArea_settings',
     reopenFromLastSession: (count: number, timestamp: string | null) =>
       `DUMMY_workArea_reopenFromLastSession(${count},${timestamp})`,

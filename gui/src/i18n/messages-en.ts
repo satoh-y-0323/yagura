@@ -947,6 +947,7 @@ export const messagesEn = {
     canvasMode: 'Canvas',
     canvasOnly: 'Canvas only',
     newWindow: 'New window',
+    goToWindow: 'Go to window…',
     roomActions: 'Room actions',
     folderActions: 'Folder actions',
     tileRoom: 'Tile room',
@@ -968,8 +969,7 @@ export const messagesEn = {
     noWindowsTitle: 'No windows open',
     noWindowsBody: 'Open a CLI in a project folder to get started.',
     newWindow: 'New window',
-    nextWindowNeedingYou: 'Next window that needs you',
-    nextWindow: 'Next window',
+    commands: 'Commands',
     settings: 'Settings',
     reopenFromLastSession: (count: number, timestamp: string | null): string => {
       const subject = count === 1 ? '1 window' : `${count} windows`;

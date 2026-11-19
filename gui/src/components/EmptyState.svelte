@@ -20,9 +20,9 @@
   /** Opens the dialog that picks which of the last session's windows to reopen. */
   export let onChooseWindows: () => void;
 
+  // Only keys that do something while no window is open, so none of them leads nowhere.
   const SHORTCUTS: readonly { action: ActionId; label: string }[] = [
-    { action: 'focus-next-attention', label: workArea.nextWindowNeedingYou },
-    { action: 'focus-next-window', label: workArea.nextWindow },
+    { action: 'open-command-palette', label: workArea.commands },
     { action: 'toggle-settings', label: workArea.settings },
   ];
 
