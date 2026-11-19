@@ -83,8 +83,8 @@ jobs:
             ${{ runner.os }}-cargo-
 
       # Same scope as the loop, so that compilation cost is paid once and stays out of the measured
-      # seconds. The whole workspace is never built: the GUI crate needs a frontend dist and a staged
-      # sidecar that this workflow does not prepare.
+      # seconds. The whole workspace is never built: the GUI crate needs a frontend dist that this
+      # workflow does not prepare.
       - name: Pre-build the test scope
         shell: bash
         # A daemon window runs in a yagura-holder found next to the test binaries.

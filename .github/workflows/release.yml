@@ -85,7 +85,7 @@ jobs:
         run: |
           npm ci
           npm run build:web
-          npx tauri build
+          npm run build:tauri
       - name: Attach them to the draft release
         shell: bash
         run: gh release upload "$TAG" ${{ matrix.files }} --clobber

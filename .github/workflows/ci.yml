@@ -59,22 +59,6 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force -Path gui/dist
           Set-Content -Path gui/dist/index.html -Value '<!doctype html><html><head><meta charset="utf-8"><title>ci placeholder</title></head><body></body></html>' -Encoding utf8
-      - name: Create placeholder sidecar binaries
-        # bundle.externalBin makes tauri-build resolve the staged sidecars (the daemon, the
-        # holder and the MCP bridge) at cargo build time. CI does not bundle, so empty
-        # placeholders are sufficient; real staging (gui/scripts/prepare-sidecar.mjs) stays a
-        # local/bundle concern. Whenever the GUI build script runs, tauri-build copies them
-        # three directories above its OUT_DIR (a build script has no supported way to find the
-        # target directory: cargo#9661, which took over cargo#5457, closed as not planned):
-        # target/debug/ on Cargo 1.99 and earlier, target/debug/build/ on 1.100. Where that is
-        # target/debug/, they overwrite the linked daemon, holder and MCP bridge: in the build
-        # step cargo links the real binaries after the script runs, but in the test step a rerun
-        # of the script alone leaves the empty copies in place and the tests that start a window fail.
-        run: |
-          New-Item -ItemType Directory -Force -Path gui/src-tauri/binaries
-          New-Item -ItemType File -Force -Path gui/src-tauri/binaries/yagura-daemon-x86_64-pc-windows-msvc.exe
-          New-Item -ItemType File -Force -Path gui/src-tauri/binaries/yagura-holder-x86_64-pc-windows-msvc.exe
-          New-Item -ItemType File -Force -Path gui/src-tauri/binaries/yagura-mcp-x86_64-pc-windows-msvc.exe
       - name: Prepare rustup toolchain
         run: |
           rustup update stable
@@ -108,8 +92,8 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
 
   # Linux and macOS coverage for the Unix side of yagura-os and everything above it. The GUI crate
-  # (gui/src-tauri) is left to the Windows `rust` job, so these jobs need no frontend dist or sidecar
-  # placeholders.
+  # (gui/src-tauri) is left to the Windows `rust` job, so these jobs need no frontend dist
+  # placeholder.
   rust-unix:
     name: ${{ matrix.name }}
     runs-on: ${{ matrix.os }}

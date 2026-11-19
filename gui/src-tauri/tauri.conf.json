@@ -6,6 +6,7 @@
   "build": {
     "beforeBuildCommand": "npm run type-check && node scripts/prepare-sidecar.mjs",
     "beforeDevCommand": "",
+    "beforeBundleCommand": "node scripts/refuse-bundle.mjs",
     "frontendDist": "../dist"
   },
   "app": {
@@ -35,7 +36,6 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
-    "externalBin": ["binaries/yagura-daemon", "binaries/yagura-holder", "binaries/yagura-mcp"],
     "macOS": {
       "minimumSystemVersion": "15.0"
     },

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Compiles the macOS 26 icon (`icons/yagura.icon`) into the `Assets.car` that
-// `tauri.macos.conf.json` lists in `bundle.icon`. Tauri can compile a `.icon`
+// `tauri.bundle.macos.conf.json` lists in `bundle.icon`. Tauri can compile a `.icon`
 // itself, but it starts actool without a stdin under the Node.js CLI and actool
 // crashes (tauri-apps/tauri#15315), so actool runs here with stdin on /dev/null.
 import { execFileSync } from 'node:child_process';

@@ -1,4 +1,7 @@
 {
+  "build": {
+    "beforeBundleCommand": null
+  },
   "bundle": {
     "targets": ["deb"],
     "externalBin": [

@@ -1,6 +1,10 @@
 {
+  "build": {
+    "beforeBundleCommand": null
+  },
   "bundle": {
     "targets": ["nsis"],
+    "externalBin": ["binaries/yagura-daemon", "binaries/yagura-holder", "binaries/yagura-mcp"],
     "resources": {
       "../../vendor/conpty/x64/conpty.dll": "conpty.dll",
       "../../vendor/conpty/x64/OpenConsole.exe": "OpenConsole.exe"
