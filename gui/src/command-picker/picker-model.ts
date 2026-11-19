@@ -398,8 +398,8 @@ function refreshWindowSections<W extends PickerWindow>(
     heading: section.heading,
     rows: section.rows.flatMap((row): PickerRow<W>[] => {
       if (row.kind === 'action') {
-        // The only action row here is the New window offer, which goes once a window exists.
-        return source.windows.length === 0 ? refreshActionRow(row, source) : [];
+        // The only action row here is the New window offer; the check below rebuilds it.
+        return [];
       }
       const now = byId.get(row.window.windowId);
       return now === undefined ? [] : [windowRow(now, marksFor(now), source)];

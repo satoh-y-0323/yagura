@@ -238,11 +238,23 @@ describe('nextWindowNeedingYou: the next waiting window in screen order', () => 
 // ---------------------------------------------------------------------------
 
 describe('createAttentionNavigation: expanding and focusing', () => {
-  it('expands the target room before focusing the window', () => {
-    const harness = harnessOf(fourWindows(['b2']), ['room-a', 'room-b'], 'a2');
+  it('expands the target room before focusing the window, landing where the peek said it would', () => {
+    // a2 and b2 wait with the current window a1 between them: from the top the
+    // answer would be a2, from a1 it is b2.
+    const harness = harnessOf(fourWindows(['a2', 'b2']), ['room-a', 'room-b'], 'a1');
+    expect(nextWindowNeedingYou(groupsOf(harness.currentEntries()), null)?.entry.windowId).toBe(
+      'a2'
+    );
+
+    const peeked = harness.navigation.peekNextWindowNeedingYou();
+
+    expect(peeked?.windowId).toBe('b2');
+    expect(harness.calls).toEqual([]);
+    expect(get(harness.collapsedRooms)).toEqual(new Set(['room-a', 'room-b']));
 
     const landed = harness.navigation.goToNextWindowNeedingYou();
 
+    expect(landed).toBe(peeked);
     expect(landed).toBe(harness.currentEntries()[3]);
     expect(harness.calls).toEqual(['expand:room-b', 'goTo:b2', 'terminal:b2']);
     expect(get(harness.collapsedRooms).has('room-b')).toBe(false);
@@ -288,6 +300,7 @@ describe('createAttentionNavigation: expanding and focusing', () => {
   it('does nothing at all when no window is waiting', () => {
     const harness = harnessOf(fourWindows([]), ['room-b'], 'a2');
 
+    expect(harness.navigation.peekNextWindowNeedingYou()).toBeNull();
     const landed = harness.navigation.goToNextWindowNeedingYou();
 
     expect(landed).toBeNull();

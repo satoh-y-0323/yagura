@@ -36,7 +36,9 @@ export interface AttentionNavigationDeps<T extends NavigableWindow> extends Reve
 
 /** The jump, bound to its dependencies. */
 export interface AttentionNavigation<T> {
-  /** Jumps to the next waiting window; returns it, or null when none waits. */
+  /** The window the jump would go to now, without moving anything; null when none waits. */
+  peekNextWindowNeedingYou: () => T | null;
+  /** Jumps to the window {@link peekNextWindowNeedingYou} names; returns it, or null when none waits. */
   goToNextWindowNeedingYou: () => T | null;
 }
 
@@ -78,16 +80,19 @@ export function nextWindowNeedingYou<T extends NavigableWindow>(
 export function createAttentionNavigation<T extends NavigableWindow>(
   deps: AttentionNavigationDeps<T>
 ): AttentionNavigation<T> {
+  const peekNextWindowNeedingYou = (): T | null =>
+    nextWindowNeedingYou(deps.groups(), deps.current(), deps.view())?.entry ?? null;
   return {
+    peekNextWindowNeedingYou,
     goToNextWindowNeedingYou: () => {
-      const target = nextWindowNeedingYou(deps.groups(), deps.current(), deps.view());
+      const target = peekNextWindowNeedingYou();
       if (target === null) {
         return null;
       }
       // Nothing else about the list moves: the room stays open afterwards, and
       // no other room is touched.
-      revealWindow(deps, target.entry);
-      return target.entry;
+      revealWindow(deps, target);
+      return target;
     },
   };
 }

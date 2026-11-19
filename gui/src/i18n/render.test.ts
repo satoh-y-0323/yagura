@@ -36,6 +36,12 @@ import {
   describeUnknownExplanation,
   describeUndeliveredUnknownReason,
   describeInterruptHint,
+  describeActionBlock,
+  describePickerWindowRow,
+  describePickerActionRow,
+  describePickerEmpty,
+  describePickerResults,
+  type PickerWindowRowFacts,
   type WindowHeaderFacts,
 } from './render';
 
@@ -395,6 +401,95 @@ describe('describeInterruptHint: which message each reason picks', () => {
     );
     expect(describeInterruptHint(english, blockedTarget('unknown'))).toBe(
       english.hints.interruptUnavailableUnknown
+    );
+  });
+});
+
+describe('describeActionBlock: which message each reason picks', () => {
+  it('picks one message per reason, and the interrupt reasons read as the interrupt hint does', () => {
+    expect(describeActionBlock(dummyMessages, 'no-window-on-screen')).toBe(
+      dummyMessages.actionBlocks.noWindowOnScreen
+    );
+    expect(describeActionBlock(dummyMessages, 'no-windows')).toBe(
+      dummyMessages.actionBlocks.noWindows
+    );
+    expect(describeActionBlock(dummyMessages, 'nowhere-to-go')).toBe(
+      dummyMessages.actionBlocks.nowhereToGo
+    );
+    expect(describeActionBlock(dummyMessages, 'nothing-needs-you')).toBe(
+      dummyMessages.actionBlocks.nothingNeedsYou
+    );
+    expect(describeActionBlock(dummyMessages, 'canvas-only')).toBe(
+      dummyMessages.sidebar.canvasOnly
+    );
+    expect(describeActionBlock(dummyMessages, 'exited')).toBe(
+      describeInterruptHint(dummyMessages, blockedTarget('exited'))
+    );
+    expect(describeActionBlock(dummyMessages, 'unknown')).toBe(
+      describeInterruptHint(dummyMessages, blockedTarget('unknown'))
+    );
+  });
+});
+
+describe('describePickerEmpty and describePickerResults', () => {
+  it('names each kind of empty result, quoting what was typed and pointing to the other mode', () => {
+    expect(describePickerEmpty(dummyMessages, { kind: 'no-windows' })).toEqual({
+      title: dummyMessages.picker.noWindows,
+      hint: null,
+    });
+    expect(describePickerEmpty(dummyMessages, { kind: 'no-window-match', query: 'rev' })).toEqual({
+      title: dummyMessages.picker.noWindowMatch('rev'),
+      hint: dummyMessages.picker.noWindowMatchHint,
+    });
+    expect(describePickerEmpty(dummyMessages, { kind: 'no-command-match', query: 'zzz' })).toEqual({
+      title: dummyMessages.picker.noCommandMatch('zzz'),
+      hint: dummyMessages.picker.noCommandMatchHint,
+    });
+  });
+
+  it('counts the actions in the commands mode and the windows in the windows mode, or reads the empty title', () => {
+    expect(describePickerResults(dummyMessages, 'commands', 3, null)).toBe(
+      dummyMessages.picker.commandCount(3)
+    );
+    expect(describePickerResults(dummyMessages, 'windows', 3, null)).toBe(
+      dummyMessages.picker.windowCount(3)
+    );
+    expect(
+      describePickerResults(dummyMessages, 'windows', 0, { kind: 'no-window-match', query: 'rev' })
+    ).toBe(dummyMessages.picker.noWindowMatch('rev'));
+    expect(
+      describePickerResults(dummyMessages, 'commands', 0, {
+        kind: 'no-command-match',
+        query: 'zzz',
+      })
+    ).toBe(dummyMessages.picker.noCommandMatch('zzz'));
+  });
+});
+
+describe('describePickerWindowRow and describePickerActionRow', () => {
+  const facts: PickerWindowRowFacts = {
+    name: 'reviewer',
+    status: 'waiting_input',
+    isAwaitingPermission: true,
+    place: 'yagura',
+    isCurrent: false,
+  };
+
+  it('reads a window row as its sidebar row, then its place, then Current only for the current window', () => {
+    const placed = dummyMessages.picker.windowRowPlace(
+      describeWindowRow(dummyMessages, 'reviewer', 'waiting_input', true),
+      'yagura'
+    );
+    expect(describePickerWindowRow(dummyMessages, facts)).toBe(placed);
+    expect(describePickerWindowRow(dummyMessages, { ...facts, isCurrent: true })).toBe(
+      dummyMessages.picker.windowRowCurrent(placed)
+    );
+  });
+
+  it('reads an action row as its name, with its key only when it has one', () => {
+    expect(describePickerActionRow(dummyMessages, 'tile-name', null)).toBe('tile-name');
+    expect(describePickerActionRow(dummyMessages, 'tile-name', 'key-text')).toBe(
+      dummyMessages.picker.actionRowKey('tile-name', 'key-text')
     );
   });
 });

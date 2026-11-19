@@ -239,7 +239,7 @@
   } from '../session/recovery-types';
   import { confirmCopy, type ConfirmOperation } from '../session/confirm-target';
   import { pairPanes, type Pane } from '../session/pane-plan';
-  import { createAttentionNavigation, nextWindowNeedingYou } from '../session/attention-navigation';
+  import { createAttentionNavigation } from '../session/attention-navigation';
   import { currentWindowFor, type WorkMode } from '../session/current-window';
   import {
     diffAppearedWindows,
@@ -2435,8 +2435,7 @@
     expandRoom: collapsedRooms.expand,
     actions,
     goToNextWindowNeedingYou,
-    nextAttention: () =>
-      nextWindowNeedingYou(sidebarGroups(), currentWindowNow(), needsYouView)?.entry ?? null,
+    nextAttention: attentionNavigation.peekNextWindowNeedingYou,
     statusOf: (entry) => entry.detected.status,
     focusTerminal: focusTerminalOf,
     openWindowForm: openAddDialog,

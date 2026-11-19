@@ -373,9 +373,15 @@ describe('an action with nothing to act on', () => {
     }
   );
 
-  it('has no next window when the Needs you filter shows no rows', () => {
+  it('has no next window when the Needs you filter shows no rows, yet still tiles every open window', async () => {
     const h = harness(NO_ROWS_SHOWN);
-    expect(availabilityContext(h.deps).hasNeighbor.next).toBe(false);
+    const context = availabilityContext(h.deps);
+    expect(context.hasNeighbor.next).toBe(false);
+    expect(context.windowCount).toBe(NO_ROWS_SHOWN.windows.length);
+    expect(actionAvailability('tile-windows', context)).toEqual({ ok: true });
+
+    await h.run('tile-windows');
+    expect(h.calls).toEqual(['tile']);
   });
 });
 

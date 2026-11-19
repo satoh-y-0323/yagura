@@ -198,8 +198,8 @@ export function createPendingFocus<M>(deps: PendingFocusDeps<M>): {
   settled(): Promise<void>;
 } {
   let held: M | null = null;
-  // Each started attempt, wrapped so a rejection is swallowed here and never
-  // left unhandled or passed on to `settled`.
+  // Each started attempt, wrapped so a rejection is logged here and never left
+  // unhandled or passed on to `settled`.
   const started = new Set<Promise<void>>();
 
   const attempt = async (): Promise<void> => {
@@ -213,7 +213,9 @@ export function createPendingFocus<M>(deps: PendingFocusDeps<M>): {
   };
 
   const start = (): void => {
-    const done = attempt().then(noop, noop);
+    const done = attempt().then(noop, (error: unknown) => {
+      console.error('Failed to run a pending focus move:', error);
+    });
     started.add(done);
     void done.then(() => started.delete(done));
   };
@@ -235,8 +237,9 @@ export function createPendingFocus<M>(deps: PendingFocusDeps<M>): {
     },
     /**
      * Resolves once every attempt started before this call has finished,
-     * including the promise its move returned; never rejects. A move still held
-     * behind an open modal does not keep it waiting.
+     * including the promise its move returned; never rejects, since a failed
+     * attempt is logged instead. A move still held behind an open modal does
+     * not keep it waiting.
      */
     async settled(): Promise<void> {
       await Promise.all([...started]);

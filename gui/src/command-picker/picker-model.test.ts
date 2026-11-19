@@ -500,6 +500,11 @@ describe('picker-model: when there is nothing to list', () => {
     expect(idsOf(state)).toEqual(['open-window-form']);
     expect(state.selected).toBe(keyOf(state, 'open-window-form'));
     expect(chosenRow(state)?.key).toBe(keyOf(state, 'open-window-form'));
+
+    const stillNone = refreshPicker(state, source([]));
+    expect(stillNone.empty).toEqual({ kind: 'no-windows' });
+    expect(idsOf(stillNone)).toEqual(['open-window-form']);
+    expect(stillNone.selected).toBe(state.selected);
   });
 
   it('says what was typed, and offers no New window, when it is typed with no window open', () => {
@@ -507,6 +512,10 @@ describe('picker-model: when there is nothing to list', () => {
     expect(state.empty).toEqual({ kind: 'no-window-match', query: 'no such' });
     expect(rowsOf(state)).toEqual([]);
     expect(state.selected).toBeNull();
+
+    const refreshed = refreshPicker(state, source([]));
+    expect(refreshed.empty).toEqual({ kind: 'no-window-match', query: 'no such' });
+    expect(rowsOf(refreshed)).toEqual([]);
   });
 
   it('says what was typed when no window and when no action matches', () => {
@@ -530,7 +539,7 @@ describe('picker-model: while the picker is open', () => {
     win('d', 'idle'),
   ];
 
-  it('keeps the rows where they were when statuses change, showing the statuses as they are now', () => {
+  it('keeps the rows where they were when statuses or verdicts change, showing them as they are now', () => {
     const opened = openPicker('windows', source(FIRST, 'b'));
     const changed = [
       win('a', 'running'),
@@ -546,6 +555,31 @@ describe('picker-model: while the picker is open', () => {
     ]);
     expect(windowRowOf(state, 'a').window.statusWords).toBe('Running');
     expect(state.selected).toBe(opened.selected);
+
+    // Typed so that whether an action can run orders the rows: building them
+    // again from the new verdicts would move close-window up and rename-window down.
+    const before = source(
+      [],
+      null,
+      actionsOf({ 'close-window': 'no-window-on-screen', 'tile-windows': 'canvas-only' })
+    );
+    const after = source(
+      [],
+      null,
+      actionsOf({ 'rename-window': 'no-window-on-screen', 'tile-windows': 'canvas-only' })
+    );
+    const byWindow = typeInput(openPicker('commands', before), '>window', before);
+    expect(idsOf(typeInput(byWindow, '>window', after))).not.toEqual(idsOf(byWindow));
+
+    const commands = refreshPicker(byWindow, after);
+    expect(idsOf(commands)).toEqual(idsOf(byWindow));
+    expect(commands.sections.map((section) => section.heading)).toEqual(
+      byWindow.sections.map((section) => section.heading)
+    );
+    expect(actionRowOf(commands, 'close-window').action.verdict).toEqual({ ok: true });
+    expect(actionRowOf(commands, 'close-window').blocked).toBeNull();
+    expect(actionRowOf(commands, 'rename-window').blocked).toBe('no-window-on-screen');
+    expect(commands.selected).toBe(byWindow.selected);
   });
 
   it('adds a new window at the end of the section it would join now, with nothing typed', () => {
@@ -571,6 +605,13 @@ describe('picker-model: while the picker is open', () => {
     expect(needs?.rows.map(idOf)).toEqual(['e']);
     const other = state.sections.find((section) => section.heading?.kind === 'other-windows');
     expect(other?.rows.map(idOf)).toEqual(['c', 'd']);
+
+    const offered = openPicker('windows', source([]));
+    expect(idsOf(offered)).toEqual(['open-window-form']);
+    const first = refreshPicker(offered, source([win('e', 'idle')]));
+    expect(first.sections.map((section) => section.heading)).toEqual([{ kind: 'other-windows' }]);
+    expect(sectionIds(first)).toEqual([['e']]);
+    expect(first.empty).toBeNull();
   });
 
   it('puts a Needs you section that appears while open above the other windows, leaving the rows and selection', () => {
@@ -620,6 +661,11 @@ describe('picker-model: while the picker is open', () => {
       source(FIRST.filter((w) => w.windowId !== 'b'))
     );
     expect(sectionIds(state)).toEqual([['a'], ['c', 'd']]);
+
+    // The last window going leaves the New window offer, as opening with none does.
+    const lastGone = refreshPicker(openPicker('windows', source([win('e', 'idle')])), source([]));
+    expect(lastGone.empty).toEqual({ kind: 'no-windows' });
+    expect(idsOf(lastGone)).toEqual(['open-window-form']);
   });
 });
 

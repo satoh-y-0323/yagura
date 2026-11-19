@@ -2,7 +2,7 @@
  * Where keyboard focus goes when it crosses the sidebar boundary, and when a
  * requested move has to wait for the open modal dialogs to finish.
  */
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 
 import {
   createPendingFocus,
@@ -214,16 +214,23 @@ describe('createPendingFocus without an open modal', () => {
     expect(settled.done).toBe(true);
   });
 
-  it('settles instead of rejecting when the settle step of a started attempt rejects', async () => {
+  it('settles instead of rejecting when the settle step of a started attempt rejects, and reports the failure once', async () => {
+    const failure = new Error('render failed');
     const { ran, pending } = harness(0, {
-      settle: () => Promise.reject(new Error('render failed')),
+      settle: () => Promise.reject(failure),
     });
+    const reported = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      pending.request(TO_B);
+      const settled = pending.settled();
 
-    pending.request(TO_B);
-    const settled = pending.settled();
-
-    await expect(settled).resolves.toBeUndefined();
-    expect(ran).toEqual([]);
+      await expect(settled).resolves.toBeUndefined();
+      expect(ran).toEqual([]);
+      expect(reported).toHaveBeenCalledTimes(1);
+      expect(reported.mock.calls[0]).toContain(failure);
+    } finally {
+      reported.mockRestore();
+    }
   });
 });
 

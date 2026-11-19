@@ -62,10 +62,12 @@ const KEYBOARD_ACTION_NAMES = {
 
 /**
  * Extra words the command palette finds an action by, never shown. English
- * UI words only; no vendor is named.
+ * UI words only; no vendor is named. Every action has an entry, empty when its
+ * name is enough, so a new action without one fails to compile.
  */
-const PICKER_ACTION_KEYWORDS: Readonly<Record<string, string>> = {
+const PICKER_ACTION_KEYWORDS: Readonly<Record<keyof typeof KEYBOARD_ACTION_NAMES, string>> = {
   openWindowPicker: 'find search switch jump',
+  openCommandPalette: '',
   focusNextWindow: 'switch cycle',
   focusPreviousWindow: 'switch cycle back',
   focusNextAttention: 'waiting approval input jump',
@@ -1014,6 +1016,6 @@ export const messagesEn = {
     windowRowCurrent: (label: string): string => `${label}, current`,
     actionRowKey: (name: string, key: string): string => `${name}, ${key}`,
     actionKeywords: (action: KebabCase<keyof typeof KEYBOARD_ACTION_NAMES>): string =>
-      PICKER_ACTION_KEYWORDS[camelCase(action)] ?? '',
+      lookup(PICKER_ACTION_KEYWORDS, action),
   },
 };
