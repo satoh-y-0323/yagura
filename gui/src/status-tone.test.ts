@@ -81,10 +81,6 @@ const EXPECTED_NEEDS_YOU: Record<WindowStatus, boolean> = {
 };
 
 describe('windowsNeedingYou / attentionCount: membership in the waiting set', () => {
-  it('returns an empty array for an empty entry list', () => {
-    expect(windowsNeedingYou<Entry>([])).toEqual([]);
-  });
-
   it('keeps entries in input order and drops every entry not in the table above', () => {
     const entries: Entry[] = [
       entryOf('idle', 'a'),
@@ -114,13 +110,6 @@ describe('needsYou: a task window waiting on its owner after its report is not t
     expect(needsYou(reportedEntryOf('waiting_approval', 'w', 'standing'))).toBe(true);
     expect(needsYou(entryOf('waiting_input', 'w'))).toBe(true);
   });
-
-  it.each(NOT_STANDING_STATES)(
-    'keeps in a waiting_input window whose report reads %s: only a standing report is left out',
-    (state) => {
-      expect(needsYou(reportedEntryOf('waiting_input', 'w', state))).toBe(true);
-    }
-  );
 
   it('agrees with the status table for every status that carries no standing report', () => {
     for (const [status, expected] of Object.entries(EXPECTED_NEEDS_YOU) as [

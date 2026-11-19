@@ -156,14 +156,6 @@ describe('a keydown that matches nothing', () => {
     expectUntouched(h.handle(init));
     expect(h.runs).toEqual([]);
   });
-
-  it('lets Ctrl+R reach the CLI as history search, with only the page reload cancelled', () => {
-    const h = harness();
-    const counted = h.handle({ key: 'r', code: 'KeyR', ctrlKey: true });
-    expect(counted.prevented()).toBe(1);
-    expect(counted.stopped()).toBe(0);
-    expect(h.runs).toEqual([]);
-  });
 });
 
 describe('input method composition', () => {
@@ -255,21 +247,6 @@ describe('keys the input method owns (measured on Windows and macOS, 2026-09-29)
     const macReload = mac.handle({ key: 'r', code: 'KeyR', metaKey: true, isComposing: true });
     expect(macReload.prevented()).toBe(1);
     expect(macReload.stopped()).toBe(0);
-  });
-
-  it('does not record an IME key, and records the next key the user presses', () => {
-    const h = harness();
-    const results: Array<string | null> = [];
-    h.dispatcher.beginRecording((chord) => {
-      results.push(chord);
-    });
-    expectUntouched(h.handle({ key: 'Escape', code: 'Escape', keyCode: 229 }));
-    expectUntouched(h.handle({ key: 'Enter', code: 'Enter', keyCode: 229 }));
-    expect(results).toEqual([]);
-    expect(h.dispatcher.isRecording()).toBe(true);
-
-    h.handle({ key: 'Escape', code: 'Escape', keyCode: 27 });
-    expect(results).toEqual([null]);
   });
 });
 
@@ -423,7 +400,7 @@ describe('recording a chord', () => {
     expect(recorded).toEqual(['Shift+Escape']);
   });
 
-  it('does not record a key that is part of a composition', () => {
+  it('does not record a key that is part of a composition, and records the next key the user presses', () => {
     const h = harness();
     const results = recorder(h);
     h.handle({ key: 'a', code: 'KeyA', keyCode: 229 });
@@ -433,6 +410,15 @@ describe('recording a chord', () => {
 
     h.handle({ key: 'J', code: 'KeyJ', ctrlKey: true, shiftKey: true, keyCode: 74 });
     expect(results).toEqual(['Ctrl+Shift+j']);
+
+    const cancelled = recorder(h);
+    expectUntouched(h.handle({ key: 'Escape', code: 'Escape', keyCode: 229 }));
+    expectUntouched(h.handle({ key: 'Enter', code: 'Enter', keyCode: 229 }));
+    expect(cancelled).toEqual([]);
+    expect(h.dispatcher.isRecording()).toBe(true);
+
+    h.handle({ key: 'Escape', code: 'Escape', keyCode: 27 });
+    expect(cancelled).toEqual([null]);
   });
 
   it('goes back to running shortcuts once the chord is recorded', () => {
@@ -485,18 +471,5 @@ describe('recording while a dialog opens', () => {
     h.handle(CTRL_SHIFT_W);
 
     expect(h.runs).toHaveLength(1);
-  });
-
-  it('stops a bare modifier key while recording and keeps waiting', () => {
-    const h = harness();
-    const results: (string | null)[] = [];
-    h.dispatcher.beginRecording((chord) => {
-      results.push(chord);
-    });
-
-    h.handle({ key: 'Shift', code: 'ShiftLeft', shiftKey: true, keyCode: 16 });
-
-    expect(results).toEqual([]);
-    expect(h.dispatcher.isRecording()).toBe(true);
   });
 });

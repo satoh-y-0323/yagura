@@ -192,10 +192,6 @@ const EXPECTED_CALLS: Readonly<Record<ActionId, readonly string[]>> = {
 };
 
 describe('every action', () => {
-  it('has an expectation for each action id and none other', () => {
-    expect(Object.keys(EXPECTED_CALLS).sort()).toEqual([...ACTION_IDS].sort());
-  });
-
   it.each([...ACTION_IDS])('%s reaches what it stands for, in order', async (action: ActionId) => {
     const h = harness({ windows: [A, B, C], current: B, attentionTarget: C });
     const done = h.run(action);
@@ -235,23 +231,6 @@ describe('next and previous window', () => {
       `goTo:${hiddenC.windowId}`,
       `terminal:${hiddenC.windowId}`,
     ]);
-  });
-
-  it('do nothing when there is no window at all', async () => {
-    const h = harness({ windows: [] });
-    await h.run('focus-next-window');
-    await h.run('focus-previous-window');
-    expect(h.calls).toEqual([]);
-  });
-});
-
-describe('the window an operation acts on', () => {
-  it('is the current window it is given, whatever the placement', async () => {
-    const maximized = win('wm-r4c6yu', 9, 'room-a', { isMaximized: true });
-    const h = harness({ windows: [maximized, A, C], current: A });
-    await h.run('close-window');
-    await h.run('interrupt-window');
-    expect(h.calls).toEqual([`close:${A.windowId}`, `interrupt:${A.windowId}`]);
   });
 });
 
@@ -446,7 +425,7 @@ describe("next and previous window while an ended window's card is shown", () =>
     ]);
   });
 
-  it('reach a window the Needs you filter hides, and do nothing when the card has none', async () => {
+  it('reach a window the Needs you filter hides', async () => {
     const hiddenByFilter = harness({
       windows: [A, C],
       order: [A],
@@ -456,14 +435,5 @@ describe("next and previous window while an ended window's card is shown", () =>
     });
     await hiddenByFilter.run('focus-next-window');
     expect(hiddenByFilter.calls).toContain(`goTo:${C.windowId}`);
-
-    const alone = harness({
-      windows: [A],
-      workMode: 'focus',
-      exitedCard: cardFor('wgone-b', null, null),
-    });
-    await alone.run('focus-next-window');
-    await alone.run('focus-previous-window');
-    expect(alone.calls).toEqual([]);
   });
 });

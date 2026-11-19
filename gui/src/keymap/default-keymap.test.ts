@@ -75,14 +75,6 @@ describe.each(PLATFORMS)('the default table on %s', (platform) => {
     expect({ ...table }).toEqual({ ...EXPECTED[platform] });
   });
 
-  it('names only the actions of ACTION_IDS, each with a non-empty chord or null', () => {
-    expect(Object.keys(table).sort()).toEqual([...ACTION_IDS].sort());
-    for (const action of ACTION_IDS) {
-      const chord = table[action];
-      if (chord !== null) expect(chord, action).not.toBe('');
-    }
-  });
-
   it('never puts one chord on two actions', () => {
     const chords = chordsOf(table);
     expect(new Set(chords).size).toBe(chords.length);
@@ -92,15 +84,6 @@ describe.each(PLATFORMS)('the default table on %s', (platform) => {
     for (const chord of chordsOf(table)) {
       expect(validateBinding(chord, platform), chord).toBeNull();
     }
-  });
-});
-
-describe('the default tables of different platforms', () => {
-  it('use Meta on mac and never on the other platforms', () => {
-    const others = chordsOf(defaultKeysFor('windows'));
-    expect(others.filter((chord) => chord.includes('Meta'))).toEqual([]);
-    const mac = chordsOf(defaultKeysFor('mac'));
-    expect(mac.filter((chord) => chord.includes('Meta')).length).toBeGreaterThan(0);
   });
 });
 

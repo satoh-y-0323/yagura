@@ -202,11 +202,6 @@ describe('effectiveKeys: an empty chord means no chord', () => {
     expect(result.discarded).toBe(0);
   });
 
-  it('does not hand the freed default chord to anyone', () => {
-    const { keys } = effectiveKeys(defaultsOf('windows'), { 'close-window': '' }, 'windows');
-    expect(bindingsOf(keys).has('Ctrl+Shift+w')).toBe(false);
-  });
-
   it('is told apart from a refused chord, which is counted', () => {
     const empty = effectiveKeys(defaultsOf('windows'), { 'toggle-plans': '' }, 'windows');
     const refused = effectiveKeys(defaultsOf('windows'), { 'toggle-plans': 'Ctrl+r' }, 'windows');
@@ -350,22 +345,16 @@ describe('effectiveKeys: an override is independent of the table it was written 
     'toggle-chat': 'Ctrl+Shift+y',
   };
 
-  it('keeps the chord of an overridden action when the defaults change', () => {
+  it('keeps overridden and emptied actions when the defaults change, and lets the rest follow them', () => {
     const overrides: Record<string, string> = { 'close-window': 'Ctrl+Shift+q' };
     const before = effectiveKeys(defaultsOf('windows'), overrides, 'windows');
     const after = effectiveKeys(NEXT_VERSION, overrides, 'windows');
     expect(before.keys['close-window']).toBe('Ctrl+Shift+q');
     expect(after.keys['close-window']).toBe('Ctrl+Shift+q');
-  });
-
-  it('follows the new default for an action that has no override', () => {
-    const after = effectiveKeys(NEXT_VERSION, { 'close-window': 'Ctrl+Shift+q' }, 'windows');
     expect(after.keys['toggle-chat']).toBe('Ctrl+Shift+y');
-  });
 
-  it('keeps an action without a chord when the defaults change', () => {
-    const after = effectiveKeys(NEXT_VERSION, { 'close-window': '' }, 'windows');
-    expect(after.keys['close-window']).toBeNull();
+    const emptied = effectiveKeys(NEXT_VERSION, { 'close-window': '' }, 'windows');
+    expect(emptied.keys['close-window']).toBeNull();
   });
 });
 

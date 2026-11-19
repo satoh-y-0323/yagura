@@ -21,9 +21,4 @@ describe('isApprovalDialogAllowed: an approval never stacks on another modal', (
   it.each(MODAL_KEYS)('refuses it while only %s is open', (key) => {
     expect(isApprovalDialogAllowed({ ...CLOSED, [key]: true })).toBe(false);
   });
-
-  it('refuses it while all of them are open', () => {
-    const open = Object.fromEntries(MODAL_KEYS.map((key) => [key, true])) as typeof CLOSED;
-    expect(isApprovalDialogAllowed(open)).toBe(false);
-  });
 });

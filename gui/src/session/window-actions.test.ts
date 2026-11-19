@@ -486,13 +486,6 @@ describe('window-actions: goTo in Canvas brings the window to front and restores
 
     expect(registry.bringWindowToFront).toHaveBeenCalledTimes(1);
     expect(registry.bringWindowToFront).toHaveBeenCalledWith('w-1');
-  });
-
-  it('does not touch the minimized flag for a window that is not minimized', () => {
-    const { actions, registry } = buildActions();
-
-    actions.goTo(makeEntry({ display: { ...makeEntry().display, isMinimized: false } }));
-
     expect(registry.setWindowMinimized).not.toHaveBeenCalled();
   });
 
@@ -534,13 +527,6 @@ describe('window-actions: minimize and maximize delegate to the registry without
     actions.minimize(makeEntry());
 
     expect(registry.setWindowMinimized).toHaveBeenCalledWith('w-1', true);
-  });
-
-  it('does not re-stack the window when minimizing it', () => {
-    const { actions, registry } = buildActions();
-
-    actions.minimize(makeEntry());
-
     expect(registry.bringWindowToFront).not.toHaveBeenCalled();
   });
 
@@ -550,6 +536,7 @@ describe('window-actions: minimize and maximize delegate to the registry without
     actions.maximize(makeEntry({ display: { ...makeEntry().display, isMaximized: false } }));
 
     expect(registry.setWindowMaximized).toHaveBeenCalledWith('w-1', true);
+    expect(registry.bringWindowToFront).not.toHaveBeenCalled();
   });
 
   it('toggles maximize off for a window that is already maximized', () => {
@@ -558,14 +545,6 @@ describe('window-actions: minimize and maximize delegate to the registry without
     actions.maximize(makeEntry({ display: { ...makeEntry().display, isMaximized: true } }));
 
     expect(registry.setWindowMaximized).toHaveBeenCalledWith('w-1', false);
-  });
-
-  it('does not re-stack the window when maximizing it', () => {
-    const { actions, registry } = buildActions();
-
-    actions.maximize(makeEntry());
-
-    expect(registry.bringWindowToFront).not.toHaveBeenCalled();
   });
 });
 

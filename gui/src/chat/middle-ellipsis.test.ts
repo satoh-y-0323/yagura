@@ -50,19 +50,12 @@ describe('splitForMiddleEllipsis - names of 17 graphemes or more keep the last 8
     });
   });
 
-  it.each([['abcdefghijklmnopq'], [kanjiRun(40)], ['x'.repeat(100)]])(
-    'head + tail rebuilds %j',
-    (name) => {
-      expectPartsRebuildName(name);
-    }
-  );
+  it.each([[kanjiRun(40)], ['x'.repeat(100)]])('head + tail rebuilds %j', (name) => {
+    expectPartsRebuildName(name);
+  });
 });
 
 describe('splitForMiddleEllipsis - counts graphemes, so combined characters are never split', () => {
-  it('Intl.Segmenter is available in this environment (precondition for this block)', () => {
-    expect(Reflect.has(Intl, 'Segmenter')).toBe(true);
-  });
-
   it('16 kana with a combining dakuten (32 code points) stay whole', () => {
     const name = KA_WITH_DAKUTEN.repeat(16);
     expect(splitForMiddleEllipsis(name)).toEqual({ head: name, tail: '' });

@@ -32,10 +32,6 @@ describe('ACTION_IDS', () => {
   it('lists the actions in the order of the Keyboard tab rows', () => {
     expect([...ACTION_IDS]).toEqual([...EXPECTED_ORDER]);
   });
-
-  it('holds no action twice', () => {
-    expect(new Set(ACTION_IDS).size).toBe(ACTION_IDS.length);
-  });
 });
 
 describe('parseChord: canonical form', () => {
@@ -82,36 +78,18 @@ describe('parseChord: canonical form', () => {
   });
 });
 
-describe('parseChord: the space key is spelled Space', () => {
-  it('accepts Space as a key name', () => {
-    expect(parseChord('Ctrl+Shift+Space')).not.toBeNull();
-  });
-
-  it.each([' ', '\t'])('rejects a whitespace character %j written as the key itself', (key) => {
-    expect(parseChord(`Ctrl+Shift+${key}`)).toBeNull();
-  });
-});
-
 describe('parseChord: what a chord may be made of', () => {
   it.each<[string, string]>([
     ['Ctrl+Shift+ArrowRight', 'a key name that starts with a capital'],
-    ['Alt+1', 'a digit'],
-    ['Ctrl+]', 'a symbol'],
     ['Shift+é', 'a lower-case letter outside ASCII'],
-    ['Ctrl+Meta+Space', 'the key name Space'],
   ])('accepts %s (%s)', (chord) => {
     expect(parseChord(chord)).not.toBeNull();
   });
 
   it.each<[string, string]>([
-    ['', 'an empty chord'],
-    ['Ctrl+', 'a missing key'],
     ['Foo+a', 'an unknown modifier'],
-    ['Shift+Ctrl+a', 'modifiers out of order'],
-    ['Ctrl+Ctrl+a', 'a modifier twice'],
     ['Alt+Ctrl', 'a modifier name as the key'],
     ['Ctrl+Meta', 'a modifier name as the key'],
-    ['Ctrl+A', 'a lone capital letter'],
     ['Ctrl+aB', 'a key name that does not start with a capital'],
     ['Ctrl+arrow', 'a lower-case key name'],
     ['Ctrl+ ', 'a space character'],

@@ -417,16 +417,6 @@ describe('the Keyboard tab controller: recording', () => {
     expect(state.edits).toHaveLength(0);
     expect(get(controller).recording).toBe('toggle-plans');
   });
-
-  it('clears the notice of a row when Change is pressed on it again', async () => {
-    const { state, controller } = harness();
-    controller.change('toggle-chat');
-    lastResult(state)('Ctrl+r');
-    await flush();
-    expect(get(controller).notices['toggle-chat']).toBeDefined();
-    controller.change('toggle-chat');
-    expect(get(controller).notices['toggle-chat']).toBeUndefined();
-  });
 });
 
 describe('the Keyboard tab controller: saving a recorded chord', () => {

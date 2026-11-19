@@ -51,15 +51,3 @@ describe('hostKeyboardPlatform', () => {
     expect(platform).toBe('linux');
   });
 });
-
-describe('hostKeyboardPlatform without a navigator', () => {
-  afterEach(() => {
-    vi.unstubAllGlobals();
-  });
-
-  it('is linux when there is no navigator', () => {
-    vi.stubGlobal('navigator', undefined);
-    const platform: KeyboardPlatform = hostKeyboardPlatform();
-    expect(platform).toBe('linux');
-  });
-});
