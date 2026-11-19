@@ -60,9 +60,10 @@ export function buildBinPackages(tool, { release }) {
     exitWith(
       tool,
       `cargo ${args.join(' ')} failed; see the cargo output above for the reason. If a running ` +
-        'yagura-daemon holds one of these executables (os error 5 or 32 on Windows), stop the ' +
-        'daemon of that instance with `yagura-daemon --shutdown` and re-run, or rebuild it in ' +
-        'place with scripts/stash-rebuild.'
+        'yagura-daemon holds one of these executables (os error 5 or 32 on Windows), first close ' +
+        'any yagura GUI of that instance (an open GUI starts the daemon again; for the dev run, ' +
+        'stop `npm run dev`), then stop the daemon with `yagura-daemon --shutdown` and re-run, ' +
+        'or rebuild it in place with scripts/stash-rebuild.'
     );
   }
 }
