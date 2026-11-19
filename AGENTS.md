@@ -27,8 +27,9 @@ talk to each other.
 
 ## Checks
 
-Run what CI runs before you push. After a fresh clone, stage the GUI's sidecars once
-(`cd gui && npm install && node scripts/prepare-sidecar.mjs`), or `cargo` fails on the GUI crate.
+Run what CI runs before you push. After a fresh clone, build the web frontend once
+(`cd gui && npm install && npm run build:web`): the GUI crate embeds `gui/dist`, so `cargo` fails on
+the GUI crate without it.
 
 ```bash
 cargo fmt --all -- --check

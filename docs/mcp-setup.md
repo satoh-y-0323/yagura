@@ -34,8 +34,10 @@ yagura-daemon
 The daemon initializes with one default shell window and listens for IPC connections.
 
 The daemon outlives the GUI: closing the GUI leaves it running, still serving the version it was
-started with. **After upgrading yagura, restart `yagura-daemon`** (`yagura-daemon --shutdown`, then
-start the GUI again). A client checks the wire revision the daemon reports before sending a request
+started with. **After upgrading yagura, restart `yagura-daemon`**: close the GUI (an open GUI
+starts the daemon again as soon as it stops), run `yagura-daemon --shutdown`, then start the GUI
+again. `--shutdown` returns once the daemon process has ended, so the GUI you start next starts the
+new daemon; when it cannot confirm the end, it says so and exits non-zero. A client checks the wire revision the daemon reports before sending a request
 that needs a newer one: when a daemon from before the upgrade answers with an older revision, such
 a call is refused outright as `unsupported` rather than sent. Restarting the daemon closes every
 window it is currently running.
@@ -163,11 +165,11 @@ beside the window's name, in the status panel and the title bar, with the toolti
 "Connected to yagura". The bridge identifies itself to the daemon as soon as the CLI starts it,
 before its first tool call.
 
-**Building from source on a development machine**: build the GUI first, then `yagura-daemon`, then
-`yagura-mcp`. A GUI build copies the staged sidecar binaries over the `yagura-daemon` and
-`yagura-mcp` executables in the same cargo target directory, and the daemon uses whichever
-`yagura-mcp` sits next to it, so building the two last keeps both current. Restart the daemon
-afterwards: it resolves the bridge only when it starts.
+**Building from source on a development machine**: run yagura with `npm run dev`, which builds the
+GUI, the daemon, the holder and `yagura-mcp` from the same checkout into a target directory of their
+own, so the daemon it starts finds the bridge of that build beside itself. The daemon resolves the
+bridge only when it starts; after changing the bridge, restart the daemon as
+[Running a development build](building.md#running-a-development-build) describes.
 
 ## Registering from the GUI
 

@@ -5,8 +5,8 @@ and how to sign and notarize a build with an Apple Developer ID if you want to d
 
 ## Opening the Release Build
 
-The `.dmg` on the [Releases](https://github.com/satoh-y-0323/yagura/releases) page is built for Apple silicon. Its app and the two
-programs inside it (`yagura-daemon` and `yagura-mcp`) carry an **ad-hoc signature** and are **not
+The `.dmg` on the [Releases](https://github.com/satoh-y-0323/yagura/releases) page is built for Apple silicon. Its app and the
+programs inside it (`yagura-daemon`, `yagura-holder`, `yagura-watcher` and `yagura-mcp`) carry an **ad-hoc signature** and are **not
 notarized**. An ad-hoc signature is anonymous: it lets the code run on Apple silicon, but Gatekeeper
 still treats the app as coming from an unidentified developer. The first launch therefore needs one
 deliberate step from you:
@@ -36,14 +36,17 @@ An Intel Mac has no release build; [build from source](building.md) instead.
 
 ## Building the App Yourself
 
-`gui/src-tauri/tauri.macos.conf.json` holds the macOS bundle settings: the `app` and `dmg` targets
-and `signingIdentity: "-"`, which makes Tauri sign the sidecars and the app ad-hoc during the build.
+`gui/src-tauri/tauri.bundle.macos.conf.json` holds the macOS bundle settings: the `app` and `dmg`
+targets, the sidecars, the macOS 26 icon and `signingIdentity: "-"`, which makes Tauri sign the
+sidecars and the app ad-hoc during the bundle step. `npm run build:tauri` hands that file to the
+bundle step; a plain `npx tauri build` stops before bundling (see
+[Building the Installers](building.md#building-the-installers)).
 
 ```bash
 cd gui
 npm ci
 npm run build:web
-npx tauri build
+npm run build:tauri
 ```
 
 The app lands in `target/release/bundle/macos/` and the disk image in `target/release/bundle/dmg/`.
@@ -136,11 +139,11 @@ A macOS `.app` is a directory, and code signing applies to every Mach-O file ins
 top-level bundle. In a yagura bundle that means at least:
 
 - the GUI executable in `Contents/MacOS/`;
-- the **`yagura-daemon` and `yagura-mcp` sidecars**, declared as `bundle.externalBin` in
-  `gui/src-tauri/tauri.conf.json` and staged by `gui/scripts/prepare-sidecar.mjs` under the host
-  triple name (for example `yagura-daemon-aarch64-apple-darwin`) and placed in the bundle as plain
-  `yagura-daemon` and `yagura-mcp` beside the GUI executable, the names the GUI and the daemon look
-  each other up by;
+- the **`yagura-daemon`, `yagura-holder`, `yagura-watcher` and `yagura-mcp` sidecars**, declared
+  as `bundle.externalBin` in `gui/src-tauri/tauri.bundle.macos.conf.json` and staged by
+  `gui/scripts/prepare-sidecar.mjs` under the host triple name (for example
+  `yagura-daemon-aarch64-apple-darwin`) and placed in the bundle under their plain names beside the
+  GUI executable, the names the GUI, the daemon and the holder look each other up by;
 - any framework or dynamic library that ends up inside the bundle.
 
 Data files such as the detection TOMLs in `bundle.resources` are not signed individually; they are
@@ -157,15 +160,14 @@ options and one entitlements file to everything it touches.
 
 ```bash
 IDENTITY="Developer ID Application: Your Name (TEAMID1234)"
-APP="gui/src-tauri/target/release/bundle/macos/yagura.app"
+APP="target/release/bundle/macos/yagura.app"
 
-# 1. nested executables first (the daemon and MCP sidecars, plus anything else that is Mach-O)
-codesign --force --timestamp --options runtime \
-  --sign "$IDENTITY" \
-  "$APP/Contents/MacOS/yagura-daemon"
-codesign --force --timestamp --options runtime \
-  --sign "$IDENTITY" \
-  "$APP/Contents/MacOS/yagura-mcp"
+# 1. nested executables first (the sidecars, plus anything else that is Mach-O)
+for bin in yagura-daemon yagura-holder yagura-watcher yagura-mcp; do
+  codesign --force --timestamp --options runtime \
+    --sign "$IDENTITY" \
+    "$APP/Contents/MacOS/$bin"
+done
 
 # 2. then the bundle itself
 codesign --force --timestamp --options runtime \
@@ -330,14 +332,17 @@ carries the quarantine attribute — is the only check that reflects a real firs
 
 ## 5. Tauri Configuration (`bundle.macOS`)
 
-The macOS bundle settings live in `gui/src-tauri/tauri.macos.conf.json`, which Tauri merges over
-`tauri.conf.json` on macOS. It already selects the `app` and `dmg` targets, and the build runs
-`beforeBuildCommand`, which includes `node scripts/prepare-sidecar.mjs`, so the daemon and MCP
-sidecars are staged for the host triple before bundling. A universal build
-(`--target universal-apple-darwin`) needs a sidecar staged for **each** architecture, since Tauri
-resolves `externalBin` by target triple.
+The macOS bundle settings live in `gui/src-tauri/tauri.bundle.macos.conf.json`, which
+`npm run build:tauri` merges over `tauri.conf.json` for the bundle step on macOS. It selects the
+`app` and `dmg` targets. The command's first step runs `beforeBuildCommand`, which includes
+`node scripts/prepare-sidecar.mjs`, so the sidecars are staged for the host triple before bundling.
 
-**Signing keys.** Replace the ad-hoc identity in `tauri.macos.conf.json`:
+**A universal build (`--target universal-apple-darwin`) cannot be made from this repository
+today.** `npm run build:tauri` takes no arguments, and `prepare-sidecar.mjs` stages the sidecars
+for the host triple only, while Tauri resolves `externalBin` by target triple: a universal bundle
+needs a sidecar staged for each architecture, which nothing here does.
+
+**Signing keys.** Replace the ad-hoc identity in `tauri.bundle.macos.conf.json`:
 
 ```json
 {
@@ -373,7 +378,7 @@ The bundle identifier is **not** part of this object: it comes from the top-leve
 `io.github.satoh-y-0323.yagura`. Notarization associates submissions with that identifier, and changing it
 after a release makes the new build a different application to macOS.
 
-Tauri signs during `tauri build` when an identity is configured. Notarization and stapling are then
+Tauri signs during the bundle step of `npm run build:tauri` when an identity is configured. Notarization and stapling are then
 run on the produced artifact exactly as in section 4; doing those steps by hand keeps the verdict and
 the log visible, which is worth more than the convenience when a submission comes back `Invalid`.
 

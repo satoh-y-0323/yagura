@@ -10,7 +10,7 @@ derives every instance's path lives.
 
 One yagura instance owns one IPC endpoint plus one config / state / data directory. Running two
 instances at once -- most commonly a work instance (an installed build, used for real sessions)
-alongside a development instance (`target/debug`, rebuilt while you work on yagura itself) -- keeps
+alongside a development instance (a dev run of a checkout, rebuilt while you work on yagura itself) -- keeps
 their windows, their session store and their logs from colliding. Without this separation, starting
 a second `yagura-daemon` either fails to bind the one endpoint name that already exists, or, worse,
 silently shares the first daemon's session store and discards its previous-session snapshot on
@@ -142,23 +142,31 @@ PowerShell) if you need to see it again.
 ## Working and development instances
 
 The pattern this mechanism is meant for: run an **installed** build of yagura as your working
-instance for real sessions, and a **`target/debug`** build as your development instance while you
-work on yagura itself.
+instance for real sessions, and a **dev run** of your checkout (`npm run dev`) as your development
+instance while you work on yagura itself.
 
 ```powershell
 # work instance: the installed build, unset YAGURA_INSTANCE (the default instance)
 # started normally, e.g. from the Start menu
 
-# development instance, from a separate terminal
+# development instance, from a separate terminal in gui/
 $env:YAGURA_INSTANCE = 'dev'
-.\target\debug\yagura-gui.exe
+npm run dev
+
+# or start the GUI a dev run built, from the repository root, without tauri dev
+.\target\dev-run\debug\yagura-gui.exe
 ```
 
 On macOS and Linux, the development instance is started the same way from a shell:
 
 ```sh
-YAGURA_INSTANCE=dev ./target/debug/yagura-gui
+YAGURA_INSTANCE=dev npm run dev                  # in gui/
+YAGURA_INSTANCE=dev ./target/dev-run/debug/yagura-gui   # or this, from the repository root
 ```
+
+`target/` is the cargo target directory's default. What a dev run builds, and how to restart its
+daemon after changing the daemon, is in
+[Running a development build](building.md#running-a-development-build).
 
 Stopping the development instance's daemon (`$env:YAGURA_INSTANCE='dev'; yagura-daemon --shutdown`
 in PowerShell, `YAGURA_INSTANCE=dev yagura-daemon --shutdown` in a Unix shell) never affects the

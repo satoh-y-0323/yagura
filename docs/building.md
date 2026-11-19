@@ -15,39 +15,84 @@ provided yet, or to work on yagura itself.
 ## Build Steps
 
 ```bash
-# Stage the daemon and the MCP bridge as the GUI's sidecars (required before any cargo build)
 cd gui
 npm install
-node scripts/prepare-sidecar.mjs
+npm run build:web   # the GUI crate embeds gui/dist, so build it before any cargo build
 
-# Build and run the GUI in development mode; it starts the daemon for you
-npx tauri dev
+# Run this checkout's GUI, daemon and MCP bridge as the `dev` instance
+YAGURA_INSTANCE=dev npm run dev   # PowerShell: $env:YAGURA_INSTANCE = 'dev'; npm run dev
 
 # Or build everything at once
 cd ..
 cargo build --workspace
 ```
 
-**`cargo build` depends on the staged sidecars.** `gui/src-tauri/tauri.conf.json` declares
-`bundle.externalBin = ["binaries/yagura-daemon", "binaries/yagura-mcp"]`, and `tauri-build`
-resolves that at *cargo build* time: with no `gui/src-tauri/binaries/<name>-<host-triple>` (`.exe`
-on Windows) present, the `yagura-gui` build script fails, and since `yagura-gui` is a workspace
-member that takes `cargo build`/`clippy`/`test --workspace` down with it. `binaries/` is a build
-product and is not tracked, so run `node scripts/prepare-sidecar.mjs` (from `gui/`) once after a
-fresh clone. The script is self-contained and idempotent: it runs
-`cargo build --release -p yagura-daemon -p yagura-mcp` itself and copies each executable under the
-host-triple name Tauri expects.
+**Nothing has to be staged first.** Once `gui/dist` exists, a fresh clone builds with
+`cargo build`, `clippy` and `test --workspace`. What a distribution ships beside the GUI -- the
+daemon, the holder, on Linux and macOS the watcher, the MCP bridge, and on Windows the bundled
+ConPTY -- is named only in the distribution configs that `npm run build:tauri` hands to the bundle
+step (see [Building the Installers](#building-the-installers)); no cargo build reads them. Run
+`npm run build:web` again after changing the frontend.
 
-**After changing the daemon or the MCP bridge, re-run it.** `tauri-build` copies the staged
-sidecars next to the GUI executable on every cargo build, including `target/debug/`. Until
-`prepare-sidecar.mjs` is re-run, a `tauri dev` run keeps launching the *previously staged release*
-binaries, not your rebuilt ones.
+**Do not put distribution settings in a file tauri-build reads.** On every cargo build of the GUI,
+tauri-build reads `gui/src-tauri/tauri.conf.json` and, when one exists,
+`tauri.<platform>.conf.json` (`tauri.windows.conf.json` and so on), and copies each
+`bundle.externalBin` and `bundle.resources` entry into the cargo target directory. There the copies
+contend with the executables cargo itself builds for every other build and test, and an entry that
+does not exist yet fails every cargo build of the workspace. Keep `externalBin` and `resources` in
+the `tauri.bundle.<os>.conf.json` files, and do not create a `tauri.<platform>.conf.json`.
 
-**If a running MCP bridge or daemon holds the executable open, `cargo build` fails to link it.**
-Use `scripts/stash-rebuild/stash_rebuild.py` to rename the held executable out of the way before
-building; the process that holds it keeps running from the renamed file, and the rebuilt binary
-takes effect the next time that process is started. See `scripts/stash-rebuild/README.md` for
-details.
+### Running a development build
+
+`npm run dev` (from `gui/`) runs `tauri dev` in a cargo target directory of its own: `dev-run`
+under the one cargo resolves, so `target/dev-run/` unless `CARGO_TARGET_DIR` or
+`build.target-dir` in `.cargo/config.toml` points elsewhere. Before it builds the GUI, its
+`beforeDevCommand` (`gui/scripts/prepare-dev.mjs`) builds the daemon, the holder (with the watcher
+on Linux and macOS) and the MCP bridge into the same directory and, on Windows, places the bundled
+ConPTY beside them. A daemon the GUI starts is therefore the one beside it in
+`target/dev-run/debug/`, built from this checkout. The dev run is a debug build, and `npm run dev`
+takes no arguments.
+
+- Only `npm run dev` writes to `dev-run/`. Builds and tests of the default target never touch it,
+  so you can run `cargo build` and `cargo test --workspace` while a dev run and its windows keep
+  running.
+- A plain `npx tauri dev` stops before building anything: the preparation refuses a target
+  directory that is not the dev run's and names `npm run dev`.
+- To start the GUI that `npm run dev` built without `tauri dev`, run
+  `target/dev-run/debug/yagura-gui` (`yagura-gui.exe` on Windows). To run the preparation by hand,
+  run `node gui/scripts/prepare-dev.mjs` with `CARGO_TARGET_DIR` set to that `dev-run` directory.
+
+**The daemon outlives the GUI** (see [mcp-setup.md](mcp-setup.md#starting-the-daemon)), and a dev
+run follows the same rule: the GUI starts a daemon only when none is running for its instance, and
+otherwise connects to the one that is, whatever build it is. Three things follow:
+
+1. **Run the dev build as an instance of its own** (`YAGURA_INSTANCE=dev`). In the default
+   instance, a dev run connects to the daemon of the yagura you use every day when it is running,
+   and starts no daemon of its own. A daemon accepts as its approver only the GUI it was started
+   for (`--approver-exe`), so the dev GUI cannot answer that daemon's approvals either; a daemon
+   started without `--approver-exe`, for example from a command line, refuses every GUI.
+2. **After changing the daemon, the holder or the MCP bridge** -- or a crate they share with the
+   GUI, such as `yagura-os` or `yagura-protocol` -- restart the dev run in this order:
+   1. Close that instance's GUI; for the dev run, stop `npm run dev`. An open GUI starts the daemon
+      again as soon as it stops.
+   2. Stop the daemon: `YAGURA_INSTANCE=dev target/dev-run/debug/yagura-daemon --shutdown`. It
+      returns once the daemon process has ended, and the daemon closes every window it runs.
+   3. Run `npm run dev` again.
+
+   `tauri dev` does not rebuild the daemon, the holder or the bridge while it runs, and runs its
+   `beforeDevCommand` only when it starts. If the daemon is still running when the preparation
+   rebuilds it, on Windows the preparation stops: the running daemon holds its executable, and the
+   link fails with the steps above. On macOS and Linux the build replaces the file, and the running
+   daemon carries on with the old code.
+3. **After changing only the GUI** (`gui/`), the daemon may keep running. `tauri dev` rebuilds and
+   restarts the GUI on its own when `gui/src-tauri` changes, or restart `npm run dev`; the new GUI
+   connects to the running daemon and its windows.
+
+`scripts/stash-rebuild/stash_rebuild.py` is not needed for a dev run. It renames an executable a
+running process holds out of the way so that `cargo build` can link a fresh one into the default
+target -- for example a daemon you keep running straight from `target/<profile>/` -- and the
+rebuilt binary takes effect the next time that process starts. See
+`scripts/stash-rebuild/README.md`.
 
 **On Windows, every window runs under the ConPTY that ships with yagura.** It is used instead of
 the one built into Windows. Its two files, `conpty.dll` and `OpenConsole.exe`
@@ -59,18 +104,16 @@ different; they copy nothing, because a build script has no supported way to fin
 directory (cargo#9661, which took over cargo#5457, closed as not planned). The files are vendored
 for x86_64 only, so a Windows build for another architecture fails.
 
-Where the files end up beside a build depends on how it is made:
+The files reach a daemon's directory in one of these ways:
 
-- A build that includes `yagura-gui` (`tauri dev`, `cargo build --workspace`) runs tauri-build,
-  which copies the two files and the sidecars (`gui/src-tauri/binaries/`) three directories above
-  its `OUT_DIR`. That is `target/<profile>/` on Cargo 1.99 and earlier and
-  `target/<profile>/build/` on Cargo 1.100, so on 1.100 they do not land beside the daemon.
-- The tests do not rely on that copy. Before starting a holder they check the pair beside it
+- A dev run's preparation places them in `dev-run/debug/` with the same check and placing the tests
+  use (the `place-bundled-conpty` command of `yagura-test-support`).
+- The tests do not rely on any copy. Before starting a holder they check the pair beside it
   against the pins and, when it does not match, place it from `vendor/conpty/`.
 - To run a daemon straight from `target/<profile>` on Windows, copy `vendor/conpty/x64/conpty.dll`
   and `vendor/conpty/x64/OpenConsole.exe` next to `yagura-daemon.exe` (and so `yagura-holder.exe`).
   Without them the daemon opens no window and says so in `get_daemon_health`.
-- The installer carries them through `bundle.resources`.
+- The installer carries them through `bundle.resources` in `tauri.bundle.windows.conf.json`.
 
 At run time the daemon checks the same pins beside its own executable, and that the `conpty.dll` it
 loaded is that one; if not, it opens no window and reports `spawn_failed` asking for a reinstall,
@@ -83,20 +126,22 @@ criteria CI uses, and checks that the files in `vendor/conpty/` match the hashes
 README and pinned in the code. See `scripts/dep-audit/README.md` for the prerequisites, what fails,
 and what to do when it does.
 
-**To drive yagura from Claude Code while working on this repository, register the MCP bridge
-yourself after a fresh clone.** The registration points at a build you produce locally, so it is
-not tracked (`.mcp.json` is git-ignored):
+**To drive yagura from Claude Code while working on this repository, register the dev run's MCP
+bridge yourself after a fresh clone.** The registration points at a build you produce locally, so
+it is not tracked (`.mcp.json` is git-ignored). Run `npm run dev` once to build the bridge, then,
+from the repository root:
 
 ```bash
-cargo build -p yagura-mcp
-claude mcp add yagura -s project -- ./target/debug/yagura-mcp.exe
+claude mcp add --scope project --env YAGURA_INSTANCE=dev yagura-dev -- ./target/dev-run/debug/yagura-mcp.exe
 ```
 
 That writes `.mcp.json` in the repository root and scopes the server to this project alone, leaving
 your user-wide configuration untouched. Claude Code asks you to approve a project-scoped server the
-first time it starts afterwards. On macOS and Linux drop the `.exe` suffix. To keep a development
-build apart from the yagura you use every day, run it as a separate instance (see
-[instances.md](instances.md)).
+first time it starts afterwards. On macOS and Linux drop the `.exe` suffix. The name and the
+`YAGURA_INSTANCE` follow the dev instance, as [Registering from the GUI](mcp-setup.md#registering-from-the-gui)
+does (see [instances.md](instances.md)). After changing the bridge's source, close the Claude Code
+session that runs it before running `npm run dev`: on Windows the session holds the executable, and
+the preparation cannot replace it.
 
 ## Building the Installers
 
@@ -104,14 +149,16 @@ build apart from the yagura you use every day, run it as a separate instance (se
 cd gui
 npm ci
 npm run build:web
-npx tauri build
+npm run build:tauri
 ```
 
-`tauri build` stages the sidecars itself (its `beforeBuildCommand` runs
-`node scripts/prepare-sidecar.mjs`) and bundles for the OS it runs on. `tauri.conf.json` holds
-the settings every OS shares; `tauri.windows.conf.json`, `tauri.macos.conf.json` and
-`tauri.linux.conf.json` add each OS's targets and settings on top of it. The output lands under
-`target/release/bundle/`:
+`npm run build:tauri` (`gui/scripts/build-bundle.mjs`) bundles in two steps. `tauri build
+--no-bundle` builds the GUI in release, and its `beforeBuildCommand` runs
+`node scripts/prepare-sidecar.mjs`, which builds the release daemon, holder, watcher and bridge and
+stages them in `gui/src-tauri/binaries/` under the host-triple names Tauri expects. Then
+`tauri bundle --config` bundles with this OS's distribution config. When either step fails, the
+command names it and exits non-zero. It takes no arguments: it bundles for the host triple, the
+only one the sidecars are staged for. The output lands under `target/release/bundle/`:
 
 | OS | Output | Notes |
 |---|---|---|
@@ -119,19 +166,32 @@ the settings every OS shares; `tauri.windows.conf.json`, `tauri.macos.conf.json`
 | macOS | `macos/yagura.app`, `dmg/yagura_<version>_aarch64.dmg` | Signed ad-hoc; see [macos-signing.md](macos-signing.md). Over SSH, set `CI=true`. Needs Xcode 26 or later for the macOS 26 icon (see below). |
 | Linux | `deb/yagura_<version>_amd64.deb` | Needs the WebKitGTK 4.1 development packages (`libwebkit2gtk-4.1-dev` on Debian and Ubuntu). No AppImage: it runs the app from a different temporary path on every launch, and yagura recognizes its own GUI and MCP bridge by their paths. |
 
+`tauri.conf.json` holds the settings every OS shares and every cargo build reads. Each OS's
+distribution config -- `tauri.bundle.windows.conf.json`, `tauri.bundle.macos.conf.json` or
+`tauri.bundle.linux.conf.json` -- holds everything that OS's bundle adds on top of it: the bundle
+targets, `externalBin`, and on Windows `resources` and the installer settings, on macOS the icon
+and the signing identity. Only the bundle step reads them.
+
+**A plain `npx tauri build` or `npx tauri bundle` makes no distribution.** The
+`beforeBundleCommand` in `tauri.conf.json` (`gui/scripts/refuse-bundle.mjs`) stops it before
+anything is bundled, naming `npm run build:tauri`, and each distribution config replaces that hook
+(with none, or on macOS with the icon step). Keep the hook in `tauri.conf.json`: without it, a
+bundle from `tauri.conf.json` alone succeeds and ships an app with none of its binaries beside it.
+
 Pushing a `v*` tag runs the same build on each OS in CI (`.github/workflows/release.yml`) and
 attaches the results to a draft release.
 
 **The Windows installer** installs per user
-(`nsis.installMode = "currentUser"`, no administrator rights), bundles `yagura-daemon.exe` and
-`yagura-mcp.exe` alongside the GUI together with the bundled ConPTY's `conpty.dll` and
-`OpenConsole.exe` (`bundle.resources` in `tauri.windows.conf.json`), and installs the WebView2 runtime silently when the machine
-lacks it (that step needs network access). The detection definitions are compiled into
+(`nsis.installMode = "currentUser"`, no administrator rights), bundles `yagura-daemon.exe`,
+`yagura-holder.exe` and `yagura-mcp.exe` alongside the GUI together with the bundled ConPTY's
+`conpty.dll` and `OpenConsole.exe` (`bundle.resources` in `tauri.bundle.windows.conf.json`), and
+installs the WebView2 runtime silently when the machine lacks it (that step needs network access).
+The detection definitions are compiled into
 `yagura-daemon.exe` itself, so the installer puts none of them on disk; definitions of your own go
 in a `detection` directory under the config root (`%LOCALAPPDATA%\io.github.satoh-y-0323.yagura` on Windows), where they
 override the compiled-in ones name by name. The build is unsigned, so SmartScreen warns about an
-unrecognized publisher on first run. Stop any running `yagura-daemon.exe` first: a live daemon
-holds a lock on its executable in the target directory and fails the build.
+unrecognized publisher on first run. Stop any `yagura-daemon.exe` running from `target/release/`
+first: a live daemon holds a lock on its executable there and fails the build.
 
 ## Regenerating the Application Icon
 
@@ -204,8 +264,8 @@ scripts), run `verify-icon.ps1` before committing.
 macOS 26 masks every app icon to its rounded square, and shows an icon of any other shape shrunk
 onto a gray plate. `icons/yagura.icon` is an Icon Composer icon for macOS 26 and later: a dark blue
 gradient fill with `icon.svg` as its only layer, scaled and offset to the centre in `icon.json`.
-On macOS, `tauri build` runs `gui/scripts/compile-macos-icon.mjs` before bundling
-(`beforeBundleCommand` in `tauri.macos.conf.json`). It compiles the icon with `actool`, which needs
+On macOS, the bundle step of `npm run build:tauri` runs `gui/scripts/compile-macos-icon.mjs` before
+bundling (`beforeBundleCommand` in `tauri.bundle.macos.conf.json`). It compiles the icon with `actool`, which needs
 Xcode 26 or later, into `gui/src-tauri/gen/macos-icon/Assets.car`, and the bundle lists that file.
 Earlier macOS releases keep using `icons/icon.icns`. Tauri could compile the `.icon` itself, but under
 the Node.js CLI it starts `actool` without a stdin and `actool` crashes

@@ -136,7 +136,7 @@ those that could not be (`rollback: NOT restored ...`, when the original name is
 move itself failed), so the reader can tell which targets are back in place.
 
 Leaving a target stashed in any of these cases would take it out of the name that other tools
-resolve - the MCP registration points at `target/<profile>/<bin>.exe` - so no failure path ends
+resolve - an MCP registration can point at `<target_directory>/<profile>/<bin>.exe` - so no failure path ends
 with a target stashed while its own name is free.
 
 ## 6. Tests
@@ -168,18 +168,18 @@ part of CI.
   resolve. The check cannot tell a redirected output path from a target this build never produced,
   so both end the same way; restoring first keeps the harmless case (a `--bin` the build does not
   cover) from vacating a name that was occupied before the run.
-- **The Tauri sidecar copy is not covered.** `gui/scripts/prepare-sidecar.mjs` stages
-  `yagura-daemon.exe` into `gui/src-tauri/binaries/`, outside `cargo metadata`'s
-  `target_directory`, and runs its own `cargo build --release -p yagura-daemon`, so it never goes
-  through this command. The daemon **inside** the target directory is covered by
+- **The distribution staging is not covered.** `gui/scripts/prepare-sidecar.mjs` stages the
+  release binaries into `gui/src-tauri/binaries/`, outside `cargo metadata`'s `target_directory`,
+  for the bundle step of `npm run build:tauri` alone, and runs its own `cargo build --release`, so
+  it never goes through this command. The daemon **inside** the target directory is covered by
   `--bin yagura-daemon`.
 - **Nothing is ever stopped or killed.** If a rebuild must actually take effect immediately, the
   holding process has to be restarted by hand.
-- **Running a second, named instance (see `docs/instances.md`) does not make this command
-  unnecessary.** `--bin yagura-mcp` stays needed regardless of instances: `.mcp.json` registers
-  `./target/debug/yagura-mcp.exe`, and the process that holds that file open is the Claude Code
-  session developing this repository itself -- not a yagura instance -- so separating instances
-  changes nothing about it. `--bin yagura-daemon` becomes unnecessary only while your work instance
-  runs an **installed** build; it stays needed whenever a development instance (`YAGURA_INSTANCE`
-  set, running `target/debug/yagura-daemon.exe`) is itself the executable being rebuilt, since that
-  instance then holds its own file open the same way the single daemon does today.
+- **A dev run (`npm run dev`) does not need this command.** It builds the GUI, the daemon, the
+  holder and the MCP bridge into `<target_directory>/dev-run/debug/`, which only `npm run dev`
+  writes, so builds and tests of the default target never meet the executables a dev run holds. To
+  rebuild a dev run's own daemon or bridge, stop what holds it and run `npm run dev` again (see
+  "Running a development build" in `docs/building.md`). What remains for this command is rebuilding
+  in the default target an executable that a running process keeps open there: a resident
+  `yagura-daemon.exe` started straight from `target/<profile>/` (`--bin yagura-daemon`), or a
+  `yagura-mcp.exe` there that an MCP client has registered (`--bin yagura-mcp`).
