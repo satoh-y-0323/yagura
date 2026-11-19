@@ -19,6 +19,7 @@
   import AppRail from '../components/AppRail.svelte';
   import ApprovalDialog from '../components/ApprovalDialog.svelte';
   import ChatPanel from '../components/ChatPanel.svelte';
+  import CommandPicker from '../components/CommandPicker.svelte';
   import ConfirmDialog from '../components/ConfirmDialog.svelte';
   import Icon from '../components/Icon.svelte';
   import IconButton from '../components/IconButton.svelte';
@@ -167,6 +168,7 @@
   import type { KeymapLoadStatus } from '../settings/keyboard-settings-model';
   import { createShortcutDispatcher } from '../keymap/shortcut-dispatcher';
   import { actionAvailability, type ActionVerdict } from '../keymap/action-availability';
+  import type { ActionId } from '../keymap/key-binding';
   import {
     availabilityContext,
     createShortcutRunner,
@@ -399,8 +401,13 @@
     entry: null,
   };
 
-  // The mode the picker is open in, or null while it is closed.
+  // The mode the picker opened in, or null while it is closed.
   let pickerMode: PickerMode | null = null;
+  // From closing the picker on a chosen row until that row starts to run; the
+  // permission dialog waits through it so it cannot flash up in between.
+  let isPickerRunPending = false;
+  // Spelled out: the linter reads a component instance as `any`.
+  let commandPicker: { showMode: (mode: PickerMode) => void } | undefined;
 
   // Restore flow. `restoreLoadFailedNotice` is not part of
   // banner-model.ts's fixed banner set (RestoreBanner is deliberately not
@@ -882,7 +889,7 @@
       isConfirmDialogOpen: confirmDialog.isOpen,
       isRenameDialogOpen: renameDialog.isOpen,
       isRestoreDialogOpen,
-      isPickerInUse: pickerMode !== null,
+      isPickerInUse: pickerMode !== null || isPickerRunPending,
     });
   $: isApprovalRequesterOpen = isRequesterWindowOpen(approvalRequest, $registry.windows);
   // Delegated to a function for the same reason as the folder-drop sync
@@ -2135,8 +2142,8 @@
     return target;
   }
 
-  /** A row the user chose: its window comes on screen and takes the keyboard. */
-  function goToWindowFromSidebar(entry: WindowEntry): void {
+  /** A window the user chose, in the sidebar or the picker: it comes on screen and takes the keyboard. */
+  function goToWindowByUser(entry: WindowEntry): void {
     revealWindow(revealDeps, entry);
     advanceNeedsYouView(true);
   }
@@ -2449,12 +2456,22 @@
   };
   const runShortcut = createShortcutRunner(runnerDeps);
 
+  /** The one way an action runs, from a key or from the picker; a failure shows in the banner. */
+  function runAction(action: ActionId): Promise<void> {
+    return reportIfFailed(errors.shortcutFailed, runShortcut(action));
+  }
+
+  /** Whether `action` would do anything now, judged from what the runner itself reads. */
+  function availabilityOf(action: ActionId): ActionVerdict {
+    return actionAvailability(action, availabilityContext(runnerDeps));
+  }
+
   // `$:` tracks only names written in the statement, and the runner's deps read through get(),
   // so every source those deps read is listed here.
   let tileAvailability: ActionVerdict;
   $: {
     void [$shell, $registry, $collapsedRooms, needsYouView];
-    tileAvailability = actionAvailability('tile-windows', availabilityContext(runnerDeps));
+    tileAvailability = availabilityOf('tile-windows');
   }
 
   // The window-level capture listener below is the only place keys are judged as
@@ -2463,10 +2480,56 @@
     bindings: () => get(keymapStore).bindings,
     isModalOpen: hasOpenModal,
     run: (action) => {
-      void reportIfFailed(errors.shortcutFailed, runShortcut(action));
+      void runAction(action);
     },
     platform: keyboardPlatform,
   });
+
+  $: pickerWindows = windowsInDisplayOrder(sidebarGroupsNow);
+
+  type PickerChoice = { kind: 'window'; windowId: string } | { kind: 'action'; action: ActionId };
+
+  /**
+   * Closes the picker, then starts the chosen row once the picker's focus return
+   * has run, so the row acts from where focus was before the picker opened.
+   */
+  async function runFromPicker(choice: PickerChoice): Promise<void> {
+    pickerMode = null;
+    isPickerRunPending = true;
+    try {
+      await tick();
+      await pendingFocus.settled();
+      if (choice.kind === 'window') {
+        const entry = get(registry).windows.find((w) => w.windowId === choice.windowId);
+        if (entry !== undefined) {
+          goToWindowByUser(entry);
+        }
+      } else {
+        // Not awaited: a dialog the action opens is marked before this returns,
+        // and the permission dialog must not wait for the daemon's reply.
+        void runAction(choice.action);
+      }
+    } finally {
+      isPickerRunPending = false;
+    }
+  }
+
+  function chooseWindowInPicker(entry: WindowEntry): void {
+    void runFromPicker({ kind: 'window', windowId: entry.windowId });
+  }
+
+  function chooseActionInPicker(action: ActionId): void {
+    // Going to a window from the commands keeps the picker open in its windows mode.
+    if (action === 'open-window-picker') {
+      commandPicker?.showMode('windows');
+      return;
+    }
+    void runFromPicker({ kind: 'action', action });
+  }
+
+  function cancelPicker(): void {
+    pickerMode = null;
+  }
 
   function panelHoldsFocus(panelSelector: string): boolean {
     return document.querySelector(panelSelector)?.contains(document.activeElement) ?? false;
@@ -3629,7 +3692,7 @@
       {roomActions}
       {themeStore}
       onToggleNeedsYou={toggleNeedsYouFilter}
-      onSelectWindow={goToWindowFromSidebar}
+      onSelectWindow={goToWindowByUser}
       onChooseWorkMode={chooseWorkMode}
       {tileAvailability}
       onTileWindows={handleArrangeWindows}
@@ -3806,6 +3869,21 @@
   subject={confirmDialog.windowId}
   onConfirm={() => answerConfirm(true)}
   onCancel={() => answerConfirm(false)}
+/>
+
+<CommandPicker
+  bind:this={commandPicker}
+  isOpen={pickerMode !== null}
+  mode={pickerMode ?? 'windows'}
+  windows={pickerWindows}
+  currentId={current?.windowId ?? null}
+  awaitingPermission={permissionWaiters}
+  keys={$keymapStore.keys}
+  platform={keyboardPlatform}
+  actionVerdict={availabilityOf}
+  onChooseWindow={chooseWindowInPicker}
+  onChooseAction={chooseActionInPicker}
+  onCancel={cancelPicker}
 />
 
 {#if approvalRequest !== null}

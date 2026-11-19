@@ -17,6 +17,8 @@ import {
   type WindowActionId,
 } from './action-availability';
 import type { ActionId } from './key-binding';
+import type { PickerMode } from '../command-picker/picker-model';
+export type { PickerMode };
 
 /** The window operations a shortcut can start. */
 export interface ShortcutWindowActions<T> {
@@ -27,9 +29,6 @@ export interface ShortcutWindowActions<T> {
   /** Brings a window on screen in the current work mode. */
   goTo: (entry: T) => void;
 }
-
-/** Which of its two modes the picker opens in: windows by name, or actions after `>`. */
-export type PickerMode = 'windows' | 'commands';
 
 /** What the runner reads and acts through; the view injects its own functions. */
 export interface ShortcutRunnerDeps<T extends RoomMember> {
