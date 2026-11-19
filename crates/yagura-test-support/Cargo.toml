@@ -5,8 +5,9 @@ edition.workspace = true
 # File::try_lock (the run directory's owner lock) is stable from 1.89.
 rust-version = "1.89"
 license.workspace = true
-# Test-fixture crate: consumed only through the dev-dependencies of the other
-# workspace members, so it is never released to crates.io.
+# Test-fixture crate, consumed through the dev-dependencies of the other
+# workspace members, plus a bin that places the bundled ConPTY for the dev
+# run's preparation. Neither is bundled into a release or published to crates.io.
 publish = false
 # The integration tests are one binary (tests/main.rs) rather than one per file.
 autotests = false
@@ -34,3 +35,9 @@ toml.workspace = true
 [[test]]
 name = "test_support"
 path = "tests/main.rs"
+
+# No tests of its own: placing is measured through the library's callers.
+[[bin]]
+name = "place-bundled-conpty"
+path = "src/bin/place-bundled-conpty.rs"
+test = false

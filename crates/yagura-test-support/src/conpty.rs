@@ -3,6 +3,8 @@
 //! A Windows holder loads `conpty.dll` and `OpenConsole.exe` only from beside
 //! its own executable. No build script puts them there, so a test does, from
 //! `vendor/conpty/x64`, before it starts anything that loads them.
+//! [`try_place_bundled_conpty`] does the same for a caller that wants the
+//! outcome rather than a panic.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -25,9 +27,24 @@ pub fn place_bundled_conpty(dir: &Path) {
     if !cfg!(windows) {
         return;
     }
-    if let Err(why) = placed_once(dir).get_or_init(|| place(dir)) {
+    if let Err(why) = placed_once(dir).get_or_init(|| try_place_bundled_conpty(dir)) {
         panic!("{why}");
     }
+}
+
+/// Makes `dir` hold the pinned pair, like [`place_bundled_conpty`] but
+/// returning the failure instead of panicking and without the once-per-directory
+/// memo. Does nothing off Windows.
+///
+/// # Errors
+///
+/// Returns why when the vendored pair differs from the pins, or when `dir` does
+/// not hold the pinned pair after placing it.
+pub fn try_place_bundled_conpty(dir: &Path) -> Result<(), String> {
+    if !cfg!(windows) {
+        return Ok(());
+    }
+    place(dir)
 }
 
 /// The outcome of placing the pair in one directory, set by its first caller.
