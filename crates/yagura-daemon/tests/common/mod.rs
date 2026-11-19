@@ -3022,6 +3022,7 @@ pub async fn open_turn_after_the_key_was_named(entry: &yagura_daemon::WindowEntr
 /// window on the ready screen, waiting for input.
 pub async fn interrupt_with_the_turn_end_key(entry: &yagura_daemon::WindowEntry) {
     let mut published = entry.subscribe_status();
+    let pressed_at = tokio::time::Instant::now();
     yagura_daemon::control::interrupt_window(
         entry,
         b" ",
@@ -3029,6 +3030,22 @@ pub async fn interrupt_with_the_turn_end_key(entry: &yagura_daemon::WindowEntry)
     )
     .await
     .expect("the interrupt is written");
+    // The press is queued to the detector, while the screen model moves on with the child's
+    // output, so the next screen is drawn only once the press has been seen to close the turn.
+    let closed = tokio::time::timeout(HANG_GUARD, published.recv())
+        .await
+        .expect("a status is published after the press")
+        .expect("the window's statuses are published");
+    assert_eq!(
+        closed.status.status(),
+        WindowStatus::WaitingInput,
+        "an interrupt pressing the turn-end key must close the turn"
+    );
+    assert!(
+        closed.changed_at.duration_since(pressed_at)
+            < yagura_daemon::detector::engine::TURN_ACTIVE_QUIET,
+        "the press must close the turn at once, not when the turn's quiet time runs out"
+    );
     assert!(
         entry.record_status_event(WindowStatus::Running),
         "a living window takes a report"
@@ -3037,9 +3054,8 @@ pub async fn interrupt_with_the_turn_end_key(entry: &yagura_daemon::WindowEntry)
     let before_the_mark = published_until(&mut published, WindowStatus::WaitingApproval).await;
     assert_eq!(
         before_the_mark,
-        vec![WindowStatus::WaitingInput],
-        "an interrupt pressing the turn-end key must close the turn at once and keep the \
-         running report after it from opening it again"
+        Vec::<WindowStatus>::new(),
+        "the running report after the press must not open the turn again"
     );
     views::entry_script_write(entry, TURN_END_KEY_READY).await;
     wait_for_entry_status(entry, WindowStatus::WaitingInput).await;
