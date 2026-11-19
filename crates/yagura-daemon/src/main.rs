@@ -12,6 +12,9 @@
 //! environment's login-shell read comes earlier, but it is a one-shot capture
 //! collected with its whole process tree before the endpoint is bound, not a
 //! window's shell.
+//!
+//! `--shutdown` returns only once the daemon it asked has ended, and fails
+//! when that end cannot be confirmed.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -852,18 +855,63 @@ fn log_detection_layers(layers: &DetectionLayers) {
     );
 }
 
-/// Connects to `endpoint` and sends `shutdown` (the `--shutdown` CLI entry
-/// point). No reply is expected.
+/// Connects to `endpoint`, sends `shutdown` (the `--shutdown` CLI entry
+/// point) and returns once the daemon's process has ended. The wait has no
+/// time limit: the daemon bounds its own windows' close.
+///
+/// # Errors
+///
+/// Fails when the daemon cannot be reached or the message cannot be sent,
+/// and when its end cannot be confirmed (its process id is not known, its
+/// process cannot be opened, or the wait fails); a daemon whose end is not
+/// confirmed is never reported as stopped.
 async fn send_shutdown(ipc: &PlatformIpc, endpoint: &str) -> Result<()> {
     let mut client = ipc.connect(endpoint).await.with_context(|| {
         format!("failed to connect to the daemon endpoint {endpoint} for --shutdown")
     })?;
+    // Watched before the message is sent, so the daemon's end cannot be missed.
+    let watch = watch_server_exit(ipc, &client);
+    if matches!(watch, Ok(None)) {
+        return Ok(());
+    }
     let frame = frame_encode(&encode_client_message(&ClientMessage::Shutdown));
     client
         .write_all(&frame)
         .await
         .context("failed to send the shutdown message")?;
-    Ok(())
+    let unconfirmed = "the shutdown message was sent, but the daemon's end could not be confirmed";
+    let Some(watch) = watch.context(unconfirmed)? else {
+        return Ok(());
+    };
+    tokio::task::spawn_blocking(move || watch.wait())
+        .await
+        .context(unconfirmed)?
+        .context(unconfirmed)
+}
+
+/// A watch of the end of the process serving `client`'s endpoint; `None`
+/// when no such process runs any more, which is its end.
+fn watch_server_exit(
+    ipc: &PlatformIpc,
+    client: &ClientConnection,
+) -> Result<Option<yagura_os::ExitWatch>> {
+    let pid = ipc
+        .server_process_id(client)
+        .context("the daemon's process id is not known")?;
+    let start = yagura_os::process_start(pid)
+        .with_context(|| format!("cannot read the start of the daemon process {pid}"))?;
+    let Some(start) = start else {
+        return Ok(None);
+    };
+    let handle = yagura_os::ProcessHandle::open(pid, &start)
+        .with_context(|| format!("cannot open the daemon process {pid}"))?;
+    let Some(handle) = handle else {
+        return Ok(None);
+    };
+    handle
+        .watch_exit()
+        .map(Some)
+        .with_context(|| format!("cannot watch the daemon process {pid} for its end"))
 }
 
 /// A hook's stdin being read to its end on a thread of its own, so the CLI

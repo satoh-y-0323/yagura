@@ -15,7 +15,7 @@ use std::path::PathBuf;
 use std::process::{Child, ExitStatus};
 use std::time::Duration;
 
-use common::real_daemon::{RunningDaemon, Sandbox, daemon_bin, shell_path};
+use common::real_daemon::{RunningDaemon, Sandbox, daemon_bin, shell_path, wait_for_end};
 use yagura_os::{IpcTransport, PeerAuth, PlatformIpc};
 use yagura_protocol::{ClientMessage, DaemonMessage, MCP_BRIDGE_ENV};
 use yagura_test_support::HANG_GUARD;
@@ -324,13 +324,23 @@ async fn a_daemon_whose_endpoint_is_held_by_a_non_daemon_exits_as_a_failure() {
 #[tokio::test]
 async fn shutdown_stops_the_daemon_serving_the_instance() {
     let sandbox = Sandbox::new("launch-shutdown");
+    let shell = shell_path();
+    let shell = shell.to_str().expect("the shell path must be UTF-8");
+    sandbox.write_probe_profile("shutdown-shell", &[shell], "");
     let mut daemon = sandbox.start().await;
+    // An open window leaves the daemon work to do between the message and its end.
+    daemon.open_profile_window(&sandbox, "shutdown-shell").await;
 
     let mut shutdown = sandbox.spawn_with_args(&["--shutdown"]);
-    let status = wait_for_exit(&mut shutdown, &sandbox).await;
+    let status = wait_for_end(&mut shutdown, "--shutdown").await;
     assert!(
         status.success(),
         "--shutdown must succeed against a running daemon, got {status:?}"
+    );
+    assert!(
+        daemon.has_ended(),
+        "--shutdown succeeded while the daemon serving the instance still ran; daemon log:\n{}",
+        sandbox.daemon_log()
     );
 
     // The daemon's exit closes every connection it served.

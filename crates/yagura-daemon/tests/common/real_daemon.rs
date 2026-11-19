@@ -10,7 +10,7 @@
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
@@ -344,6 +344,34 @@ impl Drop for RunningDaemon {
     }
 }
 
+/// Waits for `child` to end and returns how it ended. The wait is for the process's end
+/// itself, not a poll; [`HANG_GUARD`] only bounds it, killing `child` (named `what` in
+/// the failure) when it runs out.
+pub async fn wait_for_end(child: &mut Child, what: &str) -> ExitStatus {
+    let pid = child.id();
+    let handle = yagura_os::process_start(pid)
+        .expect("the process's start must be readable")
+        .and_then(|start| {
+            yagura_os::ProcessHandle::open(pid, &start)
+                .expect("the process must be openable while it runs")
+        });
+    // `None`: it has already exited, and only its status is left to read.
+    if let Some(handle) = handle {
+        let handle = std::sync::Arc::new(handle);
+        let waiter = std::sync::Arc::clone(&handle);
+        let ended = tokio::time::timeout(
+            HANG_GUARD,
+            tokio::task::spawn_blocking(move || waiter.wait()),
+        )
+        .await;
+        if ended.is_err() {
+            let _ = handle.kill();
+            panic!("{what} (process {pid}) did not end within {HANG_GUARD:?}");
+        }
+    }
+    child.wait().expect("the ended process must be waitable")
+}
+
 impl RunningDaemon {
     /// Kills the daemon process outright and waits for it to be gone, leaving its
     /// windows' holders to whatever they do when their daemon goes away.
@@ -358,32 +386,17 @@ impl RunningDaemon {
     /// it, killing the daemon when it runs out.
     // As for `Sandbox::start_at_fault`.
     #[allow(dead_code)]
-    pub async fn wait_for_fault_end(mut self) -> std::process::ExitStatus {
+    pub async fn wait_for_fault_end(mut self) -> ExitStatus {
         self.holders = None;
-        let pid = self.child.id();
-        let handle = yagura_os::process_start(pid)
-            .expect("the daemon's start must be readable")
-            .and_then(|start| {
-                yagura_os::ProcessHandle::open(pid, &start)
-                    .expect("the daemon must be openable while it runs")
-            });
-        // `None`: it has already exited, and only its status is left to read.
-        if let Some(handle) = handle {
-            let handle = std::sync::Arc::new(handle);
-            let waiter = std::sync::Arc::clone(&handle);
-            let ended = tokio::time::timeout(
-                HANG_GUARD,
-                tokio::task::spawn_blocking(move || waiter.wait()),
-            )
-            .await;
-            if ended.is_err() {
-                let _ = handle.kill();
-                panic!("the daemon {pid} did not end at its fault point within {HANG_GUARD:?}");
-            }
-        }
+        wait_for_end(&mut self.child, "the daemon at its fault point").await
+    }
+
+    /// Whether the daemon's process has already ended, read without waiting.
+    pub fn has_ended(&mut self) -> bool {
         self.child
-            .wait()
-            .expect("the ended daemon must be waitable")
+            .try_wait()
+            .expect("the daemon's status must be readable")
+            .is_some()
     }
 
     pub async fn open_profile_window(&mut self, sandbox: &Sandbox, profile: &str) -> String {

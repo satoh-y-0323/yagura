@@ -72,7 +72,8 @@ pub enum CliCommand {
         /// [`resolve_tickets_path`].
         tickets_arg: Option<PathBuf>,
     },
-    /// Ask an already-running daemon to terminate (`--shutdown`).
+    /// Ask an already-running daemon to terminate, returning once its
+    /// process has ended (`--shutdown`).
     Shutdown,
     /// Send a single structured-source status event to a running daemon
     /// (`--emit-status`).
