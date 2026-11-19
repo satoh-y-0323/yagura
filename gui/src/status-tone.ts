@@ -30,6 +30,14 @@ export function needsYou(entry: NeedsYouInput): boolean {
   return STATUS_PRESENTATION[status].needsYou;
 }
 
+/**
+ * Whether a window's name is drawn in full weight and listed first: it needs
+ * the user, or its status is unknown, so a wait may be hiding behind it.
+ */
+export function isProminentWindow(entry: NeedsYouInput): boolean {
+  return needsYou(entry) || entry.detected.status === 'unknown';
+}
+
 /** The entries that need the user ({@link needsYou}), in input order. */
 export function windowsNeedingYou<T extends NeedsYouInput>(entries: readonly T[]): T[] {
   return entries.filter(needsYou);

@@ -19,6 +19,7 @@ import {
   beginAttentionSend,
   emptyArrivalMemory,
   emptyAttentionSendState,
+  isProminentWindow,
   needsYou,
   noteAttentionArrival,
   observeNeedsYouArrivals,
@@ -164,6 +165,16 @@ describe('needsYou: a task window waiting on its owner after its report is not t
       mark: 'waiting_input',
       unknownOnly: false,
     });
+  });
+});
+
+describe('isProminentWindow: a window that needs the user or whose status is unknown stands out', () => {
+  it('is true for the windows needing the user and for unknown, false for the reported input wait and the quiet statuses', () => {
+    for (const [status, needs] of Object.entries(EXPECTED_NEEDS_YOU) as [WindowStatus, boolean][]) {
+      expect(isProminentWindow(entryOf(status, 'w')), status).toBe(needs || status === 'unknown');
+    }
+    expect(isProminentWindow(reportedEntryOf('waiting_input', 'w', 'standing'))).toBe(false);
+    expect(isProminentWindow(reportedEntryOf('waiting_approval', 'w', 'standing'))).toBe(true);
   });
 });
 

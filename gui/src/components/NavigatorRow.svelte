@@ -4,7 +4,7 @@
    * how loud it is come from its props and the shared "needs you" decision.
    */
   import type { WindowEntry } from '../stores/window-registry';
-  import { needsYou } from '../status-tone';
+  import { isProminentWindow } from '../status-tone';
   import {
     describeUnknownExplanation,
     describeWindowLocation,
@@ -40,7 +40,7 @@
   let menuButton: HTMLButtonElement | undefined;
 
   // Unknown is not counted as needing the user, but it is not quiet either.
-  $: isProminent = !isSettled && (needsYou(entry) || entry.detected.status === 'unknown');
+  $: isProminent = !isSettled && isProminentWindow(entry);
   $: explanation = describeUnknownExplanation(entry.detected, entry.displayDetectionWarning);
   // The card repeats what the window's header says: where it runs and why its
   // status is unknown.

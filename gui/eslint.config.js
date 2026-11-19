@@ -250,9 +250,11 @@ export default [
     // Display-only parts read props and call back; the shell owns IPC and stores.
     // `display/` holds the text preparation they draw through, so it is one of them.
     // `keymap/action-availability.ts` is the judgment those parts and the runner share, so it
-    // reads no IPC or store either.
+    // reads no IPC or store either. `command-picker/` builds the picker's rows from what it is
+    // handed, so it is measured without IPC or stores.
     files: [
       'src/banner-model.ts',
+      'src/command-picker/**/*.ts',
       'src/components/**/*.{ts,svelte}',
       'src/display/**/*.ts',
       'src/keymap/action-availability.ts',

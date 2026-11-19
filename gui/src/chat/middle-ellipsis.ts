@@ -1,24 +1,10 @@
+import { createGraphemeSegmenter } from '../display/graphemes';
+
 /** Names up to this many graphemes are shown whole. */
 const SPLIT_THRESHOLD = 16;
 
 /** Graphemes kept visible at the end of a long name. */
 const TAIL_LENGTH = 8;
-
-/** The part of `Intl.Segmenter` used here; the ES2020 lib does not declare it. */
-interface GraphemeSegmenter {
-  segment(input: string): Iterable<{ segment: string }>;
-}
-
-type GraphemeSegmenterConstructor = new () => GraphemeSegmenter;
-
-function isSegmenterConstructor(value: unknown): value is GraphemeSegmenterConstructor {
-  return typeof value === 'function';
-}
-
-function createGraphemeSegmenter(): GraphemeSegmenter | null {
-  const ctor: unknown = Reflect.get(Intl, 'Segmenter');
-  return isSegmenterConstructor(ctor) ? new ctor() : null;
-}
 
 // Older WebKit lacks Intl.Segmenter; code points still keep surrogate pairs whole there.
 const segmenter = createGraphemeSegmenter();
