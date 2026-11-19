@@ -166,7 +166,7 @@
   import { createKeymapStore } from '../keymap/keymap-store';
   import type { KeymapLoadStatus } from '../settings/keyboard-settings-model';
   import { createShortcutDispatcher } from '../keymap/shortcut-dispatcher';
-  import { createShortcutRunner } from '../keymap/shortcut-runner';
+  import { createShortcutRunner, type PickerMode } from '../keymap/shortcut-runner';
   import { cascadeRect, type Size } from '../layout/float-layout';
   import { clampSidebarWidth, createSidebarWidthStorage } from '../layout/sidebar-width';
   import { offeredProfiles } from '../profile/offered-profiles';
@@ -392,6 +392,9 @@
     isOpen: false,
     entry: null,
   };
+
+  // The mode the picker is open in, or null while it is closed.
+  let pickerMode: PickerMode | null = null;
 
   // Restore flow. `restoreLoadFailedNotice` is not part of
   // banner-model.ts's fixed banner set (RestoreBanner is deliberately not
@@ -873,6 +876,7 @@
       isConfirmDialogOpen: confirmDialog.isOpen,
       isRenameDialogOpen: renameDialog.isOpen,
       isRestoreDialogOpen,
+      isPickerInUse: pickerMode !== null,
     });
   $: isApprovalRequesterOpen = isRequesterWindowOpen(approvalRequest, $registry.windows);
   // Delegated to a function for the same reason as the folder-drop sync
@@ -2421,6 +2425,15 @@
     goToNextWindowNeedingYou,
     focusTerminal: focusTerminalOf,
     openWindowForm: openAddDialog,
+    renameWindow: handleRenameWindow,
+    openPicker: (mode) => {
+      pickerMode = mode;
+    },
+    toggleWorkMode: () => {
+      chooseWorkMode(isFocusMode() ? 'canvas' : 'focus');
+    },
+    tileWindows: handleArrangeWindows,
+    toggleNeedsYouFilter,
     toggleChat,
     togglePlans,
     toggleSettings,

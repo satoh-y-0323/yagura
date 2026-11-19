@@ -49,16 +49,22 @@ const WITH_GAPS: DefaultKeys = {
 };
 
 /** The group each row belongs to, in the order the mock shows them. */
-const EXPECTED_GROUPS: Readonly<Record<ActionId, 'windows' | 'focus-and-panels'>> = {
+const EXPECTED_GROUPS: Readonly<Record<ActionId, 'find' | 'windows' | 'focus-and-panels'>> = {
+  'open-window-picker': 'find',
+  'open-command-palette': 'find',
   'focus-next-window': 'windows',
   'focus-previous-window': 'windows',
   'focus-next-attention': 'windows',
   'open-window-form': 'windows',
   'close-window': 'windows',
   'interrupt-window': 'windows',
+  'rename-window': 'windows',
   'minimize-window': 'windows',
   'toggle-maximize-window': 'windows',
+  'toggle-work-mode': 'windows',
+  'tile-windows': 'windows',
   'toggle-sidebar-focus': 'focus-and-panels',
+  'toggle-needs-you-filter': 'focus-and-panels',
   'toggle-chat': 'focus-and-panels',
   'toggle-plans': 'focus-and-panels',
   'toggle-settings': 'focus-and-panels',
@@ -71,15 +77,24 @@ describe('keyboardRows', () => {
     expect(rows).toHaveLength(ACTION_IDS.length);
   });
 
-  it('puts the first eight rows in the windows group and the last four in focus-and-panels', () => {
+  it('puts each row in its group and keeps the rows of a group together, so no heading shows twice', () => {
     const rows = keyboardRows(defaultKeys('windows'), defaultKeysFor('windows'));
-    expect(rows.slice(0, 8).map((row) => row.group)).toEqual(Array<string>(8).fill('windows'));
-    expect(rows.slice(8).map((row) => row.group)).toEqual(
-      Array<string>(4).fill('focus-and-panels')
-    );
     for (const row of rows) {
       expect(row.group, row.action).toBe(EXPECTED_GROUPS[row.action]);
     }
+    const headings = rows
+      .filter((row, index) => rows[index - 1]?.group !== row.group)
+      .map((row) => row.group);
+    expect(new Set(headings).size).toBe(headings.length);
+  });
+
+  it('opens with the window picker and the command palette, the only rows of the find group', () => {
+    const rows = keyboardRows(defaultKeys('windows'), defaultKeysFor('windows'));
+    expect(rows.slice(0, 2).map(({ action, group }) => ({ action, group }))).toEqual([
+      { action: 'open-window-picker', group: 'find' },
+      { action: 'open-command-palette', group: 'find' },
+    ]);
+    expect(rows.filter((row) => row.group === 'find')).toHaveLength(2);
   });
 
   it.each(PLATFORMS)(

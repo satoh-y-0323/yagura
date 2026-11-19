@@ -14,19 +14,25 @@ import { ACTION_IDS, type ActionId } from '../keymap/key-binding';
 import { assignChord, removeAction, resetAction, type Keys } from '../keymap/keymap-model';
 
 /** The section of the tab a row is listed under. */
-export type KeyboardGroup = 'windows' | 'focus-and-panels';
+export type KeyboardGroup = 'find' | 'windows' | 'focus-and-panels';
 
 /** The group of every action. */
 const GROUP_OF: Readonly<Record<ActionId, KeyboardGroup>> = {
+  'open-window-picker': 'find',
+  'open-command-palette': 'find',
   'focus-next-window': 'windows',
   'focus-previous-window': 'windows',
   'focus-next-attention': 'windows',
   'open-window-form': 'windows',
   'close-window': 'windows',
   'interrupt-window': 'windows',
+  'rename-window': 'windows',
   'minimize-window': 'windows',
   'toggle-maximize-window': 'windows',
+  'toggle-work-mode': 'windows',
+  'tile-windows': 'windows',
   'toggle-sidebar-focus': 'focus-and-panels',
+  'toggle-needs-you-filter': 'focus-and-panels',
   'toggle-chat': 'focus-and-panels',
   'toggle-plans': 'focus-and-panels',
   'toggle-settings': 'focus-and-panels',

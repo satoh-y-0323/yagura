@@ -8,22 +8,28 @@ import { ACTION_IDS, parseChord, type ActionId } from './key-binding';
 
 // The rows of the Keyboard tab, top to bottom.
 const EXPECTED_ORDER: readonly ActionId[] = [
+  'open-window-picker',
+  'open-command-palette',
   'focus-next-window',
   'focus-previous-window',
   'focus-next-attention',
   'open-window-form',
   'close-window',
   'interrupt-window',
+  'rename-window',
   'minimize-window',
   'toggle-maximize-window',
+  'toggle-work-mode',
+  'tile-windows',
   'toggle-sidebar-focus',
+  'toggle-needs-you-filter',
   'toggle-chat',
   'toggle-plans',
   'toggle-settings',
 ];
 
 describe('ACTION_IDS', () => {
-  it('lists the twelve actions in the order of the Keyboard tab rows', () => {
+  it('lists the actions in the order of the Keyboard tab rows', () => {
     expect([...ACTION_IDS]).toEqual([...EXPECTED_ORDER]);
   });
 

@@ -7,6 +7,7 @@ const CLOSED = {
   isConfirmDialogOpen: false,
   isRenameDialogOpen: false,
   isRestoreDialogOpen: false,
+  isPickerInUse: false,
 };
 
 type ModalKey = keyof typeof CLOSED;

@@ -133,6 +133,21 @@ function harness(setup: Setup): Harness {
     toggleSidebarFocus: (): void => {
       calls.push('sidebar');
     },
+    openPicker: (mode: 'windows' | 'commands'): void => {
+      calls.push(`picker:${mode}`);
+    },
+    renameWindow: (entry: Win): void => {
+      calls.push(`rename:${entry.windowId}`);
+    },
+    toggleWorkMode: (): void => {
+      calls.push('work-mode');
+    },
+    tileWindows: (): void => {
+      calls.push('tile');
+    },
+    toggleNeedsYouFilter: (): void => {
+      calls.push('needs-you-filter');
+    },
   };
   const run = createShortcutRunner(deps);
   return { run, calls };
@@ -145,15 +160,21 @@ const B = win('wb-p0d8qz', 2, 'room-b');
 const C = win('wc-m7t2rv', 3, 'room-c');
 
 const EXPECTED_CALLS: Readonly<Record<ActionId, readonly string[]>> = {
+  'open-window-picker': ['picker:windows'],
+  'open-command-palette': ['picker:commands'],
   'focus-next-window': ['expand:room-c', `goTo:${C.windowId}`, `terminal:${C.windowId}`],
   'focus-previous-window': ['expand:room-a', `goTo:${A.windowId}`, `terminal:${A.windowId}`],
   'focus-next-attention': ['attention'],
   'open-window-form': ['open-form'],
   'close-window': [`close:${B.windowId}`],
   'interrupt-window': [`interrupt:${B.windowId}`],
+  'rename-window': [`rename:${B.windowId}`],
   'minimize-window': [`minimize:${B.windowId}`],
   'toggle-maximize-window': [`maximize:${B.windowId}`],
+  'toggle-work-mode': ['work-mode'],
+  'tile-windows': ['tile'],
   'toggle-sidebar-focus': ['sidebar'],
+  'toggle-needs-you-filter': ['needs-you-filter'],
   'toggle-chat': ['chat'],
   'toggle-plans': ['plans'],
   'toggle-settings': ['settings'],
@@ -166,7 +187,9 @@ describe('every action', () => {
 
   it.each([...ACTION_IDS])('%s reaches what it stands for, in order', async (action: ActionId) => {
     const h = harness({ windows: [A, B, C], current: B, attentionTarget: C });
-    await h.run(action);
+    const done = h.run(action);
+    expect(h.calls, 'before the returned promise is awaited').toEqual(EXPECTED_CALLS[action]);
+    await done;
     expect(h.calls).toEqual(EXPECTED_CALLS[action]);
   });
 });
@@ -223,6 +246,7 @@ describe('the window an operation acts on', () => {
   it.each<ActionId>([
     'close-window',
     'interrupt-window',
+    'rename-window',
     'minimize-window',
     'toggle-maximize-window',
   ])('%s does nothing when there is no current window', async (action: ActionId) => {

@@ -77,7 +77,7 @@ describe('effectiveKeys without overrides', () => {
     expect(result.discarded).toBe(0);
   });
 
-  it('has a chord or null for exactly the twelve actions', () => {
+  it('has a chord or null for exactly the actions of ACTION_IDS', () => {
     const { keys } = effectiveKeys(defaultsOf('windows'), { 'close-window': '' }, 'windows');
     expect(Object.keys(keys).sort()).toEqual([...ACTION_IDS].sort());
   });

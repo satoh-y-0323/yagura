@@ -78,14 +78,21 @@ export function chordOfEvent(event: KeyEventLike): string | null {
   );
 }
 
+/** A canonical chord's modifier names and its key, which is what follows the last `+`. */
+function partsOf(chord: string): { names: string[]; key: string } {
+  const keyStart = chord.lastIndexOf('+') + 1;
+  return {
+    names: keyStart === 0 ? [] : chord.slice(0, keyStart - 1).split('+'),
+    key: chord.slice(keyStart),
+  };
+}
+
 /**
  * Splits a canonical chord into the parts a user reads: modifiers named for
  * the platform, then the key (letters upper-cased). On macOS Cmd comes first.
  */
 export function formatChord(chord: string, platform: KeyboardPlatform): string[] {
-  const keyStart = chord.lastIndexOf('+') + 1;
-  const key = chord.slice(keyStart);
-  const names = keyStart === 0 ? [] : chord.slice(0, keyStart - 1).split('+');
+  const { names, key } = partsOf(chord);
   const keyLabel = isAsciiLetter(key) ? key.toUpperCase() : key;
   if (platform === 'mac') {
     const modifiers = new Set(names);
@@ -97,4 +104,23 @@ export function formatChord(chord: string, platform: KeyboardPlatform): string[]
     return [...labels, keyLabel];
   }
   return [...names.map((name) => (name === 'Meta' ? 'Win' : name)), keyLabel];
+}
+
+// UI Events key values; of the canonical modifiers only Ctrl is spelled differently.
+const ARIA_MODIFIER_NAMES: Readonly<Record<string, string>> = {
+  Ctrl: 'Control',
+  Alt: 'Alt',
+  Shift: 'Shift',
+  Meta: 'Meta',
+};
+
+/**
+ * The `aria-keyshortcuts` value of a canonical chord: the modifiers as UI Events
+ * key values in the chord's order, then the key with letters upper-cased. The
+ * chord's key names (`Plus`, `Space`, `Enter`) are already the ones WAI-ARIA uses.
+ */
+export function ariaKeyShortcutsOf(chord: string): string {
+  const { names, key } = partsOf(chord);
+  const keyName = isAsciiLetter(key) ? key.toUpperCase() : key;
+  return [...names.map((name) => ARIA_MODIFIER_NAMES[name] ?? name), keyName].join('+');
 }

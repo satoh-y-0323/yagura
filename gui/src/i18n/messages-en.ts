@@ -34,23 +34,30 @@ function lookup<T>(table: Readonly<Record<string, T>>, id: string): T {
 }
 
 const KEYBOARD_GROUP_HEADINGS = {
+  find: 'Go to and commands',
   windows: 'Windows',
   focusAndPanels: 'Focus and panels',
 };
 
 const KEYBOARD_ACTION_NAMES = {
+  openWindowPicker: 'Go to window…',
+  openCommandPalette: 'Commands…',
   focusNextWindow: 'Next window',
   focusPreviousWindow: 'Previous window',
   focusNextAttention: 'Next window needing you',
   openWindowForm: 'New window',
   closeWindow: 'Close window',
   interruptWindow: 'Interrupt window',
+  renameWindow: 'Rename window…',
   minimizeWindow: 'Minimize window',
   toggleMaximizeWindow: 'Maximize or restore window',
+  toggleWorkMode: 'Switch Focus / Canvas',
+  tileWindows: 'Tile windows',
   toggleSidebarFocus: 'Move to sidebar / back to window',
-  toggleChat: 'Chat panel',
-  togglePlans: 'Plans panel',
-  toggleSettings: 'Settings panel',
+  toggleNeedsYouFilter: 'Needs you filter',
+  toggleChat: 'Chat',
+  togglePlans: 'Board',
+  toggleSettings: 'Settings',
 };
 
 /** The one row that says more than its name: the next-window order follows the sidebar. */

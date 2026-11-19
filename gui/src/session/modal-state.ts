@@ -7,6 +7,8 @@ export interface OtherModalState {
   readonly isConfirmDialogOpen: boolean;
   readonly isRenameDialogOpen: boolean;
   readonly isRestoreDialogOpen: boolean;
+  /** True while the picker is open, and from its closing until the row it chose starts running. */
+  readonly isPickerInUse: boolean;
 }
 
 /**
@@ -19,6 +21,7 @@ export function isApprovalDialogAllowed(state: OtherModalState): boolean {
     !state.isAddDialogOpen &&
     !state.isConfirmDialogOpen &&
     !state.isRenameDialogOpen &&
-    !state.isRestoreDialogOpen
+    !state.isRestoreDialogOpen &&
+    !state.isPickerInUse
   );
 }

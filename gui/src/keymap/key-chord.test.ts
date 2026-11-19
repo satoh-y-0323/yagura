@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import { chordOfEvent, formatChord, isImeKey, type KeyEventLike } from './key-chord';
+import {
+  ariaKeyShortcutsOf,
+  chordOfEvent,
+  formatChord,
+  isImeKey,
+  type KeyEventLike,
+} from './key-chord';
 
 interface Modifiers {
   ctrl?: boolean;
@@ -273,5 +279,17 @@ describe('formatChord: keys with a long or empty name', () => {
   it('shows a chord that is only a key as that key', () => {
     expect(formatChord('F5', 'windows')).toEqual(['F5']);
     expect(formatChord('F5', 'mac')).toEqual(['F5']);
+  });
+});
+
+describe('ariaKeyShortcutsOf: the aria-keyshortcuts value of a chord', () => {
+  it.each<[string, string]>([
+    ['Ctrl+Shift+o', 'Control+Shift+O'],
+    ['Shift+Meta+p', 'Shift+Meta+P'],
+    ['Meta+p', 'Meta+P'],
+    ['Ctrl+Alt+x', 'Control+Alt+X'],
+    ['Ctrl+Shift+Enter', 'Control+Shift+Enter'],
+  ])('writes %s as %s', (chord, value) => {
+    expect(ariaKeyShortcutsOf(chord)).toBe(value);
   });
 });

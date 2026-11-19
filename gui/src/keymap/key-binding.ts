@@ -4,15 +4,21 @@
  */
 
 export type ActionId =
+  | 'open-window-picker'
+  | 'open-command-palette'
   | 'focus-next-window'
   | 'focus-previous-window'
   | 'focus-next-attention'
   | 'open-window-form'
   | 'close-window'
   | 'interrupt-window'
+  | 'rename-window'
   | 'minimize-window'
   | 'toggle-maximize-window'
+  | 'toggle-work-mode'
+  | 'tile-windows'
   | 'toggle-sidebar-focus'
+  | 'toggle-needs-you-filter'
   | 'toggle-chat'
   | 'toggle-plans'
   | 'toggle-settings';
@@ -24,15 +30,21 @@ export type KeyMap = Map<string, ActionId>;
  * this order, so it also decides which of two overrides on one chord wins.
  */
 export const ACTION_IDS: readonly ActionId[] = [
+  'open-window-picker',
+  'open-command-palette',
   'focus-next-window',
   'focus-previous-window',
   'focus-next-attention',
   'open-window-form',
   'close-window',
   'interrupt-window',
+  'rename-window',
   'minimize-window',
   'toggle-maximize-window',
+  'toggle-work-mode',
+  'tile-windows',
   'toggle-sidebar-focus',
+  'toggle-needs-you-filter',
   'toggle-chat',
   'toggle-plans',
   'toggle-settings',
