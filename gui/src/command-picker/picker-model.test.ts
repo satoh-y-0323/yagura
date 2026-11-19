@@ -321,6 +321,15 @@ describe('picker-model: the windows as the user types', () => {
       'w7',
       'w9',
     ]);
+
+    // Both are in stage 4 for "co inf": x finds both words only outside its
+    // name, y finds "co" at the start of its name.
+    const x = { name: 'claude', place: 'infra', vendor: 'claude-code' };
+    const y = { name: 'codex', place: 'infra', vendor: 'codex' };
+    const sameStatus = source([win('x', 'idle', x), win('y', 'idle', y)]);
+    expect(idsOf(typed(sameStatus, 'co inf'))).toEqual(['y', 'x']);
+    const xNeedsYou = source([win('x', 'waiting_approval', x), win('y', 'idle', y)]);
+    expect(idsOf(typed(xNeedsYou, 'co inf'))).toEqual(['y', 'x']);
   });
 
   it('marks the union of the places each word is found at', () => {
@@ -483,6 +492,30 @@ describe('picker-model: the actions', () => {
     expect(actionRowOf(ti, 'tile-windows').marks.name).toEqual([{ start: 0, end: 2 }]);
     expect(actionRowOf(ti, 'toggle-settings').marks.name).toEqual([{ start: 3, end: 5 }]);
     expect(actionRowOf(ti, 'toggle-plans').marks.name).toEqual([]);
+
+    // "and" is only in the section names; "s" is in the names of the first three.
+    const fewerOutsideTheName = [
+      'toggle-sidebar-focus',
+      'toggle-needs-you-filter',
+      'toggle-settings',
+      'open-window-picker',
+      'toggle-chat',
+      'toggle-plans',
+    ];
+    expect(idsOf(typeInput(openPicker('commands', src), '>and s', src))).toEqual(
+      fewerOutsideTheName
+    );
+    const sidebarBlocked = source([], null, actionsOf({ 'toggle-sidebar-focus': 'no-windows' }));
+    expect(
+      idsOf(typeInput(openPicker('commands', sidebarBlocked), '>and s', sidebarBlocked))
+    ).toEqual([
+      'toggle-needs-you-filter',
+      'toggle-settings',
+      'toggle-sidebar-focus',
+      'open-window-picker',
+      'toggle-chat',
+      'toggle-plans',
+    ]);
   });
 
   it('never lists the palette itself, even when its name is typed', () => {

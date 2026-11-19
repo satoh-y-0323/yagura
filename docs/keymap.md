@@ -76,19 +76,21 @@ the sidebar words it; case and character width are ignored.
 - With nothing typed, the windows that need you come first under **Needs you**, then the rest under
   **Other windows**; a window whose status is unknown leads the rest. The current window comes last
   in its list.
-- With text typed, the list is one run: a window whose whole name is what you typed comes first,
-  then names that start with it, names with a word that starts with it, names that contain it, and
-  last the windows found only through another field. Within a group, windows that need you (or whose
-  status is unknown) come first, then the status and the sidebar order. The current window comes
-  last.
+- With text typed, the list is one run. A window whose whole name is what you typed comes first; the
+  rest are grouped by their weakest word: names that start with it, names with a word that starts
+  with it, names that contain it, and last the windows where a word is found only in another field.
+  Within a group, windows with fewer words found only outside the name come first, then windows
+  that need you (or whose status is unknown), then the status and the sidebar order. The current
+  window comes last.
 - With nothing typed and no window open, the list offers **New window** instead.
 
 **Commands.** A leading `>` turns the list into the operations, so the same box serves both modes:
 type `>` in the windows mode to switch, delete it to switch back. The list holds every operation
 except Commands itself, under the headings of the Keyboard tab, with the key of each at its right
 end. Typing narrows it by name, by words the name does not show (`stop` finds Interrupt window) and
-by heading. The matches are ordered as the window names are (whole name, start, word start, inside,
-other fields), and within one group the operations that can run come before those that cannot.
+by heading. The matches are grouped as the windows are (whole name, start, word start, inside,
+another field). Within a group, the operations with fewer words found only outside the name come
+first, then those that can run before those that cannot.
 
 - An operation that would do nothing right now stays in the list, dimmed, with the reason beside it:
   **No window on screen**, **Canvas only**, **No windows open**, **No window to go to**,

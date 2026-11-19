@@ -270,7 +270,7 @@ function windowSections<W extends PickerWindow>(
     return match === null ? [] : [{ w, match }];
   });
   const order = sidebarOrder(source);
-  matched.sort((a, b) => a.match.stage - b.match.stage || compareByAttention(a.w, b.w, order));
+  matched.sort((a, b) => compareRanks(a.match, b.match) || compareByAttention(a.w, b.w, order));
   const rows = moveCurrentLast(matched, ({ w }) => w.windowId === source.currentId).map(
     ({ w, match }) => windowRow(w, match.marks, source)
   );
@@ -359,7 +359,7 @@ function actionSections<W extends PickerWindow>(
   // Array sort is stable, so the action order decides among the rest.
   matched.sort(
     (a, b) =>
-      a.match.stage - b.match.stage || Number(!a.action.verdict.ok) - Number(!b.action.verdict.ok)
+      compareRanks(a.match, b.match) || Number(!a.action.verdict.ok) - Number(!b.action.verdict.ok)
   );
   return [
     {
@@ -496,13 +496,26 @@ function collapseSpaces(text: string): string {
   return text.replace(/\s+/gu, ' ').trim();
 }
 
-/** A row's match: its stage (lower comes first) and the marked parts of its texts. */
-interface Match<M> {
+/** Where a row ranks: its stage first (lower comes first), then its words found outside the name. */
+interface Rank {
   stage: number;
+  /** The words found only in a field other than the name; fewer comes first within a stage. */
+  outsideNameWords: number;
+}
+
+/** A row's match: its rank and the marked parts of its texts. */
+interface Match<M> extends Rank {
   marks: M;
 }
 
-/** Stage 0 is the whole name; 1 its start; 2 a word start in it; 3 its middle; 4 another field. */
+function compareRanks(a: Rank, b: Rank): number {
+  return a.stage - b.stage || a.outsideNameWords - b.outsideNameWords;
+}
+
+/**
+ * Stage 0 is the whole name; 1 its start; 2 a word start in it; 3 its middle.
+ * A row takes this stage when any of its words is found only in another field.
+ */
 const OTHER_FIELD_STAGE = 4;
 
 function matchWindow(
@@ -514,14 +527,14 @@ function matchWindow(
   const cwd = fold(w.cwd);
   const vendor = w.vendor === null ? null : fold(w.vendor);
   const others = [place.folded, cwd.folded, vendor?.folded ?? '', fold(w.statusWords).folded];
-  const stage = stageOf(name.folded, others, query);
-  if (stage === null) {
+  const rank = stageOf(name.folded, others, query);
+  if (rank === null) {
     return null;
   }
   return {
-    stage,
+    ...rank,
     marks: {
-      name: stage === 0 ? [wholeSpan(name)] : marksOf(name, query.words),
+      name: rank.stage === 0 ? [wholeSpan(name)] : marksOf(name, query.words),
       place: marksOf(place, query.words),
       cwd: marksOf(cwd, query.words),
       vendor: vendor === null ? [] : marksOf(vendor, query.words),
@@ -532,30 +545,37 @@ function matchWindow(
 function matchAction(action: PickerAction, query: Query): Match<{ name: MarkSpan[] }> | null {
   const name = fold(action.name);
   const others = [fold(action.keywords).folded, fold(action.section).folded];
-  const stage = stageOf(name.folded, others, query);
-  if (stage === null) {
+  const rank = stageOf(name.folded, others, query);
+  if (rank === null) {
     return null;
   }
-  return { stage, marks: { name: stage === 0 ? [wholeSpan(name)] : marksOf(name, query.words) } };
+  return {
+    ...rank,
+    marks: { name: rank.stage === 0 ? [wholeSpan(name)] : marksOf(name, query.words) },
+  };
 }
 
 /**
- * The stage of a row, or `null` when some word is in none of its fields. A
- * whole-name match is stage 0 by itself; otherwise the row takes the stage of
- * its weakest word.
+ * The rank of a row, or `null` when some word is in none of its fields. A
+ * whole-name match is stage 0 with no words outside the name; otherwise the
+ * row takes the stage of its weakest word and counts the words only another field holds.
  */
-function stageOf(name: string, others: readonly string[], query: Query): number | null {
+function stageOf(name: string, others: readonly string[], query: Query): Rank | null {
   let worst = 0;
+  let outsideNameWords = 0;
   for (const word of query.words) {
-    const stage =
-      nameStage(name, word) ??
-      (others.some((field) => field.includes(word)) ? OTHER_FIELD_STAGE : null);
-    if (stage === null) {
-      return null;
+    const inName = nameStage(name, word);
+    if (inName === null) {
+      if (!others.some((field) => field.includes(word))) {
+        return null;
+      }
+      outsideNameWords += 1;
     }
-    worst = Math.max(worst, stage);
+    worst = Math.max(worst, inName ?? OTHER_FIELD_STAGE);
   }
-  return collapseSpaces(name) === query.whole ? 0 : worst;
+  return collapseSpaces(name) === query.whole
+    ? { stage: 0, outsideNameWords: 0 }
+    : { stage: worst, outsideNameWords };
 }
 
 function nameStage(name: string, word: string): number | null {

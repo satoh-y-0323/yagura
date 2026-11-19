@@ -463,6 +463,10 @@ describe('describePickerEmpty and describePickerResults', () => {
         query: 'zzz',
       })
     ).toBe(dummyMessages.picker.noCommandMatch('zzz'));
+    // With no window open, the New window offer is a row while the empty title is read.
+    expect(describePickerResults(dummyMessages, 'windows', 1, { kind: 'no-windows' })).toBe(
+      dummyMessages.picker.noWindows
+    );
   });
 });
 
