@@ -473,12 +473,16 @@ def start_daemon(bin_dir: Path, instance: str, workdir: Path) -> subprocess.Pope
 def stop_daemon(bin_dir: Path, instance: str, daemon: subprocess.Popen) -> None:
     """Stops only the daemon this run started: `--shutdown` to its instance, then
     a kill of the PID this script holds if it does not exit."""
-    subprocess.run(
-        [str(bin_dir / "yagura-daemon.exe"), "--shutdown"],
-        env=daemon_env(instance),
-        capture_output=True,
-        timeout=30,
-    )
+    # `--shutdown` waits for the daemon's end, so a hung daemon times it out; the kill follows.
+    try:
+        subprocess.run(
+            [str(bin_dir / "yagura-daemon.exe"), "--shutdown"],
+            env=daemon_env(instance),
+            capture_output=True,
+            timeout=30,
+        )
+    except subprocess.TimeoutExpired:
+        pass
     try:
         daemon.wait(timeout=30)
     except subprocess.TimeoutExpired:
