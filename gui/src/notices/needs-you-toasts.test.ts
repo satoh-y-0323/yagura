@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 
 import type { WindowStatus } from '../ipc/session-boundary';
+import { emptyArrivalMemory, needsYou, observeNeedsYouArrivals } from '../status-tone';
 import type { NeedsYouToastState, NeedsYouToastWindow } from './needs-you-toasts';
 
 interface StepInput {
@@ -67,6 +68,31 @@ describe('a window arriving', () => {
     const windows = [win('a', 'waiting_approval')];
     const state = await run([{ arrived: ['a'], windows }, { windows }, { windows }]);
     expect(ids(state)).toEqual(['a']);
+  });
+
+  it('keeps a call through an unknown observation, as the arrival rule passes unknown over', async () => {
+    const { stepNeedsYouToasts, emptyNeedsYouToastState } = await load();
+    let memory = emptyArrivalMemory();
+    let state = emptyNeedsYouToastState();
+    const states: NeedsYouToastState[] = [];
+    for (const status of ['waiting_approval', 'unknown', 'waiting_approval'] as const) {
+      const entry = {
+        windowId: 'w',
+        detected: status === 'unknown' ? { status, reason: null } : { status },
+        statusBoot: null,
+      };
+      const observed = observeNeedsYouArrivals(memory, [entry]);
+      memory = observed.memory;
+      state = stepNeedsYouToasts(state, {
+        arrived: observed.arrived,
+        windows: [{ windowId: 'w', status, needsYou: needsYou(entry) }],
+        seenWindowId: null,
+      });
+      states.push(state);
+    }
+    const [first, ...rest] = states;
+    expect(first === undefined ? [] : ids(first)).toEqual(['w']);
+    expect(rest).toEqual([first, first]);
   });
 
   it('makes no toast for a window that arrived but does not need the user', async () => {
@@ -146,9 +172,12 @@ describe('the window being looked at', () => {
 
   it('loses its toast once it becomes the window being looked at', async () => {
     const windows = [win('a', 'waiting_approval'), win('b', 'waiting_input')];
+    // `a` is unknown when it becomes the window being looked at: the call kept through unknown still goes.
+    const unknownA = [win('a', 'unknown'), win('b', 'waiting_input')];
     const state = await run([
       { arrived: ['a', 'b'], windows },
-      { windows, seenWindowId: 'a' },
+      { windows: unknownA },
+      { windows: unknownA, seenWindowId: 'a' },
     ]);
     expect(ids(state)).toEqual(['b']);
   });
@@ -167,6 +196,7 @@ describe('a window leaving the needs-you set', () => {
   it('loses its toast when it no longer needs the user', async () => {
     const state = await run([
       { arrived: ['a', 'b'], windows: [win('a', 'waiting_input'), win('b', 'waiting_input')] },
+      { windows: [win('a', 'unknown'), win('b', 'waiting_input')] },
       { windows: [win('a', 'running'), win('b', 'waiting_input')] },
     ]);
     expect(ids(state)).toEqual(['b']);

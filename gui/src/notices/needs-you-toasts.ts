@@ -63,7 +63,9 @@ function callOrder(status: NeedsYouToastStatus): number {
  * Applies one observation to the toasts. A toast is put up or replaced only
  * when its window arrives, so a closed toast stays away until the next
  * arrival without any memory of the close. A toast goes when its window is
- * being looked at, no longer needs the user, or is gone from the list.
+ * being looked at, settles on a status that no longer needs the user, or is
+ * gone from the list; an `unknown` status settles nothing, so the toast stays
+ * as it was, just as an arrival passes `unknown` over.
  * @param state the state returned by the previous step
  * @param input this observation
  */
@@ -104,7 +106,11 @@ export function stepNeedsYouToasts(
 
   const kept = [...toasts.values()].filter((toast) => {
     const window = byId.get(toast.windowId);
-    return window !== undefined && window.needsYou && toast.windowId !== input.seenWindowId;
+    return (
+      window !== undefined &&
+      (window.needsYou || window.status === 'unknown') &&
+      toast.windowId !== input.seenWindowId
+    );
   });
   kept.sort((a, b) => callOrder(a.status) - callOrder(b.status) || a.entered - b.entered);
   return { toasts: kept, nextMark };
