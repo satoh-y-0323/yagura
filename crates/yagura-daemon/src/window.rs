@@ -38,7 +38,7 @@ use crate::parcel_store::{InboxKeeper, KeptParcel, MarkKeeper, ParcelStore};
 use crate::profile::CredentialsMode;
 use crate::profile_delivery::ProfileDelivery;
 use crate::pty::{
-    AttachGeneration, LostNotice, PtySession, TakeBackSpawn, WindowSpawn, lock_recover,
+    AttachGeneration, ChildExit, LostNotice, PtySession, TakeBackSpawn, WindowSpawn, lock_recover,
 };
 use crate::room::{mention_key, reserved_mention};
 use crate::token::StatusToken;
@@ -1608,6 +1608,12 @@ impl WindowEntry {
         self.window_info_with(self.task_report_now())
     }
 
+    /// The exit code reported with `at`, a pair this window published (see
+    /// [`published_exit_code`]).
+    pub(crate) fn published_exit_code(&self, at: &StatusAt) -> Option<i32> {
+        published_exit_code(at.status.status(), self.session.exit_status())
+    }
+
     /// [`Self::window_info`] carrying `task_report`.
     fn window_info_with(&self, task_report: Option<TaskReportMark>) -> WindowInfo {
         // One read of the published pair, so the reported status, its reason
@@ -1619,7 +1625,7 @@ impl WindowEntry {
             vendor: self.vendor.clone(),
             cwd: self.cwd.clone(),
             status: at.status.status(),
-            exit_code: self.session.exit_status().and_then(|exit| exit.code),
+            exit_code: self.published_exit_code(&at),
             layout_json: self.layout_json(),
             room: None,
             unknown_reason: at.status.unknown_reason(),
@@ -1641,12 +1647,7 @@ impl WindowEntry {
     /// The task report fact is read as the push is built: it is ordered by
     /// its own `seq`, not by the status generation.
     pub(crate) fn status_changed(&self, at: &StatusAt) -> DaemonMessage {
-        // The code is read for `Exited` alone, so a push of any other status
-        // never carries one, whatever the session already knows.
-        let exit_code = match at.status {
-            DetectedStatus::Exited => self.session.exit_status().and_then(|exit| exit.code),
-            _ => None,
-        };
+        let exit_code = self.published_exit_code(at);
         DaemonMessage::StatusChanged {
             window_id: self.window_id.clone(),
             status: at.status.status(),
@@ -4585,6 +4586,19 @@ pub(crate) fn window_status_wire(status: WindowStatus) -> String {
         .unwrap_or_else(|| format!("{status:?}"))
 }
 
+/// The exit code a reader outside the daemon is given for a window reported
+/// as `status`, from the session's observed `exit`.
+///
+/// The code travels with `Exited` alone: the session can observe the exit
+/// before `Exited` is published, and a window still reported as running
+/// must not carry a code meanwhile.
+pub(crate) fn published_exit_code(status: WindowStatus, exit: Option<ChildExit>) -> Option<i32> {
+    match status {
+        WindowStatus::Exited => exit.and_then(|exit| exit.code),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 impl WindowRegistry {
     /// Opens `req` as a window whose holder this test plays in its own
@@ -4654,6 +4668,39 @@ mod tests {
             name: Some(name.to_string()),
             on_name_taken: OnNameTaken::Refuse,
             ..played_request()
+        }
+    }
+
+    #[test]
+    fn an_exit_code_is_published_only_with_exited() {
+        let observed = [
+            None,
+            Some(ChildExit { code: None }),
+            Some(ChildExit { code: Some(0) }),
+            Some(ChildExit { code: Some(3) }),
+        ];
+        for status in [
+            WindowStatus::Running,
+            WindowStatus::WaitingInput,
+            WindowStatus::WaitingApproval,
+            WindowStatus::Interrupted,
+            WindowStatus::Idle,
+            WindowStatus::Unknown,
+        ] {
+            for exit in observed {
+                assert_eq!(
+                    published_exit_code(status, exit),
+                    None,
+                    "{status:?} with {exit:?} publishes no code"
+                );
+            }
+        }
+        for exit in observed {
+            assert_eq!(
+                published_exit_code(WindowStatus::Exited, exit),
+                exit.and_then(|exit| exit.code),
+                "Exited with {exit:?} publishes the observed code"
+            );
         }
     }
 

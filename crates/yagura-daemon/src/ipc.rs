@@ -2589,6 +2589,9 @@ impl IpcServer {
         });
         let session = entry.session();
 
+        // The session's own exit, not the published status: `child_exited`
+        // stops the view's writes as soon as the exit is seen, and its code
+        // describes that same exit.
         let exit = session.exit_status();
         let msg = DaemonMessage::Attached {
             child_exited: exit.is_some(),
@@ -3294,7 +3297,7 @@ impl IpcServer {
             status: snapshot.status.status(),
             since_ms: snapshot.since_ms(Instant::now()),
             last_output_summary,
-            exit_code: entry.session().exit_status().and_then(|exit| exit.code),
+            exit_code: entry.published_exit_code(&snapshot),
             unknown_reason: snapshot.status.unknown_reason(),
             detection_warning: entry.detection_warning().map(str::to_string),
             mcp_connected: Some(entry.mcp_connected()),
