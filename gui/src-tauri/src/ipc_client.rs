@@ -349,14 +349,12 @@ pub struct IpcClient {
     /// generation, rather than on every tick.
     refused_generation: AtomicU64,
     /// The wire revision the peer settled on, and the `generation` it was
-    /// settled for.
+    /// settled for. Only the gates read it; whether a settle is a
+    /// generation's first is [`DaemonStart::settled`]'s to say.
     settled: wire::SettledRevision,
-    /// The `generation` whose revision probe settled, and the boot the
-    /// daemon answered it with. A blocking mutex, never held across an await.
-    settled_boot: std::sync::Mutex<Option<(u64, Option<StatusBoot>)>>,
-    /// What a control connection last announced of the daemon start it
-    /// reached. A blocking mutex, never held across an await.
-    announcement: std::sync::Mutex<DaemonAnnouncement>,
+    /// The daemon start this client settled on, made and announced. A
+    /// blocking mutex, never held across an await.
+    daemon_start: std::sync::Mutex<DaemonStart>,
     /// The window this client is attached to, or `None` for a control connection.
     /// Set by `request_attach` and cleared by `on_disconnect`.
     window_id: Mutex<Option<String>>,
@@ -369,8 +367,8 @@ pub struct IpcClient {
     /// Set by [`Self::disconnect`] on a window client: one the pool let go of
     /// changes no record and never attaches again.
     retired: AtomicBool,
-    /// The default palettes last asked for, sent again on every new
-    /// connection: a daemon that started again without a store would
+    /// The default palettes last asked for, sent again on every connection
+    /// once its revision settles: a daemon that started again without a store would
     /// otherwise answer with its built-in ones.
     default_palettes: Mutex<SentDefaultPalettes>,
     role: Role,
@@ -380,16 +378,90 @@ pub struct IpcClient {
 /// names as its owner.
 static NEXT_SERIAL: AtomicU64 = AtomicU64::new(1);
 
-/// What a control connection told the WebView of the daemon start it
-/// reached, and the warning of a start it made that is not told yet.
-#[derive(Debug, Default)]
-struct DaemonAnnouncement {
+/// What this client knows of the daemon start it reached: the generation
+/// that settled its revision, the start it made, and what it last announced.
+#[derive(Debug, Clone, Default)]
+struct DaemonStart {
+    /// The `generation` whose revision probe settled, and the boot the
+    /// daemon answered it with.
+    settled: Option<(u64, Option<StatusBoot>)>,
+    /// The start this client made last, until a settle shows it reached
+    /// another one; the next start it makes replaces it.
+    made: Option<MadeStart>,
     /// Kept after it is sent: a WebView that starts listening later reads it.
     last: Option<DaemonConnectedPayload>,
-    /// Held until the next announcement rather than tied to one connection,
-    /// so a start whose first connection settled no revision still reports
-    /// its warning; the next start this client makes replaces it.
-    spawn_warning: Option<String>,
+}
+
+/// A daemon start this client made, and the warning it was made with.
+#[derive(Debug, Clone)]
+struct MadeStart {
+    warning: Option<String>,
+    reached: MadeStartReached,
+}
+
+/// Which settled start a made start is taken to be.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MadeStartReached {
+    /// No generation has settled since it was made, whichever connection
+    /// that settle comes on.
+    NotYet,
+    /// The start a settle answered with this boot.
+    Boot(Option<StatusBoot>),
+}
+
+impl DaemonStart {
+    /// The value after `generation` first settles on `boot`, and the
+    /// announcement to emit, which only a control connection makes. A boot
+    /// already announced is not again; a daemon that names no boot is
+    /// announced on every generation, as it may be another start each time.
+    fn first_settled(
+        &self,
+        generation: u64,
+        boot: Option<StatusBoot>,
+        role: Role,
+    ) -> (Self, Option<DaemonConnectedPayload>) {
+        let mut next = Self {
+            settled: Some((generation, boot)),
+            ..self.clone()
+        };
+        if role != Role::Control {
+            return (next, None);
+        }
+        let told = boot.is_some()
+            && self
+                .last
+                .as_ref()
+                .is_some_and(|last| last.status_boot == boot);
+        let (spawn_warning, made) = match &self.made {
+            None => (None, None),
+            // A boot told before this start was made: the start reached is
+            // not the one made.
+            Some(made) if made.reached == MadeStartReached::NotYet && told => (None, None),
+            Some(made) if made.reached == MadeStartReached::NotYet => (
+                made.warning.clone(),
+                Some(MadeStart {
+                    warning: made.warning.clone(),
+                    reached: MadeStartReached::Boot(boot),
+                }),
+            ),
+            // Two starts that name no boot cannot be told apart, so the
+            // warning stays, the safe side for a warning.
+            Some(made) if made.reached == MadeStartReached::Boot(boot) => {
+                (made.warning.clone(), Some(made.clone()))
+            }
+            Some(_) => (None, None),
+        };
+        next.made = made;
+        if told {
+            return (next, None);
+        }
+        let payload = DaemonConnectedPayload {
+            status_boot: boot,
+            spawn_warning,
+        };
+        next.last = Some(payload.clone());
+        (next, Some(payload))
+    }
 }
 
 /// [`IpcClient::set_default_palettes`]'s memory: the palettes, and the
@@ -411,8 +483,7 @@ impl Default for IpcClient {
             registered_generation: AtomicU64::new(u64::MAX),
             refused_generation: AtomicU64::new(u64::MAX),
             settled: wire::SettledRevision::new(),
-            settled_boot: std::sync::Mutex::new(None),
-            announcement: std::sync::Mutex::new(DaemonAnnouncement::default()),
+            daemon_start: std::sync::Mutex::new(DaemonStart::default()),
             window_id: Mutex::new(None),
             record: None,
             serial: NEXT_SERIAL.fetch_add(1, Ordering::SeqCst),
@@ -704,10 +775,13 @@ impl IpcClient {
     ///
     /// # Errors
     /// Returns [`IpcError`] when the daemon cannot be reached.
-    pub async fn get_daemon_health(&self) -> Result<DaemonHealthReply, IpcError> {
+    pub async fn get_daemon_health(
+        &self,
+        app: &impl GuiHost,
+    ) -> Result<DaemonHealthReply, IpcError> {
         // Settled first: the gate refuses an unsettled revision as unsupported,
         // which would read as an older daemon with no problem to report.
-        self.ensure_protocol_revision().await;
+        self.ensure_protocol_revision(app).await;
         match self
             .request(
                 &ClientMessage::GetDaemonHealth,
@@ -1318,14 +1392,21 @@ impl IpcClient {
 
     /// Gives the daemon the palettes a window it opens from now on answers
     /// color queries with, unless this connection already sent the same ones.
-    /// They are remembered and sent again whenever a new connection is made,
-    /// so a daemon that is not reachable now, or not yet, still gets them.
+    /// They are remembered and sent again whenever a connection first settles
+    /// its revision, so a daemon that is not reachable now, or not yet, still
+    /// gets them.
     ///
     /// # Errors
     /// Returns [`IpcError`] when a connected daemon could not be written to.
     /// A daemon too old to take them is not sent them, which is not an error.
-    pub async fn set_default_palettes(&self, palettes: DefaultPalettes) -> Result<(), IpcError> {
-        self.ensure_protocol_revision().await;
+    pub async fn set_default_palettes(
+        &self,
+        app: &impl GuiHost,
+        palettes: DefaultPalettes,
+    ) -> Result<(), IpcError> {
+        // Settled before `default_palettes` is locked: a first settle sends
+        // the remembered ones, which locks it too.
+        self.ensure_protocol_revision(app).await;
         let mut sent = self.default_palettes.lock().await;
         let generation = self.generation.load(Ordering::SeqCst);
         if sent.latest.as_ref() == Some(&palettes) && sent.sent_on == Some(generation) {
@@ -1347,7 +1428,8 @@ impl IpcClient {
     }
 
     /// Sends the remembered default palettes on a connection that has not
-    /// had them yet.
+    /// had them yet. Called once its revision settles: before that, the
+    /// gate refuses them.
     async fn resend_default_palettes(&self) {
         let mut sent = self.default_palettes.lock().await;
         let generation = self.generation.load(Ordering::SeqCst);
@@ -1665,12 +1747,21 @@ impl IpcClient {
     /// the request that happened to prompt it, the same reason
     /// [`Self::ensure_approver_registered`] swallows its own failures.
     ///
+    /// A generation's first settle, whichever caller makes it, is also where
+    /// a control connection tells the WebView of a daemon start it was not
+    /// told of, and where the remembered default palettes are sent again:
+    /// both follow from reaching a start, and settling is what says which.
+    /// The announcement is emitted after the settle is recorded, so a WebView
+    /// reading again on it sees the settled generation; an emit that drops
+    /// it, or panics, leaves the settle recorded and only that announcement
+    /// missing.
+    ///
     /// Takes no guard of its own and must never be called while one of
-    /// `writer`, `request_lock` or `pending` is held: it runs a round trip
-    /// of its own through [`Self::request`], which locks all three, and
-    /// holding any of them here would deadlock that round trip against
-    /// itself.
-    pub(crate) async fn ensure_protocol_revision(&self) {
+    /// `writer`, `request_lock`, `pending` or `default_palettes` is held: it
+    /// runs a round trip of its own through [`Self::request`], which locks
+    /// the first three, and a first settle sends the default palettes, which
+    /// locks the last; holding any of them here would deadlock against itself.
+    pub(crate) async fn ensure_protocol_revision(&self, app: &impl GuiHost) {
         let Some(generation) = self.protocol_revision_settle_due() else {
             return;
         };
@@ -1687,59 +1778,51 @@ impl IpcClient {
             }
             _ => return,
         };
-        *lock_blocking(&self.settled_boot) = Some((generation, boot));
-        self.settled.store(revision, generation);
-    }
-
-    /// The boot the daemon answered this connection's revision probe with,
-    /// for `generation`; `None` when that generation has not settled one.
-    fn boot_settled_for(&self, generation: u64) -> Option<Option<StatusBoot>> {
-        match *lock_blocking(&self.settled_boot) {
-            Some((settled, boot)) if settled == generation => Some(boot),
-            _ => None,
+        if self.settle(app, generation, revision, boot) {
+            self.resend_default_palettes().await;
         }
     }
 
-    /// What every new connection does before it is used. The announcement
-    /// comes last, so the WebView reads a new daemon start after what the
-    /// approver registration reported.
+    /// Records `generation` as settled on `revision` and `boot`, announcing
+    /// what its first settle tells, and returns whether this call was that
+    /// first settle. A generation no longer current records nothing: its
+    /// connection is gone, and a newer settle must not be written over.
+    fn settle(
+        &self,
+        app: &impl GuiHost,
+        generation: u64,
+        revision: u32,
+        boot: Option<StatusBoot>,
+    ) -> bool {
+        let mut start = lock_blocking(&self.daemon_start);
+        let settled_before = start
+            .settled
+            .is_some_and(|(settled, _)| settled == generation);
+        if settled_before || generation != self.generation.load(Ordering::SeqCst) {
+            return false;
+        }
+        let (next, announcement) = start.first_settled(generation, boot, self.role);
+        *start = next;
+        // After the slot, under the same lock: a stale read of `settled`
+        // only costs one more probe, which the slot then finds settled.
+        self.settled.store(revision, generation);
+        if let Some(payload) = announcement {
+            app.emit_event(EVENT_DAEMON_CONNECTED, payload);
+        }
+        true
+    }
+
+    /// What every new connection does before it is used: the approver
+    /// registration first, so the WebView reads a new daemon start, which
+    /// the settle announces, after what the registration reported.
     async fn after_connect(&self, app: &impl GuiHost) {
         self.ensure_approver_registered(app).await;
-        self.ensure_protocol_revision().await;
-        self.resend_default_palettes().await;
-        self.announce_daemon_start(app);
-    }
-
-    /// Tells the WebView, on a control connection, that it reached a daemon
-    /// start it was not told of. A daemon that names no boot may be a new
-    /// start on every connection, so each one is announced. A generation that
-    /// settled no revision announces nothing; the next connection does.
-    fn announce_daemon_start(&self, app: &impl GuiHost) {
-        if self.role != Role::Control {
-            return;
-        }
-        let Some(boot) = self.boot_settled_for(self.generation.load(Ordering::SeqCst)) else {
-            return;
-        };
-        let mut announcement = lock_blocking(&self.announcement);
-        let told = announcement
-            .last
-            .as_ref()
-            .is_some_and(|last| boot.is_some() && last.status_boot == boot);
-        if told {
-            return;
-        }
-        let payload = DaemonConnectedPayload {
-            status_boot: boot,
-            spawn_warning: announcement.spawn_warning.take(),
-        };
-        app.emit_event(EVENT_DAEMON_CONNECTED, payload.clone());
-        announcement.last = Some(payload);
+        self.ensure_protocol_revision(app).await;
     }
 
     /// The daemon start this client last announced, `None` before the first.
     pub(crate) fn daemon_connection(&self) -> Option<DaemonConnectedPayload> {
-        lock_blocking(&self.announcement).last.clone()
+        lock_blocking(&self.daemon_start).last.clone()
     }
 
     async fn connect_inner(
@@ -1762,7 +1845,10 @@ impl IpcClient {
             Some(connection) => connection,
             None if mode == ConnectMode::Spawn => {
                 let warning = app.spawn_daemon()?;
-                lock_blocking(&self.announcement).spawn_warning = warning;
+                lock_blocking(&self.daemon_start).made = Some(MadeStart {
+                    warning,
+                    reached: MadeStartReached::NotYet,
+                });
                 connect_after_spawn(&endpoint).await?
             }
             None => return Err(IpcError::NotConnected),
@@ -1852,7 +1938,7 @@ impl IpcClient {
             state.size
         };
         let generation = self.generation.load(Ordering::SeqCst);
-        let response = self.request_attach(window_id, size).await?;
+        let response = self.request_attach(app, window_id, size).await?;
         let mut state = record.lock().await;
         if !self.holds(record) || state.link == LinkState::Superseded {
             return Ok(response);
@@ -1940,10 +2026,11 @@ impl IpcClient {
     /// refused with [`IpcError::Unsupported`] without a frame being sent.
     async fn request_attach(
         &self,
+        app: &impl GuiHost,
         window_id: &str,
         size: Option<TerminalSize>,
     ) -> Result<AttachResponse, IpcError> {
-        self.ensure_protocol_revision().await;
+        self.ensure_protocol_revision(app).await;
         // Recorded before the request goes out: the daemon may stream output
         // for the window between its `attached` reply and this task waking
         // up, and the reader needs the window id to route it.
@@ -2255,9 +2342,8 @@ fn client_message_wire_tag(body: &[u8]) -> String {
         .to_owned()
 }
 
-/// Locks a blocking slot, recovering from poisoning: every slot it guards is
-/// replaced whole under the lock, so a panicking holder cannot have left one
-/// inconsistent.
+/// Locks a blocking slot, recovering from poisoning: a holder writes a slot in one store of
+/// a value computed before anything that can fail, so a panic leaves the old value or the new.
 fn lock_blocking<T>(slot: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
@@ -2314,6 +2400,7 @@ mod host_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::host::fake::FakeHost;
     use crate::window_record::WindowRecord;
 
     /// A message the baseline revision cannot carry.
@@ -2656,6 +2743,7 @@ mod tests {
     #[tokio::test]
     async fn window_requests_hand_back_what_the_daemon_answered() {
         let (client, mut peer, _read) = wired("window-requests").await;
+        let host = FakeHost::new("window-requests");
 
         let (windows, sent) = tokio::join!(
             client.list_windows(),
@@ -2808,7 +2896,7 @@ mod tests {
         );
 
         let (health, sent) = tokio::join!(
-            client.get_daemon_health(),
+            client.get_daemon_health(&host),
             answer(
                 &client,
                 &mut peer,
@@ -2825,7 +2913,7 @@ mod tests {
         assert_eq!(health.expect("get_daemon_health").problems.len(), 1);
 
         let (older, sent) = tokio::join!(
-            client.get_daemon_health(),
+            client.get_daemon_health(&host),
             answer(
                 &client,
                 &mut peer,
@@ -3386,10 +3474,11 @@ mod tests {
     #[tokio::test]
     async fn an_attached_client_reports_the_window_it_attached_to() {
         let (client, mut peer, _read) = wired("attach").await;
+        let host = FakeHost::new("attach");
         let size = Some(TerminalSize { cols: 80, rows: 24 });
 
         let (attached, sent) = tokio::join!(
-            client.request_attach("w1", size),
+            client.request_attach(&host, "w1", size),
             answer(
                 &client,
                 &mut peer,
@@ -3431,8 +3520,9 @@ mod tests {
     /// with `outcome`.
     async fn probe_settled_with(tag: &str, outcome: Result<Reply, IpcError>) -> IpcClient {
         let (client, mut peer, _read) = wired_unsettled(tag).await;
+        let host = FakeHost::new(tag);
         let ((), sent) = tokio::join!(
-            client.ensure_protocol_revision(),
+            client.ensure_protocol_revision(&host),
             answer(
                 &client,
                 &mut peer,
@@ -3447,7 +3537,8 @@ mod tests {
     #[tokio::test]
     async fn health_settles_an_unsettled_revision_before_asking_instead_of_answering_empty() {
         let (client, mut peer, _read) = wired_unsettled("health-unsettled").await;
-        let (health, sent) = tokio::join!(client.get_daemon_health(), async {
+        let host = FakeHost::new("health-unsettled");
+        let (health, sent) = tokio::join!(client.get_daemon_health(&host), async {
             let probe = answer(
                 &client,
                 &mut peer,

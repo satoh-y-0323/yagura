@@ -1685,12 +1685,15 @@ pub fn validate_window_input(input: &ClientMessage) -> Result<(), IpcError> {
 /// daemon could not be written to.
 #[tauri::command(rename_all = "snake_case")]
 pub async fn set_default_palettes(
+    app: AppHandle,
     app_palette: Palette,
     vendor_palettes: std::collections::BTreeMap<String, Palette>,
     pool: State<'_, Arc<ConnectionPool>>,
 ) -> Result<(), String> {
     let palettes = default_palettes_to_send(app_palette, vendor_palettes).map_err(stringify)?;
-    pool.set_default_palettes(palettes).await.map_err(stringify)
+    pool.set_default_palettes(&app, palettes)
+        .await
+        .map_err(stringify)
 }
 
 fn default_palettes_to_send(

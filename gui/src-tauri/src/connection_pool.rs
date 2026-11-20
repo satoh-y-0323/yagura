@@ -765,13 +765,17 @@ impl ConnectionPool {
 
     /// Gives the daemon the palettes a window it opens from now on answers
     /// color queries with, through the control connection. Neither connects
-    /// nor starts a daemon: the control connection sends them when it is
-    /// next made.
+    /// nor starts a daemon: the control connection sends them once its next
+    /// connection settles its revision.
     ///
     /// # Errors
     /// Returns [`IpcError`] when a connected daemon could not be written to.
-    pub async fn set_default_palettes(&self, palettes: DefaultPalettes) -> Result<(), IpcError> {
-        self.control.set_default_palettes(palettes).await
+    pub async fn set_default_palettes(
+        &self,
+        app: &impl GuiHost,
+        palettes: DefaultPalettes,
+    ) -> Result<(), IpcError> {
+        self.control.set_default_palettes(app, palettes).await
     }
 
     /// Reads the daemon's current approval settings, through the control
@@ -929,7 +933,7 @@ impl ConnectionPool {
         &self,
         app: &impl GuiHost,
     ) -> Result<DaemonHealthReply, IpcError> {
-        self.control(app).await?.get_daemon_health().await
+        self.control(app).await?.get_daemon_health(app).await
     }
 
     /// Reports a window's presentation layout to the daemon, verbatim.
@@ -1092,7 +1096,7 @@ impl ConnectionPool {
     ) -> Result<&Arc<IpcClient>, IpcError> {
         let control = self.control_connected(app, connect).await?;
         control.ensure_approver_registered(app).await;
-        control.ensure_protocol_revision().await;
+        control.ensure_protocol_revision(app).await;
         // Not `approver_registration_due().is_some()`: a refused generation
         // makes `due` `None` too (the refusal latch), which would
         // otherwise let a destructive operation through unregistered.

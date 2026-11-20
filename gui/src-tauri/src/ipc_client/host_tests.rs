@@ -21,6 +21,7 @@ use crate::host::fake::{
 
 const BOOT_A: StatusBoot = StatusBoot { origin: 7, seq: 1 };
 const BOOT_B: StatusBoot = StatusBoot { origin: 7, seq: 2 };
+const WEAK_START: &str = "started without breaking away";
 
 /// A daemon that lets every window attach.
 fn attaching_daemon() -> ScriptedDaemon {
@@ -166,23 +167,51 @@ async fn a_daemon_that_is_not_running_is_started_by_connecting_and_a_failed_star
 
 #[tokio::test]
 async fn connecting_reaches_the_daemon_it_started() {
-    let daemon = ScriptedDaemon::quiet();
+    let answer = Arc::new(std::sync::Mutex::new(protocol_revision(None)));
+    let daemon = ScriptedDaemon::new({
+        let answer = Arc::clone(&answer);
+        move |request| match request {
+            ClientMessage::GetProtocolRevision => {
+                Reaction::reply(answer.lock().expect("probe answer").clone())
+            }
+            _ => None,
+        }
+    });
+    let answer_with = |message| *answer.lock().expect("probe answer") = message;
     let host = FakeHost::new("spawned");
-    host.starts_daemon(&daemon);
+    host.starts_daemon_with_warning(&daemon, WEAK_START);
     let client = Arc::new(IpcClient::new());
+    let weak = connected(None, Some(WEAK_START));
 
     client.connect(&host).await.expect("connect");
 
     assert_eq!(host.spawn_count(), 1);
     assert!(client.is_connected().await);
-    assert_eq!(announced(&host.take_events()), [connected(None, None)]);
+    assert_eq!(announced(&host.take_events()), std::slice::from_ref(&weak));
 
     // A daemon whose answer names no boot may be another boot on every
-    // connection, so each one is announced.
+    // connection, so each one is announced, and it may be the start this
+    // client made, so its warning stays.
+    daemon.hang_up();
+    assert_eq!(host.next_event(EVENT_DAEMON_CONNECTED).await, weak);
+
+    // The reconnect's own probe fails; two callers then settle that
+    // generation together, and it is announced once.
+    answer_with(error_frame(ERROR_CODE_INTERNAL));
+    daemon.hang_up();
+    daemon.received_at_least(6).await;
+    answer_with(protocol_revision(None));
+    tokio::join!(
+        client.ensure_protocol_revision(&host),
+        client.ensure_protocol_revision(&host)
+    );
+    assert_eq!(announced(&host.take_events()), [weak]);
+
+    answer_with(protocol_revision(Some(BOOT_B)));
     daemon.hang_up();
     assert_eq!(
         host.next_event(EVENT_DAEMON_CONNECTED).await,
-        connected(None, None)
+        connected(Some(BOOT_B), None)
     );
     assert_eq!(host.spawn_count(), 1);
 }
@@ -627,7 +656,8 @@ async fn a_registration_refused_for_another_reason_stays_owed_and_is_not_reporte
 }
 
 #[tokio::test]
-async fn a_connection_whose_revision_is_not_settled_announces_no_boot_and_the_next_one_does() {
+async fn a_spawned_connection_whose_revision_settles_later_announces_its_boot_and_warning_and_sends_the_palettes_then()
+ {
     let probes = AtomicUsize::new(0);
     let daemon = ScriptedDaemon::new(move |request| match request {
         ClientMessage::GetProtocolRevision => match probes.fetch_add(1, Ordering::SeqCst) {
@@ -636,16 +666,41 @@ async fn a_connection_whose_revision_is_not_settled_announces_no_boot_and_the_ne
         },
         _ => None,
     });
-    let host = FakeHost::served_by("unsettled", &daemon).await;
+    let host = FakeHost::new("unsettled");
+    host.starts_daemon_with_warning(&daemon, WEAK_START);
     let client = Arc::new(IpcClient::new());
+    let palettes = DefaultPalettes {
+        app: sample_palette(),
+        vendors: Default::default(),
+    };
+    client
+        .set_default_palettes(&host, palettes.clone())
+        .await
+        .expect("palettes are remembered while not connected");
 
     client.connect(&host).await.expect("connect");
 
     assert_eq!(client.protocol_revision(), None);
     assert!(announced(&host.take_events()).is_empty());
-    daemon.hang_up();
+
+    client.ensure_protocol_revision(&host).await;
     assert_eq!(
-        host.next_event(EVENT_DAEMON_CONNECTED).await,
-        connected(Some(BOOT_A), None)
+        announced(&host.take_events()),
+        [connected(Some(BOOT_A), Some(WEAK_START))]
     );
+    client.ensure_protocol_revision(&host).await;
+    assert!(
+        announced(&host.take_events()).is_empty(),
+        "a generation is announced once"
+    );
+    assert_eq!(
+        daemon.received_at_least(4).await,
+        [
+            ClientMessage::RegisterApprover,
+            ClientMessage::GetProtocolRevision,
+            ClientMessage::GetProtocolRevision,
+            ClientMessage::SetDefaultPalettes(palettes),
+        ]
+    );
+    assert_eq!(host.spawn_count(), 1);
 }
