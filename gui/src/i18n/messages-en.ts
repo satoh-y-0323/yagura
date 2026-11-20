@@ -399,6 +399,8 @@ export const messagesEn = {
     // Names each tone's icon, so a tone is never told by colour alone.
     noticeTones: { info: 'Information', warning: 'Warning', error: 'Error' },
     noticeDetails: 'Details',
+    // Marks a notice in the list that came after the list was last opened.
+    noticeNew: 'New',
   },
 
   hints: {

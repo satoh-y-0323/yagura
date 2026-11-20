@@ -188,6 +188,7 @@ export const dummyMessages: Messages = {
       error: 'DUMMY_noticeToneError',
     },
     noticeDetails: 'DUMMY_noticeDetails',
+    noticeNew: 'DUMMY_noticeNew',
   },
   hints: {
     noWindows: 'DUMMY_noWindows',

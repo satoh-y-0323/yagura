@@ -6,15 +6,16 @@
    * children, optionally laid out as `popup-menu__icon`, `popup-menu__label`
    * and `popup-menu__badge`; a `<select>` is reachable like an item.
    */
-  import { afterUpdate, onMount, tick } from 'svelte';
+  import { afterUpdate, tick } from 'svelte';
 
   import { isImeKey } from '../keymap/key-chord';
+  import { dismissOnOutside, type OutsideDismissReason } from './dismiss-on-outside';
   import { handleMenuKey, type MenuEntry } from './menu-navigation';
   import { placeMenu, type Rect } from './menu-position';
   import { overlayPortal } from './overlay-host';
 
   /** Why the menu asks to be closed. */
-  type CloseReason = 'escape' | 'tab' | 'outside' | 'resize';
+  type CloseReason = 'escape' | 'tab' | OutsideDismissReason;
 
   const ITEM = '[role="menuitem"], [role="menuitemradio"]';
   const NAVIGABLE = `${ITEM}, [role="separator"], hr, select`;
@@ -31,38 +32,6 @@
   let menuElement: HTMLDivElement | undefined;
   let menuPosition = { left: 0, top: 0 };
   let isPlaced = false;
-  let isSubscribedToOutsidePointer = false;
-
-  function handleWindowResize(): void {
-    if (isOpen) {
-      onClose('resize');
-    }
-  }
-
-  onMount(() => {
-    window.addEventListener('resize', handleWindowResize);
-    return () => {
-      window.removeEventListener('resize', handleWindowResize);
-      syncOutsidePointerSubscription(false);
-    };
-  });
-
-  // Delegated to a function rather than written inline: a reactive statement
-  // that assigns the subscription state it also reads is an infinite reactive
-  // loop as far as Svelte is concerned.
-  $: syncOutsidePointerSubscription(isOpen);
-
-  function syncOutsidePointerSubscription(isMenuOpen: boolean): void {
-    if (isMenuOpen === isSubscribedToOutsidePointer) {
-      return;
-    }
-    if (isMenuOpen) {
-      window.addEventListener('pointerdown', handlePointerDown);
-    } else {
-      window.removeEventListener('pointerdown', handlePointerDown);
-    }
-    isSubscribedToOutsidePointer = isMenuOpen;
-  }
 
   $: if (!isOpen) {
     isPlaced = false;
@@ -157,21 +126,6 @@
       item.focus({ preventScroll: true });
     }
   }
-
-  function handlePointerDown(event: PointerEvent): void {
-    if (!menuElement) {
-      return;
-    }
-    const target = event.target as Node;
-    if (keepOpenWithin?.contains(target) === true) {
-      return;
-    }
-    // No preventDefault: the outside press is usually the start of another
-    // gesture (a title-bar drag), which must still run.
-    if (!menuElement.contains(target)) {
-      onClose('outside');
-    }
-  }
 </script>
 
 <span class="popup-menu__origin" hidden bind:this={originMarker}></span>
@@ -187,6 +141,7 @@
       ? 'visible'
       : 'hidden'};"
     use:overlayPortal={originMarker ?? null}
+    use:dismissOnOutside={{ keepOpenWithin, onDismiss: onClose }}
     on:keydown={handleKeyDown}
     on:pointerover={handlePointerOver}
   >
