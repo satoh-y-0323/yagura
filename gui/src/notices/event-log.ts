@@ -72,11 +72,6 @@ export function dismissEvent(log: EventLog, seq: number): EventLog {
   return log.filter((entry) => entry.seq !== seq);
 }
 
-/** An empty log, for when every event is removed. */
-export function clearEvents(): EventLog {
-  return [];
-}
-
 /** A window that left the sidebar, with what the shell knows about why. */
 export type GoneWindow = Omit<WindowGoneEvent, 'type'> & {
   /** Whether this GUI closed it, which the user already knows about. */

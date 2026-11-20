@@ -42,7 +42,6 @@
   import { daemonProblemNotices } from '../notices/daemon-health';
   import {
     appendEvent,
-    clearEvents,
     daemonReconnectedEvent,
     dismissEvent,
     failureEvent,
@@ -3719,7 +3718,7 @@
   }
 
   function clearNoticeEvents(): void {
-    eventLog = clearEvents();
+    eventLog = [];
   }
 
   /** Opens Settings on the Notifications tab, in place of the list. */

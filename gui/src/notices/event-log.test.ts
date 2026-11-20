@@ -7,7 +7,6 @@ import { describeExitedWindow as renderDescribeExitedWindow } from '../i18n/rend
 import { dummyMessages } from '../test-utils/dummy-messages';
 import {
   appendEvent,
-  clearEvents,
   daemonReconnectedEvent,
   dismissEvent,
   failureEvent,
@@ -104,10 +103,6 @@ describe('event log: what is kept', () => {
     expect(seqsOf(after)).toEqual([0, 2]);
     expect(seqsOf(log)).toEqual([0, 1, 2]);
   });
-
-  it('clears every event', () => {
-    expect(clearEvents()).toEqual([]);
-  });
 });
 
 describe('event log: numbering', () => {
@@ -128,7 +123,7 @@ describe('event log: numbering', () => {
 
   it('does not hand out a number again after the log is cleared', () => {
     const added = appendAll([failure('a'), failure('b')]);
-    const emptied = clearEvents();
+    const emptied: EventLog = [];
 
     const next = appendEvent(emptied, added.memory, failure('c'), '12:00');
 

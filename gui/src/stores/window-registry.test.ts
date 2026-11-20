@@ -907,12 +907,29 @@ describe('createWindowRegistry: which message retires an ended window', () => {
       applyStatusPush(registry, revision, payload);
       return;
     }
-    applyListedWindow(
-      registry,
-      revision,
-      makeWindowInfo({ window_id: 'w-a', detected: { status: 'exited' }, exit_code: exitCode })
-    );
+    // An ended window never counts as live, whichever revision retires it.
+    expect(
+      applyListedWindow(
+        registry,
+        revision,
+        makeWindowInfo({ window_id: 'w-a', detected: { status: 'exited' }, exit_code: exitCode })
+      )
+    ).toBe(false);
   }
+
+  it.each([36, 37, null])(
+    'at revision %s, counts a listed window that still runs as live',
+    (revision) => {
+      const registry = createWindowRegistry();
+      const live = applyListedWindow(
+        registry,
+        revision,
+        makeWindowInfo({ window_id: 'w-a', detected: { status: 'running' } })
+      );
+      expect(live).toBe(true);
+      expect(get(registry).windows.map((entry) => entry.windowId)).toEqual(['w-a']);
+    }
+  );
 
   /**
    * The code each update that took `w-a` off the list retired it with, for
