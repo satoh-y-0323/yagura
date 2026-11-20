@@ -263,8 +263,8 @@ export function describeUndeliveredUnknownReason(
 }
 
 /**
- * Describes the restore banner's text: how many windows from the last
- * session are available, and when that configuration was recorded.
+ * Describes the reopen offer's text: how many windows from the last
+ * session can be reopened, and when that configuration was recorded.
  */
 export function describeRestoreBanner(
   messages: Messages,
@@ -281,6 +281,11 @@ export function describeRestoreSelectionCount(
   total: number
 ): string {
   return messages.formats.restoreSelectionCount(selected, total);
+}
+
+/** Describes the label of the button that reopens the checked windows. */
+export function describeRestoreConfirm(messages: Messages, count: number): string {
+  return messages.formats.restoreConfirm(count);
 }
 
 /**

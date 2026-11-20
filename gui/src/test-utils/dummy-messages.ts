@@ -63,6 +63,7 @@ export const dummyMessages: Messages = {
     detectionLabel: 'DUMMY_detectionLabel',
     detectionDefaultOption: 'DUMMY_detectionDefaultOption',
     addWindowTitle: 'DUMMY_addWindowTitle',
+    reopenTitle: 'DUMMY_reopenTitle',
     browseButton: 'DUMMY_browseButton',
     folderDropHint: 'DUMMY_folderDropHint',
     closeDialog: 'DUMMY_closeDialog',
@@ -218,6 +219,7 @@ export const dummyMessages: Messages = {
     attentionBadge: (count: number) => `DUMMY_attentionBadge(${count})`,
     restoreSelectionCount: (selected: number, total: number) =>
       `DUMMY_restoreSelectionCount(${selected}, ${total})`,
+    restoreConfirm: (count: number) => `DUMMY_restoreConfirm(${count})`,
     // The tooltip of a window's waiting-messages mark.
     queuedMessages: (count: number) => `DUMMY_queuedMessages(${count})`,
     windowRow: (name: string, status: string) => `DUMMY_windowRow(${name}, ${status})`,

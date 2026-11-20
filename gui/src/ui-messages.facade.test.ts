@@ -134,6 +134,11 @@ const CASES: ReadonlyArray<[string, () => unknown, () => unknown]> = [
     () => render.describeRestoreSelectionCount(messages, 2, 5),
   ],
   [
+    'describeRestoreConfirm',
+    () => facade.describeRestoreConfirm(2),
+    () => render.describeRestoreConfirm(messages, 2),
+  ],
+  [
     'describeRoomTitle',
     () => facade.describeRoomTitle('main', 2),
     () => render.describeRoomTitle(messages, 'main', 2),

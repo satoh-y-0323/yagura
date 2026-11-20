@@ -1,6 +1,13 @@
 <script lang="ts">
-  import { buttons, forms, hints, describeRestoreSelectionCount } from '../ui-messages';
+  import {
+    buttons,
+    forms,
+    hints,
+    describeRestoreSelectionCount,
+    describeRestoreConfirm,
+  } from '../ui-messages';
   import type { RestoreEntry } from '../ipc/session-boundary';
+  import { splitForMiddleEllipsis } from '../chat/middle-ellipsis';
   import { matchesOpenWindow } from '../session/restore-model';
   import Icon from './Icon.svelte';
   import IconButton from './IconButton.svelte';
@@ -24,12 +31,19 @@
   export let onClearAll: () => void;
   /** Restores the checked candidates. */
   export let onRestore: () => void;
+
+  /** The profile and vendor of a candidate, whichever it recorded. */
+  function describeOrigin(candidate: RestoreEntry): string {
+    return [candidate.profile, candidate.displayVendor]
+      .filter((part): part is string => part !== null && part !== '')
+      .join(' · ');
+  }
 </script>
 
 <ModalDialog {isOpen} {onCancel} maxWidth="560px">
   <div class="restore-dialog-content">
     <div class="dialog-header">
-      <h2 class="dialog-title">{buttons.chooseWindows}</h2>
+      <h2 class="dialog-title">{forms.reopenTitle}</h2>
       <IconButton class="dialog-close" label={forms.closeDialog} on:click={onCancel}
         ><Icon name="x" /></IconButton
       >
@@ -49,6 +63,8 @@
 
     <ul class="restore-candidate-list">
       {#each candidates as candidate (candidate.position)}
+        {@const origin = describeOrigin(candidate)}
+        {@const cwd = splitForMiddleEllipsis(candidate.displayCwd)}
         <li class="restore-row">
           <label class="restore-row__label">
             <input
@@ -57,11 +73,20 @@
               on:change={() => onToggle(candidate.position)}
             />
             <span class="restore-row__name">{candidate.displayName}</span>
-            <span class="restore-row__cwd">{candidate.displayCwd}</span>
+            {#if matchesOpenWindow(candidate, openWindows)}
+              <span class="restore-row__chip">{hints.restoreAlreadyOpen}</span>
+            {/if}
+            <span class="restore-row__meta">
+              {#if origin !== ''}
+                <span class="restore-row__origin">{origin}</span>
+              {/if}
+              <span class="restore-row__cwd">
+                <span class="restore-row__cwd-head">{cwd.head}</span><span
+                  class="restore-row__cwd-tail">{cwd.tail}</span
+                >
+              </span>
+            </span>
           </label>
-          {#if matchesOpenWindow(candidate, openWindows)}
-            <span class="restore-row__hint">{hints.restoreAlreadyOpen}</span>
-          {/if}
         </li>
       {/each}
     </ul>
@@ -79,7 +104,7 @@
         on:click={onRestore}
         disabled={selected.size === 0}
       >
-        {buttons.restore}
+        {describeRestoreConfirm(selected.size)}
       </button>
     </div>
   </div>
@@ -110,34 +135,67 @@
   }
 
   .restore-row {
-    display: flex;
-    align-items: center;
-    gap: var(--space-sm);
     padding: var(--space-xs) var(--space-sm);
     border: 1px solid var(--color-border);
     border-radius: var(--radius-sm);
   }
 
+  /* Checkbox | name | chip on the first line; the meta line spans the rest. */
   .restore-row__label {
-    display: flex;
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr) auto;
     align-items: center;
-    gap: var(--space-sm);
-    flex: 1 1 auto;
-    min-width: 0;
+    gap: 2px var(--space-sm);
   }
 
-  .restore-row__cwd {
-    color: var(--color-text-secondary);
-    font-size: var(--font-size-sm);
+  .restore-row__name {
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+    font-weight: 500;
   }
 
-  .restore-row__hint {
-    flex: 0 0 auto;
+  .restore-row__chip {
+    padding: 0 var(--space-xs);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-sm);
+    font-size: var(--font-size-xs);
+    white-space: nowrap;
+  }
+
+  .restore-row__meta {
+    grid-column: 2 / 4;
+    display: flex;
+    gap: var(--space-sm);
+    min-width: 0;
     color: var(--color-text-secondary);
     font-size: var(--font-size-xs);
+    white-space: nowrap;
+  }
+
+  .restore-row__origin {
+    flex: 0 0 auto;
+  }
+
+  .restore-row__cwd {
+    flex: 1 1 auto;
+    min-width: 0;
+    display: flex;
+    overflow: hidden;
+  }
+
+  /* Shrinks first, so the end of the path stays readable. */
+  .restore-row__cwd-head {
+    flex: 0 100 auto;
+    min-width: calc(1em + 1ch);
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .restore-row__cwd-tail {
+    flex: 0 1 auto;
+    min-width: 0;
+    overflow: hidden;
   }
 
   .restore-note {

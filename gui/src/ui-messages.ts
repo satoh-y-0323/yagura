@@ -27,6 +27,7 @@ import {
   describeReopenOffer as renderDescribeReopenOffer,
   describeRestoreBanner as renderDescribeRestoreBanner,
   describeRestoreSelectionCount as renderDescribeRestoreSelectionCount,
+  describeRestoreConfirm as renderDescribeRestoreConfirm,
   describeRoomTitle as renderDescribeRoomTitle,
   describeStatus as renderDescribeStatus,
   describeThemeIssues as renderDescribeThemeIssues,
@@ -294,8 +295,8 @@ export function describeAttentionBadge(count: number): string {
 }
 
 /**
- * Describes the restore banner's text: how many windows from the last
- * session are available, and when that configuration was recorded.
+ * Describes the reopen offer's text: how many windows from the last
+ * session can be reopened, and when that configuration was recorded.
  * @param count the number of restore candidates
  * @param timestamp the formatted recording time, `null` when unknown
  */
@@ -310,6 +311,14 @@ export function describeRestoreBanner(count: number, timestamp: string | null): 
  */
 export function describeRestoreSelectionCount(selected: number, total: number): string {
   return renderDescribeRestoreSelectionCount(messages, selected, total);
+}
+
+/**
+ * Describes the label of the button that reopens the checked windows.
+ * @param count the number of candidates currently checked
+ */
+export function describeRestoreConfirm(count: number): string {
+  return renderDescribeRestoreConfirm(messages, count);
 }
 
 /**

@@ -208,7 +208,7 @@ export const messagesEn = {
     restore: 'Restore',
     chooseWindows: 'Choose windows…',
     selectAll: 'Select all',
-    clearAll: 'Clear all',
+    clearAll: 'Clear',
     approve: 'Approve',
     deny: 'Deny',
     reconnect: 'Reconnect',
@@ -261,6 +261,7 @@ export const messagesEn = {
     profileSummaryCommandUnavailable: 'Provided by the daemon at launch',
     profileSummaryDetectionLabel: 'Detection definition:',
     addWindowTitle: 'Add a window',
+    reopenTitle: 'Reopen windows',
     browseButton: 'Browse…',
     folderDropHint: 'Drop a folder here',
     closeDialog: 'Close dialog',
@@ -351,8 +352,7 @@ export const messagesEn = {
 
     restoreAvailable: (count: number, timestamp: string | null): string => {
       const subject = count === 1 ? '1 window' : `${count} windows`;
-      const verb = count === 1 ? 'is' : 'are';
-      const base = `${subject} from your last session ${verb} available to restore`;
+      const base = `${subject} from last time can be reopened`;
       return timestamp === null ? `${base}.` : `${base} (saved ${timestamp}).`;
     },
     restoreLoadFailed: 'Previous session could not be read.',
@@ -484,6 +484,10 @@ export const messagesEn = {
 
     restoreSelectionCount: (selected: number, total: number): string =>
       `${selected} of ${total} selected`,
+
+    /** The label of the button that reopens the checked windows. */
+    restoreConfirm: (count: number): string =>
+      count === 1 ? 'Reopen 1 window' : `Reopen ${count} windows`,
 
     /** The tooltip of a window's waiting-messages mark. */
     queuedMessages: (count: number): string =>

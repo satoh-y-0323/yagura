@@ -31,6 +31,7 @@ import {
   describeAttentionBadge,
   describeRestoreBanner,
   describeRestoreSelectionCount,
+  describeRestoreConfirm,
   describeRoomTitle,
   describeUnknownReasonSuffix,
   describeUnknownExplanation,
@@ -114,6 +115,12 @@ describe('render.ts: output is driven by the given locale (dummy-locale swap)', 
     expect(result).not.toBe(english.formats.restoreSelectionCount(2, 5));
   });
 
+  it('describeRestoreConfirm: renders from the dummy formats.restoreConfirm template', () => {
+    const result = describeRestoreConfirm(dummyMessages, 2);
+    expect(result).toBe(dummyMessages.formats.restoreConfirm(2));
+    expect(result).not.toBe(english.formats.restoreConfirm(2));
+  });
+
   it('describeRoomTitle: renders through the dummy formats.windowListTitle(name, count) template', () => {
     const result = describeRoomTitle(dummyMessages, 'yagura', 2);
     expect(result).toBe(dummyMessages.formats.windowListTitle('yagura', 2));
@@ -163,6 +170,11 @@ describe('render.ts: plural forms (contract (3), English locale)', () => {
   it.each([2, 5])('describeRestoreBanner: uses the plural form for count %i', (count) => {
     const result = describeRestoreBanner(english, count, null);
     expect(result).toContain(`${count} windows`);
+  });
+
+  it('describeRestoreConfirm: uses the singular form for 1 and the plural form otherwise', () => {
+    expect(describeRestoreConfirm(english, 1)).toBe('Reopen 1 window');
+    expect(describeRestoreConfirm(english, 5)).toBe('Reopen 5 windows');
   });
 
   it('describeRestoreBanner: includes the given timestamp text when provided', () => {
