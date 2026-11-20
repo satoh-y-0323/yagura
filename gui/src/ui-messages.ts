@@ -138,7 +138,7 @@ export function describeGoToWindow(name: string): string {
 }
 
 /**
- * Describes a window that calls the user, as its pop-up says it.
+ * Describes a window that calls the user, as its lane card says it.
  * @param name the window's display name
  * @param status which call it is
  */
@@ -162,9 +162,9 @@ export function describeWindowCallParts(
 }
 
 /**
- * Describes a pop-up that later events of its kind were folded into.
+ * Describes a lane card that later events of its kind were folded into.
  * @param sentence the latest event's sentence
- * @param count how many other events the pop-up holds
+ * @param count how many other events the card holds
  */
 export function describeNoticeAndMore(sentence: string, count: number): string {
   return renderDescribeNoticeAndMore(messages, sentence, count);

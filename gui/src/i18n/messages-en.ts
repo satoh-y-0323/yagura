@@ -448,9 +448,9 @@ export const messagesEn = {
     // Ends that notice when the lines that did not fit are only counted.
     restoreNotRestoredMore: (count: number): string => `+${count} more`,
 
-    // Pop-ups, the Notifications list and what is read out.
+    // The notice lane, the Notifications list and what is read out.
     actionsAvailable: 'Actions available',
-    /** A pop-up that later events of its kind were folded into: the latest event's sentence first. */
+    /** A card that later events of its kind were folded into: the latest event's sentence first. */
     noticeAndMore: (sentence: string, count: number): string => `${sentence} and ${count} more`,
     windowNeedsApprovalParts,
     windowNeedsInputParts,
@@ -458,7 +458,6 @@ export const messagesEn = {
     windowNeedsInput: (name: string): string => joinParts(windowNeedsInputParts(name)),
     // A card's go-to sentence; the arrow beside it is drawn, not said.
     goToCallingWindowParts: (name: string): TitleParts => ({ before: 'Go to “', name, after: '”' }),
-    goToWindow: 'Go to window',
     waitingForYouMore: (count: number): string => `+${count} waiting for you`,
     notificationsMore: (count: number): string => `+${count} more in Notifications`,
     notifications: 'Notifications',
@@ -467,7 +466,6 @@ export const messagesEn = {
     noNotifications: 'No notifications',
     clearNotifications: 'Clear',
     notificationSettings: 'Notification settings',
-    notificationPopUps: 'Notification pop-ups',
     // The band at the foot of the work surface; a different word from the bell's list.
     noticeLane: 'Notification bar',
     // A lane card's name: its whole sentence, then what pressing it does.

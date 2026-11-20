@@ -13,11 +13,11 @@
   import ConfirmDialog from '../components/ConfirmDialog.svelte';
   import NoticeAnnouncer from '../components/NoticeAnnouncer.svelte';
   import NoticeCenter from '../components/NoticeCenter.svelte';
+  import NoticeLane from '../components/NoticeLane.svelte';
   import PlansPanel from '../components/PlansPanel.svelte';
   import RenameDialog from '../components/RenameDialog.svelte';
   import RestoreDialog from '../components/RestoreDialog.svelte';
   import SettingsPanel from '../components/SettingsPanel.svelte';
-  import ToastRegion from '../components/ToastRegion.svelte';
   import Tooltip from '../components/Tooltip.svelte';
   import type { OutsideDismissReason } from '../components/dismiss-on-outside';
   import type { Rect } from '../components/menu-position';
@@ -50,10 +50,12 @@
     type FailureEventKey,
     type NewEvent,
   } from '../notices/event-log';
+  import { laneCapacity, type LaneCapacity, type LaneMetrics } from '../notices/lane-capacity';
   import {
     emptyNeedsYouToastState,
     stepNeedsYouToasts,
     type NeedsYouToastState,
+    type NeedsYouToastStatus,
   } from '../notices/needs-you-toasts';
   import {
     dismissLaneNotice,
@@ -487,16 +489,22 @@
   // The newest notice the user has seen in the Notifications list.
   let seenThrough = -1;
   // Counted where the modal focus port hears a dialog open and close; a reactive value so the
-  // pop-ups held behind a modal come up as soon as the last one closes.
+  // cards held behind a modal come up as soon as the last one closes.
   let openModalCount = 0;
-  // Pop-up timers stand still while the app is not in front.
+  // Lane card timers stand still while the app is not in front.
   let appFocused = document.hasFocus();
   $: timersRunning = !$appHidden && appFocused;
+  let laneElement: HTMLElement | undefined;
+  // How many cards the lane fits, `null` until it has been measured.
+  let laneFit: LaneCapacity | null = null;
+  let stopLaneTracking: (() => void) | null = null;
 
   let isNoticeCenterOpen = false;
   let noticeCenterAnchor: Rect | null = null;
   // Fixed for one opening, so what came after the last opening stays marked new while it is open.
   let noticeCenterNewerThan = Number.POSITIVE_INFINITY;
+  // The notice an opening from a lane card starts on; `null` for the list's own first focus.
+  let noticeCenterInitialSeq: number | null = null;
   let notificationsButton: HTMLButtonElement | undefined;
 
   const keyboardPlatform = hostKeyboardPlatform();
@@ -882,6 +890,8 @@
   // With no window open the work area makes the offer, so the two never make it together.
   $: restoreOffer = reopenOffer(sourceState);
   $: windowNames = new Map($registry.windows.map((entry) => [entry.windowId, entry.displayName]));
+  // Ahead of the feed, so the measure taken on attaching reaches the same run of it.
+  $: trackLane(laneElement);
   // The lane is an input so a closed or timed-out card runs the feed again; the
   // function writes them back, which a statement reading them could not do itself.
   $: feed = runNoticeFeed(
@@ -892,10 +902,12 @@
     notificationPreferences,
     openModalCount,
     laneState,
+    laneFit,
     windowNames,
     isNoticeCenterOpen
   );
-  $: toastSecondLines = secondLinesOf(feed, $registry.windows);
+  $: laneSecondLines = secondLinesOf(feed, $registry.windows);
+  $: moreCallsStatus = leftOverCallsStatus(feed, needsYouToasts);
   $: closeNoticeCenterBehindModal(openModalCount);
   // Recomputed on every registry change so the already-open hint (cwd + name
   // match) tracks which windows are actually open right now.
@@ -2739,6 +2751,7 @@
     unbindAppPalette();
     stopDefaultPaletteSync?.();
     stopLayoutSync();
+    stopLaneTracking?.();
     unsubscribeSession?.();
     void framePull?.stop();
     unsubscribeWindowList?.();
@@ -3362,6 +3375,47 @@
     };
   }
 
+  /**
+   * Keeps `laneFit` on how many cards the lane fits. The sizes are read from
+   * the lane's computed style, so the stylesheet stays their one source.
+   */
+  function trackLane(element: HTMLElement | undefined): void {
+    stopLaneTracking?.();
+    stopLaneTracking = null;
+    if (element === undefined) {
+      laneFit = null;
+      return;
+    }
+    const measure = (): void => {
+      const next = measureLane(element);
+      if (next?.all !== laneFit?.all || next?.withMore !== laneFit?.withMore) {
+        laneFit = next;
+      }
+    };
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(element);
+    stopLaneTracking = () => {
+      observer.disconnect();
+    };
+  }
+
+  // A lane with no width has not been laid out yet, so how many cards it fits is not known.
+  function measureLane(element: HTMLElement): LaneCapacity | null {
+    const style = getComputedStyle(element);
+    const px = (property: string): number => Number.parseFloat(style.getPropertyValue(property));
+    const metrics: LaneMetrics = {
+      card: px('--lane-card-width'),
+      gap: px('--lane-gap'),
+      padding: px('--lane-padding-inline'),
+      chip: px('--lane-chip-width'),
+    };
+    const readable = Object.values(metrics).every((value) => Number.isFinite(value) && value >= 0);
+    return element.clientWidth > 0 && readable && metrics.card > 0
+      ? laneCapacity(element.clientWidth, metrics)
+      : null;
+  }
+
   function applyArea(next: Size): void {
     if (next.width === area.width && next.height === area.height) {
       return;
@@ -3622,6 +3676,7 @@
     prefs: NoticeFeedInput['prefs'],
     modals: number,
     lane: NoticeFeedInput['lane'],
+    capacity: NoticeFeedInput['capacity'],
     names: NoticeFeedInput['windowNames'],
     listOpen: boolean
   ): NoticeFeedOutput {
@@ -3634,8 +3689,7 @@
       prefs,
       openModalCount: modals,
       lane,
-      // The lane is not measured yet, so no card shows; arrivals stay on the lane and are read.
-      capacity: null,
+      capacity,
       windowNames: names,
     };
     let output = noticeFeed(input);
@@ -3652,8 +3706,8 @@
   }
 
   /**
-   * The line under each pop-up's title: for a notice, the detail of the latest notice it holds;
-   * for a window call, the place the sidebar lists the window under.
+   * The tooltip's line under each card's sentence: for a notice, the detail of the latest notice
+   * it holds; for a window call, the place the sidebar lists the window under.
    */
   function secondLinesOf(
     output: NoticeFeedOutput,
@@ -3675,8 +3729,31 @@
     return new Map([...notices, ...places]);
   }
 
-  /** A closed or timed-out pop-up; a window call stays away until its window arrives again. */
-  function handleToastDone(item: LaneItem): void {
+  /**
+   * The mark on the lane's waiting count: approval when any call left off the lane's cards
+   * waits for one, as the feed ranks approval first.
+   */
+  function leftOverCallsStatus(
+    output: NoticeFeedOutput,
+    calls: NeedsYouToastState
+  ): NeedsYouToastStatus {
+    const shown = new Set(
+      output.lane.visible.flatMap((item) => (item.kind === 'needs-you' ? [item.windowId] : []))
+    );
+    const leftOver = new Set(
+      output.lane.state.lane.flatMap((entry) =>
+        entry.kind === 'call' && !shown.has(entry.windowId) ? [entry.windowId] : []
+      )
+    );
+    return calls.toasts.some(
+      (toast) => leftOver.has(toast.windowId) && toast.status === 'waiting_approval'
+    )
+      ? 'waiting_approval'
+      : 'waiting_input';
+  }
+
+  /** A closed, timed-out or pressed card; a window call stays away until its window arrives again. */
+  function dismissLaneCard(item: LaneItem): void {
     if (item.kind === 'notice') {
       laneState = dismissLaneNotice(laneState, item.id);
       return;
@@ -3691,10 +3768,29 @@
     );
   }
 
-  function handleGoToWindowFromToast(windowId: string): void {
-    const entry = get(registry).windows.find((candidate) => candidate.windowId === windowId);
-    if (entry !== undefined) {
-      goToWindowByUser(entry);
+  /**
+   * A card's body was pressed. A call goes to its window, and the card goes once that is the
+   * window looked at; a notice's card goes, since what it opens takes its part over.
+   */
+  function pressLaneCard(item: LaneItem): void {
+    if (item.kind === 'needs-you') {
+      const entry = get(registry).windows.find((candidate) => candidate.windowId === item.windowId);
+      if (entry !== undefined) {
+        goToWindowByUser(entry);
+      }
+      return;
+    }
+    // A folded card's title is its latest notice, so that is the row the list starts on.
+    const entry = laneState.lane.find(
+      (candidate) => candidate.kind === 'notice' && candidate.id === item.id
+    );
+    const seqs = entry?.kind === 'notice' ? entry.seqs : [];
+    const latest = seqs[seqs.length - 1] ?? null;
+    dismissLaneCard(item);
+    if (item.action === null) {
+      void showNoticeInCenter(latest);
+    } else {
+      handleNoticeAction(item.action);
     }
   }
 
@@ -3712,6 +3808,7 @@
     }
     noticeCenterAnchor = notificationsButton?.getBoundingClientRect() ?? null;
     noticeCenterNewerThan = seenThrough;
+    noticeCenterInitialSeq = null;
     seenThrough = Math.max(seenThrough, ...feed.center.map((notice) => notice.seq));
     isNoticeCenterOpen = true;
   }
@@ -3720,6 +3817,19 @@
     if (!isNoticeCenterOpen) {
       toggleNoticeCenter();
     }
+  }
+
+  /**
+   * Opens the Notifications list on one notice's row. An open list is opened again, since the
+   * list places its first focus once per opening.
+   */
+  async function showNoticeInCenter(seq: number | null): Promise<void> {
+    if (isNoticeCenterOpen) {
+      isNoticeCenterOpen = false;
+      await tick();
+    }
+    toggleNoticeCenter();
+    noticeCenterInitialSeq = seq;
   }
 
   /**
@@ -3783,7 +3893,10 @@
 
   /** Opens Settings on the Profiles tab with `id`'s row open, where its guidance is shown. */
   async function showProfileInSettings(id: string): Promise<void> {
-    if (!isSettingsOpen) {
+    // Asked for when already open too, so the keyboard follows the press into Settings.
+    if (isSettingsOpen) {
+      pendingFocus.request({ kind: 'panel', panel: 'settings' });
+    } else {
       await toggleSettings();
     }
     selectSettingsTab('profiles');
@@ -3874,6 +3987,7 @@
       keepOpenWithin={notificationsButton}
       notices={feed.center}
       newerThan={noticeCenterNewerThan}
+      initialSeq={noticeCenterInitialSeq}
       onAction={handleNoticeAction}
       onDismiss={dismissListedNotice}
       onClear={clearNoticeEvents}
@@ -3936,17 +4050,18 @@
           onExitedCardGoTo={() => dispatchShell({ type: 'exitedCardGoTo' })}
         />
       </div>
-      <ToastRegion
+      <NoticeLane
         lane={feed.lane}
-        secondLines={toastSecondLines}
+        {moreCallsStatus}
+        secondLines={laneSecondLines}
         {timersRunning}
-        onAction={handleNoticeAction}
-        onGoToWindow={handleGoToWindowFromToast}
-        onDismiss={handleToastDone}
-        onExpire={handleToastDone}
+        onPress={pressLaneCard}
+        onDismiss={dismissLaneCard}
+        onExpire={dismissLaneCard}
         onShowWaiting={showWaitingWindows}
         onShowNotifications={openNoticeCenter}
         onReturnFocus={focusCurrentTerminal}
+        bind:element={laneElement}
       />
     </div>
   </div>
@@ -4169,16 +4284,16 @@
     gap: 0;
   }
 
-  /* The positioned box the pop-ups sit in, at the work surface's bottom right. */
+  /* The windows over the notice lane: the lane takes its own height, so it covers nothing. */
   .work-surface {
-    position: relative;
     display: flex;
+    flex-direction: column;
     flex: 1 1 auto;
     min-width: 0;
     min-height: 0;
   }
 
-  /* Window z-orders grow with the window count; kept inside their own stack so pop-ups stay above. */
+  /* Window z-orders grow with the window count; kept inside their own stack so panels stay above. */
   .work-surface__windows {
     display: flex;
     flex: 1 1 auto;
