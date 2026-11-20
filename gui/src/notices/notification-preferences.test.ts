@@ -105,10 +105,12 @@ describe('readPreferences', () => {
 });
 
 describe('writePreferences', () => {
-  it.each(ROWS)('reads back what it wrote, with only %s off', async (row) => {
+  it('reads back what it wrote, with each row off on its own', async () => {
     const { readPreferences, writePreferences } = await load();
-    const prefs = allOnExcept(row);
-    expect(readPreferences(writePreferences(prefs))).toEqual(prefs);
+    for (const row of ROWS) {
+      const prefs = allOnExcept(row);
+      expect(readPreferences(writePreferences(prefs)), row).toEqual(prefs);
+    }
   });
 
   it('writes the version and the seven rows under inApp', async () => {
@@ -132,9 +134,11 @@ describe('writePreferences', () => {
 });
 
 describe('withPreference', () => {
-  it.each(ROWS)('turns only %s off and leaves the rest', async (row) => {
+  it('turns each row off on its own and leaves the rest', async () => {
     const { withPreference } = await load();
-    expect(withPreference(ALL_ON, row, false)).toEqual(allOnExcept(row));
+    for (const row of ROWS) {
+      expect(withPreference(ALL_ON, row, false), row).toEqual(allOnExcept(row));
+    }
   });
 
   it('turns a row back on', async () => {

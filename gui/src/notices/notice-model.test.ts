@@ -340,18 +340,20 @@ describe('buildNotices', () => {
 
   it.each(NOTICES.map((row) => [row.label, row] as const))(
     'shows %s alone, with its sentence and action, when only its condition holds',
-    (_label, row) => {
-      expect(shown(buildNotices(baseState(row.on)))).toEqual([row.notice]);
-    }
-  );
+    (label, row) => {
+      const drafts = buildNotices(baseState(row.on));
+      expect(shown(drafts)).toEqual([row.notice]);
 
-  it.each(NOTICES.filter((row) => BLOCKING_LABELS.has(row.label)).map((row) => [row.label, row]))(
-    'gives the blocking %s a one-line title of its own above the sentence',
-    (_label, row) => {
-      const [draft] = buildNotices(baseState(row.on));
-      expect(draft?.detail).toBe(row.notice.sentence);
-      expect(draft?.title).not.toBe('');
-      expect(draft?.title).not.toBe(draft?.detail);
+      // A blocking notice carries a one-line title of its own above the sentence;
+      // any other notice is its sentence alone.
+      const [draft] = drafts;
+      if (BLOCKING_LABELS.has(label)) {
+        expect(draft?.detail).toBe(row.notice.sentence);
+        expect(draft?.title).not.toBe('');
+        expect(draft?.title).not.toBe(draft?.detail);
+      } else {
+        expect(draft?.detail).toBeNull();
+      }
     }
   );
 
@@ -478,10 +480,14 @@ describe('dismissNotice', () => {
 });
 
 describe('recordApprovalExpiredUnseen', () => {
-  it('starts the count at 1 with the given summary as latest, from a null state (reason: timeout)', () => {
+  it('starts the count at 1 with the given summary as latest, from a null state (reason: timeout), and leaves every other field untouched', () => {
     const latest = summary();
-    const next = recordApprovalExpiredUnseen(baseState(), false, 'timeout', latest);
-    expect(next.approvalExpiredUnseen).toEqual({ count: 1, latest });
+    const state = baseState({
+      daemonSpawnNotice: DAEMON_SPAWN_NOTICE,
+      boundaryNotice: 'probe: boundary notice',
+    });
+    const next = recordApprovalExpiredUnseen(state, false, 'timeout', latest);
+    expect(next).toEqual({ ...state, approvalExpiredUnseen: { count: 1, latest } });
   });
 
   it('increments count and overwrites latest on a second unseen expiry (reason: timeout)', () => {
@@ -503,16 +509,6 @@ describe('recordApprovalExpiredUnseen', () => {
       summary({ requester: 'other window' })
     );
     expect(next.approvalExpiredUnseen).toEqual(state.approvalExpiredUnseen);
-  });
-
-  it('leaves every other notice-relevant field untouched', () => {
-    const state = baseState({
-      daemonSpawnNotice: DAEMON_SPAWN_NOTICE,
-      boundaryNotice: 'probe: boundary notice',
-    });
-    const next = recordApprovalExpiredUnseen(state, false, 'timeout', summary());
-    expect(next.daemonSpawnNotice).toBe(DAEMON_SPAWN_NOTICE);
-    expect(next.boundaryNotice).toBe('probe: boundary notice');
   });
 
   // Only an actual timeout is an "expired unseen" request: a decision made
@@ -583,47 +579,32 @@ describe('applyRecoveryUpdate: generation-ordered adoption', () => {
     expect(next).toEqual(state);
   });
 
-  it('does not go from idle to idle: the first adopted generation is 1, applied from the initial idle/0 state', () => {
-    const state = baseState({ daemonRecovery: 'idle', daemonRecoveryRev: 0 });
-    const next = applyRecoveryUpdate(state, { status: 'retrying', rev: 1 });
-    expect(next.daemonRecovery).toBe('retrying');
-    expect(next.daemonRecoveryRev).toBe(1);
-  });
-
-  it('leaves every other notice-relevant field untouched', () => {
+  it('does not go from idle to idle: the first adopted generation is 1, applied from the initial idle/0 state, and every other field stays untouched', () => {
     const state = baseState({
       daemonSpawnNotice: DAEMON_SPAWN_NOTICE,
       detectionWarning: 'probe: unrelated warning',
-      daemonRecovery: 'retrying',
-      daemonRecoveryRev: 1,
+      daemonRecovery: 'idle',
+      daemonRecoveryRev: 0,
     });
-    const next = applyRecoveryUpdate(state, { status: 'exhausted', rev: 2 });
-    expect(next.daemonSpawnNotice).toBe(DAEMON_SPAWN_NOTICE);
-    expect(next.detectionWarning).toBe('probe: unrelated warning');
+    const next = applyRecoveryUpdate(state, { status: 'retrying', rev: 1 });
+    expect(next).toEqual({ ...state, daemonRecovery: 'retrying', daemonRecoveryRev: 1 });
   });
 });
 
 describe('applyClientConfigFailure', () => {
   // Every reason is kept, including the one no notice is shown for, so an
   // absent file stays distinguishable from an unusable one.
-  it('keeps the reason given, including "not_found" which raises no notice', () => {
-    const shownFailure = applyClientConfigFailure(baseState(), 'read_failed');
+  it('keeps the reason given, including "not_found" which raises no notice, and leaves every other field untouched', () => {
+    const state = baseState({ boundaryNotice: 'wiring-probe: boundary notice' });
+    const shownFailure = applyClientConfigFailure(state, 'read_failed');
+    expect(shownFailure).toEqual({ ...state, clientConfigFailure: 'read_failed' });
     const next = applyClientConfigFailure(shownFailure, 'not_found');
-    expect(next.clientConfigFailure).toBe('not_found');
+    expect(next).toEqual({ ...state, clientConfigFailure: 'not_found' });
   });
 
   it('clears the failure when passed null', () => {
     const state = baseState({ clientConfigFailure: 'invalid_toml' });
     const next = applyClientConfigFailure(state, null);
     expect(next.clientConfigFailure).toBeNull();
-  });
-
-  it('leaves every other notice-relevant field untouched', () => {
-    const state = baseState({
-      boundaryNotice: 'wiring-probe: boundary notice',
-      clientConfigFailure: null,
-    });
-    const next = applyClientConfigFailure(state, 'read_failed');
-    expect(next.boundaryNotice).toBe('wiring-probe: boundary notice');
   });
 });

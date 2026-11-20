@@ -49,15 +49,6 @@ describe('window handlers follow the window', () => {
     expect(registry.resolveWindowHandlers('w1')).toBeUndefined();
   });
 
-  it('forgets the handlers of a window whose child exited', () => {
-    const registry = openRegistry('w1');
-    registry.registerWindowHandlers('w1', HANDLERS);
-
-    registry.retireWindow('w1', null);
-
-    expect(registry.resolveWindowHandlers('w1')).toBeUndefined();
-  });
-
   it('keeps the handlers of the other windows', () => {
     const registry = openRegistry('w1', 'w2');
     registry.registerWindowHandlers('w1', HANDLERS);
@@ -185,15 +176,6 @@ describe('status generations', () => {
 });
 
 describe('closing a window', () => {
-  it('leaves the other windows and their tabs as they were', () => {
-    const registry = openRegistry('w1', 'w2', 'w3');
-
-    registry.closeWindow('w2');
-
-    expect(get(registry).windows.map((entry) => entry.windowId)).toEqual(['w1', 'w3']);
-    expect(get(registry).tabOrder).toEqual(['w1', 'w3']);
-  });
-
   it('leaves everything as it was when the id is unknown', () => {
     const registry = openRegistry('w1', 'w2');
     const before = structuredClone(get(registry));

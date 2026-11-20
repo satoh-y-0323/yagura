@@ -44,10 +44,11 @@ function makeRequest(requestId: string, overrides: Partial<ApprovalRequest> = {}
 }
 
 describe('emptyQueue', () => {
-  it('starts with no items', () => {
+  it('starts with no items and no failed request', () => {
     const state = emptyQueue();
     expect(size(state)).toBe(0);
     expect(head(state)).toBeNull();
+    expect(state.failedIds.size).toBe(0);
   });
 });
 
@@ -293,15 +294,6 @@ describe('isWithinGuard: the 500 ms post-open click guard', () => {
 
   it('is false well after opening', () => {
     expect(isWithinGuard(1_000, 5_000)).toBe(false);
-  });
-});
-
-/** Sanity check that the invented state shape round-trips through the type. */
-describe('ApprovalQueueState shape', () => {
-  it('emptyQueue() satisfies the ApprovalQueueState contract used above', () => {
-    const state: ApprovalQueueState = emptyQueue();
-    expect(state.items).toEqual([]);
-    expect(state.failedIds.size).toBe(0);
   });
 });
 

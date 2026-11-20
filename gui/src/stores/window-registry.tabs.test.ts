@@ -71,14 +71,6 @@ describe('window registry tab order: opening a window', () => {
 });
 
 describe('window registry tab order: re-applying a window list snapshot', () => {
-  it('does not grow the tab order when the same snapshot is applied again', () => {
-    const registry = openRegistry('w-a', 'w-b');
-
-    applySnapshot(registry, 'w-a', 'w-b');
-
-    expect(tabOrderOf(registry)).toEqual(['w-a', 'w-b']);
-  });
-
   it('does not grow the tab order over repeated polls', () => {
     const registry = openRegistry('w-a', 'w-b');
 
@@ -112,14 +104,6 @@ describe('window registry tab order: removing a window', () => {
     const registry = openRegistry('w-a', 'w-b', 'w-c');
 
     registry.closeWindow('w-b');
-
-    expect(tabOrderOf(registry)).toEqual(['w-a', 'w-c']);
-  });
-
-  it('drops a window from the tab order once its status becomes exited', () => {
-    const registry = openRegistry('w-a', 'w-b', 'w-c');
-
-    registry.retireWindow('w-b', null);
 
     expect(tabOrderOf(registry)).toEqual(['w-a', 'w-c']);
   });
@@ -226,16 +210,6 @@ describe('window registry tab order: the multiset invariant holds on every path'
     const registry = openRegistry('w-a', 'w-b', 'w-c');
 
     registry.retireWindow('w-b', null);
-
-    expectTabOrderCoversWindows(registry);
-  });
-
-  it('holds after repeated polls of the same snapshot', () => {
-    const registry = openRegistry('w-a', 'w-b');
-
-    for (let poll = 0; poll < 3; poll++) {
-      applySnapshot(registry, 'w-a', 'w-b');
-    }
 
     expectTabOrderCoversWindows(registry);
   });

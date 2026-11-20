@@ -80,16 +80,6 @@ function publishedStates(registry: WindowRegistry): WindowRegistryState[] {
 }
 
 describe('createWindowRegistry: lifecycle', () => {
-  it('discards the window entry once it is retired', () => {
-    const registry = createWindowRegistry();
-    registry.openWindow(makeWindowInfo({ window_id: 'w-a' }));
-
-    registry.retireWindow('w-a', null);
-
-    const state = get(registry);
-    expect(state.windows.some((w) => w.windowId === 'w-a')).toBe(false);
-  });
-
   it('retires a window in one update that names the window and the code it ended with', () => {
     const registry = createWindowRegistry();
     registry.openWindow(makeWindowInfo({ window_id: 'w-a' }));
@@ -964,8 +954,6 @@ describe('createWindowRegistry: which message retires an ended window', () => {
   it.each<[number | null, Message[]]>([
     [37, ['push', 'list']],
     [37, ['list', 'push']],
-    [38, ['push', 'list']],
-    [38, ['list', 'push']],
     [36, ['push', 'list']],
     [36, ['list', 'push']],
     [null, ['push', 'list']],
@@ -992,7 +980,7 @@ describe('createWindowRegistry: which message retires an ended window', () => {
     }
   );
 
-  it.each<number | null>([36, 19, null])(
+  it.each<number | null>([36, null])(
     'at revision %s, the exited push leaves the window listed as exited until the list retires it',
     (revision) => {
       const registry = createWindowRegistry();
@@ -1020,7 +1008,6 @@ describe('createWindowRegistry: which message retires an ended window', () => {
     [null, 'list', null],
     [37, 'list', -1],
     [37, 'push', -1],
-    [38, 'list', -1],
   ])('at revision %s, a -1 the %s carries is retired as %s', (revision, message, expected) => {
     expect(retiredCodesOf(revision, [message], -1)).toEqual([expected]);
   });

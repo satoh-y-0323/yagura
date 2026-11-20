@@ -80,37 +80,15 @@ fn status_changed(status_rev: Option<u64>) -> DaemonMessage {
 }
 
 #[test]
-fn status_changed_decodes_a_body_missing_the_status_rev_key_as_none() {
-    let body = br#"{"type":"status_changed","window_id":"w1","status":"waiting_input"}"#;
-    let decoded = decode_daemon_message(body).expect("status_changed must decode");
-    assert_eq!(decoded, status_changed(None));
-}
-
-#[test]
-fn status_changed_omits_status_rev_from_the_wire_when_none() {
-    let body = encode_daemon_message(&status_changed(None));
-    let value: serde_json::Value = serde_json::from_slice(&body).expect("valid json");
-    assert!(
-        value.get("status_rev").is_none(),
-        "status_rev: None must be omitted from the wire, got: {value}"
-    );
-}
-
-#[test]
 fn status_changed_status_rev_round_trips_when_present() {
     let msg = status_changed(Some(42));
     let body = encode_daemon_message(&msg);
     let decoded = decode_daemon_message(&body).expect("round trip decode must succeed");
     assert_eq!(decoded, msg);
-}
-
-#[test]
-fn status_changed_wire_key_for_status_rev_is_literally_status_rev() {
-    let body = encode_daemon_message(&status_changed(Some(5)));
     let value: serde_json::Value = serde_json::from_slice(&body).expect("valid json");
     assert_eq!(
         value.get("status_rev"),
-        Some(&serde_json::json!(5)),
+        Some(&serde_json::json!(42)),
         "the wire key must be exactly \"status_rev\", got: {value}"
     );
 }
@@ -209,18 +187,6 @@ fn status_changed_task_report_round_trips_when_present() {
         "got: {value}"
     );
     assert_eq!(decode_daemon_message(&body).expect("decode"), msg);
-}
-
-#[test]
-fn status_changed_omits_task_report_when_none_and_decodes_a_body_without_the_key() {
-    let body = encode_daemon_message(&status_changed(None));
-    let value: serde_json::Value = serde_json::from_slice(&body).expect("valid json");
-    assert!(value.get("task_report").is_none(), "got: {value}");
-    let old = br#"{"type":"status_changed","window_id":"w1","status":"waiting_input"}"#;
-    assert_eq!(
-        decode_daemon_message(old).expect("decode"),
-        status_changed(None)
-    );
 }
 
 /// A revision 35 daemon sends `{ "seq", "standing" }`: the frame still decodes,

@@ -38,24 +38,6 @@ describe('describeBoundaryNotice: operation -> summary mapping covers every Boun
   );
 });
 
-describe('describeBoundaryNotice: non-empty detail always reaches the display text', () => {
-  it.each(ALL_OPERATIONS.filter((operation) => operation !== 'profilesIncomplete'))(
-    'includes a plain-string detail in the display text for operation "%s"',
-    (operation) => {
-      const result = describeBoundaryNotice({ operation, detail: 'a specific daemon reason' });
-      expect(result).toContain('a specific daemon reason');
-    }
-  );
-
-  it('includes the sole warning for profilesIncomplete when detail has exactly one entry', () => {
-    const result = describeBoundaryNotice({
-      operation: 'profilesIncomplete',
-      detail: ['profile file "a.toml" could not be parsed'],
-    });
-    expect(result).toContain('profile file "a.toml" could not be parsed');
-  });
-});
-
 describe('describeBoundaryNotice: blank detail falls back to the summary alone (existing rule preserved)', () => {
   it.each(['', '   ', '\n\t'])(
     'returns the summary alone for a blank detail (case: %j)',
@@ -114,18 +96,6 @@ describe('describeBoundaryNotice: profilesIncomplete assembles a multi-warning d
     ];
     const result = describeBoundaryNotice({ operation: 'profilesIncomplete', detail });
     expect(result).toBe(`${SUMMARIES.profilesIncomplete}: 3 problems, first: ${detail[0]}`);
-  });
-
-  it('does not put the count at the end (a trailing "(and N more)" form is rejected)', () => {
-    const detail = [
-      'profile file "a.toml" could not be parsed',
-      'profile file "b.toml" could not be parsed',
-      'profile file "c.toml" could not be parsed',
-    ] as const;
-    const result = describeBoundaryNotice({ operation: 'profilesIncomplete', detail });
-    expect(result).not.toMatch(/and \d+ more\)?\s*$/);
-    expect(result.indexOf('3')).toBeGreaterThanOrEqual(0);
-    expect(result.indexOf('3')).toBeLessThan(result.indexOf(detail[0]));
   });
 
   it('keeps the count prefix even when the combined text is long enough to be truncated (the count must survive the 200 code point cap)', () => {

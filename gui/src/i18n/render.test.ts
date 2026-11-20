@@ -245,14 +245,11 @@ describe('describeUnknownReasonSuffix', () => {
     expect(describeUnknownReasonSuffix(english, { status: 'exited' })).toBe('');
   });
 
-  it.each(UNKNOWN_REASONS)('returns a non-empty suffix for reason %s', (reason) => {
-    expect(describeUnknownReasonSuffix(english, unknownPair(reason)).length).toBeGreaterThan(0);
-  });
-
-  it('renders the six reasons as six distinct suffixes', () => {
+  it('renders the six reasons as six distinct, non-empty suffixes', () => {
     const rendered = UNKNOWN_REASONS.map((reason) =>
       describeUnknownReasonSuffix(english, unknownPair(reason))
     );
+    expect(rendered.every((suffix) => suffix.length > 0)).toBe(true);
     expect(new Set(rendered).size).toBe(UNKNOWN_REASONS.length);
   });
 
@@ -284,22 +281,12 @@ describe('describeUnknownExplanation', () => {
     ).toBe('');
   });
 
-  it('renders the explanation alone when there is no warning (null)', () => {
-    expect(describeUnknownExplanation(english, unknownPair('no_definition'), null)).toBe(
-      english.unknownReasons.explanation.no_definition
-    );
-  });
-
-  it('renders the explanation alone when the warning is an empty string', () => {
-    expect(describeUnknownExplanation(english, unknownPair('no_definition'), '')).toBe(
-      english.unknownReasons.explanation.no_definition
-    );
-  });
-
-  it('renders the explanation alone when the warning is whitespace only', () => {
-    expect(describeUnknownExplanation(english, unknownPair('no_definition'), '   ')).toBe(
-      english.unknownReasons.explanation.no_definition
-    );
+  it('renders the explanation alone when there is no warning (null, empty, or whitespace only)', () => {
+    for (const warning of [null, '', '   ']) {
+      expect(describeUnknownExplanation(english, unknownPair('no_definition'), warning)).toBe(
+        english.unknownReasons.explanation.no_definition
+      );
+    }
   });
 
   it('appends the warning in parentheses when it is non-blank', () => {
@@ -344,16 +331,11 @@ describe('describeUndeliveredUnknownReason', () => {
     );
   });
 
-  it.each(UNKNOWN_REASONS)('renders a non-empty, reason-specific string for %s', (reason) => {
-    const result = describeUndeliveredUnknownReason(english, undeliveredUnknown(reason));
-    expect(result.length).toBeGreaterThan(0);
-    expect(result).not.toBe(english.chat.deliveryUndeliveredUnknown);
-  });
-
-  it('renders the six reasons as six distinct strings, all distinct from the reason-less fallback', () => {
+  it('renders the six reasons as six distinct, non-empty strings, all distinct from the reason-less fallback', () => {
     const rendered = UNKNOWN_REASONS.map((reason) =>
       describeUndeliveredUnknownReason(english, undeliveredUnknown(reason))
     );
+    expect(rendered.every((text) => text.length > 0)).toBe(true);
     expect(new Set(rendered).size).toBe(UNKNOWN_REASONS.length);
     expect(rendered).not.toContain(english.chat.deliveryUndeliveredUnknown);
   });

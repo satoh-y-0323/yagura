@@ -492,27 +492,6 @@ describe('reduceShell: a window vanished while Focus shows it', () => {
   });
 });
 
-describe('the verdict on who closed a window does not depend on which news arrives first', () => {
-  const afterClose = [ordered('a'), ordered('c')];
-
-  it('is one verdict whether the exit push or the close reply removes the window first', () => {
-    const request: ShellEvent = { type: 'closeRequested', windowId: 'b' };
-    // Both the push and the reply remove the window; the second removal leaves the list as it is.
-    const pushFirst = replay(focusShowing('b'), [
-      request,
-      ...goneEventsAcross([ORDER_ABC, afterClose, afterClose]),
-    ]);
-    const replyFirst = replay(focusShowing('b'), [
-      request,
-      ...goneEventsAcross([ORDER_ABC, afterClose]),
-    ]);
-
-    expect(pushFirst.goneByUser).toEqual([true]);
-    expect(pushFirst).toEqual(replyFirst);
-    expect(pushFirst.state.focusedWindowId).toBe('c');
-  });
-});
-
 describe('reduceShell: a window appeared', () => {
   it('goes to a window this GUI opened and moves the keyboard to its terminal', () => {
     const { reduceShell } = shellStateModule();

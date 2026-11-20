@@ -222,7 +222,7 @@ mod unix_resolve_shell {
 }
 
 #[tokio::test]
-async fn spawn_with_command_echoes_ascii_input() {
+async fn spawn_with_command_echoes_ascii_and_japanese_utf8_input() {
     let config = DaemonConfig::default();
     let session = spawn_echo_session(&config).await;
 
@@ -233,12 +233,6 @@ async fn spawn_with_command_echoes_ascii_input() {
         .expect("write_input should succeed while child is running");
 
     let _ = recv_until_contains(&session, "hello-yagura").await;
-}
-
-#[tokio::test]
-async fn spawn_with_command_echoes_japanese_utf8_as_subsequence() {
-    let config = DaemonConfig::default();
-    let session = spawn_echo_session(&config).await;
 
     let payload = "やぐら日本語テスト\r\n".as_bytes();
     session
@@ -250,16 +244,10 @@ async fn spawn_with_command_echoes_japanese_utf8_as_subsequence() {
 }
 
 #[tokio::test]
-async fn initial_pty_size_is_80x24() {
+async fn initial_pty_size_is_80x24_and_resize_updates_the_reported_size() {
     let config = DaemonConfig::default();
     let session = spawn_echo_session(&config).await;
     assert_eq!(session.size().await.unwrap(), (80, 24));
-}
-
-#[tokio::test]
-async fn resize_updates_reported_size_and_does_not_error() {
-    let config = DaemonConfig::default();
-    let session = spawn_echo_session(&config).await;
 
     session
         .resize(120, 40)
@@ -315,7 +303,7 @@ async fn wait_for_exit_status(session: &PtySession) -> ChildExit {
 }
 
 #[tokio::test]
-async fn terminate_kills_a_long_running_child_within_ten_seconds() {
+async fn terminate_kills_a_long_running_child_and_stays_harmless_when_repeated() {
     let config = DaemonConfig::default();
     let argv = echo_child_command();
     let argv: Vec<&str> = argv.iter().map(String::as_str).collect();
@@ -325,6 +313,8 @@ async fn terminate_kills_a_long_running_child_within_ten_seconds() {
 
     println!("child_process_id={:?}", session.child_process_id());
 
+    // A repeated terminate() before the exit is seen must not disturb the kill.
+    session.terminate();
     session.terminate();
 
     let exit = wait_for_exit_status(&session).await;
@@ -336,23 +326,6 @@ async fn terminate_kills_a_long_running_child_within_ten_seconds() {
         ChildExit { code: Some(1) },
         "terminate() must kill the child itself (exit code 1), not merely rely on the writer-close side effect; observed {exit:?}"
     );
-}
-
-#[tokio::test]
-async fn terminate_called_twice_then_again_after_exit_is_observed_does_not_panic_or_hang() {
-    let config = DaemonConfig::default();
-    let argv = echo_child_command();
-    let argv: Vec<&str> = argv.iter().map(String::as_str).collect();
-    let session = common::spawn_session(&argv, &config)
-        .await
-        .expect("spawn_with_command should start echo_child");
-
-    println!("child_process_id={:?}", session.child_process_id());
-
-    session.terminate();
-    session.terminate();
-
-    let _ = wait_for_exit_status(&session).await;
 
     // Exit has now been observed; a further terminate() call must be a
     // harmless no-op, not a panic or a hang.

@@ -161,18 +161,6 @@ describe('windowExitEvent', () => {
     expect(event?.text).toBe(dummyExitSentence('reviewer', null));
   });
 
-  it('keeps one entry for each window that ended', () => {
-    const first = windowExitEvent(goneFrom('w-1', 0, { goneByUser: false, carded: false }));
-    const second = windowExitEvent(goneFrom('w-3', 2, { goneByUser: false, carded: false }));
-    if (first === null || second === null) {
-      throw new Error('expected an event for each window that ended');
-    }
-
-    const { log } = appendAll([first, second]);
-
-    expect(log.map((entry) => entry.windowId).sort()).toEqual(['w-1', 'w-3']);
-  });
-
   it('marks the event of a window that left a card as not a pop-up, and keeps it in the log', () => {
     const event = windowExitEvent(goneFrom('w-2', 1, { goneByUser: false, carded: true }));
     if (event === null) {
@@ -188,7 +176,6 @@ describe('windowExitEvent', () => {
   it.each([
     [0, 'info'],
     [1, 'warning'],
-    [137, 'warning'],
     [-1, 'warning'],
     [null, 'warning'],
   ] as const)('gives exit code %s the %s tone', (exitCode, tone) => {

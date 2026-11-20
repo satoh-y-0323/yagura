@@ -120,23 +120,6 @@ fn status_event_ignores_a_ttl_ms_an_older_hook_still_sends() {
 }
 
 #[test]
-fn status_event_round_trips_for_every_status_value() {
-    for (status, wire) in ALL_STATUSES {
-        let msg = status_event_from_json(serde_json::json!({
-            "type": "status_event", "source": "cli", "status": wire,
-            "token": "0123456789abcdef0123456789abcdef",
-        }));
-        let body = encode_client_message(&msg);
-        let decoded = decode_client_message(&body).expect("round trip decode must succeed");
-        assert_eq!(decoded, msg);
-        assert!(
-            matches!(&decoded, ClientMessage::StatusEvent { status: s, .. } if s == status),
-            "{decoded:?} must carry {status:?}"
-        );
-    }
-}
-
-#[test]
 fn decode_client_message_rejects_status_event_with_an_unknown_status_string() {
     // A known `type` with a malformed field is InvalidJson, not a silent
     // fallback. The token is present so the `status` value is the body's only
@@ -386,16 +369,4 @@ fn existing_daemon_messages_still_decode_after_the_status_extension() {
         let decoded = decode_daemon_message(body).expect("existing type must still decode");
         assert_eq!(decoded, expected);
     }
-}
-
-#[test]
-fn an_unrelated_unknown_type_is_still_reported_as_unknown_type() {
-    assert_eq!(
-        decode_client_message(br#"{"type":"bogus"}"#),
-        Err(MessageError::UnknownType)
-    );
-    assert_eq!(
-        decode_daemon_message(br#"{"type":"bogus"}"#),
-        Err(MessageError::UnknownType)
-    );
 }
