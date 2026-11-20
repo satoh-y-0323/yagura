@@ -892,6 +892,13 @@ impl PtySession {
     pub fn exit_status(&self) -> Option<ChildExit> {
         self.exit.get().copied()
     }
+
+    /// Records `exit` as observed without announcing it, so nothing confirms
+    /// the window `Exited`: the gap between the two, held open for a test.
+    #[cfg(test)]
+    pub(crate) fn observe_exit_unannounced(&self, exit: ChildExit) {
+        let _ = self.exit.set(exit);
+    }
 }
 
 impl PtySession {

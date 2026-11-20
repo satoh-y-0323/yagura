@@ -1609,9 +1609,9 @@ impl WindowEntry {
     }
 
     /// The exit code reported with `at`, a pair this window published (see
-    /// [`published_exit_code`]).
+    /// [`exit_code_for_status`]).
     pub(crate) fn published_exit_code(&self, at: &StatusAt) -> Option<i32> {
-        published_exit_code(at.status.status(), self.session.exit_status())
+        exit_code_for_status(at.status.status(), self.session.exit_status())
     }
 
     /// [`Self::window_info`] carrying `task_report`.
@@ -4592,7 +4592,7 @@ pub(crate) fn window_status_wire(status: WindowStatus) -> String {
 /// The code travels with `Exited` alone: the session can observe the exit
 /// before `Exited` is published, and a window still reported as running
 /// must not carry a code meanwhile.
-pub(crate) fn published_exit_code(status: WindowStatus, exit: Option<ChildExit>) -> Option<i32> {
+fn exit_code_for_status(status: WindowStatus, exit: Option<ChildExit>) -> Option<i32> {
     match status {
         WindowStatus::Exited => exit.and_then(|exit| exit.code),
         _ => None,
@@ -4689,7 +4689,7 @@ mod tests {
         ] {
             for exit in observed {
                 assert_eq!(
-                    published_exit_code(status, exit),
+                    exit_code_for_status(status, exit),
                     None,
                     "{status:?} with {exit:?} publishes no code"
                 );
@@ -4697,7 +4697,7 @@ mod tests {
         }
         for exit in observed {
             assert_eq!(
-                published_exit_code(WindowStatus::Exited, exit),
+                exit_code_for_status(WindowStatus::Exited, exit),
                 exit.and_then(|exit| exit.code),
                 "Exited with {exit:?} publishes the observed code"
             );

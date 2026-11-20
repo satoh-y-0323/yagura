@@ -1920,8 +1920,8 @@ pub struct WindowInfo {
     pub cwd: String,
     /// Current status of the child process.
     pub status: WindowStatus,
-    /// Exit code if the child has exited. `None` while it runs, or when the
-    /// code could not be determined.
+    /// The exit code when `status` is `Exited`. `None` for any other status,
+    /// or when the code could not be determined.
     pub exit_code: Option<i32>,
     /// The window's presentation layout, as the opaque JSON string the GUI
     /// last reported through [`ClientMessage::UpdateWindowLayout`]. Omitted
@@ -3852,8 +3852,8 @@ pub enum DaemonMessage {
         /// wrapped rows joined as `read_output` reads them. `None` if the
         /// screen shows no text.
         last_output_summary: Option<String>,
-        /// Exit code if the window has exited. `None` while it runs, or when
-        /// the code could not be determined.
+        /// The exit code when `status` is `Exited`. `None` for any other
+        /// status, or when the code could not be determined.
         exit_code: Option<i32>,
         /// Why `status` is `Unknown`, if it is. Omitted from the wire when
         /// `None`.

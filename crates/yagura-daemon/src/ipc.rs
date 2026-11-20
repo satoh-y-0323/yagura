@@ -2590,8 +2590,7 @@ impl IpcServer {
         let session = entry.session();
 
         // The session's own exit, not the published status: `child_exited`
-        // stops the view's writes as soon as the exit is seen, and its code
-        // describes that same exit.
+        // and the code come from the same read.
         let exit = session.exit_status();
         let msg = DaemonMessage::Attached {
             child_exited: exit.is_some(),
@@ -6939,5 +6938,59 @@ mod tests {
             rx.try_recv().ok(),
             Some(encode_frame(&window_not_found_msg()))
         );
+    }
+
+    #[tokio::test]
+    async fn an_exit_seen_before_exited_is_published_gives_no_code_to_any_reader() {
+        let registry = Arc::new(WindowRegistry::new(DaemonConfig::default()));
+        let server = IpcServer::new(Arc::clone(&registry), "unused", DaemonConfig::default());
+        let (opened, _holder) = registry
+            .open_played(OpenWindowRequest {
+                command: vec!["played-child".to_owned()],
+                cwd: None,
+                name: None,
+                vendor: None,
+                detection: None,
+                on_name_taken: OnNameTaken::default(),
+            })
+            .await;
+        let entry = registry.get(&opened.window_id).expect("registered");
+        entry
+            .session()
+            .observe_exit_unannounced(crate::pty::ChildExit { code: Some(0) });
+        let at = entry.status_snapshot();
+        assert_ne!(at.status.status(), WindowStatus::Exited);
+
+        assert_eq!(registry.list()[0].exit_code, None, "the window list");
+        assert!(
+            matches!(
+                entry.status_changed(&at),
+                DaemonMessage::StatusChanged {
+                    exit_code: None,
+                    ..
+                }
+            ),
+            "the status push"
+        );
+
+        let (tx, mut rx) = mpsc::channel(8);
+        let outbound = Outbound::new(tx);
+        let state = ConnectionState::new(0, None);
+        server
+            .handle_get_window_status(&outbound, &state, &opened.window_id)
+            .await;
+        let frame = rx.try_recv().expect("the status reply is sent");
+        let (body, _) = frame_decode(&frame)
+            .expect("a valid frame")
+            .expect("a whole frame");
+        match yagura_protocol::decode_daemon_message(body).expect("a daemon message") {
+            DaemonMessage::WindowStatus {
+                status, exit_code, ..
+            } => {
+                assert_ne!(status, WindowStatus::Exited);
+                assert_eq!(exit_code, None, "the status reply");
+            }
+            other => panic!("expected the status reply, got {other:?}"),
+        }
     }
 }
