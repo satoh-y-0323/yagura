@@ -191,7 +191,7 @@ These are safety limits only; a well-formed palette file will not approach them.
 ### Failure Modes
 
 If `themes.toml` cannot be loaded, yagura continues running with the built-in palettes (`dark` and `light`).
-The app shows a notice, in the corner of the window and in the Notifications list, indicating the failure reason:
+The app shows a notice, on the notice lane at the foot of the work area and in the Notifications list, indicating the failure reason:
 
 - **File not found** — `themes.toml` does not exist; this is normal. Yagura uses built-in palettes.
 - **Read failed** — The file exists but could not be read (e.g. permission denied, or is a directory instead
