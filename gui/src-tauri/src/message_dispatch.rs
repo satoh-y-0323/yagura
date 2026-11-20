@@ -27,10 +27,10 @@ use crate::events::{
     ApprovalRequestedPayload, ApprovalWithdrawnPayload, AttachResponse, ChatChangedPayload,
     ChatHistoryClearedPayload, ChatParticipantsChangedPayload, EVENT_APPROVAL_REQUESTED,
     EVENT_APPROVAL_WITHDRAWN, EVENT_CHAT_CHANGED, EVENT_CHAT_HISTORY_CLEARED,
-    EVENT_CHAT_PARTICIPANTS_CHANGED, EVENT_EXIT, EVENT_MCP_REGISTRATION_RESULT,
-    EVENT_MCP_REGISTRATION_STATUS, EVENT_MODEL_CHOICES, EVENT_PLAN_CHANGED, EVENT_STATUS,
-    EVENT_TICKET_CHANGED, ExitPayload, McpRegistrationResultPayload, McpRegistrationStatusPayload,
-    ModelChoicesPayload, PlanChangedPayload, StatusPayload, TicketChangedPayload,
+    EVENT_CHAT_PARTICIPANTS_CHANGED, EVENT_MCP_REGISTRATION_RESULT, EVENT_MCP_REGISTRATION_STATUS,
+    EVENT_MODEL_CHOICES, EVENT_PLAN_CHANGED, EVENT_STATUS, EVENT_TICKET_CHANGED,
+    McpRegistrationResultPayload, McpRegistrationStatusPayload, ModelChoicesPayload,
+    PlanChangedPayload, StatusPayload, TicketChangedPayload,
 };
 use crate::host::GuiHost;
 use crate::ipc_client::{
@@ -42,7 +42,6 @@ use crate::ipc_client::{
 #[derive(Debug, Clone, PartialEq)]
 enum WindowEvent {
     Frame { window_id: String, frame: Frame },
-    Exit { window_id: String, exit_code: i32 },
 }
 
 /// Assembles a window-scoped event from a daemon message and the connection's
@@ -60,10 +59,6 @@ fn window_event_for(
         DaemonMessage::Frame(frame) => Ok(WindowEvent::Frame {
             window_id: wid.to_owned(),
             frame,
-        }),
-        DaemonMessage::Exit { exit_code } => Ok(WindowEvent::Exit {
-            window_id: wid.to_owned(),
-            exit_code,
         }),
         other => Err(Box::new(other)),
     }
@@ -382,7 +377,6 @@ fn reply_for(message: DaemonMessage) -> Option<(PendingKind, Reply)> {
         // messages `dispatch` handles directly rather than as a reply. The
         // rest stream to the WebView as events elsewhere, or answer nothing.
         DaemonMessage::Frame(_)
-        | DaemonMessage::Exit { .. }
         | DaemonMessage::StatusChanged { .. }
         | DaemonMessage::Error { .. }
         | DaemonMessage::Pong
@@ -553,7 +547,7 @@ fn mcp_registration_event_for(message: DaemonMessage) -> Option<McpRegistrationE
 }
 
 /// Delivers a window-scoped event: a frame goes to the mailbox the WebView
-/// pulls from, an exit is emitted as an event.
+/// pulls from.
 fn emit_window_event(app: &impl GuiHost, event: WindowEvent) {
     match event {
         WindowEvent::Frame { window_id, frame } => {
@@ -561,16 +555,6 @@ fn emit_window_event(app: &impl GuiHost, event: WindowEvent) {
                 mailbox.push(&window_id, frame);
             }
         }
-        WindowEvent::Exit {
-            window_id,
-            exit_code,
-        } => app.emit_event(
-            EVENT_EXIT,
-            ExitPayload {
-                window_id,
-                exit_code,
-            },
-        ),
     }
 }
 
@@ -604,6 +588,7 @@ async fn dispatch(
             status_rev,
             status_boot,
             task_report,
+            exit_code,
         } => {
             app.emit_event(
                 EVENT_STATUS,
@@ -614,6 +599,7 @@ async fn dispatch(
                     status_rev,
                     status_boot,
                     task_report,
+                    exit_code,
                 },
             );
             false
@@ -895,19 +881,6 @@ mod tests {
     fn window_event_returns_none_for_control_connection() {
         let msg = DaemonMessage::Frame(sample_frame(1));
         assert_eq!(window_event_for(None, msg).ok(), None);
-    }
-
-    #[test]
-    fn window_event_from_exit_includes_window_id() {
-        let msg = DaemonMessage::Exit { exit_code: 42 };
-        let event = window_event_for(Some("window-c"), msg).ok();
-        assert_eq!(
-            event,
-            Some(WindowEvent::Exit {
-                window_id: "window-c".to_owned(),
-                exit_code: 42,
-            })
-        );
     }
 
     fn rejection_with_code(code: &str) -> IpcError {

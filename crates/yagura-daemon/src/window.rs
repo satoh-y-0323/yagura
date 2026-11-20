@@ -1619,7 +1619,7 @@ impl WindowEntry {
             vendor: self.vendor.clone(),
             cwd: self.cwd.clone(),
             status: at.status.status(),
-            exit_code: self.session.exit_status(),
+            exit_code: self.session.exit_status().and_then(|exit| exit.code),
             layout_json: self.layout_json(),
             room: None,
             unknown_reason: at.status.unknown_reason(),
@@ -1641,6 +1641,12 @@ impl WindowEntry {
     /// The task report fact is read as the push is built: it is ordered by
     /// its own `seq`, not by the status generation.
     pub(crate) fn status_changed(&self, at: &StatusAt) -> DaemonMessage {
+        // The code is read for `Exited` alone, so a push of any other status
+        // never carries one, whatever the session already knows.
+        let exit_code = match at.status {
+            DetectedStatus::Exited => self.session.exit_status().and_then(|exit| exit.code),
+            _ => None,
+        };
         DaemonMessage::StatusChanged {
             window_id: self.window_id.clone(),
             status: at.status.status(),
@@ -1648,6 +1654,7 @@ impl WindowEntry {
             status_rev: Some(at.generation),
             status_boot: self.status_boot,
             task_report: self.task_report_now(),
+            exit_code,
         }
     }
 

@@ -36,8 +36,6 @@ pub struct ViewClient {
     pub exit_code: Option<i32>,
     /// Every completed frame so far, oldest first.
     pub completed: Vec<CompletedFrame>,
-    /// The exit code of a pushed `Exit`, once one arrived.
-    pub exited: Option<i32>,
     /// Every part of the most recently completed frame, in arrival order.
     pub last_frame_parts: Vec<Frame>,
     open_buffer: Vec<Frame>,
@@ -80,7 +78,6 @@ impl ViewClient {
             child_exited: false,
             exit_code: None,
             completed: Vec::new(),
-            exited: None,
             last_frame_parts: Vec::new(),
             open_buffer: Vec::new(),
             open_parts: 0,
@@ -122,7 +119,7 @@ impl ViewClient {
                     break;
                 }
                 // A part of the previous attach's frame that was already in flight.
-                Some(DaemonMessage::Frame(_) | DaemonMessage::Exit { .. }) => continue,
+                Some(DaemonMessage::Frame(_)) => continue,
                 other => panic!("expected `attached` after attach_view, got {other:?}"),
             }
         }
@@ -134,7 +131,7 @@ impl ViewClient {
     }
 
     /// Reads the next message that is not a `StatusChanged` push; `None` when
-    /// the connection closed. A pushed `Exit` is recorded and also returned.
+    /// the connection closed.
     ///
     /// # Panics
     ///
@@ -157,29 +154,21 @@ impl ViewClient {
             match outcome {
                 ReadOutcome::Closed => return None,
                 ReadOutcome::Message(DaemonMessage::StatusChanged { .. }) => continue,
-                ReadOutcome::Message(DaemonMessage::Exit { exit_code }) => {
-                    self.exited = Some(exit_code);
-                    return Some(DaemonMessage::Exit { exit_code });
-                }
                 ReadOutcome::Message(message) => return Some(message),
             }
         }
     }
 
-    /// Reads one part of a frame, skipping status pushes and a pushed exit.
+    /// Reads one part of a frame, skipping status pushes.
     ///
     /// # Panics
     ///
-    /// Panics if a message other than a frame, a status push or an exit
-    /// arrives, if the connection closed, or as [`ViewClient::read_non_status`]
-    /// does.
+    /// Panics if a message other than a frame or a status push arrives, if
+    /// the connection closed, or as [`ViewClient::read_non_status`] does.
     async fn read_part(&mut self, deadline: Instant, waiting_for: &str) -> Frame {
-        loop {
-            match self.read_non_status(deadline, waiting_for).await {
-                Some(DaemonMessage::Frame(frame)) => return frame,
-                Some(DaemonMessage::Exit { .. }) => continue,
-                other => panic!("expected a frame part, got {other:?}"),
-            }
+        match self.read_non_status(deadline, waiting_for).await {
+            Some(DaemonMessage::Frame(frame)) => frame,
+            other => panic!("expected a frame part, got {other:?}"),
         }
     }
 
@@ -298,7 +287,6 @@ impl ViewClient {
         loop {
             match self.read_non_status(deadline, "the pong").await {
                 Some(DaemonMessage::Pong) => return,
-                Some(DaemonMessage::Exit { .. }) => continue,
                 Some(DaemonMessage::Frame(frame)) => {
                     let seq = frame.seq;
                     if self.apply_part(&frame) {
@@ -324,7 +312,6 @@ impl ViewClient {
         loop {
             match self.read_non_status(deadline, "selection_text").await {
                 Some(DaemonMessage::SelectionText { text }) => return text,
-                Some(DaemonMessage::Exit { .. }) => continue,
                 Some(DaemonMessage::Frame(frame)) => {
                     let seq = frame.seq;
                     if self.apply_part(&frame) {
@@ -344,20 +331,17 @@ impl ViewClient {
     ///
     /// # Panics
     ///
-    /// Panics if a frame part, or anything but the pong or a pushed exit,
-    /// arrives before the pong.
+    /// Panics if a frame part, or anything but the pong, arrives before the
+    /// pong.
     pub async fn assert_no_frame(&mut self, why: &str) {
         self.send(&ClientMessage::Ping).await;
         let deadline = Instant::now() + HANG_GUARD;
-        loop {
-            match self.read_non_status(deadline, "the pong").await {
-                Some(DaemonMessage::Pong) => return,
-                Some(DaemonMessage::Exit { .. }) => continue,
-                Some(DaemonMessage::Frame(frame)) => {
-                    panic!("a frame (seq {}) arrived but {why}", frame.seq)
-                }
-                other => panic!("expected the pong, got {other:?}"),
+        match self.read_non_status(deadline, "the pong").await {
+            Some(DaemonMessage::Pong) => {}
+            Some(DaemonMessage::Frame(frame)) => {
+                panic!("a frame (seq {}) arrived but {why}", frame.seq)
             }
+            other => panic!("expected the pong, got {other:?}"),
         }
     }
 }

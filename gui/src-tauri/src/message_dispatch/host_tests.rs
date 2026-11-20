@@ -3,7 +3,9 @@
 //! is scripted.
 
 use serde_json::json;
-use yagura_protocol::{ClientMessage, CursorShape, CursorState, ViewState, WithdrawReason};
+use yagura_protocol::{
+    ClientMessage, CursorShape, CursorState, ViewState, WindowStatus, WithdrawReason,
+};
 use yagura_test_support::ipc::reply_within;
 
 use super::*;
@@ -68,22 +70,42 @@ async fn an_attached_windows_frame_goes_to_the_mailbox() {
 }
 
 #[tokio::test]
-async fn an_attached_windows_exit_is_emitted_to_the_webview() {
+async fn a_status_change_carries_its_exit_code_to_the_webview_and_names_none_without_one() {
     let host = FakeHost::new("dispatch-exit");
-    let client = Arc::new(IpcClient::new_window(Arc::new(WindowRecord::new())));
+    let client = Arc::new(IpcClient::new());
+    let status_changed = |status, exit_code| DaemonMessage::StatusChanged {
+        window_id: "w1".to_owned(),
+        status,
+        unknown_reason: None,
+        status_rev: None,
+        status_boot: None,
+        task_report: None,
+        exit_code,
+    };
 
-    let superseded = dispatch(
+    let running = dispatch(
         &host,
         &client,
-        DaemonMessage::Exit { exit_code: 3 },
-        Some("w1".to_owned()),
+        status_changed(WindowStatus::Running, None),
+        None,
+    )
+    .await;
+    let exited = dispatch(
+        &host,
+        &client,
+        status_changed(WindowStatus::Exited, Some(3)),
+        None,
     )
     .await;
 
-    assert!(!superseded);
+    assert!(!running && !exited);
     assert_eq!(
-        host.next_event(EVENT_EXIT).await,
-        json!({ "window_id": "w1", "exit_code": 3 })
+        host.next_event(EVENT_STATUS).await,
+        json!({ "window_id": "w1", "status": "running" })
+    );
+    assert_eq!(
+        host.next_event(EVENT_STATUS).await,
+        json!({ "window_id": "w1", "status": "exited", "exit_code": 3 })
     );
 }
 

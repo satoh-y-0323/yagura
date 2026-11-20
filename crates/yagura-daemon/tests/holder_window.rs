@@ -496,7 +496,10 @@ async fn the_last_output_before_the_exit_is_in_the_model_once_the_exit_is_known(
         "output written before the exit must be on the screen the daemon reads once the exit \
          is known; it shows {screen:?}"
     );
-    assert_eq!(session.exit_status(), Some(7));
+    assert_eq!(
+        session.exit_status(),
+        Some(yagura_daemon::pty::ChildExit { code: Some(7) })
+    );
 }
 
 /// Many more small writes than one screen holds.

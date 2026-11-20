@@ -49,13 +49,14 @@ use serde_json::Value;
 
 use yagura_protocol::{
     APPROVAL_SETTINGS_MIN_REVISION, CHAT_ROOM_REMOVAL_MIN_REVISION, CellPosition, ClientMessage,
-    DAEMON_HEALTH_MIN_REVISION, DEFAULT_PALETTES_MIN_REVISION, DefaultPalettes, FRAME_MIN_REVISION,
-    HOOK_EVENTS_MIN_REVISION, Key, KeyInput, LAUNCH_OPTIONS_MIN_REVISION,
-    MCP_REGISTRATION_MIN_REVISION, MODEL_ALIASES_MIN_REVISION, McpRegistrationAction, Modifiers,
-    NamedKey, PLAN_REVIEW_MIN_REVISION, PROFILE_DETAIL_MIN_REVISION, PROFILE_ENABLED_MIN_REVISION,
-    PROTOCOL_REVISION, PROTOCOL_REVISION_BASELINE, Palette, PlanTaskSpec, PointerButton,
-    PointerInput, PointerKind, ReportOutcome, TASK_INSTRUCTION_MIN_REVISION, TaskAssignment,
-    WheelInput, WindowStatus, required_protocol_revision,
+    DAEMON_HEALTH_MIN_REVISION, DEFAULT_PALETTES_MIN_REVISION, DefaultPalettes,
+    EXIT_CODE_ON_STATUS_MIN_REVISION, FRAME_MIN_REVISION, HOOK_EVENTS_MIN_REVISION, Key, KeyInput,
+    LAUNCH_OPTIONS_MIN_REVISION, MCP_REGISTRATION_MIN_REVISION, MODEL_ALIASES_MIN_REVISION,
+    McpRegistrationAction, Modifiers, NamedKey, PLAN_REVIEW_MIN_REVISION,
+    PROFILE_DETAIL_MIN_REVISION, PROFILE_ENABLED_MIN_REVISION, PROTOCOL_REVISION,
+    PROTOCOL_REVISION_BASELINE, Palette, PlanTaskSpec, PointerButton, PointerInput, PointerKind,
+    ReportOutcome, TASK_INSTRUCTION_MIN_REVISION, TaskAssignment, WheelInput, WindowStatus,
+    required_protocol_revision,
 };
 
 fn wire_tag_of(msg: &ClientMessage) -> String {
@@ -967,7 +968,7 @@ fn the_view_messages_require_the_frame_threshold_whatever_they_carry() {
 }
 
 #[test]
-fn run_hook_requires_revision_thirty_one_and_the_current_revision_is_thirty_six() {
+fn run_hook_requires_revision_thirty_one_and_the_current_revision_is_thirty_seven() {
     let message = ClientMessage::RunHook {
         window_id: "w1".to_string(),
         token: "t".to_string(),
@@ -981,7 +982,10 @@ fn run_hook_requires_revision_thirty_one_and_the_current_revision_is_thirty_six(
         HOOK_EVENTS_MIN_REVISION
     );
     assert_eq!(HOOK_EVENTS_MIN_REVISION, 31);
-    assert_eq!(PROTOCOL_REVISION, 36);
+    assert_eq!(PROTOCOL_REVISION, 37);
+    // From this revision `status_changed` carries the exit code, so an older
+    // peer's `-1` cannot be told from a real one.
+    assert_eq!(EXIT_CODE_ON_STATUS_MIN_REVISION, 37);
 }
 
 /// A daemon before revision 34 refuses a door's read and its printed notice by name, so

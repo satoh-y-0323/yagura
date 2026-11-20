@@ -2592,7 +2592,7 @@ impl IpcServer {
         let exit = session.exit_status();
         let msg = DaemonMessage::Attached {
             child_exited: exit.is_some(),
-            exit_code: exit,
+            exit_code: exit.and_then(|exit| exit.code),
         };
         outbound.reply(&msg);
         session.show_view(
@@ -3294,7 +3294,7 @@ impl IpcServer {
             status: snapshot.status.status(),
             since_ms: snapshot.since_ms(Instant::now()),
             last_output_summary,
-            exit_code: entry.session().exit_status(),
+            exit_code: entry.session().exit_status().and_then(|exit| exit.code),
             unknown_reason: snapshot.status.unknown_reason(),
             detection_warning: entry.detection_warning().map(str::to_string),
             mcp_connected: Some(entry.mcp_connected()),

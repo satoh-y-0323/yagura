@@ -221,7 +221,7 @@ async fn a_lost_connection_is_restored_and_the_window_attached_again_as_it_was()
 }
 
 #[tokio::test]
-async fn reattaching_to_a_child_that_exited_without_a_code_reports_the_exit_as_minus_one() {
+async fn reattaching_to_a_child_that_exited_without_a_code_reports_the_code_as_unknown() {
     let attaches = Arc::new(AtomicUsize::new(0));
     let daemon = ScriptedDaemon::new({
         let attaches = Arc::clone(&attaches);
@@ -248,7 +248,7 @@ async fn reattaching_to_a_child_that_exited_without_a_code_reports_the_exit_as_m
     let events = host.events_through(EVENT_EXIT).await;
     assert_eq!(
         events.last().map(|event| &event.payload),
-        Some(&json!({ "window_id": "w1", "exit_code": -1 }))
+        Some(&json!({ "window_id": "w1", "exit_code": null }))
     );
     let links: Vec<Link> = events
         .iter()

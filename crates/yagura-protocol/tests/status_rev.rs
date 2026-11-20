@@ -75,6 +75,7 @@ fn status_changed(status_rev: Option<u64>) -> DaemonMessage {
         status_rev,
         status_boot: None,
         task_report: None,
+        exit_code: None,
     }
 }
 
@@ -198,6 +199,7 @@ fn status_changed_task_report_round_trips_when_present() {
         status_rev: None,
         status_boot: None,
         task_report: Some(mark(1, ReportState::NoReader)),
+        exit_code: None,
     };
     let body = encode_daemon_message(&msg);
     let value: serde_json::Value = serde_json::from_slice(&body).expect("valid json");

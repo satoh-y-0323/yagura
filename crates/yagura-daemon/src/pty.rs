@@ -4,8 +4,8 @@
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 use thiserror::Error;
 use tokio::sync::{oneshot, watch};
@@ -46,6 +46,14 @@ pub enum PtyError {
 }
 
 pub type PtyResult<T> = Result<T, PtyError>;
+
+/// How a window's child ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ChildExit {
+    /// The code the child exited with; `None` when it could not be determined
+    /// (the OS gave none, or the connection to the holder was lost).
+    pub code: Option<i32>,
+}
 
 /// Marks a window's row lost once its holder is found gone with the window
 /// still open; run at most once, from the window's link.
@@ -312,8 +320,7 @@ struct Shared {
     input: Arc<PublishedInput>,
     output_arrivals: watch::Receiver<u64>,
     views: Arc<ViewSlot>,
-    exit_code: Arc<AtomicI32>,
-    is_exited: Arc<AtomicBool>,
+    exit: Arc<OnceLock<ChildExit>>,
     exit_notify_rx: watch::Receiver<bool>,
 }
 
@@ -323,8 +330,7 @@ impl Shared {
         let input = Arc::new(PublishedInput::new(cols, rows));
         let (arrivals, output_arrivals) = watch::channel(0u64);
         let views = Arc::new(ViewSlot::default());
-        let exit_code = Arc::new(AtomicI32::new(0));
-        let is_exited = Arc::new(AtomicBool::new(false));
+        let exit = Arc::new(OnceLock::new());
         let (exit_notify_tx, exit_notify_rx) = watch::channel(false);
         let sink = holder_link::Sink {
             copy: copy.clone(),
@@ -332,8 +338,7 @@ impl Shared {
             arrivals,
             views: Arc::clone(&views),
             exit: ExitReport {
-                code: Arc::clone(&exit_code),
-                exited: Arc::clone(&is_exited),
+                exit: Arc::clone(&exit),
                 notify: exit_notify_tx,
             },
         };
@@ -342,8 +347,7 @@ impl Shared {
             input,
             output_arrivals,
             views,
-            exit_code,
-            is_exited,
+            exit,
             exit_notify_rx,
         };
         (shared, sink)
@@ -387,8 +391,7 @@ pub struct PtySession {
 
     /// Exit status, published once the holder reports it, after the copy
     /// holding the child's last output.
-    exit_code: Arc<AtomicI32>,
-    is_exited: Arc<AtomicBool>,
+    exit: Arc<OnceLock<ChildExit>>,
 
     /// `true` once the child has exited (see [`PtySession::exit_notified`]).
     exit_notify_rx: watch::Receiver<bool>,
@@ -636,8 +639,7 @@ impl PtySession {
             input,
             output_arrivals,
             views,
-            exit_code,
-            is_exited,
+            exit,
             exit_notify_rx,
         } = shared;
         Self {
@@ -650,8 +652,7 @@ impl PtySession {
             writer: Arc::new(WriterSlot::new(link.writer())),
             link,
             writes: Arc::new(AtomicU64::new(0)),
-            exit_code,
-            is_exited,
+            exit,
             exit_notify_rx,
             released,
             _host: Arc::clone(host),
@@ -793,7 +794,7 @@ impl PtySession {
     /// [`PtyError::ChildExited`] once the child is gone (nothing is counted);
     /// [`PtyError::WriteFailed`] when the write itself fails.
     pub async fn write_input(&self, data: &[u8]) -> PtyResult<()> {
-        if self.is_exited.load(Ordering::SeqCst) {
+        if self.exit.get().is_some() {
             return Err(PtyError::ChildExited);
         }
 
@@ -841,7 +842,7 @@ impl PtySession {
         if !yagura_protocol::window_size_within_limit(cols, rows) {
             return Err(PtyError::SizeOutOfRange);
         }
-        if self.is_exited.load(Ordering::SeqCst) {
+        if self.exit.get().is_some() {
             return Err(PtyError::ChildExited);
         }
         if self.resize_fault.take() || !self.link.resize(cols, rows).await {
@@ -879,7 +880,7 @@ impl PtySession {
     }
 
     /// Get the exit status of the child process.
-    /// Returns `None` if running, `Some(code)` if exited; the status is
+    /// Returns `None` if running, `Some(exit)` if exited; the status is
     /// retained indefinitely.
     ///
     /// The code is whatever the child actually exited with, including when
@@ -888,12 +889,8 @@ impl PtySession {
     /// on Unix). A killed `1` and a child that genuinely exited with `1` are
     /// therefore indistinguishable here; callers that need to tell them apart
     /// have to track the terminate themselves.
-    pub fn exit_status(&self) -> Option<i32> {
-        if self.is_exited.load(Ordering::SeqCst) {
-            Some(self.exit_code.load(Ordering::SeqCst))
-        } else {
-            None
-        }
+    pub fn exit_status(&self) -> Option<ChildExit> {
+        self.exit.get().copied()
     }
 }
 
@@ -948,8 +945,7 @@ impl std::fmt::Debug for PtySession {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("PtySession")
             .field("child_process_id", &self.child_process_id())
-            .field("is_exited", &self.is_exited.load(Ordering::SeqCst))
-            .field("exit_code", &self.exit_code.load(Ordering::SeqCst))
+            .field("exit", &self.exit.get())
             .finish_non_exhaustive()
     }
 }

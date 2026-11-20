@@ -1788,7 +1788,7 @@ impl IpcClient {
                 EVENT_EXIT,
                 ExitPayload {
                     window_id: window_id.to_owned(),
-                    exit_code: response.exit_code.unwrap_or(-1),
+                    exit_code: response.exit_code,
                 },
             );
             return Ok(response);

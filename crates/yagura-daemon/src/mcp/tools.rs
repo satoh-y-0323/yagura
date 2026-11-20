@@ -314,7 +314,6 @@ pub(crate) fn message_kind(message: &DaemonMessage) -> &'static str {
         DaemonMessage::Attached { .. } => "Attached",
         DaemonMessage::Frame(_) => "Frame",
         DaemonMessage::SelectionText { .. } => "SelectionText",
-        DaemonMessage::Exit { .. } => "Exit",
         DaemonMessage::Pong => "Pong",
         DaemonMessage::Error { .. } => "Error",
         DaemonMessage::StatusChanged { .. } => "StatusChanged",

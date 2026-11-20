@@ -617,7 +617,11 @@ describe('subscribeSession routing', () => {
     push(SESSION_EVENT.daemonSpawnWarning, { message: 'm' });
     expect(app.onDaemonSpawnWarning).toHaveBeenCalledWith({ message: 'm' });
     push(SESSION_EVENT.status, { window_id: 'w', status: 'idle' });
-    expect(app.onStatus).toHaveBeenCalledWith({ window_id: 'w', detected: { status: 'idle' } });
+    expect(app.onStatus).toHaveBeenCalledWith({
+      window_id: 'w',
+      detected: { status: 'idle' },
+      exit_code: null,
+    });
     push(SESSION_EVENT.approvalRequested, {
       request: {
         request_id: 'r',

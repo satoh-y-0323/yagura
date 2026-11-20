@@ -284,6 +284,7 @@ fn sample_status_changed(unknown_reason: Option<UnknownReason>) -> DaemonMessage
         status_rev: None,
         status_boot: None,
         task_report: None,
+        exit_code: None,
     }
 }
 

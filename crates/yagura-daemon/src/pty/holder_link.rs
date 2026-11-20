@@ -20,8 +20,8 @@ use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::Ordering;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -35,7 +35,7 @@ use yagura_protocol::holder::{
 use yagura_protocol::{MAX_WINDOW_DIMENSION, Palette, ScreenPush, ScreenRows};
 
 use super::views::ViewSlot;
-use super::{LostNotice, PtyError, PublishedInput, lock_recover};
+use super::{ChildExit, LostNotice, PtyError, PublishedInput, lock_recover};
 use crate::detector::SharedCopy;
 use crate::holder_host::{LinkContext, TakeBackContext};
 use crate::recovery::{HolderFiles, finish_after_holder};
@@ -110,22 +110,19 @@ pub(super) struct TakeBack {
 
 /// Where the child's exit is published.
 pub(super) struct ExitReport {
-    pub(super) code: Arc<AtomicI32>,
-    pub(super) exited: Arc<AtomicBool>,
+    pub(super) exit: Arc<OnceLock<ChildExit>>,
     pub(super) notify: watch::Sender<bool>,
 }
 
 impl ExitReport {
-    /// The code first, then the flag, then the notification: whoever is woken
-    /// reads both. A missing code (the connection was lost, or the OS gave
-    /// none) is `-1`. Only the first exit is published.
+    /// The exit before the notification, so whoever is woken reads it. A
+    /// missing code (the connection was lost, or the OS gave none) stays
+    /// `None`: `-1` is a code a child can exit with. Only the first exit is
+    /// published.
     fn publish(&self, code: Option<i32>) {
-        if self.exited.load(Ordering::SeqCst) {
-            return;
+        if self.exit.set(ChildExit { code }).is_ok() {
+            let _ = self.notify.send(true);
         }
-        self.code.store(code.unwrap_or(-1), Ordering::SeqCst);
-        self.exited.store(true, Ordering::SeqCst);
-        let _ = self.notify.send(true);
     }
 }
 
@@ -2326,13 +2323,19 @@ region = "bottom"
             );
             assert_eq!(session.exit_status(), None, "the connection is kept");
 
-            holder.send(&HolderFrame::Exited { code: Some(0) }).await;
+            // A holder that could not learn the code reports the exit without one.
+            holder.send(&HolderFrame::Exited { code: None }).await;
             let late = holder.push(true, &[line(0, "AFTER-EXIT")], 0).await;
             let mut exited = session.exit_notified();
             tokio::time::timeout(HANG_GUARD, exited.wait_for(|&gone| gone))
                 .await
                 .expect("the exit is announced")
                 .expect("the exit channel stays open while the session lives");
+            assert_eq!(
+                session.exit_status(),
+                Some(crate::pty::ChildExit { code: None }),
+                "an exit without a code is an ended child whose code is unknown, never a number"
+            );
             let (tail, ()) = tokio::join!(
                 session.text_tail(5, 1024),
                 holder.answer_read_tail("read after the exit")
@@ -2377,7 +2380,7 @@ region = "bottom"
                 .expect("the exit channel stays open while the session lives");
             assert_eq!(
                 session.exit_status(),
-                Some(7),
+                Some(crate::pty::ChildExit { code: Some(7) }),
                 "the exit the holder sent before it closed is read, not lost to the failed write"
             );
         }

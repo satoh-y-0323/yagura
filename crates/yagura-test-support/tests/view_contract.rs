@@ -76,16 +76,6 @@ impl Peer {
             self.buf.extend_from_slice(&chunk[..n]);
         }
     }
-
-    /// Reads messages until one that is not a `FrameAck` arrives.
-    async fn recv_skipping_acks(&mut self, acks: &mut Vec<u64>) -> ClientMessage {
-        loop {
-            match self.recv().await {
-                ClientMessage::FrameAck { seq } => acks.push(seq),
-                other => return other,
-            }
-        }
-    }
 }
 
 /// Attaches a `ViewClient` to a peer that answers the attach with frame 1.
@@ -177,24 +167,4 @@ async fn assert_no_frame_returns_at_the_pong_and_leaves_what_follows_unread() {
         Some(2),
         "the frame after the pong must still be on the connection"
     );
-}
-
-#[tokio::test]
-async fn assert_no_frame_accepts_a_pushed_exit_before_the_pong() {
-    let (mut view, mut peer) = attached("exit").await;
-    let serve = tokio::spawn(async move {
-        let mut acks = Vec::new();
-        assert_eq!(
-            peer.recv_skipping_acks(&mut acks).await,
-            ClientMessage::Ping
-        );
-        peer.send(&DaemonMessage::Exit { exit_code: 0 }).await;
-        peer.send(&DaemonMessage::Pong).await;
-        peer
-    });
-
-    view.assert_no_frame("the child only exited").await;
-
-    assert_eq!(view.exited, Some(0), "the pushed exit must be recorded");
-    drop(serve.await.expect("the exit script"));
 }

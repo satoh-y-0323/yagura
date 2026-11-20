@@ -14,6 +14,7 @@ use std::time::Duration;
 #[cfg(windows)]
 use yagura_test_support::paths::strip_extended_length_prefix;
 
+use yagura_daemon::pty::ChildExit;
 use yagura_daemon::{DaemonConfig, PtySession, WindowsShellSearch, resolve_shell};
 
 async fn spawn_echo_session(config: &DaemonConfig) -> PtySession {
@@ -281,8 +282,8 @@ async fn exit_is_detected_with_correct_exit_code_and_state_is_retained() {
 
     let deadline = tokio::time::Instant::now() + yagura_test_support::HANG_GUARD;
     loop {
-        if let Some(code) = session.exit_status() {
-            assert_eq!(code, 7);
+        if let Some(exit) = session.exit_status() {
+            assert_eq!(exit, ChildExit { code: Some(7) });
             break;
         }
         if tokio::time::Instant::now() >= deadline {
@@ -292,7 +293,7 @@ async fn exit_is_detected_with_correct_exit_code_and_state_is_retained() {
     }
 
     // The Exited state is retained: a repeated query returns the same result.
-    assert_eq!(session.exit_status(), Some(7));
+    assert_eq!(session.exit_status(), Some(ChildExit { code: Some(7) }));
 }
 
 /// Polls `exit_status()` until it becomes `Some`, failing after
@@ -300,11 +301,11 @@ async fn exit_is_detected_with_correct_exit_code_and_state_is_retained() {
 ///
 /// Deliberate exception to the rule of using a paused clock for time-dependent tests:
 /// this must observe a real OS child process dying, which a virtual clock cannot cause.
-async fn wait_for_exit_status(session: &PtySession) -> i32 {
+async fn wait_for_exit_status(session: &PtySession) -> ChildExit {
     let deadline = tokio::time::Instant::now() + yagura_test_support::HANG_GUARD;
     loop {
-        if let Some(code) = session.exit_status() {
-            return code;
+        if let Some(exit) = session.exit_status() {
+            return exit;
         }
         if tokio::time::Instant::now() >= deadline {
             panic!("timed out waiting for terminate() to deliver a kill to the child");
@@ -326,13 +327,14 @@ async fn terminate_kills_a_long_running_child_within_ten_seconds() {
 
     session.terminate();
 
-    let code = wait_for_exit_status(&session).await;
-    println!("exit_code={code}");
+    let exit = wait_for_exit_status(&session).await;
+    println!("exit={exit:?}");
     // terminate() must kill the child itself rather than rely on the writer-close side
     // effect; exit code 1 is TerminateProcess on Windows / a mapped signal exit on Unix.
     assert_eq!(
-        code, 1,
-        "terminate() must kill the child itself (exit code 1), not merely rely on the writer-close side effect; observed exit_code={code}"
+        exit,
+        ChildExit { code: Some(1) },
+        "terminate() must kill the child itself (exit code 1), not merely rely on the writer-close side effect; observed {exit:?}"
     );
 }
 

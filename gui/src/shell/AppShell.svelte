@@ -3359,7 +3359,10 @@
       ...handlers,
       onExit: (payload) => {
         handlers.onExit(payload);
-        reportExitCode(windowId, payload.exit_code);
+        // An unknown code is never written as a number.
+        if (payload.exit_code !== null) {
+          reportExitCode(windowId, payload.exit_code);
+        }
       },
     });
     await tick();

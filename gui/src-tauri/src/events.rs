@@ -13,11 +13,11 @@ use yagura_protocol::{
 
 use crate::recovery_state::RecoveryStatus;
 
-/// The child process exited. Payload: [`ExitPayload`].
+/// An attach found the child process already exited
+/// (`attached.child_exited == true`). Payload: [`ExitPayload`].
 ///
-/// Re-attaching to an already exited child (`attached.child_exited == true`)
-/// is reported through this same event, so the WebView has a single
-/// termination path.
+/// A child that exits while its window is attached is reported by
+/// [`EVENT_STATUS`] reporting `exited`, which carries the exit code.
 pub const EVENT_EXIT: &str = "session://exit";
 
 /// A window's link to the daemon moved, or an attach reported where it
@@ -106,8 +106,9 @@ pub const EVENT_DAEMON_RECOVERY: &str = "session://daemon-recovery";
 pub struct ExitPayload {
     /// The window this exit event belongs to (protocol v2).
     pub window_id: String,
-    /// Exit code of the child process (`-1` when it could not be determined).
-    pub exit_code: i32,
+    /// Exit code of the child process; `None` when it could not be
+    /// determined.
+    pub exit_code: Option<i32>,
 }
 
 /// The state a [`WindowLinkPayload`] reports.
@@ -189,6 +190,11 @@ pub struct StatusPayload {
     /// Omitted from the wire when `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub task_report: Option<TaskReportMark>,
+    /// The exit code of a window reporting `exited`, forwarded verbatim from
+    /// `DaemonMessage::StatusChanged`. `None` for any other status, or when
+    /// the code could not be determined. Omitted from the wire when `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
 }
 
 /// Payload of [`EVENT_WINDOW_LIST`].
@@ -335,7 +341,8 @@ pub struct DaemonRecoveryPayload {
 pub struct AttachResponse {
     /// Whether the child process has already exited.
     pub child_exited: bool,
-    /// Exit code of the child process, present when `child_exited` is true.
+    /// Exit code of the child process when `child_exited` is true; `None`
+    /// when it could not be determined.
     pub exit_code: Option<i32>,
 }
 
@@ -356,6 +363,7 @@ mod tests {
             status_rev: Some(1),
             status_boot: None,
             task_report: None,
+            exit_code: None,
         };
         let json = serde_json::to_value(&payload).unwrap();
         assert!(!json.as_object().unwrap().contains_key("unknown_reason"));
@@ -370,6 +378,7 @@ mod tests {
             status_rev: Some(1),
             status_boot: None,
             task_report: None,
+            exit_code: None,
         };
         let json = serde_json::to_value(&payload).unwrap();
         assert_eq!(json["unknown_reason"], "screen_lost");
@@ -387,6 +396,7 @@ mod tests {
             status_rev: None,
             status_boot: None,
             task_report: None,
+            exit_code: None,
         };
         let json = serde_json::to_value(&payload).unwrap();
         assert!(!json.as_object().unwrap().contains_key("status_rev"));
@@ -401,6 +411,7 @@ mod tests {
             status_rev: Some(7),
             status_boot: Some(yagura_protocol::StatusBoot { origin: 7, seq: 3 }),
             task_report: None,
+            exit_code: None,
         };
         let json = serde_json::to_value(&payload).unwrap();
         assert_eq!(json["status_rev"], 7);
@@ -423,6 +434,7 @@ mod tests {
                 status_rev: None,
                 status_boot: None,
                 task_report: None,
+                exit_code: None,
             }
         );
     }
@@ -436,6 +448,7 @@ mod tests {
             status_rev: Some(42),
             status_boot: None,
             task_report: None,
+            exit_code: None,
         };
         let json = serde_json::to_string(&payload).unwrap();
         let back: StatusPayload = serde_json::from_str(&json).unwrap();

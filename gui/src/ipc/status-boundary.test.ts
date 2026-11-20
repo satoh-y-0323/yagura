@@ -43,7 +43,7 @@ describe('narrowStatusPayload', () => {
     const payload: StatusPayload = narrowStatusPayload({ status, window_id: WINDOW_ID });
     const detected: DetectedStatusView =
       status === 'unknown' ? { status: 'unknown', reason: null } : knownPair(status);
-    expect(payload).toEqual({ detected, window_id: WINDOW_ID });
+    expect(payload).toEqual({ detected, window_id: WINDOW_ID, exit_code: null });
   });
 
   it('keeps the window id the core reported', () => {
@@ -107,7 +107,7 @@ describe('narrowStatusPayload', () => {
       window_id: WINDOW_ID,
       extra: 'ignored',
     });
-    expect(payload).toEqual({ detected: knownPair('idle'), window_id: WINDOW_ID });
+    expect(payload).toEqual({ detected: knownPair('idle'), window_id: WINDOW_ID, exit_code: null });
   });
 });
 
@@ -222,7 +222,13 @@ describe('narrowStatusPayload: the status-change route refuses a mismatched pair
 // ---------------------------------------------------------------------------
 
 /** Every key a narrowed status payload may own. */
-const KNOWN_STATUS_PAYLOAD_KEYS = ['window_id', 'detected', 'status_rev', 'status_boot'];
+const KNOWN_STATUS_PAYLOAD_KEYS = [
+  'window_id',
+  'detected',
+  'status_rev',
+  'status_boot',
+  'exit_code',
+];
 
 describe('narrowStatusPayload: the key set it produces', () => {
   it('introduces no key outside the known set, for a payload carrying every field', () => {
@@ -250,6 +256,7 @@ describe('narrowStatusPayload: the key set it produces', () => {
       detected: { status: 'unknown', reason: 'screen_lost' },
       status_rev: 12,
       status_boot: { origin: 7, seq: 3 },
+      exit_code: null,
     });
   });
 

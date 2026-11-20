@@ -230,7 +230,6 @@ fn daemon_message_kind(msg: &DaemonMessage) -> String {
         DaemonMessage::Attached { .. } => "Attached".to_string(),
         DaemonMessage::Frame(_) => "Frame".to_string(),
         DaemonMessage::SelectionText { .. } => "SelectionText".to_string(),
-        DaemonMessage::Exit { .. } => "Exit".to_string(),
         DaemonMessage::Pong => "Pong".to_string(),
         // `code` is a fixed machine-readable label, not user/PTY data, so it is
         // safe to include.
@@ -814,11 +813,15 @@ async fn since_ms_remains_nondecreasing_within_same_state() {
     );
 }
 
+/// The code [`exit_on_line_command`]'s child exits with.
+const EXIT_ON_LINE_CODE: i32 = 5;
+
 /// A child that stays in its pre-exit state until a line arrives on its input, then
-/// exits: the test, not the child's own clock, decides when the transition happens.
+/// exits with [`EXIT_ON_LINE_CODE`]: the test, not the child's own clock, decides when
+/// the transition happens.
 #[cfg(windows)]
 fn exit_on_line_command() -> Vec<String> {
-    ["cmd.exe", "/c", "set", "/p", "line="]
+    ["cmd.exe", "/c", "set", "/p", "line=", "&", "exit", "5"]
         .iter()
         .map(|arg| (*arg).to_string())
         .collect()
@@ -827,7 +830,7 @@ fn exit_on_line_command() -> Vec<String> {
 /// Unix counterpart of the Windows `exit_on_line_command`.
 #[cfg(not(windows))]
 fn exit_on_line_command() -> Vec<String> {
-    ["/bin/sh", "-c", "read line"]
+    ["/bin/sh", "-c", "read line; exit 5"]
         .iter()
         .map(|arg| (*arg).to_string())
         .collect()
@@ -846,6 +849,14 @@ async fn since_ms_resets_on_state_transition() {
     let mut client = harness.connect().await;
     let window_id = open_window_via_ipc(&mut client, exit_on_line_command()).await;
     let reference = open_exited_window_via_ipc(&mut client).await;
+    // A view attached across the exit sees the pushes a GUI sees for the window.
+    let mut viewer = harness.connect().await;
+    attach_via_ipc(&mut viewer, &window_id).await;
+    let before_exit = collect_frames(
+        &mut viewer,
+        |msg| matches!(msg, DaemonMessage::StatusChanged { window_id: id, .. } if *id == window_id),
+    )
+    .await;
 
     let (reference_status_before, reference_before) =
         query_window_status(&mut client, &reference).await;
@@ -857,6 +868,14 @@ async fn since_ms_resets_on_state_transition() {
     );
 
     harness.write_input(&window_id, b"exit\r").await;
+    let through_exit = collect_frames(&mut viewer, |msg| {
+        matches!(
+            msg,
+            DaemonMessage::StatusChanged { window_id: id, status: WindowStatus::Exited, .. }
+                if *id == window_id
+        )
+    })
+    .await;
     wait_for_window_status(&mut client, &window_id, WindowStatus::Exited).await;
     let (status_after, since_ms_after) = query_window_status(&mut client, &window_id).await;
     let (reference_status_after, reference_after) =
@@ -881,6 +900,40 @@ async fn since_ms_resets_on_state_transition() {
         "since_ms must restart at the transition: {since_ms_after} ms after it, though only \
          {} ms passed across it",
         reference_after - reference_before
+    );
+
+    // Only the push reporting `Exited` carries the code; every earlier one names none.
+    let pushes: Vec<(WindowStatus, Option<i32>)> = before_exit
+        .frames
+        .iter()
+        .chain(&through_exit.frames)
+        .filter_map(|msg| match msg {
+            DaemonMessage::StatusChanged {
+                window_id: id,
+                status,
+                exit_code,
+                ..
+            } if *id == window_id => Some((*status, *exit_code)),
+            _ => None,
+        })
+        .collect();
+    let (last, earlier) = pushes
+        .split_last()
+        .expect("the attach answers with the window's status");
+    assert_eq!(
+        *last,
+        (WindowStatus::Exited, Some(EXIT_ON_LINE_CODE)),
+        "the push reporting the exit carries the child's code: {pushes:?}"
+    );
+    assert!(
+        !earlier.is_empty(),
+        "the attach's status came before the exit: {pushes:?}"
+    );
+    assert!(
+        earlier
+            .iter()
+            .all(|&(status, code)| status != WindowStatus::Exited && code.is_none()),
+        "a push before the exit carries no code: {pushes:?}"
     );
 }
 

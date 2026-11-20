@@ -65,6 +65,11 @@ describe('narrowExitPayload', () => {
     expect(payload).toEqual({ exit_code: -1, window_id: WINDOW_ID });
   });
 
+  it('accepts a null exit code, which the core sends when it could not determine one', () => {
+    const payload = narrowExitPayload({ exit_code: null, window_id: WINDOW_ID });
+    expect(payload).toEqual({ exit_code: null, window_id: WINDOW_ID });
+  });
+
   it('accepts positive exit code', () => {
     const payload = narrowExitPayload({ exit_code: 42, window_id: WINDOW_ID });
     expect(payload).toEqual({ exit_code: 42, window_id: WINDOW_ID });
@@ -639,6 +644,29 @@ describe('narrowStatusPayload: refuses a status change whose task report mark it
     'refuses task_report %s',
     (_label, value) => {
       expect(() => narrowStatusPayload(statusPayloadWire({ task_report: value }))).toThrow(
+        BoundaryError
+      );
+    }
+  );
+});
+
+describe('narrowStatusPayload: the exit code a status change carries', () => {
+  it('reads an integer as that code and a missing or null code as null', () => {
+    for (const code of [0, 3, -1]) {
+      expect(
+        narrowStatusPayload(statusPayloadWire({ status: 'exited', exit_code: code })).exit_code
+      ).toBe(code);
+    }
+    expect(narrowStatusPayload(statusPayloadWire()).exit_code).toBeNull();
+    expect(
+      narrowStatusPayload(statusPayloadWire({ status: 'exited', exit_code: null })).exit_code
+    ).toBeNull();
+  });
+
+  it.each([3.5, '3', true, {}, []].map((value) => [JSON.stringify(value), value]))(
+    'refuses exit_code %s',
+    (_label, value) => {
+      expect(() => narrowStatusPayload(statusPayloadWire({ exit_code: value }))).toThrow(
         BoundaryError
       );
     }

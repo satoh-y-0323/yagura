@@ -132,7 +132,6 @@ fn daemon_message_round_trip_for_every_variant() {
             text: Some("hello".to_string()),
         },
         DaemonMessage::SelectionText { text: None },
-        DaemonMessage::Exit { exit_code: -1 },
         DaemonMessage::Pong,
         DaemonMessage::Error {
             code: "unknown_type".to_string(),

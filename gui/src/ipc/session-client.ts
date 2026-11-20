@@ -102,7 +102,7 @@ export interface WindowEventHandlers {
    * acknowledge, or `null` when the part is not one that is acknowledged.
    */
   onFrame: (frame: Frame) => number | null;
-  /** The child process of this window exited. */
+  /** An attach found the child process of this window already exited. */
   onExit: (payload: ExitPayload) => void;
   /** This window's link to the daemon moved; the only source of its phase. */
   onLink: (payload: WindowLinkPayload) => void;

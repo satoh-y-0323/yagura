@@ -238,6 +238,13 @@
 //! the report stands, or it was released by a new instruction, or it has no
 //! reader. A revision 35 mark, and a state this build does not know, decode as
 //! [`ReportState::Unknown`].
+//!
+//! Revision 37 adds an optional `exit_code` to `status_changed`: the code of a
+//! window that reports `exited`, or `None` when the code could not be
+//! determined. It removes the `exit` message, which no daemon sent. From this
+//! revision an `exit_code` of `-1` is a real code, not a stand-in for
+//! "unknown"; a caller establishes [`EXIT_CODE_ON_STATUS_MIN_REVISION`] before
+//! reading it that way.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -262,7 +269,7 @@ pub use screen_copy::{
 /// anything a peer can observe on the wire. It is what a peer reports when
 /// asked which wire it speaks, and what a caller compares against before
 /// sending something an older peer would mishandle.
-pub const PROTOCOL_REVISION: u32 = 36;
+pub const PROTOCOL_REVISION: u32 = 37;
 
 /// The largest column count, and the largest row count, a window takes.
 ///
@@ -438,6 +445,14 @@ pub const WITHDRAW_MESSAGE_MIN_REVISION: u32 = 34;
 /// An older daemon refuses it by name, so the overlay door fails and the
 /// launch does not start the CLI.
 pub const LAUNCH_OVERLAY_MIN_REVISION: u32 = 34;
+
+/// The first wire revision whose `status_changed` carries the exit code of a
+/// window that reports `exited`.
+///
+/// From this revision an `exit_code` of `-1` is the code the child ended with.
+/// An older daemon sends `-1` when it could not determine the code, so a
+/// caller reads an older daemon's `-1` as unknown.
+pub const EXIT_CODE_ON_STATUS_MIN_REVISION: u32 = 37;
 
 /// How long a hook door waits for one answer of the daemon.
 pub const DOOR_ANSWER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
@@ -1905,7 +1920,8 @@ pub struct WindowInfo {
     pub cwd: String,
     /// Current status of the child process.
     pub status: WindowStatus,
-    /// Exit code if the child has exited, `None` if still running.
+    /// Exit code if the child has exited. `None` while it runs, or when the
+    /// code could not be determined.
     pub exit_code: Option<i32>,
     /// The window's presentation layout, as the opaque JSON string the GUI
     /// last reported through [`ClientMessage::UpdateWindowLayout`]. Omitted
@@ -3732,7 +3748,8 @@ pub enum DaemonMessage {
     Attached {
         /// Whether the child process has already exited.
         child_exited: bool,
-        /// Exit code of the child process, if it has exited.
+        /// Exit code of the child process if it has exited. `None` while it
+        /// runs, or when the code could not be determined.
         exit_code: Option<i32>,
     },
     /// One part of a frame of the attached window's view.
@@ -3741,11 +3758,6 @@ pub enum DaemonMessage {
     SelectionText {
         /// The selected text; `None` when nothing is selected.
         text: Option<String>,
-    },
-    /// The child process has exited.
-    Exit {
-        /// Exit code of the child process (`-1` if it could not be determined).
-        exit_code: i32,
     },
     /// Response to [`ClientMessage::Ping`] (no fields).
     Pong,
@@ -3800,6 +3812,11 @@ pub enum DaemonMessage {
         /// built. Omitted from the wire when `None`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         task_report: Option<TaskReportMark>,
+        /// The exit code when `status` is `Exited`. `None` for any other
+        /// status, when the code could not be determined, or when the daemon
+        /// predates this field. Omitted from the wire when `None`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        exit_code: Option<i32>,
     },
     /// Response to [`ClientMessage::OpenWindow`]: the window was opened successfully.
     WindowOpened {
@@ -3835,7 +3852,8 @@ pub enum DaemonMessage {
         /// wrapped rows joined as `read_output` reads them. `None` if the
         /// screen shows no text.
         last_output_summary: Option<String>,
-        /// Exit code if the window has exited, `None` if still running.
+        /// Exit code if the window has exited. `None` while it runs, or when
+        /// the code could not be determined.
         exit_code: Option<i32>,
         /// Why `status` is `Unknown`, if it is. Omitted from the wire when
         /// `None`.
@@ -5479,7 +5497,6 @@ const DAEMON_MESSAGE_TYPES: &[&str] = &[
     "attached",
     "frame",
     "selection_text",
-    "exit",
     "pong",
     "error",
     "status_changed",

@@ -184,6 +184,7 @@ fn status_changed_decodes_from_its_snake_case_tagged_json() {
             status_rev: None,
             status_boot: None,
             task_report: None,
+            exit_code: None,
         }
     );
 }
@@ -197,6 +198,7 @@ fn status_changed_encodes_with_the_snake_case_type_tag_and_field_names() {
         status_rev: None,
         status_boot: None,
         task_report: None,
+        exit_code: None,
     };
     let body = encode_daemon_message(&msg);
     let value: serde_json::Value = serde_json::from_slice(&body).expect("valid json");
@@ -215,11 +217,31 @@ fn status_changed_round_trips_for_every_status_value() {
             status_rev: None,
             status_boot: None,
             task_report: None,
+            exit_code: None,
         };
         let body = encode_daemon_message(&msg);
         let decoded = decode_daemon_message(&body).expect("round trip decode must succeed");
         assert_eq!(decoded, msg);
     }
+
+    // The push that reports the exit is the one message that removes the
+    // window, so the code travels on it rather than on a second message.
+    let exited = DaemonMessage::StatusChanged {
+        window_id: "w1".to_string(),
+        status: WindowStatus::Exited,
+        unknown_reason: None,
+        status_rev: None,
+        status_boot: None,
+        task_report: None,
+        exit_code: Some(3),
+    };
+    let body = encode_daemon_message(&exited);
+    let value: serde_json::Value = serde_json::from_slice(&body).expect("valid json");
+    assert_eq!(value["exit_code"], serde_json::json!(3));
+    assert_eq!(
+        decode_daemon_message(&body).expect("round trip decode must succeed"),
+        exited
+    );
 }
 
 #[test]
@@ -338,7 +360,7 @@ fn existing_client_messages_still_decode_after_the_status_extension() {
 
 #[test]
 fn existing_daemon_messages_still_decode_after_the_status_extension() {
-    let cases: [(&[u8], DaemonMessage); 5] = [
+    let cases: [(&[u8], DaemonMessage); 4] = [
         (
             br#"{"type":"attached","child_exited":false,"exit_code":null}"#,
             DaemonMessage::Attached {
@@ -349,10 +371,6 @@ fn existing_daemon_messages_still_decode_after_the_status_extension() {
         (
             br#"{"type":"selection_text","text":null}"#,
             DaemonMessage::SelectionText { text: None },
-        ),
-        (
-            br#"{"type":"exit","exit_code":-1}"#,
-            DaemonMessage::Exit { exit_code: -1 },
         ),
         (br#"{"type":"pong"}"#, DaemonMessage::Pong),
         (

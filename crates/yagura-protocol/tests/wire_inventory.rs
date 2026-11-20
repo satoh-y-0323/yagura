@@ -881,7 +881,6 @@ fn daemon_message_corpus() -> Vec<DaemonMessage> {
         }),
         DaemonMessage::Frame(Frame::sample()),
         wire_sample!(DaemonMessage::SelectionText { text }),
-        wire_sample!(DaemonMessage::Exit { exit_code }),
         wire_sample!(DaemonMessage::Pong),
         wire_sample!(DaemonMessage::Error {
             code,
@@ -895,6 +894,7 @@ fn daemon_message_corpus() -> Vec<DaemonMessage> {
             status_rev,
             status_boot,
             task_report,
+            exit_code,
         }),
         wire_sample!(DaemonMessage::WindowOpened {
             window_id,

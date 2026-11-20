@@ -104,8 +104,8 @@ export interface WindowScoped {
 
 /** Payload of `session://exit`. */
 export interface ExitPayload extends WindowScoped {
-  /** Exit code of the child process (`-1` when it could not be determined). */
-  exit_code: number;
+  /** Exit code of the child process; `null` when it could not be determined. */
+  exit_code: number | null;
 }
 
 /** A 24-bit color as `[red, green, blue]`. */
@@ -307,6 +307,11 @@ export interface StatusPayload {
   status_boot?: StatusBoot;
   /** The window's report mark, omitted while the window has not reported this boot. */
   task_report?: TaskReportMark;
+  /**
+   * The exit code of a window reporting `'exited'`; `null` for any other
+   * status, when the code could not be determined, or when the core sent none.
+   */
+  exit_code: number | null;
 }
 
 const WINDOW_STATUS_VALUES: ReadonlySet<string> = new Set<WindowStatus>([
@@ -841,9 +846,24 @@ export function narrowExitPayload(value: unknown): ExitPayload {
   const context = SESSION_EVENT.exit;
   const record = requireRecord(value, context);
   return {
-    exit_code: requireInteger(record, 'exit_code', context),
+    exit_code: requireIntegerOrNull(record, 'exit_code', context),
     window_id: requireString(record, 'window_id', context),
   };
+}
+
+/**
+ * Reads a field the record must own: an integer, or `null` for a value the
+ * core could not determine.
+ *
+ * @throws {BoundaryError} when the record owns no such field, or owns one
+ * that is neither an integer nor `null`.
+ */
+function requireIntegerOrNull(
+  record: UntrustedRecord,
+  key: string,
+  context: string
+): number | null {
+  return readOwnField(record, key) === null ? null : requireInteger(record, key, context);
 }
 
 /**
@@ -1121,6 +1141,7 @@ export function narrowStatusPayload(value: unknown): StatusPayload {
   const base: StatusPayload = {
     window_id: requireString(record, 'window_id', context),
     detected: readDetectedStatus(record, context, 'refuse'),
+    exit_code: readOptionalInteger(record, 'exit_code', context),
   };
   const status_rev = readOptionalGeneration(record, 'status_rev', context, 'refuse');
   const withRev = status_rev === null ? base : { ...base, status_rev };

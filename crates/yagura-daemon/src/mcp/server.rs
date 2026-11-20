@@ -181,7 +181,9 @@ impl<T: DaemonTransport + 'static> YaguraMcpServer<T> {
         description = "List all windows currently managed by the daemon. Each entry \
             includes window_id, name, vendor, cwd, status, and exit_code, plus room \
             (room_id and a display name) when the window still has one; room is \
-            omitted for a window whose status is exited. room_id is the same room \
+            omitted for a window whose status is exited. exit_code is null while the \
+            window runs; an exited window whose exit_code is null ended with a code \
+            that could not be determined. room_id is the same room \
             the chat tools address; name is a display name, not a path. window_id lasts as long as its window does, across a daemon restart; eviction ends it. An entry whose \
             status is unknown carries unknown_reason (no_definition, \
             no_rule_matched, screen_lost, detector_stopped, not_yet_judged or \
@@ -211,7 +213,9 @@ impl<T: DaemonTransport + 'static> YaguraMcpServer<T> {
             report it. queued_count is how many envelopes and notices wait in the window's \
             inbox; queued_ids lists the ids of those you sent that still wait there (your \
             window's, or this MCP session's when it is no window). An id that no longer \
-            waits was handed over or is being carried, or its window or the daemon ended.",
+            waits was handed over or is being carried, or its window or the daemon ended. \
+            exit_code is null while the window runs; a status of exited with a null \
+            exit_code means the code could not be determined.",
         input_schema = schema_object(json!({
             "type": "object",
             "properties": {

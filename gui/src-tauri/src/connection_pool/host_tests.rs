@@ -855,6 +855,6 @@ async fn an_attach_that_finds_the_child_exited_drops_the_held_input() {
         .expect("the connection answers");
 
     assert_eq!(connecting.state, "connecting");
-    assert_eq!(exit, json!({ "window_id": "w4", "exit_code": -1 }));
+    assert_eq!(exit, json!({ "window_id": "w4", "exit_code": null }));
     assert!(no_text_reached(&daemon), "{:?}", daemon.received());
 }
