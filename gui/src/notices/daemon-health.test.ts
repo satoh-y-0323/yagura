@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 
-import { daemonProblemNotices } from './daemon-health-notice';
+import { daemonProblemNotices } from './daemon-health';
 
 describe('daemonProblemNotices', () => {
   it('shows no notice when the daemon reports no problem', () => {

@@ -6,7 +6,7 @@
  * classifies the failure: the summary is chosen by call site and is true for
  * every failure that site can hit, and the cause is whatever the detail says.
  */
-import { describeOperationFailure, errors } from './ui-messages';
+import { describeOperationFailure, errors } from '../ui-messages';
 
 /** The boundary failures the WebView reports, one member per call site. */
 export type BoundaryOperation =

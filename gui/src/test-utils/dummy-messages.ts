@@ -149,6 +149,14 @@ export const dummyMessages: Messages = {
     daemonReconnecting: 'DUMMY_daemonReconnecting',
     daemonReconnectFailed: 'DUMMY_daemonReconnectFailed',
     daemonReconnected: 'DUMMY_daemonReconnected',
+    noticeTitles: {
+      startupEnvFailure: 'DUMMY_titleStartupEnvFailure',
+      daemonReconnecting: 'DUMMY_titleDaemonReconnecting',
+      daemonUnreachable: 'DUMMY_titleDaemonUnreachable',
+      daemonHealth: 'DUMMY_titleDaemonHealth',
+      approverRegistrationRefused: 'DUMMY_titleApproverRegistrationRefused',
+      daemonProtocolStale: 'DUMMY_titleDaemonProtocolStale',
+    },
     clientConfigLoadFailed: 'DUMMY_clientConfigLoadFailed',
     // The daemon needs a restart before launch options work.
     daemonProtocolStale: 'DUMMY_daemonProtocolStale',

@@ -6,7 +6,7 @@
  */
 import { describe, it, expect } from 'vitest';
 
-import { describeBoundaryNotice, type BoundaryOperation } from './boundary-notice-model';
+import { describeBoundaryNotice, type BoundaryOperation } from './boundary-notice';
 
 /**
  * The nine fixed summaries, copied

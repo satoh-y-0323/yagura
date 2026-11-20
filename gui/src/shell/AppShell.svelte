@@ -2,18 +2,7 @@
   import { onDestroy, tick } from 'svelte';
   import { get, writable } from 'svelte/store';
 
-  import {
-    applyClientConfigFailure,
-    applyRecoveryUpdate,
-    buildBanners,
-    dismissBanner,
-    profilesNeedingNativeProgram,
-    recordApprovalExpiredUnseen,
-    type ApprovalExpiredSummary,
-    type BannerAction,
-    type BannerId,
-  } from '../banner-model';
-  import { describeBoundaryNotice, type BoundaryOperation } from '../boundary-notice-model';
+  import { describeBoundaryNotice, type BoundaryOperation } from '../notices/boundary-notice';
   import type { OpenWindowSubmission, ProfileOption } from '../components/add-window-dialog-types';
   import AddWindowDialog from '../components/AddWindowDialog.svelte';
   import AppRail from '../components/AppRail.svelte';
@@ -47,7 +36,26 @@
   } from '../chat/chat-store';
   import { describeRoomRemovalFailure, readRefusedForRemovedRoom } from '../chat/room-actions';
   import { serializeRefresh } from '../chat/refresh-serializer';
-  import { daemonProblemNotices } from '../daemon-health-notice';
+  import { daemonProblemNotices } from '../notices/daemon-health';
+  import {
+    appendEvent,
+    dismissEvent,
+    failureEvent,
+    type EventLog,
+    type FailureEventKey,
+  } from '../notices/event-log';
+  import {
+    applyClientConfigFailure,
+    applyRecoveryUpdate,
+    buildNotices,
+    dismissNotice,
+    profilesNeedingNativeProgram,
+    recordApprovalExpiredUnseen,
+    reopenOffer,
+    type NoticeAction,
+    type NoticeSourceState,
+    type StateNoticeKey,
+  } from '../notices/notice-model';
   import type { DropSignal } from '../ipc/folder-drop-model';
   import { writeClipboardText } from '../ipc/clipboard';
   import { pickFolder, subscribeFolderDrop } from '../ipc/folder-picker';
@@ -232,11 +240,6 @@
   import { isProfileSettingsReadOnly } from '../settings/profile-settings-model';
   import { type SettingsTab } from '../settings/settings-tabs';
   import { startLayoutSync } from '../session/layout-sync';
-  import type {
-    ClientConfigFailure,
-    DaemonRecoveryStatus,
-    StartupEnvFailure,
-  } from '../session/recovery-types';
   import { confirmCopy, type ConfirmOperation } from '../session/confirm-target';
   import { pairPanes, type Pane } from '../session/pane-plan';
   import { createAttentionNavigation } from '../session/attention-navigation';
@@ -377,11 +380,6 @@
   // so the dropdown never empties out because one look failed.
   let detectionNames: string[] = [];
 
-  // Why the last opened window could not load its detection definition. It
-  // arrives once the window is open and the dialog has closed, so it is shown
-  // on the banner path.
-  let detectionWarning: string | null = null;
-
   // Why the detection definitions could not be enumerated. This one arises
   // while the dialog is open, so the dialog displays it.
   let detectionListWarning: string | null = null;
@@ -411,54 +409,45 @@
   // Spelled out: the linter reads a component instance as `any`.
   let commandPicker: { showMode: (mode: PickerMode) => void } | undefined;
 
-  // Restore flow. `restoreLoadFailedNotice` is not part of
-  // banner-model.ts's fixed banner set (RestoreBanner is deliberately not
-  // integrated there): it renders through its own element
-  // below.
+  // Restore flow.
   let restoreCandidates: RestoreEntry[] = [];
   let restoreTakenAtEpochS: number | null = null;
-  let isRestoreBannerDismissed = false;
-  // Dismissing the banner naming unusable profiles holds for this run only.
-  let isProfileUnavailableDismissed = false;
   let isRestoreDialogOpen = false;
   let restoreSelection: Set<number> = new Set();
   // Checkboxes the user toggled by hand (position -> checked); never rendered
   // directly, so there is no clearing path -- it lives for the process lifetime.
   // eslint-disable-next-line svelte/prefer-svelte-reactivity -- lookup table read only when the dialog opens, never rendered, so runes-based SvelteMap reactivity does not apply
   const restoreSelectionOverrides = new Map<number, boolean>();
-  let restoreLoadFailedNotice: string | null = null;
+  // What the app says about its own state. Holds what the shell learns itself; what is
+  // derived from other state is filled in by `sourceState`.
+  let noticeState: NoticeSourceState = {
+    daemonSpawnNotice: null,
+    detectionWarning: null,
+    keymapNotice: null,
+    boundaryNotice: null,
+    hasThemeLoadFailure: false,
+    isThemeLoadFailureDismissed: false,
+    themeIssueCount: 0,
+    isThemeIssuesDismissed: false,
+    approvalExpiredUnseen: null,
+    approverRegistrationRefused: false,
+    daemonRecovery: 'idle',
+    daemonRecoveryRev: 0,
+    clientConfigFailure: null,
+    isDaemonProtocolStale: false,
+    startupEnvFailure: null,
+    profilesNeedingNativeProgram: [],
+    isProfileUnavailableDismissed: false,
+    daemonHealthNotices: [],
+    lastSession: null,
+    isReopenOfferDismissed: false,
+    hasOpenWindows: false,
+  };
 
-  // What the daemon says keeps it from opening windows, one sentence each.
-  // Like `restoreLoadFailedNotice` it renders through its own element.
-  let daemonHealthNotices: string[] = [];
+  // Things that happened, kept until the user dismisses them; `noticeMemory` numbers them.
+  let eventLog: EventLog = [];
+  let noticeMemory = { nextSeq: 1 };
 
-  // What the launcher reported about how the daemon was started, `null`
-  // while nothing was reported. Holds the launcher's own sentence: it is the
-  // only place the detachment mode used, and what follows from it, is stated.
-  let daemonSpawnNotice: string | null = null;
-
-  // Daemon recovery: how far the supervisor has got, the generation
-  // that ordering is decided by, whether the user dismissed the banner, and
-  // why the client settings were not used.
-  let daemonRecovery: DaemonRecoveryStatus = 'idle';
-  let daemonRecoveryRev = 0;
-  let isDaemonRecoveryDismissed = false;
-  let clientConfigFailure: ClientConfigFailure | null = null;
-
-  // Why start-up could not resolve which instance this process
-  // belongs to. While non-null no daemon was started or connected.
-  let startupEnvFailure: StartupEnvFailure | null = null;
-
-  // The last boundary failure reported anywhere in the application, `null`
-  // while none is active. Carries the daemon's own diagnosis rather than a
-  // fixed line, so the banner never claims a cause it did not observe.
-  let boundaryNotice: string | null = null;
-
-  // Last window operation that the core or the daemon refused
-  let operationError: string | null = null;
-
-  // What the startup keymap load has to report, `null` when it has nothing to
-  let keymapNotice: string | null = null;
   const keyboardPlatform = hostKeyboardPlatform();
   const keymapStore = createKeymapStore({
     platform: keyboardPlatform,
@@ -468,10 +457,6 @@
   let keymapLoadStatus: KeymapLoadStatus = { kind: 'not-loaded' };
   // The keymap.toml path this instance reads, `null` until known or when it has none.
   let keymapFilePath: string | null = null;
-
-  // Whether the user has dismissed the two theme banners
-  let isThemeLoadFailureDismissed = false;
-  let isThemeIssuesDismissed = false;
 
   // Measured size of the float area; every layout calculation is fed from it
   let area: Size = { width: 0, height: 0 };
@@ -694,17 +679,6 @@
   let approvals = approvalQueue.emptyQueue();
   let approvalOpenedAt = 0;
   let approvalDisplayedId: string | null = null;
-  let approvalExpiredUnseen: { count: number; latest: ApprovalExpiredSummary } | null = null;
-  // Whether this connection's register_approver attempt was refused.
-  // Set by the refusal event and by a refused pull, cleared
-  // by the reset event and by a registered pull, so a refusal
-  // that predates the subscription is still reported and still clears.
-  let approverRegistrationRefused = false;
-  // Whether the connected daemon's last-pushed wire revision is older than
-  // what showing a window needs. Information: the
-  // gate that actually decides what may be sent is Rust-side and stays
-  // correct even if this field lagged.
-  let isDaemonProtocolStale = false;
 
   const registry = createWindowRegistry();
 
@@ -830,28 +804,25 @@
     detectionInput !== '' && !detectionNames.includes(detectionInput)
       ? [detectionInput, ...detectionNames]
       : detectionNames;
-  $: bannerState = {
-    daemonSpawnNotice,
-    operationError,
-    detectionWarning,
-    keymapNotice,
-    boundaryNotice,
+  $: sourceState = {
+    ...noticeState,
     hasThemeLoadFailure: themeLoadFailure !== null,
-    isThemeLoadFailureDismissed,
     themeIssueCount,
-    isThemeIssuesDismissed,
-    approvalExpiredUnseen,
-    approverRegistrationRefused,
-    daemonRecovery,
-    daemonRecoveryRev,
-    isDaemonRecoveryDismissed,
-    clientConfigFailure,
-    isDaemonProtocolStale,
-    startupEnvFailure,
     profilesNeedingNativeProgram: profilesNeedingNativeProgram(profileOptions),
-    isProfileUnavailableDismissed,
-  };
-  $: activeBanners = buildBanners(bannerState);
+    lastSession:
+      restoreCandidates.length > 0
+        ? {
+            count: restoreCandidates.length,
+            timestamp:
+              restoreTakenAtEpochS === null ? null : formatRestoreTimestamp(restoreTakenAtEpochS),
+          }
+        : null,
+    hasOpenWindows: $registry.windows.length > 0,
+  } satisfies NoticeSourceState;
+  // The reopen offer keeps its own element (RestoreBanner) above the strip.
+  $: stateNotices = buildNotices(sourceState).filter((notice) => notice.key !== 'reopen-offer');
+  // With no window open the work area makes the offer, so the two never make it together.
+  $: restoreOffer = reopenOffer(sourceState);
   // Recomputed on every registry change so the already-open hint (cwd + name
   // match) tracks which windows are actually open right now.
   $: restoreOpenWindows = $registry.windows.map((entry) => ({ cwd: entry.cwd, name: entry.name }));
@@ -1148,14 +1119,13 @@
     if (!(await requestConfirmation(operation, room.displayName))) {
       return;
     }
-    operationError = null;
     try {
       await (operation === 'clear_room'
         ? invokeClearChatRoom(room.room_id)
         : invokeDeleteChatRoom(room.room_id));
     } catch (error) {
       console.error(chat.panelTitle, error);
-      operationError = describeRoomRemovalFailure(error);
+      recordFailure('operation-failure', describeRoomRemovalFailure(error));
       void refreshChatRooms();
     }
   }
@@ -1163,7 +1133,6 @@
   /** Posts one message; `null` leaves the composer holding what was typed. */
   async function postChat(body: string, broadcast: boolean): Promise<ChatPosted | null> {
     const roomId = currentRoomId === '' ? undefined : currentRoomId;
-    operationError = null;
     let posted: ChatPosted;
     try {
       posted = broadcast
@@ -1509,7 +1478,6 @@
     if (planId === null || plan === null) {
       return;
     }
-    operationError = null;
     try {
       const next = await invokeApprovePlan(planId, plan.version);
       if (selectedPlanId === planId) {
@@ -1522,7 +1490,6 @@
   }
 
   async function saveRoles(next: RoleEntry[], nextDefaultRole: string | null): Promise<void> {
-    operationError = null;
     try {
       ({ roles, default_role: defaultRole } = await invokeSaveRoles(next, nextDefaultRole));
     } catch (error) {
@@ -1621,7 +1588,6 @@
   }
 
   async function saveModelAliases(profile: string, aliases: LaunchOptionAlias[]): Promise<void> {
-    operationError = null;
     try {
       await invokeSaveModelAliases(profile, aliases);
     } catch (error) {
@@ -1907,7 +1873,6 @@
   }
 
   async function deletePlan(planId: string): Promise<void> {
-    operationError = null;
     try {
       await invokeDeletePlan(planId);
     } catch (error) {
@@ -1926,7 +1891,6 @@
     if (planId === null) {
       return;
     }
-    operationError = null;
     try {
       const next = await invokeSetTaskAssignment(planId, taskId, assignment);
       if (selectedPlanId === planId) {
@@ -1942,7 +1906,6 @@
     if (planId === null) {
       return;
     }
-    operationError = null;
     try {
       const next = await invokeClearTaskAssignment(planId, taskId);
       if (selectedPlanId === planId) {
@@ -2000,7 +1963,7 @@
 
   /**
    * Drops a request the daemon withdrew. One that expired before it was ever
-   * displayed is counted for the banner instead of disappearing without the
+   * displayed is counted for its notice instead of disappearing without the
    * user ever learning it was asked -- but only when it actually timed out:
    * a decision made elsewhere, or the requester
    * disconnecting, is not an unnoticed expiry.
@@ -2008,10 +1971,8 @@
   function withdrawApproval(requestId: string, reason: WithdrawReason): void {
     const request = approvals.items.find((entry) => entry.request_id === requestId);
     if (request !== undefined) {
-      // `bannerState` is only recomputed at the next flush, so the live field
-      // is spread over it: two withdrawals in one tick both have to count.
-      approvalExpiredUnseen = recordApprovalExpiredUnseen(
-        { ...bannerState, approvalExpiredUnseen },
+      noticeState = recordApprovalExpiredUnseen(
+        noticeState,
         approvalQueue.wasShown(approvals, requestId),
         reason,
         {
@@ -2024,7 +1985,7 @@
               ? sanitizeForDisplay(request.target.name)
               : describeUntargeted(request),
         }
-      ).approvalExpiredUnseen;
+      );
     }
     approvals = approvalQueue.withdraw(approvals, requestId);
   }
@@ -2051,7 +2012,7 @@
       .catch((error: unknown) => {
         console.error('failed to decide approval:', error);
         approvals = approvalQueue.clearInFlight(approvals, requestId);
-        operationError = banners.approvalDecisionFailed;
+        recordFailure('operation-failure', banners.approvalDecisionFailed);
       });
   }
 
@@ -2079,9 +2040,9 @@
   // and maximize do nothing: Focus never writes the canvas placement.
   const actions: WindowActions = {
     ...contractedActions,
-    close: (entry) => reportFailures(errors.closeWindowFailed, contractedActions.close(entry)),
+    close: (entry) => reportIfFailed(errors.closeWindowFailed, contractedActions.close(entry)),
     interrupt: (entry) =>
-      reportFailures(errors.interruptWindowFailed, contractedActions.interrupt(entry)),
+      reportIfFailed(errors.interruptWindowFailed, contractedActions.interrupt(entry)),
     minimize: (entry) => {
       if (isFocusMode()) {
         return;
@@ -2648,14 +2609,7 @@
     }
   }
 
-  /** Clears the banner, then shows the operation's failure in it if it fails. */
-  async function reportFailures(summary: string, operation: Promise<void>): Promise<void> {
-    operationError = null;
-    await reportIfFailed(summary, operation);
-  }
-
-  // Leaves a banner already on screen alone, so a shortcut that succeeds does not
-  // dismiss an unrelated error.
+  // Says nothing when the operation succeeds.
   async function reportIfFailed(summary: string, operation: Promise<void>): Promise<void> {
     try {
       await operation;
@@ -2708,7 +2662,7 @@
           );
         },
         onDaemonSpawnWarning: (payload) => {
-          daemonSpawnNotice = foldExternalText(payload.message);
+          noticeState = { ...noticeState, daemonSpawnNotice: foldExternalText(payload.message) };
         },
         onBoundaryError: (error) => {
           reportBoundaryNotice('sessionEvent', error);
@@ -2724,19 +2678,13 @@
         },
         onApprovalReset: (payload) => {
           approvals = approvalQueue.reset(approvals, payload.requests);
-          approverRegistrationRefused = false;
+          noticeState = { ...noticeState, approverRegistrationRefused: false };
         },
         onApprovalRegistrationRefused: () => {
-          approverRegistrationRefused = true;
+          noticeState = { ...noticeState, approverRegistrationRefused: true };
         },
         onDaemonRecovery: (payload) => {
-          const updated = applyRecoveryUpdate(
-            { ...bannerState, daemonRecovery, daemonRecoveryRev, isDaemonRecoveryDismissed },
-            payload
-          );
-          daemonRecovery = updated.daemonRecovery;
-          daemonRecoveryRev = updated.daemonRecoveryRev;
-          isDaemonRecoveryDismissed = updated.isDaemonRecoveryDismissed;
+          noticeState = applyRecoveryUpdate(noticeState, payload);
         },
       });
     } catch (error) {
@@ -2763,25 +2711,22 @@
     // be lost, the same reasoning the approval sync pull below follows.
     try {
       const report = await invokeGetRecoveryStatus();
-      const updated = applyRecoveryUpdate(
-        { ...bannerState, daemonRecovery, daemonRecoveryRev, isDaemonRecoveryDismissed },
-        { status: report.status, rev: report.rev }
-      );
-      daemonRecovery = updated.daemonRecovery;
-      daemonRecoveryRev = updated.daemonRecoveryRev;
-      isDaemonRecoveryDismissed = updated.isDaemonRecoveryDismissed;
-      const withFailure = applyClientConfigFailure(
-        { ...bannerState, clientConfigFailure },
-        report.config_failure
-      );
-      clientConfigFailure = withFailure.clientConfigFailure;
-      startupEnvFailure = report.startup_env_failure;
+      noticeState = {
+        ...applyClientConfigFailure(
+          applyRecoveryUpdate(noticeState, { status: report.status, rev: report.rev }),
+          report.config_failure
+        ),
+        startupEnvFailure: report.startup_env_failure,
+      };
     } catch (error) {
       console.error('failed to pull the daemon recovery status:', error);
     }
 
     try {
-      daemonHealthNotices = daemonProblemNotices(await invokeGetDaemonHealth());
+      noticeState = {
+        ...noticeState,
+        daemonHealthNotices: daemonProblemNotices(await invokeGetDaemonHealth()),
+      };
     } catch (error) {
       console.error('failed to pull the daemon health:', error);
     }
@@ -2801,8 +2746,11 @@
     unsubscribeWindowList = await subscribeWindowList(
       (payload) => {
         protocol_revision = payload.protocol_revision;
-        isDaemonProtocolStale =
-          protocol_revision !== null && protocol_revision < ATTACH_VIEW_MIN_REVISION;
+        noticeState = {
+          ...noticeState,
+          isDaemonProtocolStale:
+            protocol_revision !== null && protocol_revision < ATTACH_VIEW_MIN_REVISION,
+        };
         isModelAliasesReadOnly =
           protocol_revision !== null && protocol_revision < MODEL_ALIASES_MIN_REVISION;
         void applyWindowList(payload.windows);
@@ -2867,9 +2815,9 @@
       const outcome = await invokeSyncApprovals();
       if (outcome.status === 'registered') {
         approvals = approvalQueue.merge(approvals, outcome.pending);
-        approverRegistrationRefused = false;
+        noticeState = { ...noticeState, approverRegistrationRefused: false };
       } else {
-        approverRegistrationRefused = true;
+        noticeState = { ...noticeState, approverRegistrationRefused: true };
       }
     } catch (error) {
       // Keeping whatever the events already delivered: with no daemon to pull
@@ -2917,17 +2865,17 @@
       const loaded = await invokeLoadKeymap();
       keymapLoadStatus = { kind: 'loaded', result: loaded };
       if (loaded.failure !== undefined && loaded.failure !== 'not_found') {
-        keymapNotice = banners.keymapLoadFailed;
+        noticeState = { ...noticeState, keymapNotice: banners.keymapLoadFailed };
         return;
       }
       const { discarded } = keymapStore.load(loaded);
       if (discarded > 0) {
-        keymapNotice = describeDiscardedKeymapEntries(discarded);
+        noticeState = { ...noticeState, keymapNotice: describeDiscardedKeymapEntries(discarded) };
       }
     } catch (error) {
       console.error('failed to load keymap:', error);
       keymapLoadStatus = { kind: 'rejected' };
-      keymapNotice = banners.keymapLoadFailed;
+      noticeState = { ...noticeState, keymapNotice: banners.keymapLoadFailed };
     }
   }
 
@@ -3045,7 +2993,7 @@
    */
   function reportBoundaryNotice(operation: BoundaryOperation, detail: unknown): void {
     logBoundaryFailure(operation, detail);
-    boundaryNotice = describeBoundaryNotice({ operation, detail });
+    noticeState = { ...noticeState, boundaryNotice: describeBoundaryNotice({ operation, detail }) };
   }
 
   /**
@@ -3055,16 +3003,22 @@
     console.error(`${operation} boundary error:`, detail);
   }
 
+  /** Records an event that reports an action that did not go through. */
+  function recordFailure(key: FailureEventKey, text: string): void {
+    const next = appendEvent(eventLog, noticeMemory, failureEvent(key, text));
+    eventLog = next.log;
+    noticeMemory = next.memory;
+  }
+
   /**
-   * Surfaces a refused window operation in the application-wide banner, the
-   * same place the daemon warnings go. Operations started here are not put to
+   * Records a refused window operation. Operations started here are not put to
    * a human approver -- this GUI is the approver -- so a refusal is a real
    * failure, including the one the core reports on its own when approver
    * registration has not succeeded yet (`ApproverNotRegistered`).
    */
   function reportOperationFailure(summary: string, error: unknown): void {
     console.error(summary, error);
-    operationError = describeOperationFailure(summary, error);
+    recordFailure('operation-failure', describeOperationFailure(summary, error));
   }
 
   async function refreshWindowList(): Promise<void> {
@@ -3089,9 +3043,8 @@
 
   /**
    * Fetches the restore candidates once at startup. A
-   * failure leaves the candidate list empty and surfaces
-   * `banners.restoreLoadFailed`; it is not part of `banner-model.ts`'s fixed
-   * banner set, so it renders through its own element.
+   * failure leaves the candidate list empty and records
+   * `banners.restoreLoadFailed`.
    */
   async function loadRestoreCandidates(): Promise<void> {
     try {
@@ -3100,7 +3053,7 @@
       restoreTakenAtEpochS = result.takenAtEpochS;
     } catch (error) {
       console.error('failed to list restore candidates:', error);
-      restoreLoadFailedNotice = banners.restoreLoadFailed;
+      recordFailure('restore-load-failed', banners.restoreLoadFailed);
     }
   }
 
@@ -3123,19 +3076,8 @@
     isRestoreDialogOpen = false;
   }
 
-  // The one offer to reopen the last session's windows. With no window open the
-  // work area makes it, so the banner and the work area never make it together.
-  $: restoreOffer =
-    restoreCandidates.length > 0 && !isRestoreBannerDismissed
-      ? {
-          count: restoreCandidates.length,
-          timestamp:
-            restoreTakenAtEpochS === null ? null : formatRestoreTimestamp(restoreTakenAtEpochS),
-        }
-      : null;
-
   function dismissRestoreBanner(): void {
-    isRestoreBannerDismissed = true;
+    noticeState = dismissNotice(noticeState, 'reopen-offer');
   }
 
   function toggleRestoreSelection(position: number): void {
@@ -3197,7 +3139,7 @@
       .filter((candidate) => restoreSelection.has(candidate.position))
       .sort((a, b) => a.position - b.position);
     isRestoreDialogOpen = false;
-    isRestoreBannerDismissed = true;
+    dismissRestoreBanner();
 
     const { opened, failed } = await restoreSelected(selected, invokeRestoreLaunch);
     for (const { name, failure } of failed) {
@@ -3213,7 +3155,7 @@
     returnFocusIfLost();
     const notice = restoreNoticeForFailures(failed);
     if (notice !== null) {
-      operationError = notice;
+      recordFailure('restore-not-restored', notice);
     }
   }
 
@@ -3387,7 +3329,7 @@
    * shown, and the dialog stays open on it.
    */
   async function handleOpenWindow(input: OpenWindowSubmission): Promise<void> {
-    detectionWarning = null;
+    noticeState = { ...noticeState, detectionWarning: null };
     // A blank detection definition is left out of the call: the core tells
     // "not provided" apart from an empty value, and validates both. One call
     // per branch: a profile carries its own command, detection definition and
@@ -3423,13 +3365,11 @@
       }
       throw failed;
     }
-    // Received under another name: the component state of the same name is
-    // what the warning is written to just below.
     const { windowId, detectionWarning: warning } = opened;
     // The window is open either way; a warning only says its status will
     // stay `Unknown` because the definition could not be loaded.
     if (warning !== null) {
-      detectionWarning = describeDetectionWarning(warning);
+      noticeState = { ...noticeState, detectionWarning: describeDetectionWarning(warning) };
     }
     // The pane is created from the window list, the same path the core's
     // poll takes, so opening twice cannot produce two panes for one window.
@@ -3539,26 +3479,17 @@
     renameDialog = { isOpen: true, entry };
   }
 
-  function handleDismissBanner(id: BannerId): void {
-    const next = dismissBanner(bannerState, id);
-    daemonSpawnNotice = next.daemonSpawnNotice;
-    operationError = next.operationError;
-    detectionWarning = next.detectionWarning;
-    keymapNotice = next.keymapNotice;
-    boundaryNotice = next.boundaryNotice;
-    isThemeLoadFailureDismissed = next.isThemeLoadFailureDismissed;
-    isThemeIssuesDismissed = next.isThemeIssuesDismissed;
-    approvalExpiredUnseen = next.approvalExpiredUnseen;
-    isDaemonRecoveryDismissed = next.isDaemonRecoveryDismissed;
-    clientConfigFailure = next.clientConfigFailure;
-    startupEnvFailure = next.startupEnvFailure;
-    isProfileUnavailableDismissed = next.isProfileUnavailableDismissed;
+  function handleDismissNotice(key: StateNoticeKey): void {
+    noticeState = dismissNotice(noticeState, key);
   }
 
-  function handleBannerAction(action: BannerAction): void {
+  function handleNoticeAction(action: NoticeAction): void {
     switch (action.labelKey) {
       case 'reconnect':
         void handleReconnect();
+        return;
+      case 'chooseWindows':
+        openRestoreDialog();
         return;
       case 'howToInstall':
         void showProfileInSettings(action.profileId);
@@ -3612,14 +3543,6 @@
 <svelte:document on:focusin={notePanelFocus} />
 
 <main class="app">
-  {#if restoreLoadFailedNotice !== null}
-    <div class="restore-load-failed" role="alert">{restoreLoadFailedNotice}</div>
-  {/if}
-
-  {#each daemonHealthNotices as notice (notice)}
-    <div class="restore-load-failed" role="alert">{notice}</div>
-  {/each}
-
   {#if restoreOffer !== null && $registry.windows.length > 0}
     <RestoreBanner
       count={restoreOffer.count}
@@ -3629,19 +3552,36 @@
     />
   {/if}
 
-  {#each activeBanners as banner (banner.id)}
+  {#each stateNotices as notice (`${notice.key}:${notice.detail ?? notice.title}`)}
     <div class="banner banner-warning" role="alert">
-      <span class="banner-text">{banner.text}</span>
-      {#if banner.action}
-        {@const action = banner.action}
-        <button class="banner-action" type="button" on:click={() => handleBannerAction(action)}>
+      <span class="banner-text">{notice.detail ?? notice.title}</span>
+      {#if notice.action}
+        {@const action = notice.action}
+        <button class="banner-action" type="button" on:click={() => handleNoticeAction(action)}>
           {buttons[action.labelKey]}
         </button>
       {/if}
+      {#if notice.dismissible}
+        <IconButton
+          class="banner-close"
+          label={hints.dismissBanner}
+          on:click={() => handleDismissNotice(notice.key)}
+        >
+          <Icon name="x" />
+        </IconButton>
+      {/if}
+    </div>
+  {/each}
+
+  {#each eventLog as event (event.seq)}
+    <div class="banner banner-warning" role="alert">
+      <span class="banner-text">{event.text}</span>
       <IconButton
         class="banner-close"
         label={hints.dismissBanner}
-        on:click={() => handleDismissBanner(banner.id)}
+        on:click={() => {
+          eventLog = dismissEvent(eventLog, event.seq);
+        }}
       >
         <Icon name="x" />
       </IconButton>
@@ -3952,18 +3892,6 @@
     background-color: var(--st-approval-tint);
     color: var(--fg-default);
     border-bottom-color: var(--st-approval);
-  }
-
-  /* The restore candidate fetch's failure notice. Not part of the
-     .banner/.banner-warning skeleton above -- RestoreBanner is deliberately
-     not integrated into banner-model.ts, so this stays a
-     distinct element rather than a second literal use of that class pair. */
-  .restore-load-failed {
-    padding: var(--space-sm) var(--space-md);
-    border-bottom: 1px solid var(--color-border);
-    background-color: var(--st-approval-tint);
-    color: var(--fg-default);
-    font-size: var(--font-size-sm);
   }
 
   .banner-text {

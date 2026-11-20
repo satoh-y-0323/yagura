@@ -1,6 +1,6 @@
 /**
  * Wire-adjacent literal types shared by the approval boundary
- * (`ipc/session-boundary.ts`) and the banner model (`banner-model.ts`).
+ * (`ipc/session-boundary.ts`) and the notice model (`notices/notice-model.ts`).
  *
  * Deliberately depends on neither `ipc/` nor `ui-messages`: both of those
  * modules import from here, and a dependency the other way would cycle.

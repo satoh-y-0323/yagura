@@ -6,6 +6,7 @@
 import type { DaemonRecoveryStatus } from '../session/recovery-types';
 import type { WindowGoneEvent } from '../session/shell-state';
 import { banners, describeExitedWindow } from '../ui-messages';
+import { classifyNotice } from './notice-model';
 
 /** The kinds of event the log records. */
 export type EventKey =
@@ -96,10 +97,31 @@ export function windowExitEvent(gone: GoneWindow): NewEvent | null {
     gone.orderBefore.find((entry) => entry.windowId === gone.windowId)?.name ?? gone.windowId;
   return {
     key: 'window-exit',
-    tone: gone.exitCode === 0 ? 'info' : 'warning',
+    tone: classifyNotice('window-exit', { exitCode: gone.exitCode }).tone,
     text: describeExitedWindow(name, gone.exitCode),
     toast: !gone.carded,
     windowId: gone.windowId,
+  };
+}
+
+/** The kinds of event that report an action that did not go through. */
+export type FailureEventKey = Extract<
+  EventKey,
+  'operation-failure' | 'restore-load-failed' | 'restore-not-restored'
+>;
+
+/**
+ * Makes the event for an action that did not go through.
+ * @param key which kind of failure it is
+ * @param text the sentence to show, already resolved for the active locale
+ */
+export function failureEvent(key: FailureEventKey, text: string): NewEvent {
+  return {
+    key,
+    tone: classifyNotice(key, {}).tone,
+    text,
+    toast: true,
+    windowId: null,
   };
 }
 
@@ -119,7 +141,7 @@ export function daemonReconnectedEvent(
   }
   return {
     key: 'daemon-reconnected',
-    tone: 'info',
+    tone: classifyNotice('daemon-reconnected', {}).tone,
     text: banners.daemonReconnected,
     toast: true,
     windowId: null,

@@ -251,13 +251,14 @@ export default [
     // `display/` holds the text preparation they draw through, so it is one of them.
     // `keymap/action-availability.ts` is the judgment those parts and the runner share, so it
     // reads no IPC or store either. `command-picker/` builds the picker's rows from what it is
-    // handed, so it is measured without IPC or stores.
+    // handed, so it is measured without IPC or stores. `notices/` decides what the app
+    // says from state it is handed, so it reads neither either.
     files: [
-      'src/banner-model.ts',
       'src/command-picker/**/*.ts',
       'src/components/**/*.{ts,svelte}',
       'src/display/**/*.ts',
       'src/keymap/action-availability.ts',
+      'src/notices/**/*.ts',
     ],
     ignores: [...TEST_SOURCES, 'src/components/TerminalPane.svelte'],
     rules: {

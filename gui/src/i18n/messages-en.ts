@@ -332,6 +332,16 @@ export const messagesEn = {
     daemonReconnecting: 'Lost the connection to the daemon. Reconnecting…',
     daemonReconnectFailed: 'Could not reconnect to the daemon after several attempts.',
     daemonReconnected: 'Reconnected to the daemon',
+
+    // The one line a blocking notice leads with; the sentence beneath it is its detail.
+    noticeTitles: {
+      startupEnvFailure: 'Started without a daemon',
+      daemonReconnecting: 'Lost the connection to the daemon',
+      daemonUnreachable: "Can't reach the daemon",
+      daemonHealth: "Windows can't be opened",
+      approverRegistrationRefused: 'Approvals are unavailable',
+      daemonProtocolStale: 'The daemon is too old to show windows',
+    },
     clientConfigLoadFailed:
       'Could not load the client settings. Falling back to the default reconnection settings.',
 

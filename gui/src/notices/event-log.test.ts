@@ -10,6 +10,7 @@ import {
   clearEvents,
   daemonReconnectedEvent,
   dismissEvent,
+  failureEvent,
   windowExitEvent,
 } from './event-log';
 import type { EventLog, GoneWindow, NewEvent } from './event-log';
@@ -220,4 +221,21 @@ describe('daemonReconnectedEvent', () => {
       expect(daemonReconnectedEvent(before, after)).toBeNull();
     }
   );
+});
+
+describe('failureEvent', () => {
+  // A failed action reads as an error; a restore that could not load or finish is a warning.
+  it.each([
+    ['operation-failure', 'error'],
+    ['restore-load-failed', 'warning'],
+    ['restore-not-restored', 'warning'],
+  ] as const)('gives %s the %s tone and a pop-up', (key, tone) => {
+    expect(failureEvent(key, 'text')).toEqual({
+      key,
+      tone,
+      text: 'text',
+      toast: true,
+      windowId: null,
+    });
+  });
 });

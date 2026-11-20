@@ -7,7 +7,7 @@
  * folded into their return value: that keeps the queue's four mutators
  * (`enqueue` / `withdraw` / `resolve` / `reset`) uniform (state in, state
  * out) and lets a caller decide, at the call site, whether an expiring
- * request needs to feed `banner-model.ts`'s unseen-approval count.
+ * request needs to feed `notices/notice-model.ts`'s unseen-approval count.
  */
 import { describe, it, expect } from 'vitest';
 

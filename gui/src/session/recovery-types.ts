@@ -1,8 +1,8 @@
 /**
  * Wire-adjacent literal types shared by the daemon-recovery boundary
- * (`ipc/session-boundary.ts`) and the banner model (`banner-model.ts`).
+ * (`ipc/session-boundary.ts`) and the notice model (`notices/notice-model.ts`).
  *
- * Deliberately depends on neither `ipc/` nor `banner-model`: both of those
+ * Deliberately depends on neither `ipc/` nor `notice-model`: both of those
  * modules import from here, and a dependency the other way would cycle.
  */
 
