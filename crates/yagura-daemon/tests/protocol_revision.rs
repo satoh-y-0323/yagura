@@ -6,7 +6,8 @@
 //!
 //! Four properties are measured here:
 //!
-//! - The daemon answers with the wire revision this build implements.
+//! - The daemon answers with the wire revision this build implements, and
+//!   with the boot it runs in when it has one.
 //! - The answer comes back from a connection that never sent `identify` or
 //!   `register_approver` -- the probe carries no permission gate.
 //! - The connection stays open and usable after the probe responds.
@@ -24,19 +25,36 @@ use crate::common;
 
 use common::{Harness, read_response, send};
 use yagura_daemon::DaemonConfig;
-use yagura_protocol::{ClientMessage, DaemonMessage};
+use yagura_protocol::{ClientMessage, DaemonMessage, StatusBoot};
 
 #[tokio::test]
-async fn probe_reports_this_builds_own_wire_revision() {
-    let harness = Harness::start("protocol-revision-value", DaemonConfig::default()).await;
-    let mut client = harness.connect().await;
+async fn probe_reports_this_builds_own_wire_revision_and_the_boot_it_runs_in() {
+    let booted = DaemonConfig {
+        status_boot: Some(StatusBoot { origin: 7, seq: 3 }),
+        ..DaemonConfig::default()
+    };
+    for (tag, config, boot) in [
+        ("protocol-revision-value", DaemonConfig::default(), None),
+        (
+            "protocol-revision-boot",
+            booted,
+            Some(StatusBoot { origin: 7, seq: 3 }),
+        ),
+    ] {
+        let harness = Harness::start(tag, config).await;
+        let mut client = harness.connect().await;
 
-    send(&mut client, &ClientMessage::GetProtocolRevision).await;
-    match read_response(&mut client).await {
-        DaemonMessage::ProtocolRevision { revision } => {
-            assert_eq!(revision, yagura_protocol::PROTOCOL_REVISION);
+        send(&mut client, &ClientMessage::GetProtocolRevision).await;
+        match read_response(&mut client).await {
+            DaemonMessage::ProtocolRevision {
+                revision,
+                boot: answered,
+            } => {
+                assert_eq!(revision, yagura_protocol::PROTOCOL_REVISION);
+                assert_eq!(answered, boot, "{tag}");
+            }
+            other => panic!("expected protocol_revision, got {other:?}"),
         }
-        other => panic!("expected protocol_revision, got {other:?}"),
     }
 }
 

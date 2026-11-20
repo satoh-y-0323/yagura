@@ -13,7 +13,6 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager};
 
 use crate::daemon_launch;
-use crate::events::EVENT_DAEMON_SPAWN_WARNING;
 use crate::frame_mailbox::FrameMailbox;
 use crate::instance::StartupContext;
 use crate::ipc_client::{IpcError, current_endpoint_with};
@@ -36,12 +35,13 @@ pub trait GuiHost: Clone + Send + Sync + 'static {
     /// unavailable.
     fn endpoint(&self) -> Result<String, IpcError>;
 
-    /// Starts the daemon detached.
+    /// Starts the daemon detached, returning the warning the WebView shows when
+    /// it had to be started the weaker way.
     ///
     /// # Errors
     /// Returns [`IpcError::DaemonNotFound`] or [`IpcError::DaemonSpawn`] when
     /// the daemon cannot be located or started.
-    fn spawn_daemon(&self) -> Result<(), IpcError>;
+    fn spawn_daemon(&self) -> Result<Option<String>, IpcError>;
 
     /// Emits `event` to the WebView, ignoring the (window-less) failure case.
     ///
@@ -65,11 +65,8 @@ impl GuiHost for AppHandle {
         current_endpoint_with(self.state::<StartupContext>().resolution())
     }
 
-    fn spawn_daemon(&self) -> Result<(), IpcError> {
-        let startup = self.state::<StartupContext>();
-        daemon_launch::spawn_daemon(&startup, |warning| {
-            self.emit_event(EVENT_DAEMON_SPAWN_WARNING, warning);
-        })
+    fn spawn_daemon(&self) -> Result<Option<String>, IpcError> {
+        daemon_launch::spawn_daemon(&self.state::<StartupContext>())
     }
 
     fn emit_event<P: Serialize + Clone>(&self, event: &str, payload: P) {

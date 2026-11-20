@@ -9,12 +9,11 @@ use yagura_os::{DetachedSpawn, OsError, resolve_sibling_executable, spawn_daemon
 
 use crate::config_paths::resolve_playbook_path;
 use crate::constants::{CONNECT_RETRY_INTERVAL, POST_SPAWN_CONNECT_RETRY_LIMIT};
-use crate::events::DaemonSpawnWarningPayload;
 use crate::instance::StartupContext;
 use crate::ipc_client::{Connection, IpcError, connect_retrying_with_limit};
 
-/// Starts the daemon detached, handing `warn` the warning the WebView must
-/// show when the platform refused the strongest detachment mode.
+/// Starts the daemon detached, returning the warning the WebView must show
+/// when the platform refused the strongest detachment mode.
 ///
 /// Passes no `--instance` flag: the daemon resolves the same instance this
 /// process did by inheriting `YAGURA_INSTANCE` from this process's own
@@ -24,15 +23,12 @@ use crate::ipc_client::{Connection, IpcError, connect_retrying_with_limit};
 /// # Errors
 /// Returns [`IpcError::DaemonNotFound`] when the daemon executable is not
 /// next to this one, and [`IpcError::DaemonSpawn`] when it cannot be started.
-pub(crate) fn spawn_daemon(
-    startup: &StartupContext,
-    warn: impl FnOnce(DaemonSpawnWarningPayload),
-) -> Result<(), IpcError> {
+pub(crate) fn spawn_daemon(startup: &StartupContext) -> Result<Option<String>, IpcError> {
     let path = resolve_daemon_path()?;
     let own_exe = std::env::current_exe()
         .and_then(|exe| exe.canonicalize())
         .map_err(|_| IpcError::DaemonSpawn)?;
-    spawn_daemon_with(&path, &own_exe, startup, spawn_daemon_detached, warn)
+    spawn_daemon_with(&path, &own_exe, startup, spawn_daemon_detached)
 }
 
 /// [`spawn_daemon`] with the executable, the GUI's own path and the launcher
@@ -41,15 +37,14 @@ pub(crate) fn spawn_daemon(
 ///
 /// When the platform refuses the strongest detachment mode,
 /// [`spawn_daemon_detached`] falls back to a weaker one and reports it through
-/// `used_fallback`; that fallback is surfaced because the GUI has no log of
-/// its own.
+/// `used_fallback`; that fallback is returned as a warning because the GUI has
+/// no log of its own.
 fn spawn_daemon_with(
     path: &Path,
     own_exe: &Path,
     startup: &StartupContext,
     launch: impl FnOnce(&Path, &[&OsStr]) -> Result<DetachedSpawn, OsError>,
-    warn: impl FnOnce(DaemonSpawnWarningPayload),
-) -> Result<(), IpcError> {
+) -> Result<Option<String>, IpcError> {
     let playbook_path = resolve_playbook_path(startup);
     // The daemon only accepts `register_approver` from the executable named
     // by `--approver-exe`, so the GUI passes its own path there.
@@ -59,13 +54,11 @@ fn spawn_daemon_with(
         args.push(playbook_path.as_os_str());
     }
     let spawn = launch(path, &args).map_err(|_| IpcError::DaemonSpawn)?;
-    if spawn.used_fallback {
-        warn(DaemonSpawnWarningPayload {
-            message: "The daemon was started without the strongest detachment mode; \n                      it may be terminated together with this window"
-                .to_owned(),
-        });
-    }
-    Ok(())
+    Ok(spawn.used_fallback.then(|| {
+        "The daemon was started without the strongest detachment mode; \
+         it may be terminated together with this window"
+            .to_owned()
+    }))
 }
 
 /// Resolves the daemon executable next to the GUI executable, through the
@@ -112,7 +105,6 @@ mod tests {
         launcher: Result<DetachedSpawn, OsError>,
     ) -> (Result<(), IpcError>, Launched, Vec<String>) {
         let launched = RefCell::new(Vec::new());
-        let warnings = RefCell::new(Vec::new());
         let outcome = spawn_daemon_with(
             Path::new("daemon"),
             Path::new("gui"),
@@ -124,9 +116,12 @@ mod tests {
                 ));
                 launcher
             },
-            |warning| warnings.borrow_mut().push(warning.message),
         );
-        (outcome, launched.into_inner(), warnings.into_inner())
+        let warnings = match &outcome {
+            Ok(warning) => warning.iter().cloned().collect(),
+            Err(_) => Vec::new(),
+        };
+        (outcome.map(|_| ()), launched.into_inner(), warnings)
     }
 
     fn startup_under(base: &Path) -> StartupContext {

@@ -1236,6 +1236,10 @@
         ]
       },
       "protocol_revision": {
+        "boot": {
+          "origin": "number",
+          "seq": "number"
+        },
         "revision": "number",
         "type": "string"
       },

@@ -20,6 +20,7 @@ use crate::attention::{AttentionState, MAIN_WINDOW_LABEL};
 use crate::connection_pool::ConnectionPool;
 use crate::constants::{MAX_PTY_DIMENSION, MIN_PTY_COLS, MIN_PTY_ROWS};
 use crate::daemon_supervisor::RecoverySupervisorState;
+use crate::events::DaemonConnectedPayload;
 use crate::instance::StartupContext;
 use crate::ipc_client::IpcError;
 use crate::pool_outcomes::{ApprovalSyncOutcome, CloseOutcome, DecideApprovalOutcome};
@@ -693,6 +694,18 @@ pub async fn reconnect_daemon(
 #[tauri::command(rename_all = "snake_case")]
 pub fn get_recovery_status(recovery: State<'_, RecoverySupervisorState>) -> RecoveryStatusReport {
     crate::daemon_supervisor::recovery_snapshot(&recovery)
+}
+
+/// The last daemon start the control connection announced, `None` when it
+/// has announced none yet: the GUI may reach a daemon before the WebView
+/// starts listening, and that start's spawn warning must not be lost.
+///
+/// Never returns `Err`: the value is held in memory.
+#[tauri::command(rename_all = "snake_case")]
+pub fn get_daemon_connection(
+    pool: State<'_, Arc<ConnectionPool>>,
+) -> Option<DaemonConnectedPayload> {
+    pool.daemon_connection()
 }
 
 /// Shows how many things wait for the user outside the WebView: the count in

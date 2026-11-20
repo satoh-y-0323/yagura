@@ -244,7 +244,8 @@
 //! determined. It removes the `exit` message, which no daemon sent. From this
 //! revision an `exit_code` of `-1` is a real code, not a stand-in for
 //! "unknown"; a caller establishes [`EXIT_CODE_ON_STATUS_MIN_REVISION`] before
-//! reading it that way.
+//! reading it that way. It also adds an optional `boot` to
+//! `protocol_revision`: the daemon start that answered.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -4134,12 +4135,18 @@ pub enum DaemonMessage {
         /// most recent activity.
         rooms: Vec<ChatRoomInfo>,
     },
-    /// Response to [`ClientMessage::GetProtocolRevision`].
+    /// Response to [`ClientMessage::GetProtocolRevision`]: this build's wire
+    /// revision, and the daemon start the answer comes from.
     ProtocolRevision {
         /// The wire revision the answering daemon implements -- its own
         /// build's [`PROTOCOL_REVISION`], which is not necessarily the
         /// caller's.
         revision: u32,
+        /// The boot the answering daemon runs in, so a client can tell that it
+        /// reached a different daemon start. `None` from a daemon built before
+        /// this field, or one that could not establish its boot.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        boot: Option<StatusBoot>,
     },
     /// Response to [`ClientMessage::GetDaemonHealth`].
     DaemonHealth {

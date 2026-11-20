@@ -235,9 +235,9 @@ fn reply_for(message: DaemonMessage) -> Option<(PendingKind, Reply)> {
         DaemonMessage::ChatRoomDeleted { room_id } => {
             Some((PendingKind::DeleteChatRoom, Reply::ChatRoomDeleted(room_id)))
         }
-        DaemonMessage::ProtocolRevision { revision } => Some((
+        DaemonMessage::ProtocolRevision { revision, boot } => Some((
             PendingKind::GetProtocolRevision,
-            Reply::ProtocolRevision(revision),
+            Reply::ProtocolRevision { revision, boot },
         )),
         DaemonMessage::DaemonHealth { problems } => Some((
             PendingKind::GetDaemonHealth,

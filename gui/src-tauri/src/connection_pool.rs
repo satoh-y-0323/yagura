@@ -30,6 +30,7 @@ use crate::commands::{
     ProfileListReply, RestoreCandidateListReply, RoleListReply, TicketListReply,
     UpdateWindowLayoutReply,
 };
+use crate::events::DaemonConnectedPayload;
 use crate::frame_mailbox::FrameMailbox;
 use crate::host::GuiHost;
 use crate::ipc_client::{ERROR_CODE_SUPERSEDED, IpcClient, IpcError};
@@ -1303,6 +1304,13 @@ impl ConnectionPool {
     /// a daemon that is already running rather than bringing one up.
     pub(crate) fn control_connection(&self) -> &Arc<IpcClient> {
         &self.control
+    }
+
+    /// The daemon start the control connection last announced, `None` before
+    /// the first. Kept after it is sent, for a WebView that starts listening
+    /// later.
+    pub(crate) fn daemon_connection(&self) -> Option<DaemonConnectedPayload> {
+        self.control.daemon_connection()
     }
 
     async fn window_or_error(&self, window_id: &str) -> Result<Arc<IpcClient>, IpcError> {

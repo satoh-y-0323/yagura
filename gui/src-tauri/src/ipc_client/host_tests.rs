@@ -7,17 +7,20 @@ use serde_json::json;
 use tokio::sync::Notify;
 use yagura_protocol::{
     ApprovalRequester, ApprovalRequesterKind, ApprovalTarget, DaemonMessage, MAX_PASTE_BYTES,
-    WindowStatus,
+    StatusBoot, WindowStatus,
 };
 use yagura_test_support::ipc::reply_within;
 
 use super::*;
 use crate::connection_pool::ConnectionPool;
-use crate::events::EVENT_WINDOW_LINK;
+use crate::events::{EVENT_DAEMON_CONNECTED, EVENT_WINDOW_LINK};
 use crate::host::fake::{
-    FakeHost, Link, Reaction, ScriptedDaemon, attach_pane, attached, brief, error_frame,
-    sample_palette, text,
+    FakeHost, Link, Reaction, RecordedEvent, ScriptedDaemon, announced, attach_pane, attached,
+    brief, connected, error_frame, probes_answered_in, protocol_revision, sample_palette, text,
 };
+
+const BOOT_A: StatusBoot = StatusBoot { origin: 7, seq: 1 };
+const BOOT_B: StatusBoot = StatusBoot { origin: 7, seq: 2 };
 
 /// A daemon that lets every window attach.
 fn attaching_daemon() -> ScriptedDaemon {
@@ -56,6 +59,21 @@ fn connection(received: &[ClientMessage], nth: usize) -> &[ClientMessage] {
     let start = *probes.get(nth).expect("that connection was made");
     let end = probes.get(nth + 1).copied().unwrap_or(received.len());
     &received[start..end]
+}
+
+/// The next link report about `window_id`, with every event emitted before
+/// it, which [`FakeHost::next_link`] would skip.
+async fn next_link_with_events(host: &FakeHost, window_id: &str) -> (Link, Vec<RecordedEvent>) {
+    let mut before = Vec::new();
+    loop {
+        let mut events = host.events_through(EVENT_WINDOW_LINK).await;
+        let link = events.pop().expect("the events end with the link report");
+        before.append(&mut events);
+        if link.payload["window_id"] == window_id {
+            return (Link::from_payload(&link.payload), before);
+        }
+        before.push(link);
+    }
 }
 
 fn is_input(request: &ClientMessage) -> bool {
@@ -115,6 +133,7 @@ async fn connecting_a_control_client_registers_it_and_settles_the_revision() {
         ]
     );
     assert_eq!(host.spawn_count(), 0);
+    assert_eq!(announced(&host.take_events()), [connected(None, None)]);
 }
 
 #[tokio::test]
@@ -156,6 +175,16 @@ async fn connecting_reaches_the_daemon_it_started() {
 
     assert_eq!(host.spawn_count(), 1);
     assert!(client.is_connected().await);
+    assert_eq!(announced(&host.take_events()), [connected(None, None)]);
+
+    // A daemon whose answer names no boot may be another boot on every
+    // connection, so each one is announced.
+    daemon.hang_up();
+    assert_eq!(
+        host.next_event(EVENT_DAEMON_CONNECTED).await,
+        connected(None, None)
+    );
+    assert_eq!(host.spawn_count(), 1);
 }
 
 #[tokio::test]
@@ -184,16 +213,22 @@ async fn a_connection_the_daemon_hangs_up_is_reported_as_disconnected_when_it_ca
 
 #[tokio::test]
 async fn a_lost_connection_is_restored_and_the_window_attached_again_as_it_was() {
-    let daemon = attaching_daemon();
+    let probe = probes_answered_in(vec![Some(BOOT_A), Some(BOOT_B)]);
+    let daemon = ScriptedDaemon::new(move |request| match request {
+        ClientMessage::AttachView { .. } => Reaction::reply(attached(false)),
+        _ => probe(request),
+    });
     let (host, _pool, client) = attached_window(&daemon, "restore").await;
-    let first = host.next_link("w1").await;
+    let (first, mut events) = next_link_with_events(&host, "w1").await;
     assert_eq!(first.state, "attached");
     let first_connection = daemon.received_at_least(3).await;
     assert_eq!(first_connection.len(), 3);
 
     daemon.hang_up();
-    let connecting = host.next_link("w1").await;
-    let reattached = host.next_link("w1").await;
+    let (connecting, more) = next_link_with_events(&host, "w1").await;
+    events.extend(more);
+    let (reattached, more) = next_link_with_events(&host, "w1").await;
+    events.extend(more);
     let all = daemon.received_at_least(6).await;
 
     assert_eq!(
@@ -218,6 +253,10 @@ async fn a_lost_connection_is_restored_and_the_window_attached_again_as_it_was()
     );
     assert!(client.is_connected().await);
     assert_eq!(client.window_id().await.as_deref(), Some("w1"));
+    assert!(
+        announced(&events).is_empty(),
+        "a window connection announces no daemon boot, even a new one"
+    );
 }
 
 #[tokio::test]
@@ -465,47 +504,74 @@ async fn input_typed_while_a_window_reconnects_reaches_it_after_what_was_asked_m
 }
 
 #[tokio::test]
-async fn a_registration_the_daemon_accepts_hands_the_pending_requests_to_the_webview() {
+async fn each_registration_the_daemon_accepts_hands_the_pending_requests_to_the_webview_before_a_new_boot_is_announced()
+ {
     let pending = vec![approval_request("a"), approval_request("b")];
+    let probe = probes_answered_in(vec![Some(BOOT_A), Some(BOOT_A), Some(BOOT_B)]);
     let daemon = ScriptedDaemon::new({
         let pending = pending.clone();
         move |request| match request {
             ClientMessage::RegisterApprover => Reaction::reply(DaemonMessage::ApproverRegistered {
                 pending: pending.clone(),
             }),
-            _ => None,
+            _ => probe(request),
         }
     });
     let host = FakeHost::served_by("accepted", &daemon).await;
     let client = Arc::new(IpcClient::new());
+    let handed = [
+        (
+            EVENT_APPROVAL_RESET.to_owned(),
+            json!({ "requests": pending }),
+        ),
+        (
+            EVENT_APPROVAL_REQUESTED.to_owned(),
+            json!({ "request": pending[0] }),
+        ),
+        (
+            EVENT_APPROVAL_REQUESTED.to_owned(),
+            json!({ "request": pending[1] }),
+        ),
+    ];
+    let named = |events: Vec<RecordedEvent>| -> Vec<(String, serde_json::Value)> {
+        events
+            .into_iter()
+            .map(|event| (event.name, event.payload))
+            .collect()
+    };
 
     client.connect(&host).await.expect("connect");
 
-    let events: Vec<_> = host
-        .take_events()
-        .into_iter()
-        .map(|event| (event.name, event.payload))
-        .collect();
-    assert_eq!(
-        events,
-        [
-            (
-                EVENT_APPROVAL_RESET.to_owned(),
-                json!({ "requests": pending })
-            ),
-            (
-                EVENT_APPROVAL_REQUESTED.to_owned(),
-                json!({ "request": pending[0] })
-            ),
-            (
-                EVENT_APPROVAL_REQUESTED.to_owned(),
-                json!({ "request": pending[1] })
-            ),
-        ]
-    );
+    let mut first = handed.to_vec();
+    first.push((
+        EVENT_DAEMON_CONNECTED.to_owned(),
+        connected(Some(BOOT_A), None),
+    ));
+    assert_eq!(named(host.take_events()), first);
     assert!(client.is_approver_registered());
     assert_eq!(client.sync_approvals(&host).await.expect("sync"), pending);
     assert!(host.take_events().is_empty(), "a pull emits nothing");
+
+    // The second connection reaches the same boot; the pull is a round trip
+    // behind its revision probe, so the probe has settled before the next
+    // hang-up.
+    daemon.hang_up();
+    daemon.received_at_least(5).await;
+    assert_eq!(client.sync_approvals(&host).await.expect("sync"), pending);
+    daemon.hang_up();
+    let through_third = host.events_through(EVENT_DAEMON_CONNECTED).await;
+
+    let mut later = handed.to_vec();
+    later.extend(handed.iter().cloned());
+    later.push((
+        EVENT_DAEMON_CONNECTED.to_owned(),
+        connected(Some(BOOT_B), None),
+    ));
+    assert_eq!(
+        named(through_third),
+        later,
+        "the same boot is not announced again, and a new one once, after the registration"
+    );
 }
 
 #[tokio::test]
@@ -547,6 +613,39 @@ async fn a_registration_refused_for_another_reason_stays_owed_and_is_not_reporte
     let pulled = client.sync_approvals(&host).await;
 
     assert!(refused_with(&pulled, ERROR_CODE_INTERNAL), "got {pulled:?}");
-    assert!(host.take_events().is_empty());
+    let reported: Vec<String> = host
+        .take_events()
+        .into_iter()
+        .map(|event| event.name)
+        .collect();
+    assert_eq!(
+        reported,
+        [EVENT_DAEMON_CONNECTED],
+        "the refusal reports nothing of its own"
+    );
     assert_eq!(client.approver_registration_due(), Some(1));
+}
+
+#[tokio::test]
+async fn a_connection_whose_revision_is_not_settled_announces_no_boot_and_the_next_one_does() {
+    let probes = AtomicUsize::new(0);
+    let daemon = ScriptedDaemon::new(move |request| match request {
+        ClientMessage::GetProtocolRevision => match probes.fetch_add(1, Ordering::SeqCst) {
+            0 => Reaction::reply(error_frame(ERROR_CODE_INTERNAL)),
+            _ => Reaction::reply(protocol_revision(Some(BOOT_A))),
+        },
+        _ => None,
+    });
+    let host = FakeHost::served_by("unsettled", &daemon).await;
+    let client = Arc::new(IpcClient::new());
+
+    client.connect(&host).await.expect("connect");
+
+    assert_eq!(client.protocol_revision(), None);
+    assert!(announced(&host.take_events()).is_empty());
+    daemon.hang_up();
+    assert_eq!(
+        host.next_event(EVENT_DAEMON_CONNECTED).await,
+        connected(Some(BOOT_A), None)
+    );
 }

@@ -985,7 +985,7 @@ fn daemon_message_corpus() -> Vec<DaemonMessage> {
         wire_sample!(DaemonMessage::ChatRoomCleared { room_id }),
         wire_sample!(DaemonMessage::ChatRoomDeleted { room_id }),
         wire_sample!(DaemonMessage::ChatHistoryCleared { room_id }),
-        wire_sample!(DaemonMessage::ProtocolRevision { revision }),
+        wire_sample!(DaemonMessage::ProtocolRevision { revision, boot }),
         wire_sample!(DaemonMessage::DaemonHealth { problems }),
         // Built from its wire form with the hook's deadline (revision 34),
         // which a daemon puts on the answer to a door's read.

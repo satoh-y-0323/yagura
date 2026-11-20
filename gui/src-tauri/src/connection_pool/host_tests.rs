@@ -5,15 +5,15 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use serde_json::json;
 use tokio::sync::Notify;
-use yagura_protocol::{DaemonMessage, MAX_PASTE_BYTES};
+use yagura_protocol::{DaemonMessage, MAX_PASTE_BYTES, StatusBoot};
 use yagura_test_support::ipc::reply_within;
 
 use super::*;
 use crate::constants::RECONNECT_ATTEMPT_LIMIT;
-use crate::events::EVENT_EXIT;
+use crate::events::{EVENT_DAEMON_CONNECTED, EVENT_EXIT};
 use crate::host::fake::{
-    FakeHost, Link, Reaction, ScriptedDaemon, attach_pane, attached, brief, error_frame,
-    sample_palette, text, window_info,
+    FakeHost, Link, Reaction, ScriptedDaemon, announced, attach_pane, attached, brief, connected,
+    error_frame, probes_answered_in, sample_palette, text, window_info,
 };
 use crate::ipc_client::ERROR_CODE_INTERNAL;
 use crate::window_record::MAX_PENDING_INPUT_BYTES;
@@ -174,11 +174,23 @@ async fn control_requests_reach_the_daemon_and_return_what_it_answers() {
 }
 
 #[tokio::test]
-async fn a_request_that_needs_a_daemon_starts_one_when_none_runs() {
-    let daemon = ScriptedDaemon::quiet();
+async fn a_request_that_needs_a_daemon_starts_one_when_none_runs_and_keeps_what_its_boot_announced()
+{
+    const BOOT_A: StatusBoot = StatusBoot { origin: 7, seq: 1 };
+    const BOOT_B: StatusBoot = StatusBoot { origin: 7, seq: 2 };
+    const WEAK_START: &str = "started without breaking away";
+    let daemon = ScriptedDaemon::new(probes_answered_in(vec![
+        Some(BOOT_A),
+        Some(BOOT_A),
+        Some(BOOT_B),
+    ]));
     let host = FakeHost::new("starts-for-request");
-    host.starts_daemon(&daemon);
+    host.starts_daemon_with_warning(&daemon, WEAK_START);
     let pool = ConnectionPool::new();
+    let last_announced = |pool: &ConnectionPool| {
+        serde_json::to_value(pool.daemon_connection()).expect("the announcement serializes")
+    };
+    assert_eq!(last_announced(&pool), json!(null), "nothing announced yet");
 
     pool.ensure_daemon_running(&host)
         .await
@@ -186,6 +198,33 @@ async fn a_request_that_needs_a_daemon_starts_one_when_none_runs() {
 
     assert_eq!(host.spawn_count(), 1);
     assert!(pool.has_live_control_connection().await);
+    // Read before any event is taken, as a WebView that subscribes late does.
+    let weak = connected(Some(BOOT_A), Some(WEAK_START));
+    assert_eq!(last_announced(&pool), weak);
+    assert_eq!(announced(&host.take_events()), std::slice::from_ref(&weak));
+
+    // The pull is a round trip behind the second connection's revision
+    // probe, so that connection has settled on the same boot.
+    daemon.hang_up();
+    daemon.received_at_least(4).await;
+    pool.control_connection()
+        .sync_approvals(&host)
+        .await
+        .expect("sync");
+    assert_eq!(
+        last_announced(&pool),
+        weak,
+        "the same boot keeps what it announced"
+    );
+
+    daemon.hang_up();
+    let started_elsewhere = connected(Some(BOOT_B), None);
+    assert_eq!(
+        host.next_event(EVENT_DAEMON_CONNECTED).await,
+        started_elsewhere
+    );
+    assert_eq!(last_announced(&pool), started_elsewhere);
+    assert_eq!(host.spawn_count(), 1);
 }
 
 #[tokio::test]

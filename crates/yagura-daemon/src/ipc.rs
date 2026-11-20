@@ -1839,10 +1839,12 @@ impl IpcServer {
             // caller has to learn which wire this daemon speaks before it can
             // know which requests are worth making, so gating the answer
             // would deny it exactly where it is needed most. The revision is
-            // a property of the build, not of the caller's rights.
+            // a property of the build, not of the caller's rights. The boot
+            // names this daemon start only, no window or user data.
             Ok(ClientMessage::GetProtocolRevision) => {
                 outbound.reply(&DaemonMessage::ProtocolRevision {
                     revision: PROTOCOL_REVISION,
+                    boot: self.config.status_boot,
                 });
                 FrameOutcome::Continue
             }

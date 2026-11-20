@@ -5,22 +5,23 @@
 //! answers frame by frame.
 
 use std::future::Future;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use serde::Serialize;
-use serde_json::Value;
+use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::{Notify, mpsc, watch};
 use yagura_os::{IpcTransport, PeerAuth, PlatformIpc};
 use yagura_protocol::{
-    ClientMessage, DaemonMessage, PROTOCOL_REVISION, Palette, TerminalSize, WindowInfo,
+    ClientMessage, DaemonMessage, PROTOCOL_REVISION, Palette, StatusBoot, TerminalSize, WindowInfo,
     WindowStatus, decode_client_message, encode_daemon_message, frame_encode,
 };
 use yagura_test_support::ipc::{reply_within, unique_endpoint_name};
 
 use super::GuiHost;
 use crate::connection_pool::ConnectionPool;
-use crate::events::EVENT_WINDOW_LINK;
+use crate::events::{EVENT_DAEMON_CONNECTED, EVENT_WINDOW_LINK};
 use crate::frame_mailbox::FrameMailbox;
 use crate::ipc_client::IpcError;
 
@@ -71,6 +72,45 @@ pub(crate) fn error_frame(code: &str) -> DaemonMessage {
         message: String::new(),
         rejected_argument: None,
     }
+}
+
+/// This build's revision answer from a daemon running in `boot`.
+pub(crate) fn protocol_revision(boot: Option<StatusBoot>) -> DaemonMessage {
+    DaemonMessage::ProtocolRevision {
+        revision: PROTOCOL_REVISION,
+        boot,
+    }
+}
+
+/// A script part that answers the `n`th revision probe, counted across
+/// connections from 0, from a daemon running in `boots[n]`, and every probe
+/// after the last one in the last boot.
+pub(crate) fn probes_answered_in(
+    boots: Vec<Option<StatusBoot>>,
+) -> impl Fn(&ClientMessage) -> Option<Reaction> + Send + Sync + 'static {
+    let probes = AtomicUsize::new(0);
+    move |request| match request {
+        ClientMessage::GetProtocolRevision => {
+            let nth = probes.fetch_add(1, Ordering::SeqCst);
+            let boot = boots.get(nth).or(boots.last()).copied().flatten();
+            Reaction::reply(protocol_revision(boot))
+        }
+        _ => None,
+    }
+}
+
+/// The daemon-connected payload the WebView reads: both keys always present.
+pub(crate) fn connected(boot: Option<StatusBoot>, spawn_warning: Option<&str>) -> Value {
+    json!({ "status_boot": boot, "spawn_warning": spawn_warning })
+}
+
+/// The payloads of the daemon-connected events among `events`, oldest first.
+pub(crate) fn announced(events: &[RecordedEvent]) -> Vec<Value> {
+    events
+        .iter()
+        .filter(|event| event.name == EVENT_DAEMON_CONNECTED)
+        .map(|event| event.payload.clone())
+        .collect()
 }
 
 /// A window as the daemon lists it, with nothing but its id and status set.
@@ -279,9 +319,7 @@ fn housekeeping(request: &ClientMessage) -> Option<Reaction> {
         ClientMessage::RegisterApprover => Reaction::reply(DaemonMessage::ApproverRegistered {
             pending: Vec::new(),
         }),
-        ClientMessage::GetProtocolRevision => Reaction::reply(DaemonMessage::ProtocolRevision {
-            revision: PROTOCOL_REVISION,
-        }),
+        ClientMessage::GetProtocolRevision => Reaction::reply(protocol_revision(None)),
         _ => None,
     }
 }
@@ -337,6 +375,8 @@ struct HostState {
     endpoint: Mutex<Option<String>>,
     /// The daemon a spawn brings up; `None` makes a spawn fail.
     daemon_on_spawn: Mutex<Option<ScriptedDaemon>>,
+    /// The warning a spawn that brings the daemon up hands back.
+    spawn_warning: Mutex<Option<String>>,
     spawns: watch::Sender<usize>,
     events: mpsc::UnboundedSender<RecordedEvent>,
     recorded: tokio::sync::Mutex<mpsc::UnboundedReceiver<RecordedEvent>>,
@@ -359,6 +399,7 @@ impl FakeHost {
             state: Arc::new(HostState {
                 endpoint: Mutex::new(Some(unique_endpoint_name(ENDPOINT_PREFIX, tag))),
                 daemon_on_spawn: Mutex::new(None),
+                spawn_warning: Mutex::new(None),
                 spawns: watch::channel(0).0,
                 events,
                 recorded: tokio::sync::Mutex::new(recorded),
@@ -392,6 +433,13 @@ impl FakeHost {
     /// Makes a daemon start bring `daemon` up on the host's endpoint.
     pub(crate) fn starts_daemon(&self, daemon: &ScriptedDaemon) {
         *self.state.daemon_on_spawn.lock().expect("spawn behaviour") = Some(daemon.clone());
+    }
+
+    /// Makes a daemon start bring `daemon` up the weaker way, handing back
+    /// `warning`.
+    pub(crate) fn starts_daemon_with_warning(&self, daemon: &ScriptedDaemon, warning: &str) {
+        self.starts_daemon(daemon);
+        *self.state.spawn_warning.lock().expect("spawn warning") = Some(warning.to_owned());
     }
 
     /// How many times the daemon was asked to start.
@@ -480,7 +528,7 @@ impl GuiHost for FakeHost {
             .ok_or(IpcError::NotConnected)
     }
 
-    fn spawn_daemon(&self) -> Result<(), IpcError> {
+    fn spawn_daemon(&self) -> Result<Option<String>, IpcError> {
         self.state.spawns.send_modify(|count| *count += 1);
         let daemon = self
             .state
@@ -491,7 +539,12 @@ impl GuiHost for FakeHost {
             .ok_or(IpcError::DaemonSpawn)?;
         let endpoint = self.endpoint_name();
         tokio::spawn(async move { daemon.listen(&endpoint).await });
-        Ok(())
+        Ok(self
+            .state
+            .spawn_warning
+            .lock()
+            .expect("spawn warning")
+            .clone())
     }
 
     fn emit_event<P: Serialize + Clone>(&self, event: &str, payload: P) {

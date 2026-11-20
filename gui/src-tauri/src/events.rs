@@ -25,12 +25,13 @@ pub const EVENT_EXIT: &str = "session://exit";
 /// never sets it. Payload: [`WindowLinkPayload`].
 pub const EVENT_WINDOW_LINK: &str = "session://window-link";
 
-/// The daemon had to be started with the weaker detachment fallback
-/// (`DetachedSpawn::used_fallback`). On Windows this means
-/// `CREATE_BREAKAWAY_FROM_JOB` was refused; on Unix `setsid` detachment has
-/// no such fallback, so this event never fires there. Payload:
-/// [`DaemonSpawnWarningPayload`].
-pub const EVENT_DAEMON_SPAWN_WARNING: &str = "session://daemon-spawn-warning";
+/// The control connection reached a daemon start it had not announced, so
+/// what belongs to a daemon start (its health, its profiles) should be read
+/// again. Payload: [`DaemonConnectedPayload`].
+///
+/// A WebView that starts listening after one has gone out reads the last
+/// one with its own request.
+pub const EVENT_DAEMON_CONNECTED: &str = "session://daemon-connected";
 
 /// A confirmed status transition of the child process. Payload:
 /// [`StatusPayload`].
@@ -150,12 +151,17 @@ pub struct WindowLinkPayload {
     pub epoch: u64,
 }
 
-/// Payload of [`EVENT_DAEMON_SPAWN_WARNING`].
-#[derive(Debug, Clone, Serialize)]
-pub struct DaemonSpawnWarningPayload {
-    /// English text the WebView shows to the user verbatim, so it names the
-    /// consequence rather than only the condition.
-    pub message: String,
+/// Payload of [`EVENT_DAEMON_CONNECTED`]. Both keys are always present.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct DaemonConnectedPayload {
+    /// The boot the daemon answered with; `None` from a daemon that names
+    /// none, which is announced on every control connection.
+    pub status_boot: Option<StatusBoot>,
+    /// English text the WebView shows verbatim when this client started the
+    /// daemon with the weaker detachment fallback
+    /// (`DetachedSpawn::used_fallback`), so it names the consequence. On Unix
+    /// `setsid` detachment has no such fallback, so it is never set there.
+    pub spawn_warning: Option<String>,
 }
 
 /// Payload of [`EVENT_STATUS`].

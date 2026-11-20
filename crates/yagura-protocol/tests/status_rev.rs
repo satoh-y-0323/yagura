@@ -21,8 +21,8 @@
 //! fail to compile.
 
 use yagura_protocol::{
-    DaemonMessage, ReportState, TaskReportMark, WindowInfo, WindowStatus, decode_daemon_message,
-    encode_daemon_message,
+    DaemonMessage, ReportState, StatusBoot, TaskReportMark, WindowInfo, WindowStatus,
+    decode_daemon_message, encode_daemon_message,
 };
 
 fn sample_window_info(status_rev: Option<u64>) -> WindowInfo {
@@ -226,4 +226,44 @@ fn a_report_state_this_build_does_not_know_decodes_as_unknown() {
         }
         other => panic!("expected status_changed, got {other:?}"),
     }
+}
+
+// ---------------------------------------------------------------------
+// DaemonMessage::ProtocolRevision.boot: the boot of the daemon answering
+// ---------------------------------------------------------------------
+
+#[test]
+fn protocol_revision_carries_the_answering_boot_and_omits_it_when_absent() {
+    match decode_daemon_message(br#"{"type":"protocol_revision","revision":36}"#)
+        .expect("a revision 36 answer decodes")
+    {
+        DaemonMessage::ProtocolRevision { revision, boot } => {
+            assert_eq!((revision, boot), (36, None));
+        }
+        other => panic!("expected protocol_revision, got {other:?}"),
+    }
+
+    let with_boot = DaemonMessage::ProtocolRevision {
+        revision: 37,
+        boot: Some(StatusBoot { origin: 7, seq: 3 }),
+    };
+    let body = encode_daemon_message(&with_boot);
+    let value: serde_json::Value = serde_json::from_slice(&body).expect("valid json");
+    assert_eq!(
+        value.get("boot"),
+        Some(&serde_json::json!({ "origin": 7, "seq": 3 })),
+        "got: {value}"
+    );
+    assert_eq!(decode_daemon_message(&body).expect("decode"), with_boot);
+
+    let without_boot = DaemonMessage::ProtocolRevision {
+        revision: 37,
+        boot: None,
+    };
+    let value: serde_json::Value =
+        serde_json::from_slice(&encode_daemon_message(&without_boot)).expect("valid json");
+    assert!(
+        value.get("boot").is_none(),
+        "boot: None must be omitted, not sent as null, got: {value}"
+    );
 }

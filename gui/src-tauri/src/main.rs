@@ -150,6 +150,7 @@ fn main() -> anyhow::Result<()> {
             commands::load_themes,
             commands::reconnect_daemon,
             commands::get_recovery_status,
+            commands::get_daemon_connection,
             commands::set_attention_summary
         ])
         .run(tauri::generate_context!())

@@ -23,8 +23,8 @@ use tokio::sync::{Mutex, oneshot};
 use yagura_os::{IpcTransport, OsError, PeerAuth, PlatformIpc, default_endpoint};
 use yagura_protocol::{
     ApprovalRequest, ClientMessage, DefaultPalettes, LaunchOptionAlias, McpRegistrationAction,
-    OnNameTaken, PROTOCOL_REVISION_BASELINE, PlanInfo, PlanSummary, RoleEntry, TaskAssignment,
-    TerminalSize, TicketInfo, TicketWorkspaceInfo, WindowInfo,
+    OnNameTaken, PROTOCOL_REVISION_BASELINE, PlanInfo, PlanSummary, RoleEntry, StatusBoot,
+    TaskAssignment, TerminalSize, TicketInfo, TicketWorkspaceInfo, WindowInfo,
 };
 
 use crate::commands::{
@@ -41,8 +41,9 @@ use crate::constants::{
 use crate::daemon_launch::connect_after_spawn;
 use crate::events::{
     ApprovalRegistrationRefusedPayload, ApprovalRequestedPayload, ApprovalResetPayload,
-    AttachResponse, EVENT_APPROVAL_REGISTRATION_REFUSED, EVENT_APPROVAL_REQUESTED,
-    EVENT_APPROVAL_RESET, EVENT_EXIT, ExitPayload, LinkLostReason,
+    AttachResponse, DaemonConnectedPayload, EVENT_APPROVAL_REGISTRATION_REFUSED,
+    EVENT_APPROVAL_REQUESTED, EVENT_APPROVAL_RESET, EVENT_DAEMON_CONNECTED, EVENT_EXIT,
+    ExitPayload, LinkLostReason,
 };
 use crate::host::GuiHost;
 use crate::instance::InstanceResolution;
@@ -250,9 +251,12 @@ pub(crate) enum Reply {
     ChatRoomCleared(String),
     /// The id of the room the daemon deleted.
     ChatRoomDeleted(String),
-    /// The wire revision the answering daemon implements, from
-    /// [`ClientMessage::GetProtocolRevision`]'s reply.
-    ProtocolRevision(u32),
+    /// The wire revision the answering daemon implements and the boot it runs
+    /// in, from [`ClientMessage::GetProtocolRevision`]'s reply.
+    ProtocolRevision {
+        revision: u32,
+        boot: Option<StatusBoot>,
+    },
     /// The problems the daemon lists, from [`ClientMessage::GetDaemonHealth`]'s
     /// reply.
     DaemonHealth(DaemonHealthReply),
@@ -347,6 +351,12 @@ pub struct IpcClient {
     /// The wire revision the peer settled on, and the `generation` it was
     /// settled for.
     settled: wire::SettledRevision,
+    /// The `generation` whose revision probe settled, and the boot the
+    /// daemon answered it with. A blocking mutex, never held across an await.
+    settled_boot: std::sync::Mutex<Option<(u64, Option<StatusBoot>)>>,
+    /// What a control connection last announced of the daemon start it
+    /// reached. A blocking mutex, never held across an await.
+    announcement: std::sync::Mutex<DaemonAnnouncement>,
     /// The window this client is attached to, or `None` for a control connection.
     /// Set by `request_attach` and cleared by `on_disconnect`.
     window_id: Mutex<Option<String>>,
@@ -370,6 +380,18 @@ pub struct IpcClient {
 /// names as its owner.
 static NEXT_SERIAL: AtomicU64 = AtomicU64::new(1);
 
+/// What a control connection told the WebView of the daemon start it
+/// reached, and the warning of a start it made that is not told yet.
+#[derive(Debug, Default)]
+struct DaemonAnnouncement {
+    /// Kept after it is sent: a WebView that starts listening later reads it.
+    last: Option<DaemonConnectedPayload>,
+    /// Held until the next announcement rather than tied to one connection,
+    /// so a start whose first connection settled no revision still reports
+    /// its warning; the next start this client makes replaces it.
+    spawn_warning: Option<String>,
+}
+
 /// [`IpcClient::set_default_palettes`]'s memory: the palettes, and the
 /// connection `generation` they were last sent on.
 #[derive(Debug, Default)]
@@ -389,6 +411,8 @@ impl Default for IpcClient {
             registered_generation: AtomicU64::new(u64::MAX),
             refused_generation: AtomicU64::new(u64::MAX),
             settled: wire::SettledRevision::new(),
+            settled_boot: std::sync::Mutex::new(None),
+            announcement: std::sync::Mutex::new(DaemonAnnouncement::default()),
             window_id: Mutex::new(None),
             record: None,
             serial: NEXT_SERIAL.fetch_add(1, Ordering::SeqCst),
@@ -1383,7 +1407,7 @@ impl IpcClient {
         {
             let mut slot = self.writer.lock().await;
             slot.clear();
-            if let Some(cancel) = lock_cancel(&self.cancel_reader).take() {
+            if let Some(cancel) = lock_blocking(&self.cancel_reader).take() {
                 let _ = cancel.send(());
             }
         }
@@ -1656,14 +1680,66 @@ impl IpcClient {
                 PendingKind::GetProtocolRevision,
             )
             .await;
-        let revision = match result {
-            Ok(Reply::ProtocolRevision(revision)) => revision,
+        let (revision, boot) = match result {
+            Ok(Reply::ProtocolRevision { revision, boot }) => (revision, boot),
             Err(IpcError::Rejected { code, .. }) if code == ERROR_CODE_UNKNOWN_TYPE => {
-                PROTOCOL_REVISION_BASELINE
+                (PROTOCOL_REVISION_BASELINE, None)
             }
             _ => return,
         };
+        *lock_blocking(&self.settled_boot) = Some((generation, boot));
         self.settled.store(revision, generation);
+    }
+
+    /// The boot the daemon answered this connection's revision probe with,
+    /// for `generation`; `None` when that generation has not settled one.
+    fn boot_settled_for(&self, generation: u64) -> Option<Option<StatusBoot>> {
+        match *lock_blocking(&self.settled_boot) {
+            Some((settled, boot)) if settled == generation => Some(boot),
+            _ => None,
+        }
+    }
+
+    /// What every new connection does before it is used. The announcement
+    /// comes last, so the WebView reads a new daemon start after what the
+    /// approver registration reported.
+    async fn after_connect(&self, app: &impl GuiHost) {
+        self.ensure_approver_registered(app).await;
+        self.ensure_protocol_revision().await;
+        self.resend_default_palettes().await;
+        self.announce_daemon_start(app);
+    }
+
+    /// Tells the WebView, on a control connection, that it reached a daemon
+    /// start it was not told of. A daemon that names no boot may be a new
+    /// start on every connection, so each one is announced. A generation that
+    /// settled no revision announces nothing; the next connection does.
+    fn announce_daemon_start(&self, app: &impl GuiHost) {
+        if self.role != Role::Control {
+            return;
+        }
+        let Some(boot) = self.boot_settled_for(self.generation.load(Ordering::SeqCst)) else {
+            return;
+        };
+        let mut announcement = lock_blocking(&self.announcement);
+        let told = announcement
+            .last
+            .as_ref()
+            .is_some_and(|last| boot.is_some() && last.status_boot == boot);
+        if told {
+            return;
+        }
+        let payload = DaemonConnectedPayload {
+            status_boot: boot,
+            spawn_warning: announcement.spawn_warning.take(),
+        };
+        app.emit_event(EVENT_DAEMON_CONNECTED, payload.clone());
+        announcement.last = Some(payload);
+    }
+
+    /// The daemon start this client last announced, `None` before the first.
+    pub(crate) fn daemon_connection(&self) -> Option<DaemonConnectedPayload> {
+        lock_blocking(&self.announcement).last.clone()
     }
 
     async fn connect_inner(
@@ -1685,7 +1761,8 @@ impl IpcClient {
         let connection = match reached {
             Some(connection) => connection,
             None if mode == ConnectMode::Spawn => {
-                app.spawn_daemon()?;
+                let warning = app.spawn_daemon()?;
+                lock_blocking(&self.announcement).spawn_warning = warning;
                 connect_after_spawn(&endpoint).await?
             }
             None => return Err(IpcError::NotConnected),
@@ -1694,9 +1771,7 @@ impl IpcClient {
         // Dropped explicitly before the requests below: `send` also locks
         // `writer`, and holding this guard across either would deadlock.
         drop(slot);
-        self.ensure_approver_registered(app).await;
-        self.ensure_protocol_revision().await;
-        self.resend_default_palettes().await;
+        self.after_connect(app).await;
         Ok(())
     }
 
@@ -1709,7 +1784,7 @@ impl IpcClient {
         let (reader, writer) = tokio::io::split(connection);
         slot.install(writer);
         let (cancel_tx, cancel_rx) = oneshot::channel();
-        *lock_cancel(&self.cancel_reader) = Some(cancel_tx);
+        *lock_blocking(&self.cancel_reader) = Some(cancel_tx);
         let generation = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
         app.spawn_task(read_loop(
             reader,
@@ -2026,9 +2101,7 @@ impl IpcClient {
             }
             self.install(app, connection, &mut slot);
         }
-        self.ensure_approver_registered(app).await;
-        self.ensure_protocol_revision().await;
-        self.resend_default_palettes().await;
+        self.after_connect(app).await;
 
         // A control connection has no attachment to restore.
         let Some(window_id) = window_id else {
@@ -2182,11 +2255,10 @@ fn client_message_wire_tag(body: &[u8]) -> String {
         .to_owned()
 }
 
-/// Locks the cancellation slot, recovering from poisoning: the slot holds one
-/// sender and a panicking holder cannot have left it inconsistent.
-fn lock_cancel(
-    slot: &std::sync::Mutex<Option<oneshot::Sender<()>>>,
-) -> std::sync::MutexGuard<'_, Option<oneshot::Sender<()>>> {
+/// Locks a blocking slot, recovering from poisoning: every slot it guards is
+/// replaced whole under the lock, so a panicking holder cannot have left one
+/// inconsistent.
+fn lock_blocking<T>(slot: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
@@ -3380,7 +3452,10 @@ mod tests {
                 &client,
                 &mut peer,
                 PendingKind::GetProtocolRevision,
-                Ok(Reply::ProtocolRevision(yagura_protocol::PROTOCOL_REVISION)),
+                Ok(Reply::ProtocolRevision {
+                    revision: yagura_protocol::PROTOCOL_REVISION,
+                    boot: None,
+                }),
             )
             .await;
             assert_eq!(probe, ClientMessage::GetProtocolRevision);
@@ -3407,7 +3482,14 @@ mod tests {
 
     #[tokio::test]
     async fn the_revision_the_daemon_answers_is_settled_for_the_current_generation() {
-        let client = probe_settled_with("probe-answered", Ok(Reply::ProtocolRevision(9))).await;
+        let client = probe_settled_with(
+            "probe-answered",
+            Ok(Reply::ProtocolRevision {
+                revision: 9,
+                boot: None,
+            }),
+        )
+        .await;
         assert_eq!(client.protocol_revision(), Some(9));
     }
 
