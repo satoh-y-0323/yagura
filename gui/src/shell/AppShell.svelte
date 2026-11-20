@@ -2012,7 +2012,7 @@
       })
       .catch((error: unknown) => {
         console.error('failed to decide approval:', error);
-        approvals = approvalQueue.clearInFlight(approvals, requestId);
+        approvals = approvalQueue.failDecision(approvals, requestId);
         recordFailure('operation-failure', banners.approvalDecisionFailed);
       });
   }

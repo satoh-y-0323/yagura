@@ -28,11 +28,16 @@ export interface ApprovalQueueState {
    * its way.
    */
   readonly inFlightIds: ReadonlySet<string>;
+  /**
+   * Ids of the requests whose last decision failed to reach the daemon. The
+   * failure note is shown only while one of these is the displayed request.
+   */
+  readonly failedIds: ReadonlySet<string>;
 }
 
 /** A queue holding nothing. */
 export function emptyQueue(): ApprovalQueueState {
-  return { items: [], shownIds: new Set(), inFlightIds: new Set() };
+  return { items: [], shownIds: new Set(), inFlightIds: new Set(), failedIds: new Set() };
 }
 
 /**
@@ -99,7 +104,7 @@ export function reset(
   const shownIds = new Set(
     requests.map((entry) => entry.request_id).filter((id) => state.shownIds.has(id))
   );
-  return { items: [...requests], shownIds, inFlightIds: new Set() };
+  return { items: [...requests], shownIds, inFlightIds: new Set(), failedIds: new Set() };
 }
 
 /**
@@ -184,15 +189,32 @@ export function markInFlight(state: ApprovalQueueState, requestId: string): Appr
 }
 
 /**
- * Clears a request's in-flight mark, e.g. after its decision failed to reach
- * the daemon and may be retried.
+ * Records that a request's decision failed to reach the daemon: the request is
+ * offered again and remembered as failed. An id that is not in flight is
+ * ignored, so a failure landing after the request was decided or withdrawn
+ * cannot mark a later request that reuses the id.
  * @param state the current queue
- * @param requestId the request to offer again
+ * @param requestId the request whose decision failed
  */
-export function clearInFlight(state: ApprovalQueueState, requestId: string): ApprovalQueueState {
+export function failDecision(state: ApprovalQueueState, requestId: string): ApprovalQueueState {
+  if (!state.inFlightIds.has(requestId)) {
+    return state;
+  }
   const inFlightIds = new Set(state.inFlightIds);
   inFlightIds.delete(requestId);
-  return { ...state, inFlightIds };
+  const failedIds = new Set(state.failedIds);
+  failedIds.add(requestId);
+  return { ...state, inFlightIds, failedIds };
+}
+
+/**
+ * Whether the failure note belongs on `requestId`: its own decision failed.
+ * A failure of another request never shows on this one.
+ * @param state the current queue
+ * @param requestId the displayed request's id
+ */
+export function decisionFailed(state: ApprovalQueueState, requestId: string): boolean {
+  return state.failedIds.has(requestId);
 }
 
 /**
@@ -207,16 +229,19 @@ export function isWithinGuard(openedAt: number, now: number): boolean {
 
 /**
  * Drops the entry with `requestId`, keeping the order of the rest, and drops
- * it from `inFlightIds` too: a decided or withdrawn id must not stay hidden
+ * it from `inFlightIds` and `failedIds` too: a decided or withdrawn id must not stay hidden
  * from `head()` forever if it is ever re-enqueued (e.g. after a reconnect
  * that never went through `reset`).
  */
 function removeRequest(state: ApprovalQueueState, requestId: string): ApprovalQueueState {
   const inFlightIds = new Set(state.inFlightIds);
   inFlightIds.delete(requestId);
+  const failedIds = new Set(state.failedIds);
+  failedIds.delete(requestId);
   return {
     items: state.items.filter((entry) => entry.request_id !== requestId),
     shownIds: state.shownIds,
     inFlightIds,
+    failedIds,
   };
 }

@@ -25,7 +25,8 @@ import {
   size,
   isWithinGuard,
   markInFlight,
-  clearInFlight,
+  failDecision,
+  decisionFailed,
   windowsAwaitingPermission,
   type ApprovalQueueState,
 } from './approval-queue';
@@ -300,18 +301,19 @@ describe('ApprovalQueueState shape', () => {
   it('emptyQueue() satisfies the ApprovalQueueState contract used above', () => {
     const state: ApprovalQueueState = emptyQueue();
     expect(state.items).toEqual([]);
+    expect(state.failedIds.size).toBe(0);
   });
 });
 
 // ---------------------------------------------------------------------------
 // In-flight tracking: `decideApproval` marks a
-// request in-flight before invoking `decide_approval` and clears it again on
-// failure, so the dialog does not re-offer a request whose decision is still
+// request in-flight before invoking `decide_approval` and passes it through
+// `failDecision` on failure, so the dialog does not re-offer a request whose decision is still
 // in transit, without needing an optimistic removal that a failed round trip
 // would then have to undo.
 // ---------------------------------------------------------------------------
 
-describe('markInFlight / clearInFlight: head() and size()', () => {
+describe('markInFlight / failDecision: head() and size()', () => {
   it('head() skips an in-flight request and offers the next one instead', () => {
     let state = emptyQueue();
     state = enqueue(state, makeRequest('req-a'));
@@ -338,11 +340,11 @@ describe('markInFlight / clearInFlight: head() and size()', () => {
     expect(size(state)).toBe(2);
   });
 
-  it('clearInFlight makes head() offer the request again', () => {
+  it('failDecision makes head() offer the request again', () => {
     let state = emptyQueue();
     state = enqueue(state, makeRequest('req-a'));
     state = markInFlight(state, 'req-a');
-    state = clearInFlight(state, 'req-a');
+    state = failDecision(state, 'req-a');
 
     expect(head(state)?.request_id).toBe('req-a');
   });
@@ -354,7 +356,7 @@ describe('markInFlight / clearInFlight: head() and size()', () => {
     state = markInFlight(state, 'req-a');
 
     expect(head(state)?.request_id).toBe('req-b');
-    state = clearInFlight(state, 'req-b');
+    state = failDecision(state, 'req-b');
     expect(head(state)?.request_id).toBe('req-b');
   });
 });
@@ -481,8 +483,8 @@ describe('in-flight marks: edges', () => {
     let state = enqueue(enqueue(emptyQueue(), makeRequest('req-a')), makeRequest('req-b'));
     state = markInFlight(markInFlight(state, 'req-a'), 'req-b');
 
-    state = clearInFlight(state, 'req-a');
-    state = clearInFlight(state, 'req-unknown');
+    state = failDecision(state, 'req-a');
+    state = failDecision(state, 'req-unknown');
 
     expect(head(state)?.request_id).toBe('req-a');
     state = markInFlight(state, 'req-a');
@@ -506,6 +508,119 @@ describe('in-flight marks: edges', () => {
 
     expect(head(state)).toBeNull();
     expect(size(state)).toBe(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// A failed decision is remembered per request, because `head` skips in-flight
+// requests: while one decision is being sent the dialog shows another request,
+// and a note about the failure must only ever appear on the request whose
+// decision did not get through.
+// ---------------------------------------------------------------------------
+
+describe('failDecision / decisionFailed: which request carries the failure note', () => {
+  /** A and B pending, A's decision in flight, so the dialog shows B. */
+  function sendingA(): ApprovalQueueState {
+    let state = enqueue(enqueue(emptyQueue(), makeRequest('req-a')), makeRequest('req-b'));
+    state = markInFlight(state, 'req-a');
+    expect(head(state)?.request_id).toBe('req-b');
+    return state;
+  }
+
+  it('puts no note on the request that was shown while the failed one was in flight', () => {
+    const state = failDecision(sendingA(), 'req-a');
+
+    expect(decisionFailed(state, 'req-b')).toBe(false);
+  });
+
+  it('puts no note on the head while the failed request is being sent again', () => {
+    let state = failDecision(sendingA(), 'req-a');
+    state = markInFlight(state, 'req-a');
+
+    const shown = head(state);
+    expect(shown?.request_id).toBe('req-b');
+    expect(decisionFailed(state, shown?.request_id ?? '')).toBe(false);
+  });
+
+  it('puts the note on the failed request once it is the head again', () => {
+    let state = failDecision(sendingA(), 'req-a');
+    state = resolve(state, 'req-b');
+
+    const shown = head(state);
+    expect(shown?.request_id).toBe('req-a');
+    expect(decisionFailed(state, shown?.request_id ?? '')).toBe(true);
+  });
+
+  it('remembers two failures, and shows each note when that request is the head', () => {
+    let state = enqueue(enqueue(emptyQueue(), makeRequest('req-a')), makeRequest('req-b'));
+    state = markInFlight(markInFlight(state, 'req-a'), 'req-b');
+    state = failDecision(failDecision(state, 'req-a'), 'req-b');
+
+    expect(head(state)?.request_id).toBe('req-a');
+    expect(decisionFailed(state, 'req-a')).toBe(true);
+    state = resolve(state, 'req-a');
+    expect(head(state)?.request_id).toBe('req-b');
+    expect(decisionFailed(state, 'req-b')).toBe(true);
+  });
+
+  it('ignores a failure for a request whose decision is not in flight', () => {
+    const state = enqueue(enqueue(emptyQueue(), makeRequest('req-a')), makeRequest('req-b'));
+
+    const after = failDecision(state, 'req-b');
+
+    expect(decisionFailed(after, 'req-b')).toBe(false);
+    expect(head(after)?.request_id).toBe('req-a');
+  });
+
+  it('ignores a failure that lands after the request was withdrawn, so a later request with that id has no note', () => {
+    let state = withdraw(sendingA(), 'req-a');
+
+    state = failDecision(state, 'req-a');
+
+    expect(holds(state, 'req-a')).toBe(false);
+    state = enqueue(state, makeRequest('req-a'));
+    expect(decisionFailed(state, 'req-a')).toBe(false);
+  });
+
+  it('drops the note when the failed request is decided, and keeps the note of another', () => {
+    let state = enqueue(enqueue(emptyQueue(), makeRequest('req-a')), makeRequest('req-b'));
+    state = markInFlight(markInFlight(state, 'req-a'), 'req-b');
+    state = failDecision(failDecision(state, 'req-a'), 'req-b');
+
+    state = resolve(state, 'req-a');
+    state = enqueue(state, makeRequest('req-a'));
+
+    expect(decisionFailed(state, 'req-a')).toBe(false);
+    expect(decisionFailed(state, 'req-b')).toBe(true);
+  });
+
+  it('drops the note when the failed request is withdrawn, and keeps the note of another', () => {
+    let state = enqueue(enqueue(emptyQueue(), makeRequest('req-a')), makeRequest('req-b'));
+    state = markInFlight(markInFlight(state, 'req-a'), 'req-b');
+    state = failDecision(failDecision(state, 'req-a'), 'req-b');
+
+    state = withdraw(state, 'req-a');
+    state = enqueue(state, makeRequest('req-a'));
+
+    expect(decisionFailed(state, 'req-a')).toBe(false);
+    expect(decisionFailed(state, 'req-b')).toBe(true);
+  });
+
+  it('drops every note on reset, even for an id the replacement list still holds', () => {
+    let state = failDecision(sendingA(), 'req-a');
+
+    state = reset(state, [makeRequest('req-a'), makeRequest('req-b')]);
+
+    expect(decisionFailed(state, 'req-a')).toBe(false);
+    expect(state.failedIds.size).toBe(0);
+  });
+
+  it('keeps the note across a merge, which removes no request', () => {
+    let state = failDecision(sendingA(), 'req-a');
+
+    state = merge(state, [makeRequest('req-b'), makeRequest('req-c')]);
+
+    expect(decisionFailed(state, 'req-a')).toBe(true);
   });
 });
 
