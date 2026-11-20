@@ -2472,6 +2472,9 @@ async fn the_mark_on_an_open_turn_ends_the_windows_own_waits_and_those_it_starts
     let mut own = own_wait(&turns).await;
     let mut other = turns.h.connect().await;
     start_wait_for_exit(&mut other, &turns.window_id).await;
+    // The hook's Running is confirmed through the detector's debounce, not when the hook returns.
+    let mut client = turns.h.connect().await;
+    wait_until_status(&mut client, &turns.window_id, WindowStatus::Running).await;
     let status = turns.entry().current_status();
 
     turns
