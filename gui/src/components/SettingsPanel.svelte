@@ -12,6 +12,7 @@
   import ApprovalSettings from './ApprovalSettings.svelte';
   import IntegrationSettings from './IntegrationSettings.svelte';
   import KeyboardSettings from './KeyboardSettings.svelte';
+  import NotificationSettings from './NotificationSettings.svelte';
   import { closeOnEscape } from './panel-focus';
   import type { RoleEntry } from '../ipc/plan-boundary';
   import type { ApprovalSettingsInfo } from '../ipc/session-client';
@@ -25,6 +26,8 @@
   import type { Keys } from '../keymap/keymap-model';
   import type { KeymapSaveFailureKind } from '../keymap/keymap-store';
   import type { KeymapLoadStatus } from '../settings/keyboard-settings-model';
+  import type { NoticeCategory } from '../notices/notice-model';
+  import type { NotificationPreferences } from '../notices/notification-preferences';
   import type { ProfileDetailActions, ProfileDetailsState } from '../settings/profile-detail-model';
   import { SETTINGS_TABS, type SettingsTab } from '../settings/settings-tabs';
   import { observeSize } from './observe-size';
@@ -64,6 +67,8 @@
   export let onBeginRecording: (onResult: (chord: string | null) => void) => void;
   export let onCancelRecording: () => void;
   export let onCommit: (edit: (keys: Keys) => Keys) => Promise<boolean>;
+  export let notificationPreferences: NotificationPreferences;
+  export let onSetNotificationPreference: (category: NoticeCategory, enabled: boolean) => void;
   export let size: PanelSize;
   export let maxSize: PanelSize;
   export let onResize: (size: PanelSize) => void;
@@ -74,6 +79,7 @@
     approvals: settings.approvalsTab,
     integrations: settings.integrationsTab,
     keyboard: settings.keyboardTab,
+    notifications: settings.notificationsTab,
   };
 </script>
 
@@ -148,6 +154,12 @@
         {onBeginRecording}
         {onCancelRecording}
         {onCommit}
+      />
+    {/if}
+    {#if activeTab === 'notifications'}
+      <NotificationSettings
+        preferences={notificationPreferences}
+        onSetPreference={onSetNotificationPreference}
       />
     {/if}
   </div>

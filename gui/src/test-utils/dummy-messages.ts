@@ -417,6 +417,17 @@ export const dummyMessages: Messages = {
     integrationsListFailure: 'DUMMY_settings_integrationsListFailure',
     integrationRunFailure: (name: string) => `DUMMY_settings_integrationRunFailure(${name})`,
 
+    notificationsTab: 'DUMMY_settings_notificationsTab',
+    notificationsDescription: 'DUMMY_settings_notificationsDescription',
+    notificationsColumnName: 'DUMMY_settings_notificationsColumnName',
+    notificationsColumnInApp: 'DUMMY_settings_notificationsColumnInApp',
+    notificationsRowName: (row: string) => `DUMMY_settings_notificationsRowName(${row})`,
+    notificationsRowDescription: (row: string) =>
+      `DUMMY_settings_notificationsRowDescription(${row})`,
+    notificationsSwitchLabel: (rowName: string) =>
+      `DUMMY_settings_notificationsSwitchLabel(${rowName})`,
+    notificationsAlwaysShown: 'DUMMY_settings_notificationsAlwaysShown',
+
     keyboardTab: 'DUMMY_settings_keyboardTab',
     keyboardDescription: 'DUMMY_settings_keyboardDescription',
     keyboardChange: 'DUMMY_settings_keyboardChange',

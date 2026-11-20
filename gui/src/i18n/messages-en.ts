@@ -1,3 +1,5 @@
+import type { NoticeCategory } from '../notices/notice-model';
+
 /**
  * The consequence shared by every message that tells the user to restart the
  * daemon: restarting closes every window that is
@@ -39,6 +41,42 @@ const EVENT_TIME = new Intl.DateTimeFormat('en', {
   minute: '2-digit',
   hourCycle: 'h23',
 });
+
+const NOTIFICATIONS_IN_APP_COLUMN = 'In app';
+
+/** One settings row per notice kind; a kind added to `NoticeCategory` fails to compile until it is named here. */
+const NOTIFICATION_ROWS: Readonly<Record<NoticeCategory, { name: string; description: string }>> = {
+  'needs-approval': {
+    name: 'Needs approval',
+    description:
+      'A window is waiting for you to allow something. Its row in the sidebar stays marked.',
+  },
+  'needs-input': {
+    name: 'Needs input',
+    description: 'A window is waiting for your input. Its row in the sidebar stays marked.',
+  },
+  'window-exits': {
+    name: 'Window exits',
+    description: 'A window ended without you closing it.',
+  },
+  reconnected: {
+    name: 'Reconnected',
+    description: 'The connection to the daemon came back.',
+  },
+  'failed-actions': {
+    name: 'Failed actions',
+    description: 'Something you asked for could not be done.',
+  },
+  'setup-problems': {
+    name: 'Setup problems',
+    description:
+      'A setting, the keymap, a theme, a profile or a detection file could not be used as written.',
+  },
+  'last-session': {
+    name: 'Last session',
+    description: 'Windows from your last session can be reopened.',
+  },
+};
 
 const KEYBOARD_GROUP_HEADINGS = {
   find: 'Go to and commands',
@@ -971,6 +1009,23 @@ export const messagesEn = {
       KEYBOARD_SAVE_FAILURES[kind],
     keyboardEditBlocked: (block: keyof typeof KEYBOARD_EDIT_BLOCKS, location: string): string =>
       KEYBOARD_EDIT_BLOCKS[block](location),
+
+    // The Notifications tab: which notice kinds may pop up in the app.
+    notificationsTab: 'Notifications',
+    notificationsDescription:
+      'Choose which notifications pop up. One you turn off is not read aloud either, and stays ' +
+      'in the Notifications list. Windows that need you are not listed there; their rows in the ' +
+      'sidebar stay marked.',
+    notificationsColumnName: 'Notification',
+    notificationsColumnInApp: NOTIFICATIONS_IN_APP_COLUMN,
+    notificationsRowName: (row: NoticeCategory): string => NOTIFICATION_ROWS[row].name,
+    notificationsRowDescription: (row: NoticeCategory): string =>
+      NOTIFICATION_ROWS[row].description,
+    notificationsSwitchLabel: (rowName: string): string =>
+      `${rowName}, ${NOTIFICATIONS_IN_APP_COLUMN}`,
+    notificationsAlwaysShown:
+      'Always shown: alerts that keep yagura from working, the approval dialog, and approval ' +
+      'requests that expired before you answered.',
   },
 
   nav: {

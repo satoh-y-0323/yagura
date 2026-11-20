@@ -53,6 +53,7 @@
     recordApprovalExpiredUnseen,
     reopenOffer,
     type NoticeAction,
+    type NoticeCategory,
     type NoticeSourceState,
     type StateNoticeKey,
   } from '../notices/notice-model';
@@ -258,6 +259,12 @@
     type ShellState,
   } from '../session/shell-state';
   import { createGuardedLocalStorage } from '../storage/guarded-storage';
+  import {
+    NOTIFICATION_PREFERENCES_KEY,
+    readPreferences,
+    withPreference,
+    writePreferences,
+  } from '../notices/notification-preferences';
   import { createRoomActions } from '../session/room-actions';
   import {
     createPendingFocus,
@@ -591,6 +598,13 @@
   // the one operation it can start (switching a profile on or off).
   let isSettingsOpen = false;
   let settingsTab: SettingsTab = 'profiles';
+  const notificationPreferencesStorage = createGuardedLocalStorage(NOTIFICATION_PREFERENCES_KEY);
+  let notificationPreferences = readPreferences(notificationPreferencesStorage.read());
+
+  function handleSetNotificationPreference(category: NoticeCategory, enabled: boolean): void {
+    notificationPreferences = withPreference(notificationPreferences, category, enabled);
+    notificationPreferencesStorage.write(writePreferences(notificationPreferences));
+  }
   // The profile currently being switched, `null` while none is in flight;
   // handed to the Settings panel so it can freeze the row being saved.
   let savingProfileId: string | null = null;
@@ -3777,6 +3791,8 @@
     onBeginRecording={shortcutDispatcher.beginRecording}
     onCancelRecording={shortcutDispatcher.cancelRecording}
     onCommit={keymapStore.commit}
+    {notificationPreferences}
+    onSetNotificationPreference={handleSetNotificationPreference}
     size={settingsPanelSize}
     maxSize={panelMax}
     onResize={handleSettingsPanelResize}
