@@ -5,7 +5,12 @@
  */
 import type { DaemonRecoveryStatus } from '../session/recovery-types';
 import type { WindowGoneEvent } from '../session/shell-state';
-import { banners, describeExitedWindow } from '../ui-messages';
+import {
+  banners,
+  describeExitedWindow,
+  describeExitedWindowParts,
+  type TitleParts,
+} from '../ui-messages';
 import { classifyNotice } from './notice-model';
 
 /** The kinds of event the log records. */
@@ -22,6 +27,8 @@ export interface NewEvent {
   tone: 'info' | 'warning' | 'error';
   /** The sentence shown for the event, already resolved for the active locale. */
   text: string;
+  /** `text` split around the window's name, so a card cuts only the name short; `null` when it names none. */
+  parts: TitleParts | null;
   /** Whether the event may pop up as a toast; `false` when something else already shows it. */
   toast: boolean;
   /** The window the event is about, `null` when it is about no window. */
@@ -95,6 +102,7 @@ export function windowExitEvent(gone: GoneWindow): NewEvent | null {
     key: 'window-exit',
     tone: classifyNotice('window-exit', { exitCode: gone.exitCode }).tone,
     text: describeExitedWindow(name, gone.exitCode),
+    parts: describeExitedWindowParts(name, gone.exitCode),
     toast: !gone.carded,
     windowId: gone.windowId,
   };
@@ -116,6 +124,7 @@ export function failureEvent(key: FailureEventKey, text: string): NewEvent {
     key,
     tone: classifyNotice(key, {}).tone,
     text,
+    parts: null,
     toast: true,
     windowId: null,
   };
@@ -139,6 +148,7 @@ export function daemonReconnectedEvent(
     key: 'daemon-reconnected',
     tone: classifyNotice('daemon-reconnected', {}).tone,
     text: banners.daemonReconnected,
+    parts: null,
     toast: true,
     windowId: null,
   };

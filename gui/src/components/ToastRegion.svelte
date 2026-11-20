@@ -12,23 +12,20 @@
   import { tick } from 'svelte';
 
   import type { NoticeAction } from '../notices/notice-model';
-  import type { NoticeFeedOutput, ToastItem } from '../notices/notice-feed';
+  import type { LaneItem, NoticeFeedOutput } from '../notices/notice-feed';
   import { banners } from '../ui-messages';
   import { pressedByKeyboard } from './press-source';
   import Toast from './Toast.svelte';
 
-  export let toasts: Pick<
-    NoticeFeedOutput['toasts'],
-    'visible' | 'overflowWaiting' | 'overflowNotices'
-  >;
+  export let lane: Pick<NoticeFeedOutput['lane'], 'visible' | 'moreCalls' | 'moreNotices'>;
   /** The line beneath each pop-up's title, by pop-up id; the shell decides what it says. */
   export let secondLines: ReadonlyMap<string, string> = new Map();
   /** False while the app is hidden or not focused; the shell decides. */
   export let timersRunning: boolean;
   export let onAction: (action: NoticeAction) => void;
   export let onGoToWindow: (windowId: string) => void;
-  export let onDismiss: (item: ToastItem) => void;
-  export let onExpire: (item: ToastItem) => void;
+  export let onDismiss: (item: LaneItem) => void;
+  export let onExpire: (item: LaneItem) => void;
   /** Opens the sidebar's Needs you filter. */
   export let onShowWaiting: () => void;
   /** Opens the Notifications list. */
@@ -42,9 +39,9 @@
     return region.querySelector<HTMLElement>(`[data-toast-id="${CSS.escape(id)}"]`);
   }
 
-  async function dismiss(item: ToastItem, index: number, event: MouseEvent): Promise<void> {
+  async function dismiss(item: LaneItem, index: number, event: MouseEvent): Promise<void> {
     const held = toastElement(item.id)?.contains(document.activeElement) ?? false;
-    const neighbour = toasts.visible[index + 1] ?? toasts.visible[index - 1];
+    const neighbour = lane.visible[index + 1] ?? lane.visible[index - 1];
     onDismiss(item);
     if (!held) {
       return;
@@ -68,7 +65,7 @@
 
 <!-- A section with an accessible name is a region landmark. -->
 <section class="toast-region" aria-label={banners.notificationPopUps} bind:this={region}>
-  {#each toasts.visible as item, index (item.id)}
+  {#each lane.visible as item, index (item.id)}
     <Toast
       {item}
       secondLine={secondLines.get(item.id) ?? null}
@@ -79,16 +76,16 @@
       onExpire={() => onExpire(item)}
     />
   {/each}
-  {#if toasts.overflowWaiting > 0 || toasts.overflowNotices > 0}
+  {#if lane.moreCalls > 0 || lane.moreNotices > 0}
     <div class="toast-region__more">
-      {#if toasts.overflowWaiting > 0}
+      {#if lane.moreCalls > 0}
         <button type="button" class="toast-region__count" on:click={onShowWaiting}>
-          {banners.waitingForYouMore(toasts.overflowWaiting)}
+          {banners.waitingForYouMore(lane.moreCalls)}
         </button>
       {/if}
-      {#if toasts.overflowNotices > 0}
+      {#if lane.moreNotices > 0}
         <button type="button" class="toast-region__count" on:click={onShowNotifications}>
-          {banners.notificationsMore(toasts.overflowNotices)}
+          {banners.notificationsMore(lane.moreNotices)}
         </button>
       {/if}
     </div>

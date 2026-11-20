@@ -14,25 +14,36 @@ import {
 } from './event-log';
 import type { EventLog, GoneWindow, NewEvent } from './event-log';
 
-// The facade binds English; resolving the exit sentence against the dummy
-// locale proves the event's text is the card's sentence, not a copy of it.
-vi.mock('../ui-messages', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('../ui-messages')>();
+// Binding the facade to the dummy locale proves the event's text and parts are
+// the card's sentence, not a copy of it.
+vi.mock('../i18n/messages', async () => {
   const dummy = await import('../test-utils/dummy-messages');
-  const render = await import('../i18n/render');
-  return {
-    ...actual,
-    describeExitedWindow: (name: string, exitCode: number | null) =>
-      render.describeExitedWindow(dummy.dummyMessages, name, exitCode),
-  };
+  return { resolveMessages: () => dummy.dummyMessages };
 });
 
 function dummyExitSentence(name: string, exitCode: number | null): string {
   return renderDescribeExitedWindow(dummyMessages, name, exitCode);
 }
 
+/** The card draws the event from its parts: the name alone, and the words around it. */
+function expectPartsOf(event: NewEvent | null, name: string): void {
+  const parts = event?.parts ?? null;
+  if (event === null || parts === null) {
+    throw new Error('expected a window exit event with parts');
+  }
+  expect(parts.name).toBe(name);
+  expect(`${parts.before}${parts.name}${parts.after}`).toBe(event.text);
+}
+
 function failure(text: string): NewEvent {
-  return { key: 'operation-failure', tone: 'error', text, toast: true, windowId: null };
+  return {
+    key: 'operation-failure',
+    tone: 'error',
+    text,
+    parts: null,
+    toast: true,
+    windowId: null,
+  };
 }
 
 function appendAll(
@@ -146,12 +157,14 @@ describe('windowExitEvent', () => {
       text: dummyExitSentence('builder', 1),
       toast: true,
     });
+    expectPartsOf(event, 'builder');
   });
 
   it('uses the sentence without a code when the code is not known', () => {
     const event = windowExitEvent(goneFrom('w-3', null, { goneByUser: false, carded: false }));
 
     expect(event?.text).toBe(dummyExitSentence('reviewer', null));
+    expectPartsOf(event, 'reviewer');
   });
 
   it('marks the event of a window that left a card as not a pop-up, and keeps it in the log', () => {
@@ -215,6 +228,7 @@ describe('failureEvent', () => {
       key,
       tone,
       text: 'text',
+      parts: null,
       toast: true,
       windowId: null,
     });

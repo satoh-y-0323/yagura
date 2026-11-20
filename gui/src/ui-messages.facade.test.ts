@@ -74,6 +74,16 @@ const CASES: ReadonlyArray<[string, () => unknown, () => unknown]> = [
     () => render.describeWindowCall(messages, 'reviewer', 'waiting_approval'),
   ],
   [
+    'describeWindowCallParts',
+    () => facade.describeWindowCallParts('reviewer', 'waiting_input'),
+    () => render.describeWindowCallParts(messages, 'reviewer', 'waiting_input'),
+  ],
+  [
+    'describeExitedWindowParts',
+    () => facade.describeExitedWindowParts('reviewer', 1),
+    () => render.describeExitedWindowParts(messages, 'reviewer', 1),
+  ],
+  [
     'describeNoticeAndMore',
     () => facade.describeNoticeAndMore('builder exited', 3),
     () => render.describeNoticeAndMore(messages, 'builder exited', 3),

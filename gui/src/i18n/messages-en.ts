@@ -15,6 +15,35 @@ const APPROVAL_STILL_WAITS_FOR_APPROVAL = 'It still waits for your approval.';
 const PLAN_STILL_REVIEWS_FIRST = 'It still reviews new plans before they run.';
 const PLAN_STILL_RUNS_WITHOUT_REVIEW = 'It still runs new plans without review.';
 
+/** A sentence split around the name it holds, so a card can cut the name short and keep the rest. */
+export interface TitleParts {
+  before: string;
+  name: string;
+  after: string;
+}
+
+/** The sentence a set of parts makes; each sentence with a name is built from its parts. */
+function joinParts(parts: TitleParts): string {
+  return `${parts.before}${parts.name}${parts.after}`;
+}
+
+const windowNeedsApprovalParts = (name: string): TitleParts => ({
+  before: '“',
+  name,
+  after: '” needs approval',
+});
+const windowNeedsInputParts = (name: string): TitleParts => ({
+  before: '“',
+  name,
+  after: '” needs input',
+});
+const windowExitedParts = (name: string): TitleParts => ({ before: '“', name, after: '” exited' });
+const windowExitedWithCodeParts = (name: string, code: number): TitleParts => ({
+  before: '“',
+  name,
+  after: `” exited (exit code ${code})`,
+});
+
 /** `focusNextWindow` -> `focus-next-window`, at the type level. */
 type KebabCase<S extends string> = S extends `${infer Head}${infer Tail}`
   ? `${Head extends Lowercase<Head> ? Head : `-${Lowercase<Head>}`}${KebabCase<Tail>}`
@@ -423,8 +452,12 @@ export const messagesEn = {
     actionsAvailable: 'Actions available',
     /** A pop-up that later events of its kind were folded into: the latest event's sentence first. */
     noticeAndMore: (sentence: string, count: number): string => `${sentence} and ${count} more`,
-    windowNeedsApproval: (name: string): string => `“${name}” needs approval`,
-    windowNeedsInput: (name: string): string => `“${name}” needs input`,
+    windowNeedsApprovalParts,
+    windowNeedsInputParts,
+    windowNeedsApproval: (name: string): string => joinParts(windowNeedsApprovalParts(name)),
+    windowNeedsInput: (name: string): string => joinParts(windowNeedsInputParts(name)),
+    // A card's go-to sentence; the arrow beside it is drawn, not said.
+    goToCallingWindowParts: (name: string): TitleParts => ({ before: 'Go to “', name, after: '”' }),
     goToWindow: 'Go to window',
     waitingForYouMore: (count: number): string => `+${count} waiting for you`,
     notificationsMore: (count: number): string => `+${count} more in Notifications`,
@@ -1082,9 +1115,11 @@ export const messagesEn = {
       const base = `Reopen ${subject} from your last session`;
       return timestamp === null ? base : `${base} (saved ${timestamp})`;
     },
-    windowExited: (name: string): string => `“${name}” exited`,
+    windowExitedParts,
+    windowExitedWithCodeParts,
+    windowExited: (name: string): string => joinParts(windowExitedParts(name)),
     windowExitedWithCode: (name: string, code: number): string =>
-      `“${name}” exited (exit code ${code})`,
+      joinParts(windowExitedWithCodeParts(name, code)),
     exitedBody:
       "yagura didn't switch to another window, so nothing you type goes to a different CLI.",
     goToWindow: (name: string): string => `Go to ${name}`,

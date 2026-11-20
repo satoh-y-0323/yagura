@@ -12,6 +12,7 @@ import {
   describeDiscardedKeymapEntries as renderDescribeDiscardedKeymapEntries,
   describeEventTime as renderDescribeEventTime,
   describeExitedWindow as renderDescribeExitedWindow,
+  describeExitedWindowParts as renderDescribeExitedWindowParts,
   describeGoToWindow as renderDescribeGoToWindow,
   describeHaltReason as renderDescribeHaltReason,
   describeInterruptHint as renderDescribeInterruptHint,
@@ -35,6 +36,7 @@ import {
   describeUnknownExplanation as renderDescribeUnknownExplanation,
   describeUnknownReasonSuffix as renderDescribeUnknownReasonSuffix,
   describeWindowCall as renderDescribeWindowCall,
+  describeWindowCallParts as renderDescribeWindowCallParts,
   describeWindowHeader as renderDescribeWindowHeader,
   describeWindowLocation as renderDescribeWindowLocation,
   describeWindowRow as renderDescribeWindowRow,
@@ -43,6 +45,7 @@ import {
   type PickerWindowRowFacts,
   type WindowHeaderFacts,
 } from './i18n/render';
+import type { TitleParts } from './i18n/messages-en';
 import type { PickerEmpty, PickerMode } from './command-picker/picker-model';
 import type { ChatDeliveryOutcome, DetectedStatusView, WindowStatus } from './ipc/session-boundary';
 import type { ActionBlockReason } from './keymap/action-availability';
@@ -52,6 +55,9 @@ const messages = resolveMessages();
 
 /** The shape every locale fills, for a locale written outside `i18n/` such as a test's. */
 export type { Messages } from './i18n/messages';
+
+/** A sentence split around the name it holds. */
+export type { TitleParts };
 
 /** Status display strings. */
 export const statusLabels = messages.statusLabels;
@@ -115,6 +121,15 @@ export function describeExitedWindow(name: string, exitCode: number | null): str
 }
 
 /**
+ * The exited window's sentence split around its name.
+ * @param name the window's display name
+ * @param exitCode the exit code, or null if not yet determined
+ */
+export function describeExitedWindowParts(name: string, exitCode: number | null): TitleParts {
+  return renderDescribeExitedWindowParts(messages, name, exitCode);
+}
+
+/**
  * Describes the button that goes to another window.
  * @param name the window's display name
  */
@@ -132,6 +147,18 @@ export function describeWindowCall(
   status: Extract<WindowStatus, 'waiting_approval' | 'waiting_input'>
 ): string {
   return renderDescribeWindowCall(messages, name, status);
+}
+
+/**
+ * A calling window's sentence split around its name.
+ * @param name the window's display name
+ * @param status which call it is
+ */
+export function describeWindowCallParts(
+  name: string,
+  status: Extract<WindowStatus, 'waiting_approval' | 'waiting_input'>
+): TitleParts {
+  return renderDescribeWindowCallParts(messages, name, status);
 }
 
 /**

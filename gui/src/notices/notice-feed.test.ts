@@ -10,8 +10,8 @@ import {
   type NeedsYouToastState,
   type NeedsYouToastWindow,
 } from './needs-you-toasts';
-import { emptyNoticeMemory, emptyToastSlots, dismissToast, noticeFeed } from './notice-feed';
-import type { NoticeMemory, ToastSlots } from './notice-feed';
+import { emptyNoticeMemory, emptyLaneState, dismissLaneNotice, noticeFeed } from './notice-feed';
+import type { LaneState, NoticeFeedInput, NoticeMemory } from './notice-feed';
 import type { NoticeAction, NoticeCategory, NoticeDraft, StateNoticeKey } from './notice-model';
 import { NOTICE_CATEGORIES } from './notice-model';
 import {
@@ -28,14 +28,16 @@ vi.mock('../i18n/messages', async () => {
 });
 
 type FeedOutput = ReturnType<typeof noticeFeed>;
-type ToastItem = FeedOutput['toasts']['visible'][number];
+type LaneItem = FeedOutput['lane']['visible'][number];
+type Capacity = NoticeFeedInput['capacity'];
 
 /** Everything the shell keeps between two runs of the feed, and the inputs it passes. */
 interface Shell {
   drafts: NoticeDraft[];
   log: EventLog;
   memory: NoticeMemory;
-  slots: ToastSlots;
+  lane: LaneState;
+  capacity: Capacity;
   needsYou: NeedsYouToastState;
   prefs: NotificationPreferences;
   openModalCount: number;
@@ -56,7 +58,9 @@ function shell(): Shell {
     drafts: [],
     log: [],
     memory: emptyNoticeMemory(),
-    slots: emptyToastSlots(),
+    lane: emptyLaneState(),
+    // Three cards fit with or without the counts, as on a lane 900px wide.
+    capacity: { all: 3, withMore: 3 },
     needsYou: emptyNeedsYouToastState(),
     prefs: readPreferences(null),
     openModalCount: 0,
@@ -76,11 +80,12 @@ function run(s: Shell): FeedOutput {
     needsYou: s.needsYou,
     prefs: s.prefs,
     openModalCount: s.openModalCount,
-    slots: s.slots,
+    lane: s.lane,
+    capacity: s.capacity,
     windowNames: s.windowNames,
   });
   s.memory = out.memory;
-  s.slots = out.toasts.slots;
+  s.lane = out.lane.state;
   return out;
 }
 
@@ -115,6 +120,7 @@ function exitOf(windowId: string, exitCode: number, toast = true): NewEvent {
     key: 'window-exit',
     tone: exitCode === 0 ? 'info' : 'warning',
     text: `exit-${windowId}`,
+    parts: null,
     toast,
     windowId,
   };
@@ -134,33 +140,36 @@ function observe(
 }
 
 function titles(out: FeedOutput): string[] {
-  return out.toasts.visible.map((item) => item.title);
+  return out.lane.visible.map((item) => item.title);
 }
 
 function callIds(out: FeedOutput): (string | null)[] {
-  return out.toasts.visible
-    .filter((item) => item.kind === 'needs-you')
-    .map((item) => item.windowId);
+  return out.lane.visible.filter((item) => item.kind === 'needs-you').map((item) => item.windowId);
 }
 
-function toastTitled(out: FeedOutput, title: string): ToastItem {
-  const item = out.toasts.visible.find((entry) => entry.title === title);
+/** The lane left to right: a window call by its window, a notice by its title. */
+function shown(out: FeedOutput): string[] {
+  return out.lane.visible.map((item) => item.windowId ?? item.title);
+}
+
+function toastTitled(out: FeedOutput, title: string): LaneItem {
+  const item = out.lane.visible.find((entry) => entry.title === title);
   if (item === undefined) {
-    throw new Error(`no toast titled ${title}`);
+    throw new Error(`no card titled ${title}`);
   }
   return item;
 }
 
 function toastOfKind(
   out: FeedOutput,
-  kind: ToastItem['kind'],
+  kind: LaneItem['kind'],
   windowId: string | null = null
-): ToastItem {
-  const item = out.toasts.visible.find(
+): LaneItem {
+  const item = out.lane.visible.find(
     (entry) => entry.kind === kind && (windowId === null || entry.windowId === windowId)
   );
   if (item === undefined) {
-    throw new Error(`no ${kind} toast`);
+    throw new Error(`no ${kind} card`);
   }
   return item;
 }
@@ -174,7 +183,7 @@ function seqOf(out: FeedOutput, title: string): number {
 }
 
 function dismiss(s: Shell, out: FeedOutput, title: string): void {
-  s.slots = dismissToast(s.slots, toastTitled(out, title).id);
+  s.lane = dismissLaneNotice(s.lane, toastTitled(out, title).id);
 }
 
 function allOff(): NotificationPreferences {
@@ -186,6 +195,15 @@ function allOff(): NotificationPreferences {
 
 const more = (sentence: string, count: number): string =>
   dummyMessages.banners.noticeAndMore(sentence, count);
+
+/** What a card on the lane reads out: its sentence, then that it can be acted on. */
+const card = (sentence: string): string =>
+  dummyMessages.formats
+    .sentences([sentence, dummyMessages.banners.actionsAvailable])
+    .slice('DUMMY_sentences('.length, -1);
+
+const { windowNeedsApproval, windowNeedsInput, waitingForYouMore, notificationsMore } =
+  dummyMessages.banners;
 
 describe('notice feed: when a notice pops up', () => {
   it('pops a state notice up once while it says the same, and again once it says something new', () => {
@@ -205,7 +223,7 @@ describe('notice feed: when a notice pops up', () => {
     const s = shell();
     s.drafts = [setup('detection-warning', 'same'), setup('keymap-notice', 'same')];
     const out = run(s);
-    expect(out.toasts.visible).toHaveLength(2);
+    expect(out.lane.visible).toHaveLength(2);
     expect(new Set(out.center.map((notice) => notice.seq)).size).toBe(2);
   });
 
@@ -250,14 +268,71 @@ describe('notice feed: when a notice pops up', () => {
   });
 });
 
-describe('notice feed: three slots', () => {
-  it('shows three toasts at most and counts the rest as waiting in Notifications', () => {
+describe('notice feed: how many cards the lane shows', () => {
+  it('shows every item while they fit, picks approvals, then input waits, then notices once they do not, keeps them in the order they came, and brings back what a narrower lane left out, showing nothing before it is measured', () => {
     const s = shell();
-    s.drafts = ['s-1', 's-2', 's-3', 's-4'].map((title) => setup('detection-warning', title));
-    const out = run(s);
-    expect(titles(out)).toEqual(['s-1', 's-2', 's-3']);
-    expect(out.toasts.overflowNotices).toBe(1);
-    expect(out.toasts.overflowWaiting).toBe(0);
+    s.drafts = ['s-1', 's-2'].map((title) => setup('detection-warning', title));
+    run(s);
+    observe(s, [win('w-b', 'waiting_input')], ['w-b']);
+    run(s);
+    observe(s, [win('w-b', 'waiting_input'), win('w-a', 'waiting_approval')], ['w-a']);
+    s.capacity = { all: 4, withMore: 3 };
+    const fits = run(s);
+    expect(shown(fits)).toEqual(['s-1', 's-2', 'w-b', 'w-a']);
+    expect([fits.lane.moreCalls, fits.lane.moreNotices]).toEqual([0, 0]);
+
+    const narrower: readonly [Capacity, string[], number, number][] = [
+      [{ all: 3, withMore: 3 }, ['s-1', 'w-b', 'w-a'], 0, 1],
+      [{ all: 3, withMore: 2 }, ['w-b', 'w-a'], 0, 2],
+      [{ all: 2, withMore: 1 }, ['w-a'], 1, 2],
+      [{ all: 1, withMore: 1 }, ['w-a'], 1, 2],
+      // Wide again: what the narrower lanes left out is back, where it came in.
+      [{ all: 4, withMore: 3 }, ['s-1', 's-2', 'w-b', 'w-a'], 0, 0],
+    ];
+    for (const [capacity, cards, moreCalls, moreNotices] of narrower) {
+      s.capacity = capacity;
+      const out = run(s);
+      expect(shown(out)).toEqual(cards);
+      expect([out.lane.moreCalls, out.lane.moreNotices]).toEqual([moreCalls, moreNotices]);
+      // A change of width shows or hides cards, and reads nothing again.
+      expect(out.announce).toEqual({ polite: null, assertive: null });
+    }
+
+    // Until the lane is measured nothing is up, what comes stays, and each arrival is read as its card.
+    const unmeasured = shell();
+    unmeasured.capacity = null;
+    unmeasured.drafts = ['s-1', 's-2', 's-3', 's-4'].map((title) =>
+      setup('detection-warning', title)
+    );
+    const first = run(unmeasured);
+    observe(unmeasured, [win('w-a', 'waiting_approval')], ['w-a']);
+    const second = run(unmeasured);
+    expect(shown(first)).toEqual([]);
+    expect(shown(second)).toEqual([]);
+    for (const title of ['s-1', 's-2', 's-3', 's-4']) {
+      expect(first.announce.polite).toContain(card(title));
+    }
+    expect(second.announce.polite).toContain(card(windowNeedsApproval('alpha')));
+
+    unmeasured.capacity = { all: 5, withMore: 4 };
+    const measured = run(unmeasured);
+    expect(shown(measured)).toEqual(['s-1', 's-2', 's-3', 's-4', 'w-a']);
+    expect(measured.announce).toEqual({ polite: null, assertive: null });
+  });
+
+  it.each([
+    [0, { all: 1, withMore: 1 }],
+    [280, { all: 1, withMore: 1 }],
+    [391, { all: 1, withMore: 1 }],
+    [663, { all: 2, withMore: 2 }],
+    [800, { all: 3, withMore: 2 }],
+    [879, { all: 3, withMore: 2 }],
+    [880, { all: 3, withMore: 3 }],
+    [900, { all: 3, withMore: 3 }],
+    [1063, { all: 4, withMore: 3 }],
+  ] as const)('fits %ipx of work area to %o cards', async (width, capacity) => {
+    const { laneCapacity } = await import('./lane-capacity');
+    expect(laneCapacity(width, { card: 240, gap: 8, padding: 8, chip: 56 })).toEqual(capacity);
   });
 
   it('lets the notice that waited longest in once a toast goes', () => {
@@ -266,45 +341,69 @@ describe('notice feed: three slots', () => {
       setup('detection-warning', title)
     );
     const first = run(s);
+    // The cards up are read as cards; the ones left out only as how many they are.
+    for (const title of ['s-1', 's-2', 's-3']) {
+      expect(first.announce.polite).toContain(card(title));
+    }
+    expect(first.announce.polite).toContain(notificationsMore(2));
+    expect(first.announce.polite).not.toContain('s-4');
+    expect(first.announce.polite).not.toContain('s-5');
+
     dismiss(s, first, 's-1');
-    expect(titles(run(s))).toEqual(['s-2', 's-3', 's-4']);
+    const freed = run(s);
+    expect(titles(freed)).toEqual(['s-2', 's-3', 's-4']);
+    expect(freed.announce.polite).toBeNull();
+
+    record(s, failureEvent('operation-failure', 'failure-1'));
+    const late = run(s);
+    expect(titles(late)).toEqual(['s-2', 's-3', 's-4']);
+    expect(late.announce.polite).toContain(notificationsMore(1));
+    expect(late.announce.polite).not.toContain('failure-1');
+    expect(run(s).announce.polite).toBeNull();
+
+    // A notice that takes the lane past what fits moves the last notice up into the count.
+    const narrow = shell();
+    narrow.capacity = { all: 3, withMore: 2 };
+    narrow.drafts = ['s-1', 's-2', 's-3'].map((title) => setup('detection-warning', title));
+    expect(titles(run(narrow))).toEqual(['s-1', 's-2', 's-3']);
+    record(narrow, failureEvent('operation-failure', 'failure-1'));
+    const fell = run(narrow);
+    expect(titles(fell)).toEqual(['s-1', 's-2']);
+    expect(fell.lane.moreNotices).toBe(2);
+    dismiss(narrow, fell, 's-1');
+    const back = run(narrow);
+    expect(titles(back)).toEqual(['s-2', 's-3', 'failure-1']);
+    expect(back.announce.polite).toBeNull();
   });
 
-  it('pushes the oldest other toast out for a window call, puts the call first, counts it until it is seen, and never brings it back', () => {
+  it('puts a window call after the cards already up, moves the last notice into the count even once it is seen, and brings it back once the call goes', () => {
     const s = shell();
     s.drafts = ['s-1', 's-2', 's-3'].map((title) => setup('detection-warning', title));
-    const shown = run(s);
+    const shownFirst = run(s);
 
     observe(s, [win('w-a', 'waiting_approval')], ['w-a']);
     const pushed = run(s);
-    expect(pushed.toasts.visible.map((item) => item.kind)).toEqual([
-      'needs-you',
-      'notice',
-      'notice',
-    ]);
+    expect(pushed.lane.visible.map((item) => item.kind)).toEqual(['notice', 'notice', 'needs-you']);
     expect(callIds(pushed)).toEqual(['w-a']);
-    expect(titles(pushed).slice(1)).toEqual(['s-2', 's-3']);
-    expect(pushed.toasts.overflowNotices).toBe(1);
+    expect(titles(pushed).slice(0, 2)).toEqual(['s-1', 's-2']);
+    expect(pushed.lane.moreNotices).toBe(1);
 
     observe(s, [win('w-a', 'waiting_approval'), win('w-b', 'waiting_approval')], ['w-b']);
     const twice = run(s);
-    expect(titles(twice).slice(2)).toEqual(['s-3']);
-    expect(twice.toasts.overflowNotices).toBe(2);
+    expect(shown(twice)).toEqual(['s-1', 'w-a', 'w-b']);
+    expect(twice.lane.moreNotices).toBe(2);
 
-    // Seeing the list up to the first pushed-out notice leaves only the one not yet seen.
-    s.seenThrough = seqOf(shown, 's-1');
-    const seenFirst = run(s);
-    expect(seenFirst.toasts.overflowNotices).toBe(1);
-    expect(titles(seenFirst)).not.toContain('s-1');
-
-    s.seenThrough = seqOf(shown, 's-2');
-    expect(run(s).toasts.overflowNotices).toBe(0);
+    // Seeing them in the list leaves them on the lane, still counted.
+    s.seenThrough = seqOf(shownFirst, 's-3');
+    expect(run(s).lane.moreNotices).toBe(2);
 
     observe(s, [win('w-a', 'running', false), win('w-b', 'running', false)], []);
-    expect(titles(run(s))).toEqual(['s-3']);
+    const gone = run(s);
+    expect(titles(gone)).toEqual(['s-1', 's-2', 's-3']);
+    expect(gone.announce.polite).toBeNull();
   });
 
-  it('does not push one window call out for another: a later one waits, approvals first once a slot frees', () => {
+  it('lets an approval push the last input wait out but never a call of its own kind, and shows the calls in the order they came', () => {
     const s = shell();
     const windows = (statusOfB: WindowStatus, needsB: boolean) => [
       win('w-a', 'waiting_approval'),
@@ -312,21 +411,33 @@ describe('notice feed: three slots', () => {
       win('w-c', 'waiting_input'),
       win('w-d', 'waiting_input'),
       win('w-e', 'waiting_approval'),
+      win('w-f', 'waiting_approval'),
+      win('w-g', 'waiting_approval'),
     ];
     observe(s, windows('waiting_input', true).slice(0, 3), ['w-a', 'w-b', 'w-c']);
     run(s);
     observe(s, windows('waiting_input', true).slice(0, 4), ['w-d']);
-    run(s);
-    observe(s, windows('waiting_input', true), ['w-e']);
-    const full = run(s);
-    expect(callIds(full)).toEqual(['w-a', 'w-b', 'w-c']);
-    expect(full.toasts.overflowWaiting).toBe(2);
-    expect(full.toasts.overflowNotices).toBe(0);
+    const inputs = run(s);
+    expect(callIds(inputs)).toEqual(['w-a', 'w-b', 'w-c']);
+    expect(inputs.lane.moreCalls).toBe(1);
 
-    observe(s, windows('running', false), []);
+    observe(s, windows('waiting_input', true).slice(0, 5), ['w-e']);
+    const full = run(s);
+    expect(callIds(full)).toEqual(['w-a', 'w-b', 'w-e']);
+    expect(full.lane.moreCalls).toBe(2);
+    expect(full.lane.moreNotices).toBe(0);
+
+    observe(s, windows('running', false).slice(0, 5), []);
     const freed = run(s);
-    expect(callIds(freed)).toEqual(['w-a', 'w-e', 'w-c']);
-    expect(freed.toasts.overflowWaiting).toBe(1);
+    expect(callIds(freed)).toEqual(['w-a', 'w-c', 'w-e']);
+    expect(freed.lane.moreCalls).toBe(1);
+
+    observe(s, windows('running', false).slice(0, 6), ['w-f']);
+    expect(callIds(run(s))).toEqual(['w-a', 'w-e', 'w-f']);
+    observe(s, windows('running', false), ['w-g']);
+    const approvals = run(s);
+    expect(callIds(approvals)).toEqual(['w-a', 'w-e', 'w-f']);
+    expect(approvals.lane.moreCalls).toBe(3);
   });
 });
 
@@ -404,24 +515,26 @@ describe('notice feed: one toast per kind of event', () => {
     expect(run(s).announce).toEqual({ polite: null, assertive: null });
   });
 
-  it('gives an event of a kind pushed out by a window call a toast of its own, and never the pushed-out one', () => {
+  it('folds a later event into its kind’s card while a window call keeps that card off the lane, and brings the card back once there is room', () => {
     const s = shell();
-    record(s, exitOf('w-a', 1));
-    run(s);
     s.drafts = [setup('detection-warning', 's-2'), setup('keymap-notice', 's-3')];
-    expect(titles(run(s))).toEqual(['exit-w-a', 's-2', 's-3']);
+    run(s);
+    record(s, exitOf('w-a', 1));
+    expect(titles(run(s))).toEqual(['s-2', 's-3', 'exit-w-a']);
 
     observe(s, [win('w-c', 'waiting_approval')], ['w-c']);
     const pushed = run(s);
     const call = toastOfKind(pushed, 'needs-you', 'w-c').title;
-    expect(titles(pushed)).toEqual([call, 's-2', 's-3']);
+    expect(titles(pushed)).toEqual(['s-2', 's-3', call]);
+    expect(pushed.lane.moreNotices).toBe(1);
 
     record(s, exitOf('w-b', 1));
-    const waiting = run(s);
-    expect(titles(waiting)).toEqual([call, 's-2', 's-3']);
+    const folded = run(s);
+    expect(titles(folded)).toEqual(['s-2', 's-3', call]);
+    expect(folded.lane.moreNotices).toBe(1);
 
-    dismiss(s, waiting, 's-2');
-    expect(titles(run(s))).toEqual([call, 's-3', 'exit-w-b']);
+    dismiss(s, folded, 's-2');
+    expect(titles(run(s))).toEqual(['s-3', more('exit-w-b', 1), call]);
   });
 });
 
@@ -444,7 +557,7 @@ describe('notice feed: the settings rows', () => {
     record(s, exitOf('w-b', 1));
     const full = run(s);
     expect(titles(full)).toEqual(['s-1', 's-2', 's-3']);
-    expect(full.toasts.overflowNotices).toBe(1);
+    expect(full.lane.moreNotices).toBe(1);
     s.prefs = withPreference(readPreferences(null), 'window-exits', false);
     dismiss(s, full, 's-1');
     const freed = run(s);
@@ -452,6 +565,13 @@ describe('notice feed: the settings rows', () => {
     expect(freed.announce.polite).toBeNull();
     expect(freed.center.map((notice) => notice.title)).toContain('exit-w-b');
     expect(freed.unseen).toBe(4);
+
+    // Switching a kind off takes its cards that are up off the lane too; the list keeps them.
+    s.prefs = withPreference(s.prefs, 'setup-problems', false);
+    const off = run(s);
+    expect(titles(off)).toEqual([]);
+    expect(off.lane.moreNotices).toBe(0);
+    expect(off.center.map((notice) => notice.title)).toContain('s-2');
   });
 
   it('pops up and reads blocking notices and expired approval requests whatever the table says', () => {
@@ -474,8 +594,43 @@ describe('notice feed: the settings rows', () => {
     observe(s, [win('w-a', 'waiting_approval'), win('w-b', 'waiting_input')], ['w-a', 'w-b']);
     const out = run(s);
     expect(callIds(out)).toEqual(['w-b']);
-    expect(out.announce.polite).toContain(dummyMessages.banners.windowNeedsInput('bravo'));
-    expect(out.announce.polite).not.toContain(dummyMessages.banners.windowNeedsApproval('alpha'));
+    expect(out.lane.moreCalls).toBe(0);
+    expect(out.announce.polite).toContain(windowNeedsInput('bravo'));
+    expect(out.announce.polite).not.toContain(windowNeedsApproval('alpha'));
+
+    // Switched back on, the call joins the end of the lane and is read once.
+    s.prefs = readPreferences(null);
+    const on = run(s);
+    expect(callIds(on)).toEqual(['w-b', 'w-a']);
+    expect(on.announce.polite).toContain(windowNeedsApproval('alpha'));
+    expect(on.announce.polite).not.toContain(windowNeedsInput('bravo'));
+
+    // A call read before its row went off is not read again when the row comes back.
+    s.prefs = withPreference(readPreferences(null), 'needs-input', false);
+    expect(callIds(run(s))).toEqual(['w-a']);
+    s.prefs = readPreferences(null);
+    const again = run(s);
+    expect(callIds(again)).toEqual(['w-a', 'w-b']);
+    expect(again.announce.polite).toBeNull();
+
+    // A window waiting for input with that row off comes up, and is read, once it needs approval.
+    s.prefs = withPreference(readPreferences(null), 'needs-input', false);
+    observe(
+      s,
+      [win('w-a', 'waiting_approval'), win('w-b', 'waiting_input'), win('w-c', 'waiting_input')],
+      ['w-c']
+    );
+    const hidden = run(s);
+    expect(callIds(hidden)).toEqual(['w-a']);
+    expect(hidden.announce.polite).toBeNull();
+    observe(
+      s,
+      [win('w-a', 'waiting_approval'), win('w-b', 'waiting_input'), win('w-c', 'waiting_approval')],
+      ['w-c']
+    );
+    const approval = run(s);
+    expect(callIds(approval)).toEqual(['w-a', 'w-c']);
+    expect(approval.announce.polite).toContain(windowNeedsApproval('charlie'));
   });
 });
 
@@ -569,16 +724,26 @@ describe('notice feed: what is read out', () => {
     expect(out.announce.assertive).toBeNull();
   });
 
-  it('says actions are available only for a notice that offers one', () => {
+  it('says actions are available for every card on the lane, and for the strip or a notice shown elsewhere only when it offers one', () => {
     const withAction = shell();
     withAction.drafts = [setup('reopen-offer', 'reopen-1', { labelKey: 'chooseWindows' })];
-    const offered = run(withAction).announce.polite;
-    expect(offered).toContain('reopen-1');
-    expect(offered).toContain(dummyMessages.banners.actionsAvailable);
+    expect(run(withAction).announce.polite).toContain(card('reopen-1'));
 
     const without = shell();
     without.drafts = [setup('detection-warning', 'setup-a')];
-    expect(run(without).announce.polite).not.toContain(dummyMessages.banners.actionsAvailable);
+    expect(run(without).announce.polite).toContain(card('setup-a'));
+
+    const strip = shell();
+    strip.drafts = [blocking('approver-registration-refused', 'warning', 'block-1')];
+    const stripped = run(strip).announce.assertive;
+    expect(stripped).toContain('block-1');
+    expect(stripped).not.toContain(dummyMessages.banners.actionsAvailable);
+
+    const elsewhere = shell();
+    record(elsewhere, exitOf('w-a', 1, false));
+    const shownElsewhere = run(elsewhere).announce.polite;
+    expect(shownElsewhere).toContain('exit-w-a');
+    expect(shownElsewhere).not.toContain(dummyMessages.banners.actionsAvailable);
   });
 
   it('reads everything one update brings in one sentence, and each thing once', () => {
@@ -594,10 +759,8 @@ describe('notice feed: what is read out', () => {
     const s = shell();
     observe(s, [win('w-a', 'waiting_approval')], ['w-a']);
     const first = run(s);
-    expect(toastOfKind(first, 'needs-you', 'w-a').title).toBe(
-      dummyMessages.banners.windowNeedsApproval('alpha')
-    );
-    expect(first.announce.polite).toContain(dummyMessages.banners.windowNeedsApproval('alpha'));
+    expect(toastOfKind(first, 'needs-you', 'w-a').title).toBe(windowNeedsApproval('alpha'));
+    expect(first.announce.polite).toContain(windowNeedsApproval('alpha'));
     expect(first.announce.polite).toContain(dummyMessages.banners.actionsAvailable);
     const before = toastOfKind(first, 'needs-you', 'w-a').restart;
 
@@ -605,5 +768,32 @@ describe('notice feed: what is read out', () => {
     const again = run(s);
     expect(again.announce.polite).toBeNull();
     expect(toastOfKind(again, 'needs-you', 'w-a').restart).not.toBe(before);
+
+    // More calls in one update than fit: the cards up are read, the rest only as how many.
+    const narrow = shell();
+    narrow.capacity = { all: 1, withMore: 1 };
+    observe(
+      narrow,
+      [win('w-a', 'waiting_approval'), win('w-b', 'waiting_approval')],
+      ['w-a', 'w-b']
+    );
+    const crowded = run(narrow);
+    expect(callIds(crowded)).toEqual(['w-a']);
+    expect(crowded.lane.moreCalls).toBe(1);
+    expect(crowded.announce.polite).toContain(card(windowNeedsApproval('alpha')));
+    expect(crowded.announce.polite).toContain(waitingForYouMore(1));
+    expect(crowded.announce.polite).not.toContain(windowNeedsApproval('bravo'));
+
+    // A call off the lane whose sentence changes is read in that update, as how many.
+    observe(narrow, [win('w-a', 'waiting_approval'), win('w-b', 'waiting_input')], ['w-b']);
+    const changed = run(narrow);
+    expect(callIds(changed)).toEqual(['w-a']);
+    expect(changed.announce.polite).toContain(waitingForYouMore(1));
+    expect(changed.announce.polite).not.toContain(windowNeedsInput('bravo'));
+
+    observe(narrow, [win('w-a', 'running', false), win('w-b', 'waiting_input')], []);
+    const later = run(narrow);
+    expect(callIds(later)).toEqual(['w-b']);
+    expect(later.announce.polite).toBeNull();
   });
 });

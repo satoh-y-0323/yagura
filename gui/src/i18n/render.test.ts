@@ -19,6 +19,7 @@ import {
   describeDeliveryState,
   describeStatus,
   describeExitedWindow,
+  describeExitedWindowParts,
   describeWindowHeader,
   describeWindowLocation,
   describeWindowRow,
@@ -585,5 +586,16 @@ describe('describeExitedWindow', () => {
     expect(describeExitedWindow(dummyMessages, 'reviewer', 0)).toBe(
       dummyMessages.workArea.windowExitedWithCode('reviewer', 0)
     );
+
+    // The card draws the title from its parts, so the parts make up the English sentence.
+    for (const [exitCode, sentence] of [
+      [null, english.workArea.windowExited('reviewer')],
+      [3, english.workArea.windowExitedWithCode('reviewer', 3)],
+    ] as const) {
+      const parts = describeExitedWindowParts(english, 'reviewer', exitCode);
+      expect(parts.name).toBe('reviewer');
+      expect(`${parts.before}${parts.name}${parts.after}`).toBe(sentence);
+      expect(describeExitedWindow(english, 'reviewer', exitCode)).toBe(sentence);
+    }
   });
 });

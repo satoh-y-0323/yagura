@@ -3,7 +3,33 @@
  * leaking past the locale is obvious in a failing assertion. It is a plain module,
  * not a test file, so importing it registers no tests in the importer.
  */
-import type { Messages } from '../ui-messages';
+import type { Messages, TitleParts } from '../ui-messages';
+
+/** Each dummy sentence with a name is its parts put together, as in the English locale. */
+function joinParts(parts: TitleParts): string {
+  return `${parts.before}${parts.name}${parts.after}`;
+}
+
+const windowNeedsApprovalParts = (name: string): TitleParts => ({
+  before: 'DUMMY_windowNeedsApproval(',
+  name,
+  after: ')',
+});
+const windowNeedsInputParts = (name: string): TitleParts => ({
+  before: 'DUMMY_windowNeedsInput(',
+  name,
+  after: ')',
+});
+const windowExitedParts = (name: string): TitleParts => ({
+  before: 'DUMMY_workArea_windowExited(',
+  name,
+  after: ')',
+});
+const windowExitedWithCodeParts = (name: string, code: number): TitleParts => ({
+  before: 'DUMMY_workArea_windowExitedWithCode(',
+  name,
+  after: `,${code})`,
+});
 
 export const dummyMessages: Messages = {
   statusLabels: {
@@ -171,8 +197,15 @@ export const dummyMessages: Messages = {
     restoreNotRestoredMore: (count: number) => `DUMMY_restoreNotRestoredMore(${count})`,
     actionsAvailable: 'DUMMY_actionsAvailable',
     noticeAndMore: (sentence: string, count: number) => `DUMMY_noticeAndMore(${sentence},${count})`,
-    windowNeedsApproval: (name: string) => `DUMMY_windowNeedsApproval(${name})`,
-    windowNeedsInput: (name: string) => `DUMMY_windowNeedsInput(${name})`,
+    windowNeedsApprovalParts,
+    windowNeedsInputParts,
+    windowNeedsApproval: (name: string) => joinParts(windowNeedsApprovalParts(name)),
+    windowNeedsInput: (name: string) => joinParts(windowNeedsInputParts(name)),
+    goToCallingWindowParts: (name: string) => ({
+      before: 'DUMMY_goToCallingWindow(',
+      name,
+      after: ')',
+    }),
     goToWindow: 'DUMMY_goToWindow',
     waitingForYouMore: (count: number) => `DUMMY_waitingForYouMore(${count})`,
     notificationsMore: (count: number) => `DUMMY_notificationsMore(${count})`,
@@ -491,9 +524,11 @@ export const dummyMessages: Messages = {
     settings: 'DUMMY_workArea_settings',
     reopenFromLastSession: (count: number, timestamp: string | null) =>
       `DUMMY_workArea_reopenFromLastSession(${count},${timestamp})`,
-    windowExited: (name: string) => `DUMMY_workArea_windowExited(${name})`,
+    windowExitedParts,
+    windowExitedWithCodeParts,
+    windowExited: (name: string) => joinParts(windowExitedParts(name)),
     windowExitedWithCode: (name: string, code: number) =>
-      `DUMMY_workArea_windowExitedWithCode(${name},${code})`,
+      joinParts(windowExitedWithCodeParts(name, code)),
     exitedBody: 'DUMMY_workArea_exitedBody',
     goToWindow: (name: string) => `DUMMY_workArea_goToWindow(${name})`,
   },

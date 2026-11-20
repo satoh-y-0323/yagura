@@ -9,14 +9,14 @@
   import { onDestroy } from 'svelte';
 
   import type { NoticeAction } from '../notices/notice-model';
-  import type { ToastItem } from '../notices/notice-feed';
+  import type { LaneItem } from '../notices/notice-feed';
   import { banners, buttons, hints } from '../ui-messages';
   import Icon from './Icon.svelte';
   import IconButton from './IconButton.svelte';
   import StatusBadge from './StatusBadge.svelte';
   import { noticeToneMark } from './notice-tone';
 
-  export let item: ToastItem;
+  export let item: LaneItem;
   /** The line beneath the title: a notice's detail or where a calling window is; the shell picks it. */
   export let secondLine: string | null = null;
   /** False while the app is hidden or not focused; the shell decides. */

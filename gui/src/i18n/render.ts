@@ -1,4 +1,5 @@
 import type { Messages } from './messages';
+import type { TitleParts } from './messages-en';
 import type { PickerEmpty, PickerMode } from '../command-picker/picker-model';
 import type {
   ChatDeliveryOutcome,
@@ -43,6 +44,21 @@ export function describeExitedWindow(
 }
 
 /**
+ * The exited window's sentence split around its name, for a card that cuts only the name short.
+ *
+ * @param name the window's display name, already prepared for display
+ */
+export function describeExitedWindowParts(
+  messages: Messages,
+  name: string,
+  exitCode: number | null
+): TitleParts {
+  return exitCode === null
+    ? messages.workArea.windowExitedParts(name)
+    : messages.workArea.windowExitedWithCodeParts(name, exitCode);
+}
+
+/**
  * Describes the button that goes to another window.
  *
  * @param name the window's display name, already prepared for display
@@ -64,6 +80,21 @@ export function describeWindowCall(
   return status === 'waiting_approval'
     ? messages.banners.windowNeedsApproval(name)
     : messages.banners.windowNeedsInput(name);
+}
+
+/**
+ * A calling window's sentence split around its name, for a card that cuts only the name short.
+ *
+ * @param name the window's display name, already prepared for display
+ */
+export function describeWindowCallParts(
+  messages: Messages,
+  name: string,
+  status: Extract<WindowStatus, 'waiting_approval' | 'waiting_input'>
+): TitleParts {
+  return status === 'waiting_approval'
+    ? messages.banners.windowNeedsApprovalParts(name)
+    : messages.banners.windowNeedsInputParts(name);
 }
 
 /**

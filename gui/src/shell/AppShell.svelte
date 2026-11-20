@@ -56,14 +56,14 @@
     type NeedsYouToastState,
   } from '../notices/needs-you-toasts';
   import {
-    dismissToast,
+    dismissLaneNotice,
+    emptyLaneState,
     emptyNoticeMemory,
-    emptyToastSlots,
     noticeFeed,
+    type LaneItem,
     type Notice,
     type NoticeFeedInput,
     type NoticeFeedOutput,
-    type ToastItem,
   } from '../notices/notice-feed';
   import {
     applyClientConfigFailure,
@@ -480,8 +480,8 @@
   // Things that happened, kept until the user dismisses them; `noticeMemory` numbers them.
   let eventLog: EventLog = [];
   let noticeMemory = emptyNoticeMemory();
-  // What the pop-ups hold between runs of the feed, handed back as it returned them.
-  let toastSlots = emptyToastSlots();
+  // What the lane holds between runs of the feed, handed back as it returned it.
+  let laneState = emptyLaneState();
   // The windows calling the user, stepped on each observed arrival and whenever the view or list moves.
   let needsYouToasts: NeedsYouToastState = emptyNeedsYouToastState();
   // The newest notice the user has seen in the Notifications list.
@@ -882,7 +882,7 @@
   // With no window open the work area makes the offer, so the two never make it together.
   $: restoreOffer = reopenOffer(sourceState);
   $: windowNames = new Map($registry.windows.map((entry) => [entry.windowId, entry.displayName]));
-  // The slots are an input so a closed or timed-out pop-up runs the feed again; the
+  // The lane is an input so a closed or timed-out card runs the feed again; the
   // function writes them back, which a statement reading them could not do itself.
   $: feed = runNoticeFeed(
     noticeDrafts,
@@ -891,7 +891,7 @@
     needsYouToasts,
     notificationPreferences,
     openModalCount,
-    toastSlots,
+    laneState,
     windowNames,
     isNoticeCenterOpen
   );
@@ -3621,7 +3621,7 @@
     calls: NeedsYouToastState,
     prefs: NoticeFeedInput['prefs'],
     modals: number,
-    slots: NoticeFeedInput['slots'],
+    lane: NoticeFeedInput['lane'],
     names: NoticeFeedInput['windowNames'],
     listOpen: boolean
   ): NoticeFeedOutput {
@@ -3633,7 +3633,9 @@
       needsYou: calls,
       prefs,
       openModalCount: modals,
-      slots,
+      lane,
+      // The lane is not measured yet, so no card shows; arrivals stay on the lane and are read.
+      capacity: null,
       windowNames: names,
     };
     let output = noticeFeed(input);
@@ -3645,7 +3647,7 @@
       output = noticeFeed({ ...input, seenThrough: listed });
     }
     noticeMemory = output.memory;
-    toastSlots = output.toasts.slots;
+    laneState = output.lane.state;
     return output;
   }
 
@@ -3658,12 +3660,15 @@
     windows: readonly WindowEntry[]
   ): ReadonlyMap<string, string> {
     const details = new Map(output.center.map((notice) => [notice.seq, notice.detail]));
-    const notices = output.toasts.slots.notices.flatMap((slot): [string, string][] => {
-      const detail = details.get(slot.seqs[slot.seqs.length - 1] ?? -1) ?? null;
-      return detail === null ? [] : [[slot.id, detail]];
+    const notices = output.lane.state.lane.flatMap((entry): [string, string][] => {
+      if (entry.kind !== 'notice') {
+        return [];
+      }
+      const detail = details.get(entry.seqs[entry.seqs.length - 1] ?? -1) ?? null;
+      return detail === null ? [] : [[entry.id, detail]];
     });
     const byId = new Map(windows.map((entry) => [entry.windowId, entry]));
-    const places = output.toasts.visible.flatMap((item): [string, string][] => {
+    const places = output.lane.visible.flatMap((item): [string, string][] => {
       const entry = item.kind === 'needs-you' ? byId.get(item.windowId) : undefined;
       return entry === undefined ? [] : [[item.id, roomNameOf(entry)]];
     });
@@ -3671,9 +3676,9 @@
   }
 
   /** A closed or timed-out pop-up; a window call stays away until its window arrives again. */
-  function handleToastDone(item: ToastItem): void {
+  function handleToastDone(item: LaneItem): void {
     if (item.kind === 'notice') {
-      toastSlots = dismissToast(toastSlots, item.id);
+      laneState = dismissLaneNotice(laneState, item.id);
       return;
     }
     const { windows } = get(registry);
@@ -3932,7 +3937,7 @@
         />
       </div>
       <ToastRegion
-        toasts={feed.toasts}
+        lane={feed.lane}
         secondLines={toastSecondLines}
         {timersRunning}
         onAction={handleNoticeAction}
