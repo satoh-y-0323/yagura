@@ -21,7 +21,8 @@ export type ActionId =
   | 'toggle-needs-you-filter'
   | 'toggle-chat'
   | 'toggle-plans'
-  | 'toggle-settings';
+  | 'toggle-settings'
+  | 'toggle-notifications';
 
 export type KeyMap = Map<string, ActionId>;
 
@@ -48,6 +49,7 @@ export const ACTION_IDS: readonly ActionId[] = [
   'toggle-chat',
   'toggle-plans',
   'toggle-settings',
+  'toggle-notifications',
 ];
 
 /** A chord split into its modifiers and key. */

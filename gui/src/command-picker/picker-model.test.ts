@@ -80,6 +80,7 @@ const ACTION_NAMES: Record<ActionId, string> = {
   'toggle-chat': 'Chat',
   'toggle-plans': 'Board',
   'toggle-settings': 'Settings',
+  'toggle-notifications': 'Notifications',
 };
 
 const FIND = 'Go to and commands';
@@ -488,16 +489,23 @@ describe('picker-model: the actions', () => {
     expect(rowsOf(byWindow).every((row) => row.kind === 'action' && row.showsSection)).toBe(true);
 
     const ti = typeInput(openPicker('commands', src), '>ti', src);
-    expect(idsOf(ti)).toEqual(['tile-windows', 'toggle-settings', 'toggle-plans']);
+    expect(idsOf(ti)).toEqual([
+      'tile-windows',
+      'toggle-settings',
+      'toggle-notifications',
+      'toggle-plans',
+    ]);
     expect(actionRowOf(ti, 'tile-windows').marks.name).toEqual([{ start: 0, end: 2 }]);
     expect(actionRowOf(ti, 'toggle-settings').marks.name).toEqual([{ start: 3, end: 5 }]);
+    expect(actionRowOf(ti, 'toggle-notifications').marks.name).toEqual([{ start: 2, end: 4 }]);
     expect(actionRowOf(ti, 'toggle-plans').marks.name).toEqual([]);
 
-    // "and" is only in the section names; "s" is in the names of the first three.
+    // "and" is only in the section names; "s" is in the names of the first four.
     const fewerOutsideTheName = [
       'toggle-sidebar-focus',
       'toggle-needs-you-filter',
       'toggle-settings',
+      'toggle-notifications',
       'open-window-picker',
       'toggle-chat',
       'toggle-plans',
@@ -511,6 +519,7 @@ describe('picker-model: the actions', () => {
     ).toEqual([
       'toggle-needs-you-filter',
       'toggle-settings',
+      'toggle-notifications',
       'toggle-sidebar-focus',
       'open-window-picker',
       'toggle-chat',

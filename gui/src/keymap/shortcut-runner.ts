@@ -65,6 +65,7 @@ export interface ShortcutRunnerDeps<T extends RoomMember> {
   toggleChat: () => Promise<void>;
   togglePlans: () => Promise<void>;
   toggleSettings: () => Promise<void>;
+  toggleNotifications: () => void;
   toggleSidebarFocus: () => void;
 }
 
@@ -205,6 +206,9 @@ export function createShortcutRunner<T extends RoomMember>(
         return;
       case 'toggle-settings':
         await deps.toggleSettings();
+        return;
+      case 'toggle-notifications':
+        deps.toggleNotifications();
         return;
       default: {
         const unhandled: never = action;

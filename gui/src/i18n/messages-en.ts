@@ -103,6 +103,7 @@ const KEYBOARD_ACTION_NAMES = {
   toggleChat: 'Chat',
   togglePlans: 'Board',
   toggleSettings: 'Settings',
+  toggleNotifications: 'Notifications',
 };
 
 /**
@@ -129,6 +130,7 @@ const PICKER_ACTION_KEYWORDS: Readonly<Record<keyof typeof KEYBOARD_ACTION_NAMES
   toggleChat: 'room messages',
   togglePlans: 'plans tickets',
   toggleSettings: 'preferences options keyboard theme',
+  toggleNotifications: 'bell alerts',
 };
 
 /** The one row that says more than its name: the next-window order follows the sidebar. */

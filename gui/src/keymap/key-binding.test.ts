@@ -26,6 +26,7 @@ const EXPECTED_ORDER: readonly ActionId[] = [
   'toggle-chat',
   'toggle-plans',
   'toggle-settings',
+  'toggle-notifications',
 ];
 
 describe('ACTION_IDS', () => {

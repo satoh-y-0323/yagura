@@ -68,6 +68,7 @@ const EXPECTED_GROUPS: Readonly<Record<ActionId, 'find' | 'windows' | 'focus-and
   'toggle-chat': 'focus-and-panels',
   'toggle-plans': 'focus-and-panels',
   'toggle-settings': 'focus-and-panels',
+  'toggle-notifications': 'focus-and-panels',
 };
 
 describe('keyboardRows', () => {

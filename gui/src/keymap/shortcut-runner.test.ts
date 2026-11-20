@@ -141,6 +141,9 @@ function harness(setup: Setup): Harness {
       calls.push('settings');
       await Promise.resolve();
     },
+    toggleNotifications: (): void => {
+      calls.push('notifications');
+    },
     toggleSidebarFocus: (): void => {
       calls.push('sidebar');
     },
@@ -189,6 +192,7 @@ const EXPECTED_CALLS: Readonly<Record<ActionId, readonly string[]>> = {
   'toggle-chat': ['chat'],
   'toggle-plans': ['plans'],
   'toggle-settings': ['settings'],
+  'toggle-notifications': ['notifications'],
 };
 
 describe('every action', () => {

@@ -2525,6 +2525,7 @@
     toggleChat,
     togglePlans,
     toggleSettings,
+    toggleNotifications: toggleNoticeCenter,
     toggleSidebarFocus,
   };
   const runShortcut = createShortcutRunner(runnerDeps);

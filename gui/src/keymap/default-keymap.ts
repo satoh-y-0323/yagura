@@ -29,6 +29,7 @@ const WINDOWS_AND_LINUX: DefaultKeys = Object.freeze({
   'toggle-chat': 'Ctrl+Shift+l',
   'toggle-plans': 'Ctrl+Shift+t',
   'toggle-settings': 'Ctrl+Shift+s',
+  'toggle-notifications': null,
 });
 
 // Cmd is the mac convention; the app menu owns Cmd+Q/W/H/M and the edit chords.
@@ -51,6 +52,7 @@ const MAC: DefaultKeys = Object.freeze({
   'toggle-chat': 'Shift+Meta+l',
   'toggle-plans': 'Shift+Meta+t',
   'toggle-settings': 'Meta+,',
+  'toggle-notifications': null,
 });
 
 /**

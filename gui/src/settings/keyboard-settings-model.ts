@@ -36,6 +36,7 @@ const GROUP_OF: Readonly<Record<ActionId, KeyboardGroup>> = {
   'toggle-chat': 'focus-and-panels',
   'toggle-plans': 'focus-and-panels',
   'toggle-settings': 'focus-and-panels',
+  'toggle-notifications': 'focus-and-panels',
 };
 
 /** One row of the tab: an action, its chord and what may be done to it. */

@@ -31,6 +31,7 @@ const WINDOWS_AND_LINUX: Readonly<Record<ActionId, string | null>> = {
   'toggle-chat': 'Ctrl+Shift+l',
   'toggle-plans': 'Ctrl+Shift+t',
   'toggle-settings': 'Ctrl+Shift+s',
+  'toggle-notifications': null,
 };
 
 const MAC: Readonly<Record<ActionId, string | null>> = {
@@ -52,6 +53,7 @@ const MAC: Readonly<Record<ActionId, string | null>> = {
   'toggle-chat': 'Shift+Meta+l',
   'toggle-plans': 'Shift+Meta+t',
   'toggle-settings': 'Meta+,',
+  'toggle-notifications': null,
 };
 
 const EXPECTED: Readonly<Record<KeyboardPlatform, Readonly<Record<ActionId, string | null>>>> = {
