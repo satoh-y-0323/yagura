@@ -8,17 +8,19 @@
  * one subscription.
  */
 
-import { writable, type Readable } from 'svelte/store';
+import { get, writable, type Readable } from 'svelte/store';
 
 import { bringToFront, MIN_WINDOW_SIZE, type Rect, type Size } from '../layout/float-layout';
 import { tileRects } from '../layout/tile-layout';
 import { formatPathForDisplay, sanitizeForDisplay } from '../display/untrusted-text';
 import { reorderTabs } from '../sidebar/row-order';
-import type {
-  DetectedStatusView,
-  ReportState,
-  StatusBoot,
-  TaskReportMark,
+import {
+  EXIT_CODE_ON_STATUS_MIN_REVISION,
+  type DetectedStatusView,
+  type ReportState,
+  type StatusBoot,
+  type StatusPayload,
+  type TaskReportMark,
 } from '../ipc/session-boundary';
 import type { WindowEventHandlers, WindowInfo } from '../ipc/session-client';
 
@@ -117,6 +119,24 @@ export interface WindowRegistryState {
    * a window and its tab appear and disappear in the same update.
    */
   tabOrder: string[];
+  /**
+   * The windows this update retired, each with the code it ended with
+   * (`null` when the code could not be determined). Empty in every other
+   * update, so a subscriber reads a code once, in the update that removes
+   * its window.
+   */
+  retired: readonly RetiredWindow[];
+}
+
+/** One window {@link WindowRegistry.retireWindow} removed, with the code it ended with. */
+export interface RetiredWindow {
+  windowId: string;
+  exitCode: number | null;
+}
+
+/** The code an ended window is retired with; see {@link retirementFromStatus}. */
+export interface Retirement {
+  exitCode: number | null;
 }
 
 /** Store of [`WindowRegistryState`] with the operations the window set supports. */
@@ -133,7 +153,14 @@ export interface WindowRegistry extends Readable<WindowRegistryState> {
   /** Removes a window and its handlers. */
   closeWindow: (windowId: string) => void;
   /**
-   * Records a status change; `exited` removes the window. The pair replaces
+   * Removes a window that ended, with its tab and handlers, in one update
+   * whose `retired` names it and `exitCode`. A window that is not listed is
+   * left alone and no update is published.
+   */
+  retireWindow: (windowId: string, exitCode: number | null) => void;
+  /**
+   * Records a status change; `exited` included, which never removes the
+   * window ({@link WindowRegistry.retireWindow} does). The pair replaces
    * the entry's whole `detected`, and is discarded when `(statusBoot,
    * statusRev)` names an observation older than the one the entry already
    * holds. `taskReport` is merged on its own key, whatever the pair's
@@ -203,10 +230,20 @@ export interface WindowRegistry extends Readable<WindowRegistryState> {
 
 /** Creates an empty window registry. */
 export function createWindowRegistry(): WindowRegistry {
-  const { subscribe, update } = writable<WindowRegistryState>({
+  const store = writable<WindowRegistryState>({
     windows: [],
     tabOrder: [],
+    retired: [],
   });
+  const { subscribe } = store;
+  // Every update but a retirement clears `retired`, so a code is never read
+  // again from a later, unrelated update.
+  const update = (change: (state: WindowRegistryState) => WindowRegistryState): void => {
+    store.update((state) => {
+      const next = change(state);
+      return next.retired.length === 0 ? next : { ...next, retired: [] };
+    });
+  };
   // Handlers live outside the store because they are routing targets, not
   // rendered state: putting them in the store would make every output event
   // look like a state change to subscribers.
@@ -215,6 +252,17 @@ export function createWindowRegistry(): WindowRegistry {
   const removeWindow = (windowId: string): void => {
     handlersByWindow.delete(windowId);
     update((state) => withoutWindow(state, windowId));
+  };
+
+  const retireWindow = (windowId: string, exitCode: number | null): void => {
+    handlersByWindow.delete(windowId);
+    if (!get(store).windows.some((entry) => entry.windowId === windowId)) {
+      return;
+    }
+    store.update((state) => ({
+      ...withoutWindow(state, windowId),
+      retired: [{ windowId, exitCode }],
+    }));
   };
 
   const updateDisplay = (
@@ -270,11 +318,8 @@ export function createWindowRegistry(): WindowRegistry {
       update((state) => withName(state, windowId, name));
     },
     closeWindow: removeWindow,
+    retireWindow,
     setStatus: (windowId, detected, statusRev, statusBoot, taskReport) => {
-      if (detected.status === 'exited') {
-        removeWindow(windowId);
-        return;
-      }
       update((state) => ({
         ...state,
         windows: state.windows.map((entry) =>
@@ -360,6 +405,46 @@ export function createWindowRegistry(): WindowRegistry {
       tileWindows(area, () => windowIds);
     },
   };
+}
+
+/**
+ * Whether the daemon's `status_changed` carries the exit code of an ended
+ * window. While the revision is not known yet the older daemon is assumed, so
+ * no window is retired without its code and no `-1` is taken for a fact.
+ */
+function carriesExitCodeOnStatus(protocolRevision: number | null): boolean {
+  return protocolRevision !== null && protocolRevision >= EXIT_CODE_ON_STATUS_MIN_REVISION;
+}
+
+/**
+ * The retirement an `exited` status push asks for, `null` when it asks for
+ * none: the status is not `exited`, or the daemon sends no code on the push,
+ * so the push only records the status and the window list retires the window.
+ */
+export function retirementFromStatus(
+  protocolRevision: number | null,
+  payload: StatusPayload
+): Retirement | null {
+  if (payload.detected.status !== 'exited' || !carriesExitCodeOnStatus(protocolRevision)) {
+    return null;
+  }
+  return { exitCode: payload.exit_code };
+}
+
+/**
+ * The retirement a window-list entry asks for, `null` when the window has not
+ * exited. An older daemon's `-1` is read as unknown: it also stands for a code
+ * that daemon could not determine.
+ */
+export function retirementFromList(
+  protocolRevision: number | null,
+  info: WindowInfo
+): Retirement | null {
+  if (info.detected.status !== 'exited') {
+    return null;
+  }
+  const unknownAsMinusOne = !carriesExitCodeOnStatus(protocolRevision);
+  return { exitCode: unknownAsMinusOne && info.exit_code === -1 ? null : info.exit_code };
 }
 
 /**

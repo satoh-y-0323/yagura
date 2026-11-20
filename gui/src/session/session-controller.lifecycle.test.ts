@@ -112,6 +112,11 @@ describe('SessionController window events', () => {
     controller.eventHandlers().onExit({ window_id: WINDOW_ID, exit_code: 7 });
 
     expect(get(store)).toMatchObject({ phase: 'exited', exitCode: 7 });
+
+    const unknown = attachedController();
+    unknown.controller.eventHandlers().onExit({ window_id: WINDOW_ID, exit_code: null });
+
+    expect(get(unknown.store)).toMatchObject({ phase: 'exited', exitCode: null });
   });
 
   it('marks the session failed with the reason when the connection is lost', () => {

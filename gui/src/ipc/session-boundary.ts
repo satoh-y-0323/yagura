@@ -81,6 +81,14 @@ export const APPROVAL_SETTINGS_MIN_REVISION = 12;
  */
 export const MCP_REGISTRATION_MIN_REVISION = 13;
 
+/**
+ * The first wire revision whose `status_changed` carries the exit code of a
+ * window that reports `exited` (mirrors `EXIT_CODE_ON_STATUS_MIN_REVISION`,
+ * `yagura-protocol`). A daemon below it sends no code on that push and sends
+ * `-1` in the window list for a code it could not determine.
+ */
+export const EXIT_CODE_ON_STATUS_MIN_REVISION = 37;
+
 /** The `error.code` a daemon answers with when a live window already carries the name. */
 export const NAME_TAKEN_CODE = 'name_taken';
 

@@ -6,11 +6,11 @@
 import { describe, it, expect, vi } from 'vitest';
 import { get } from 'svelte/store';
 
-import { createWindowRegistry } from './window-registry';
+import { createWindowRegistry, retirementFromList, retirementFromStatus } from './window-registry';
 import { MAX_DISPLAY_FIELD_CHARS } from '../display/untrusted-text';
 import { resolveMessages } from '../i18n/messages';
-import type { WindowRegistry } from './window-registry';
-import type { DetectedStatusView, UnknownReason } from '../ipc/session-boundary';
+import type { WindowRegistry, WindowRegistryState } from './window-registry';
+import type { DetectedStatusView, StatusPayload, UnknownReason } from '../ipc/session-boundary';
 import type { WindowInfo, WindowEventHandlers } from '../ipc/session-client';
 
 function makeWindowInfo(overrides: Partial<WindowInfo> = {}): WindowInfo {
@@ -66,15 +66,61 @@ describe('createWindowRegistry: subscription model', () => {
   });
 });
 
+/** Every state the registry publishes from now on, leaving out the one subscribing replays. */
+function publishedStates(registry: WindowRegistry): WindowRegistryState[] {
+  const states: WindowRegistryState[] = [];
+  let replayed = false;
+  registry.subscribe((state) => {
+    if (replayed) {
+      states.push(state);
+    }
+    replayed = true;
+  });
+  return states;
+}
+
 describe('createWindowRegistry: lifecycle', () => {
-  it('discards the window entry once its status becomes exited', () => {
+  it('discards the window entry once it is retired', () => {
     const registry = createWindowRegistry();
     registry.openWindow(makeWindowInfo({ window_id: 'w-a' }));
 
-    registry.setStatus('w-a', { status: 'exited' }, null, null);
+    registry.retireWindow('w-a', null);
 
     const state = get(registry);
     expect(state.windows.some((w) => w.windowId === 'w-a')).toBe(false);
+  });
+
+  it('retires a window in one update that names the window and the code it ended with', () => {
+    const registry = createWindowRegistry();
+    registry.openWindow(makeWindowInfo({ window_id: 'w-a' }));
+    registry.openWindow(makeWindowInfo({ window_id: 'w-b' }));
+    registry.registerWindowHandlers('w-a', makeHandlers());
+    const states = publishedStates(registry);
+
+    registry.retireWindow('w-a', 3);
+    registry.retireWindow('w-b', null);
+
+    // A subscriber reads the code from the update that removes the window, not from an earlier one.
+    expect(states).toHaveLength(2);
+    expect(states[0]?.windows.map((entry) => entry.windowId)).toEqual(['w-b']);
+    expect(states[0]?.tabOrder).toEqual(['w-b']);
+    expect(states[0]?.retired).toEqual([{ windowId: 'w-a', exitCode: 3 }]);
+    expect(states[1]?.windows).toEqual([]);
+    expect(states[1]?.retired).toEqual([{ windowId: 'w-b', exitCode: null }]);
+    expect(registry.resolveWindowHandlers('w-a')).toBeUndefined();
+  });
+
+  it('does nothing when retiring a window that is no longer listed', () => {
+    const registry = createWindowRegistry();
+    registry.openWindow(makeWindowInfo({ window_id: 'w-a' }));
+    registry.openWindow(makeWindowInfo({ window_id: 'w-b' }));
+    registry.retireWindow('w-a', 3);
+    const states = publishedStates(registry);
+
+    registry.retireWindow('w-a', 4);
+
+    expect(get(registry).windows.map((entry) => entry.windowId)).toEqual(['w-b']);
+    expect(states.flatMap((state) => state.retired)).toEqual([]);
   });
 
   it('clears to an empty state once the last window closes', () => {
@@ -825,7 +871,7 @@ describe('createWindowRegistry: an older generation costs the pair alone', () =>
   });
 });
 
-describe('createWindowRegistry: only the status-change route closes a window', () => {
+describe('createWindowRegistry: which message retires an ended window', () => {
   it('keeps a window whose window-list snapshot reports it as exited', () => {
     const registry = createWindowRegistry();
     registry.openWindow(makeWindowInfo({ window_id: 'w-a' }));
@@ -848,14 +894,154 @@ describe('createWindowRegistry: only the status-change route closes a window', (
     expect(entryOf(registry, 'w-b')?.detected).toEqual({ status: 'exited' });
   });
 
-  it('still removes a window when the status-change route reports it as exited', () => {
+  type Message = 'push' | 'list';
+
+  /** Hands one exited message about `w-a` to the registry the way the shell routes it. */
+  function deliver(
+    registry: WindowRegistry,
+    revision: number | null,
+    message: Message,
+    exitCode: number | null
+  ): void {
+    if (message === 'push') {
+      const payload: StatusPayload = {
+        window_id: 'w-a',
+        detected: { status: 'exited' },
+        exit_code: exitCode,
+      };
+      const retirement = retirementFromStatus(revision, payload);
+      if (retirement === null) {
+        registry.setStatus(payload.window_id, payload.detected, null, null);
+      } else {
+        registry.retireWindow(payload.window_id, retirement.exitCode);
+      }
+      return;
+    }
+    const info = makeWindowInfo({
+      window_id: 'w-a',
+      detected: { status: 'exited' },
+      exit_code: exitCode,
+    });
+    const retirement = retirementFromList(revision, info);
+    if (retirement === null) {
+      registry.openWindow(info);
+    } else {
+      registry.retireWindow(info.window_id, retirement.exitCode);
+    }
+  }
+
+  /**
+   * The code each update that took `w-a` off the list retired it with, for
+   * `messages` delivered in order; `'absent'` when such an update names no code.
+   */
+  function retiredCodesOf(
+    revision: number | null,
+    messages: readonly Message[],
+    exitCode: number | null
+  ): (number | null | 'absent')[] {
     const registry = createWindowRegistry();
     registry.openWindow(makeWindowInfo({ window_id: 'w-a' }));
-
-    registry.setStatus('w-a', { status: 'exited' }, null, null);
-
+    registry.openWindow(makeWindowInfo({ window_id: 'w-b' }));
+    const states = publishedStates(registry);
+    for (const message of messages) {
+      deliver(registry, revision, message, exitCode);
+    }
     expect(entryOf(registry, 'w-a')).toBeUndefined();
+    expect(entryOf(registry, 'w-b')).toBeDefined();
+    let listed = true;
+    const codes: (number | null | 'absent')[] = [];
+    for (const state of states) {
+      const listedNow = state.windows.some((entry) => entry.windowId === 'w-a');
+      if (listed && !listedNow) {
+        const retired = state.retired.find((entry) => entry.windowId === 'w-a');
+        codes.push(retired === undefined ? 'absent' : retired.exitCode);
+      }
+      listed = listedNow;
+    }
+    return codes;
+  }
+
+  it.each<[number | null, Message[]]>([
+    [37, ['push', 'list']],
+    [37, ['list', 'push']],
+    [38, ['push', 'list']],
+    [38, ['list', 'push']],
+    [36, ['push', 'list']],
+    [36, ['list', 'push']],
+    [null, ['push', 'list']],
+    [null, ['list', 'push']],
+  ])(
+    'at revision %s, retires the window once with its code whichever of %j comes first',
+    (revision, messages) => {
+      expect(retiredCodesOf(revision, messages, 3)).toEqual([3]);
+    }
+  );
+
+  it.each<number>([37, 38])(
+    'at revision %s, the exited push alone retires the window, with the code it carries',
+    (revision) => {
+      const registry = createWindowRegistry();
+      registry.openWindow(makeWindowInfo({ window_id: 'w-a' }));
+      const states = publishedStates(registry);
+
+      deliver(registry, revision, 'push', 3);
+
+      expect(states).toHaveLength(1);
+      expect(states[0]?.windows).toEqual([]);
+      expect(states[0]?.retired).toEqual([{ windowId: 'w-a', exitCode: 3 }]);
+    }
+  );
+
+  it.each<number | null>([36, 19, null])(
+    'at revision %s, the exited push leaves the window listed as exited until the list retires it',
+    (revision) => {
+      const registry = createWindowRegistry();
+      registry.openWindow(makeWindowInfo({ window_id: 'w-a' }));
+      const states = publishedStates(registry);
+
+      deliver(registry, revision, 'push', null);
+
+      expect(entryOf(registry, 'w-a')?.detected).toEqual({ status: 'exited' });
+      expect(get(registry).tabOrder).toEqual(['w-a']);
+      expect(states.flatMap((state) => state.retired)).toEqual([]);
+
+      deliver(registry, revision, 'list', 5);
+
+      expect(entryOf(registry, 'w-a')).toBeUndefined();
+      expect(get(registry).retired).toEqual([{ windowId: 'w-a', exitCode: 5 }]);
+    }
+  );
+
+  it.each<[number | null, Message, number | null]>([
+    // Before revision 37 the daemon sent -1 for a code it could not determine, so -1 is no fact there.
+    [36, 'list', null],
+    [19, 'list', null],
+    // A revision not yet known is read as the older one.
+    [null, 'list', null],
+    [37, 'list', -1],
+    [37, 'push', -1],
+    [38, 'list', -1],
+  ])('at revision %s, a -1 the %s carries is retired as %s', (revision, message, expected) => {
+    expect(retiredCodesOf(revision, [message], -1)).toEqual([expected]);
   });
+
+  it('at revision 37, an exited push whose code could not be determined retires the window with none', () => {
+    expect(retiredCodesOf(37, ['push'], null)).toEqual([null]);
+  });
+
+  it.each<number | null>([37, 36, null])(
+    'at revision %s, a status other than exited retires nothing',
+    (revision) => {
+      const running: StatusPayload = {
+        window_id: 'w-a',
+        detected: { status: 'running' },
+        exit_code: null,
+      };
+
+      expect(retirementFromStatus(revision, running)).toBeNull();
+      expect(retirementFromList(revision, makeWindowInfo({ window_id: 'w-a' }))).toBeNull();
+    }
+  );
 });
 
 describe('createWindowRegistry: an entry never holds a reason without the unknown status', () => {

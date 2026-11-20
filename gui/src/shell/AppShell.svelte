@@ -319,6 +319,8 @@
   import { createWindowSessionStore } from '../stores/session-store';
   import {
     createWindowRegistry,
+    retirementFromList,
+    retirementFromStatus,
     type WindowEntry,
     type WindowRegistryState,
   } from '../stores/window-registry';
@@ -762,14 +764,6 @@
     const shown = currentWindowNow();
     if (shown !== null) {
       focusTerminalOf(shown.windowId);
-    }
-  }
-
-  /** Passes on an exit code of a window the view still lists or shows a card for. */
-  function reportExitCode(windowId: string, exitCode: number): void {
-    const isListed = get(registry).windows.some((entry) => entry.windowId === windowId);
-    if (isListed || get(shell).exitedCard?.windowId === windowId) {
-      dispatchShell({ type: 'exitCodeReceived', windowId, exitCode });
     }
   }
 
@@ -2359,14 +2353,20 @@
   // shell-state diff's call, not this view's.
   let listedBefore: OrderedWindow[] = [];
 
-  function observeWindowList(): void {
+  function observeWindowList(state: WindowRegistryState): void {
     const listed: OrderedWindow[] = windowsInDisplayOrder(sidebarGroups()).map((entry) => ({
       windowId: entry.windowId,
       name: entry.displayName,
-      exitCode: entry.exitCode,
+      exitCode: null,
     }));
+    // A window's code is the one the update removing it retired it with; a
+    // window closed any other way has none.
+    const retiredCodes = new Map(state.retired.map((gone) => [gone.windowId, gone.exitCode]));
     const events = [
-      ...diffGoneWindows(listedBefore, listed),
+      ...diffGoneWindows(listedBefore, listed).map((event) => ({
+        ...event,
+        exitCode: retiredCodes.get(event.windowId) ?? null,
+      })),
       ...diffAppearedWindows(listedBefore, listed),
     ];
     listedBefore = listed;
@@ -2694,6 +2694,11 @@
     try {
       unsubscribeSession = await subscribeSession(registry.resolveWindowHandlers, {
         onStatus: (payload) => {
+          const retirement = retirementFromStatus(protocol_revision, payload);
+          if (retirement !== null) {
+            registry.retireWindow(payload.window_id, retirement.exitCode);
+            return;
+          }
           registry.setStatus(
             payload.window_id,
             payload.detected,
@@ -3215,19 +3220,20 @@
   /**
    * Brings the panes in line with one window-list snapshot.
    *
-   * Exited windows are left out: the registry retires a window as soon as it
-   * reports `exited`, while the daemon keeps the entry in its list until it is
-   * evicted, so keeping them would re-open panes the view has already dropped.
+   * Exited windows are retired, never opened: the daemon keeps an entry in its
+   * list until it is evicted, so opening them would re-open panes the view has
+   * already dropped.
    */
   async function applyWindowList(windows: WindowInfo[]): Promise<void> {
+    const liveWindows: WindowInfo[] = [];
     for (const info of windows) {
-      if (info.detected.status === 'exited' && info.exit_code !== null) {
-        reportExitCode(info.window_id, info.exit_code);
+      const retirement = retirementFromList(protocol_revision, info);
+      if (retirement === null) {
+        liveWindows.push(info);
+        registry.openWindow(info);
+      } else {
+        registry.retireWindow(info.window_id, retirement.exitCode);
       }
-    }
-    const liveWindows = windows.filter((info) => info.detected.status !== 'exited');
-    for (const info of liveWindows) {
-      registry.openWindow(info);
     }
     const livePaneIds = [...get(panes).keys()];
     const plan = await syncWindows(
@@ -3354,17 +3360,7 @@
     const controller = new SessionController(windowId, sessionStore);
     // eslint-disable-next-line svelte/prefer-svelte-reactivity -- store snapshot swap: a fresh Map is republished through the writable, so runes-based SvelteMap reactivity does not apply
     panes.update((current) => new Map(current).set(windowId, { controller, sessionStore }));
-    const handlers = controller.eventHandlers();
-    registry.registerWindowHandlers(windowId, {
-      ...handlers,
-      onExit: (payload) => {
-        handlers.onExit(payload);
-        // An unknown code is never written as a number.
-        if (payload.exit_code !== null) {
-          reportExitCode(windowId, payload.exit_code);
-        }
-      },
-    });
+    registry.registerWindowHandlers(windowId, controller.eventHandlers());
     await tick();
   }
 

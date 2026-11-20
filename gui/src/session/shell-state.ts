@@ -22,7 +22,7 @@ export interface OrderedWindow {
 export interface ExitedCard {
   windowId: string;
   name: string;
-  /** `null` until the exit code is known. */
+  /** `null` when the code could not be determined. */
   exitCode: number | null;
   /** The name of the window the card offers to go to, which Next window also goes to. */
   next: string | null;
@@ -39,8 +39,6 @@ export interface ShellState {
   /** The windows this GUI asked the daemon to close that have not left the list yet. */
   closingHere: ReadonlySet<string>;
   exitedCard: ExitedCard | null;
-  /** Exit codes heard before their window left the list, so an early code is not lost. */
-  pendingExitCodes: ReadonlyMap<string, number>;
 }
 
 /** One window that left the list, with the order it is read against. */
@@ -49,6 +47,7 @@ export interface WindowGoneEvent {
   windowId: string;
   /** The sidebar order before it left, holding it and the windows still listed. */
   orderBefore: readonly OrderedWindow[];
+  /** The code the window ended with, `null` when the code could not be determined. */
   exitCode: number | null;
 }
 
@@ -65,7 +64,6 @@ export type ShellEvent =
   /** The close this GUI asked for did not go through. */
   | { type: 'closeFailed'; windowId: string }
   | WindowGoneEvent
-  | { type: 'exitCodeReceived'; windowId: string; exitCode: number }
   /** The user opened the window from this GUI. */
   | { type: 'openedByUser'; windowId: string }
   /** Windows appeared any other way: another client, the daemon, or a reopening. */
@@ -95,7 +93,6 @@ export function initialShellState(workMode: WorkMode): ShellState {
     focusedWindowId: null,
     closingHere: new Set(),
     exitedCard: null,
-    pendingExitCodes: new Map(),
   };
 }
 
@@ -161,15 +158,6 @@ function withoutMember(set: ReadonlySet<string>, member: string): ReadonlySet<st
   return next;
 }
 
-function withoutKey(map: ReadonlyMap<string, number>, key: string): ReadonlyMap<string, number> {
-  if (!map.has(key)) {
-    return map;
-  }
-  const next = new Map(map);
-  next.delete(key);
-  return next;
-}
-
 /** Keeps the card's targets off a window that has since left the list as well. */
 function retargetCard(card: ExitedCard | null, event: WindowGoneEvent): ExitedCard | null {
   if (card === null) {
@@ -205,11 +193,9 @@ export function exitedCardNeighbor(card: ExitedCard, step: 1 | -1): string | nul
  */
 function reduceWindowGone(state: ShellState, event: WindowGoneEvent): ShellStep {
   const goneByUser = state.closingHere.has(event.windowId);
-  const exitCode = event.exitCode ?? state.pendingExitCodes.get(event.windowId) ?? null;
   const base: ShellState = {
     ...state,
     closingHere: withoutMember(state.closingHere, event.windowId),
-    pendingExitCodes: withoutKey(state.pendingExitCodes, event.windowId),
     exitedCard: retargetCard(state.exitedCard, event),
   };
   if (state.workMode !== 'focus' || state.focusedWindowId !== event.windowId) {
@@ -231,7 +217,7 @@ function reduceWindowGone(state: ShellState, event: WindowGoneEvent): ShellStep 
       exitedCard: {
         windowId: event.windowId,
         name,
-        exitCode,
+        exitCode: event.exitCode,
         next: next?.name ?? null,
         nextWindowId: next?.windowId ?? null,
         previousWindowId: adjacentWindow(event.orderBefore, event.windowId, -1)?.windowId ?? null,
@@ -289,20 +275,6 @@ export function reduceShell(state: ShellState, event: ShellEvent): ShellStep {
       };
     case 'windowGone':
       return reduceWindowGone(state, event);
-    case 'exitCodeReceived':
-      if (state.exitedCard?.windowId === event.windowId) {
-        return {
-          state: { ...state, exitedCard: { ...state.exitedCard, exitCode: event.exitCode } },
-          effects: [],
-        };
-      }
-      return {
-        state: {
-          ...state,
-          pendingExitCodes: new Map(state.pendingExitCodes).set(event.windowId, event.exitCode),
-        },
-        effects: [],
-      };
     case 'openedByUser':
       if (state.workMode === 'canvas') {
         return {

@@ -53,7 +53,7 @@ describe('window handlers follow the window', () => {
     const registry = openRegistry('w1');
     registry.registerWindowHandlers('w1', HANDLERS);
 
-    registry.setStatus('w1', { status: 'exited' }, null, null);
+    registry.retireWindow('w1', null);
 
     expect(registry.resolveWindowHandlers('w1')).toBeUndefined();
   });

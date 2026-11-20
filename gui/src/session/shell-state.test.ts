@@ -34,7 +34,6 @@ interface ShellState {
   focusedWindowId: string | null;
   closingHere: ReadonlySet<string>;
   exitedCard: ExitedCard | null;
-  pendingExitCodes: ReadonlyMap<string, number>;
 }
 
 type WindowGoneEvent = {
@@ -51,7 +50,6 @@ type ShellEvent =
   | { type: 'closeRequested'; windowId: string }
   | { type: 'closeFailed'; windowId: string }
   | WindowGoneEvent
-  | { type: 'exitCodeReceived'; windowId: string; exitCode: number }
   | { type: 'openedByUser'; windowId: string }
   | { type: 'windowsAppeared'; windowIds: readonly string[] }
   | { type: 'exitedCardGoTo' };
@@ -445,18 +443,6 @@ describe('reduceShell: a window vanished while Focus shows it', () => {
     expect(alone.state.exitedCard).toMatchObject({ next: null, nextWindowId: null });
   });
 
-  it('writes the exit code onto the card when it arrives after the card', () => {
-    const { reduceShell } = shellStateModule();
-    const carded = reduceShell(focusShowing('b'), gone('b', ORDER_ABC)).state;
-
-    const late = reduceShell(carded, { type: 'exitCodeReceived', windowId: 'b', exitCode: 7 });
-    const other = reduceShell(carded, { type: 'exitCodeReceived', windowId: 'c', exitCode: 7 });
-
-    expect(carded.exitedCard?.exitCode).toBeNull();
-    expect(late.state.exitedCard?.exitCode).toBe(7);
-    expect(other.state.exitedCard?.exitCode).toBeNull();
-  });
-
   it('leaves no card and no move when the window that vanished was not the one shown', () => {
     const { reduceShell } = shellStateModule();
     const before = focusShowingWhileClosing('a', ['b']);
@@ -524,19 +510,6 @@ describe('the verdict on who closed a window does not depend on which news arriv
     expect(pushFirst.goneByUser).toEqual([true]);
     expect(pushFirst).toEqual(replyFirst);
     expect(pushFirst.state.focusedWindowId).toBe('c');
-  });
-
-  it('gives the same card whether the exit code came with the vanishing or after it', () => {
-    const { reduceShell } = shellStateModule();
-    const withCode = reduceShell(focusShowing('b'), gone('b', ORDER_ABC, 9)).state;
-    const early = reduceShell(focusShowing('b'), gone('b', ORDER_ABC)).state;
-    const afterwards = reduceShell(early, {
-      type: 'exitCodeReceived',
-      windowId: 'b',
-      exitCode: 9,
-    }).state;
-
-    expect(afterwards.exitedCard).toEqual(withCode.exitedCard);
   });
 });
 
@@ -662,37 +635,6 @@ describe('diffAppearedWindows: the windows that joined the list since the last o
 
     expect(diffAppearedWindows(ORDER_ABC, ORDER_ABC)).toEqual([]);
     expect(diffAppearedWindows(ORDER_ABC, [ordered('a')])).toEqual([]);
-  });
-});
-
-describe('reduceShell: an exit code heard before its window left the list', () => {
-  it('shows it on the card the window leaves, and prefers the code the list carried', () => {
-    const { reduceShell } = shellStateModule();
-    const heard = reduceShell(focusShowing('b'), {
-      type: 'exitCodeReceived',
-      windowId: 'b',
-      exitCode: 5,
-    }).state;
-
-    const fromHeard = reduceShell(heard, gone('b', ORDER_ABC));
-    const fromList = reduceShell(heard, gone('b', ORDER_ABC, 9));
-
-    expect(fromHeard.state.exitedCard?.exitCode).toBe(5);
-    expect(fromList.state.exitedCard?.exitCode).toBe(9);
-  });
-
-  it('is forgotten once the window has left the list', () => {
-    const { reduceShell } = shellStateModule();
-    const heard = reduceShell(focusShowing('a'), {
-      type: 'exitCodeReceived',
-      windowId: 'b',
-      exitCode: 5,
-    }).state;
-
-    const after = reduceShell(heard, gone('b', ORDER_ABC));
-
-    expect(heard.pendingExitCodes.get('b')).toBe(5);
-    expect(after.state.pendingExitCodes.has('b')).toBe(false);
   });
 });
 
