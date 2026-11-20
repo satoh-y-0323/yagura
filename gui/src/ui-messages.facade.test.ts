@@ -69,6 +69,26 @@ const CASES: ReadonlyArray<[string, () => unknown, () => unknown]> = [
     () => render.describeGoToWindow(messages, 'implementer'),
   ],
   [
+    'describeWindowCall',
+    () => facade.describeWindowCall('reviewer', 'waiting_approval'),
+    () => render.describeWindowCall(messages, 'reviewer', 'waiting_approval'),
+  ],
+  [
+    'describeNoticeAndMore',
+    () => facade.describeNoticeAndMore('builder exited', 3),
+    () => render.describeNoticeAndMore(messages, 'builder exited', 3),
+  ],
+  [
+    'describeEventTime',
+    () => facade.describeEventTime(new Date(2026, 0, 2, 0, 5)),
+    () => render.describeEventTime(messages, new Date(2026, 0, 2, 0, 5)),
+  ],
+  [
+    'describeAnnouncement',
+    () => facade.describeAnnouncement(['one', 'two']),
+    () => render.describeAnnouncement(messages, ['one', 'two']),
+  ],
+  [
     'describeReopenOffer',
     () => facade.describeReopenOffer(6, '2026-01-02 03:04'),
     () => render.describeReopenOffer(messages, 6, '2026-01-02 03:04'),

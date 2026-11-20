@@ -168,6 +168,18 @@ export const dummyMessages: Messages = {
     storeOverrideWithNamedInstance: 'DUMMY_storeOverrideWithNamedInstance',
     restoreNotRestored: (count: number) => `DUMMY_restoreNotRestored(${count})`,
     restoreNotRestoredMore: (count: number) => `DUMMY_restoreNotRestoredMore(${count})`,
+    actionsAvailable: 'DUMMY_actionsAvailable',
+    noticeAndMore: (sentence: string, count: number) => `DUMMY_noticeAndMore(${sentence},${count})`,
+    windowNeedsApproval: (name: string) => `DUMMY_windowNeedsApproval(${name})`,
+    windowNeedsInput: (name: string) => `DUMMY_windowNeedsInput(${name})`,
+    goToWindow: 'DUMMY_goToWindow',
+    waitingForYouMore: (count: number) => `DUMMY_waitingForYouMore(${count})`,
+    notificationsMore: (count: number) => `DUMMY_notificationsMore(${count})`,
+    notifications: 'DUMMY_notifications',
+    notificationsUnseen: (count: number) => `DUMMY_notificationsUnseen(${count})`,
+    noNotifications: 'DUMMY_noNotifications',
+    clearNotifications: 'DUMMY_clearNotifications',
+    notificationSettings: 'DUMMY_notificationSettings',
   },
   hints: {
     noWindows: 'DUMMY_noWindows',
@@ -204,6 +216,7 @@ export const dummyMessages: Messages = {
     windowHeaderVendorCwd: (vendor: string, cwd: string) =>
       `DUMMY_windowHeaderVendorCwd(${vendor}, ${cwd})`,
     windowHeaderCwd: (cwd: string) => `DUMMY_windowHeaderCwd(${cwd})`,
+    eventTime: (date: Date) => `DUMMY_eventTime(${date.toISOString()})`,
     sentences: (parts: readonly string[]) => `DUMMY_sentences(${parts.join('|')})`,
   },
 

@@ -32,6 +32,8 @@ export interface NewEvent {
 export interface LoggedEvent extends NewEvent {
   /** Unique across the log's lifetime, so a dismissed number is never handed out again. */
   seq: number;
+  /** When it was recorded, `HH:mm`, built once by whoever records it; this module reads no clock. */
+  at: string;
 }
 
 /** The recorded events, oldest first. */
@@ -45,14 +47,16 @@ const EVENT_LOG_LIMIT = 50;
  * @param log the events recorded so far
  * @param memory the counter, with whatever else its owner keeps beside it
  * @param event the event to record
+ * @param at when it is recorded, `HH:mm`
  * @returns the log with the event, dropping the oldest past the limit, and the counter moved past it
  */
 export function appendEvent<M extends { nextSeq: number }>(
   log: EventLog,
   memory: M,
-  event: NewEvent
+  event: NewEvent,
+  at: string
 ): { log: EventLog; memory: M } {
-  const entry: LoggedEvent = { ...event, seq: memory.nextSeq };
+  const entry: LoggedEvent = { ...event, seq: memory.nextSeq, at };
   return {
     log: [...log, entry].slice(-EVENT_LOG_LIMIT),
     memory: { ...memory, nextSeq: memory.nextSeq + 1 },

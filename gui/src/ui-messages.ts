@@ -5,15 +5,18 @@
 import { resolveMessages } from './i18n/messages';
 import {
   describeActionBlock as renderDescribeActionBlock,
+  describeAnnouncement as renderDescribeAnnouncement,
   describeAttentionBadge as renderDescribeAttentionBadge,
   describeDeliveryState as renderDescribeDeliveryState,
   describeDetectionWarning as renderDescribeDetectionWarning,
   describeDiscardedKeymapEntries as renderDescribeDiscardedKeymapEntries,
+  describeEventTime as renderDescribeEventTime,
   describeExitCode as renderDescribeExitCode,
   describeExitedWindow as renderDescribeExitedWindow,
   describeGoToWindow as renderDescribeGoToWindow,
   describeHaltReason as renderDescribeHaltReason,
   describeInterruptHint as renderDescribeInterruptHint,
+  describeNoticeAndMore as renderDescribeNoticeAndMore,
   describeOperationFailure,
   describePaneNotice as renderDescribePaneNotice,
   describePickerActionRow as renderDescribePickerActionRow,
@@ -31,6 +34,7 @@ import {
   describeUndeliveredUnknownReason as renderDescribeUndeliveredUnknownReason,
   describeUnknownExplanation as renderDescribeUnknownExplanation,
   describeUnknownReasonSuffix as renderDescribeUnknownReasonSuffix,
+  describeWindowCall as renderDescribeWindowCall,
   describeWindowHeader as renderDescribeWindowHeader,
   describeWindowLocation as renderDescribeWindowLocation,
   describeWindowRow as renderDescribeWindowRow,
@@ -40,7 +44,7 @@ import {
   type WindowHeaderFacts,
 } from './i18n/render';
 import type { PickerEmpty, PickerMode } from './command-picker/picker-model';
-import type { ChatDeliveryOutcome, DetectedStatusView } from './ipc/session-boundary';
+import type { ChatDeliveryOutcome, DetectedStatusView, WindowStatus } from './ipc/session-boundary';
 import type { ActionBlockReason } from './keymap/action-availability';
 import type { ConfirmTarget } from './session/confirm-target';
 
@@ -116,6 +120,43 @@ export function describeExitedWindow(name: string, exitCode: number | null): str
  */
 export function describeGoToWindow(name: string): string {
   return renderDescribeGoToWindow(messages, name);
+}
+
+/**
+ * Describes a window that calls the user, as its pop-up says it.
+ * @param name the window's display name
+ * @param status which call it is
+ */
+export function describeWindowCall(
+  name: string,
+  status: Extract<WindowStatus, 'waiting_approval' | 'waiting_input'>
+): string {
+  return renderDescribeWindowCall(messages, name, status);
+}
+
+/**
+ * Describes a pop-up that later events of its kind were folded into.
+ * @param sentence the latest event's sentence
+ * @param count how many other events the pop-up holds
+ */
+export function describeNoticeAndMore(sentence: string, count: number): string {
+  return renderDescribeNoticeAndMore(messages, sentence, count);
+}
+
+/**
+ * Describes when a notification event was recorded.
+ * @param date the moment it was recorded
+ */
+export function describeEventTime(date: Date): string {
+  return renderDescribeEventTime(messages, date);
+}
+
+/**
+ * Joins what one update reads out into one text.
+ * @param sentences what is read, in order
+ */
+export function describeAnnouncement(sentences: readonly string[]): string {
+  return renderDescribeAnnouncement(messages, sentences);
 }
 
 /**

@@ -40,7 +40,7 @@ function appendAll(
   events: readonly NewEvent[],
   start: { log: EventLog; memory: { nextSeq: number } } = { log: [], memory: { nextSeq: 0 } }
 ): { log: EventLog; memory: { nextSeq: number } } {
-  return events.reduce((acc, event) => appendEvent(acc.log, acc.memory, event), start);
+  return events.reduce((acc, event) => appendEvent(acc.log, acc.memory, event, '12:00'), start);
 }
 
 function seqsOf(log: EventLog): number[] {
@@ -116,8 +116,8 @@ describe('event log: numbering', () => {
   it('numbers from the counter it is given and returns the counter moved past the event', () => {
     const memory = { nextSeq: 7, stateSeqs: new Map([['profile-unavailable', 3]]) };
 
-    const first = appendEvent([], memory, failure('a'));
-    const second = appendEvent(first.log, first.memory, failure('b'));
+    const first = appendEvent([], memory, failure('a'), '09:41');
+    const second = appendEvent(first.log, first.memory, failure('b'), '09:42');
 
     expect(seqsOf(first.log)).toEqual([7]);
     expect(first.memory.nextSeq).toBe(8);
@@ -125,13 +125,14 @@ describe('event log: numbering', () => {
     expect(second.memory.nextSeq).toBe(9);
     expect(second.memory.stateSeqs).toBe(memory.stateSeqs);
     expect(memory.nextSeq).toBe(7);
+    expect(second.log.map((entry) => entry.at)).toEqual(['09:41', '09:42']);
   });
 
   it('does not hand out a number again after events are dismissed or cleared', () => {
     const added = appendAll([failure('a'), failure('b')]);
     const emptied = clearEvents(dismissEvent(added.log, 1));
 
-    const next = appendEvent(emptied, added.memory, failure('c'));
+    const next = appendEvent(emptied, added.memory, failure('c'), '12:00');
 
     expect(seqsOf(next.log)).toEqual([2]);
     expect(next.memory.nextSeq).toBe(3);
@@ -179,9 +180,9 @@ describe('windowExitEvent', () => {
     }
 
     expect(event.toast).toBe(false);
-    expect(appendEvent([], { nextSeq: 0 }, event).log.map((entry) => entry.windowId)).toEqual([
-      'w-2',
-    ]);
+    expect(
+      appendEvent([], { nextSeq: 0 }, event, '12:00').log.map((entry) => entry.windowId)
+    ).toEqual(['w-2']);
   });
 
   it.each([

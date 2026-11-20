@@ -1,6 +1,10 @@
 import type { Messages } from './messages';
 import type { PickerEmpty, PickerMode } from '../command-picker/picker-model';
-import type { ChatDeliveryOutcome, DetectedStatusView } from '../ipc/session-boundary';
+import type {
+  ChatDeliveryOutcome,
+  DetectedStatusView,
+  WindowStatus,
+} from '../ipc/session-boundary';
 import type { ActionBlockReason } from '../keymap/action-availability';
 // Type-only: the gate itself reaches this module through `ui-messages.ts`, so
 // a value import here would close that loop at runtime.
@@ -50,6 +54,41 @@ export function describeExitedWindow(
  */
 export function describeGoToWindow(messages: Messages, name: string): string {
   return messages.workArea.goToWindow(name);
+}
+
+/**
+ * Describes a window that calls the user, as its pop-up says it.
+ *
+ * @param name the window's display name, already prepared for display
+ */
+export function describeWindowCall(
+  messages: Messages,
+  name: string,
+  status: Extract<WindowStatus, 'waiting_approval' | 'waiting_input'>
+): string {
+  return status === 'waiting_approval'
+    ? messages.banners.windowNeedsApproval(name)
+    : messages.banners.windowNeedsInput(name);
+}
+
+/**
+ * Describes a pop-up that later events of its kind were folded into.
+ *
+ * @param sentence the latest event's sentence, already prepared for display
+ * @param count how many other events the pop-up holds
+ */
+export function describeNoticeAndMore(messages: Messages, sentence: string, count: number): string {
+  return messages.banners.noticeAndMore(sentence, count);
+}
+
+/** Describes when a notification event was recorded. */
+export function describeEventTime(messages: Messages, date: Date): string {
+  return messages.formats.eventTime(date);
+}
+
+/** Joins what one update reads out into one text. */
+export function describeAnnouncement(messages: Messages, sentences: readonly string[]): string {
+  return messages.formats.sentences(sentences);
 }
 
 /** Describes the empty work area's offer to reopen the windows of the last session. */

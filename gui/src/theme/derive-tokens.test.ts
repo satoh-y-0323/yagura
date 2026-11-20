@@ -121,6 +121,7 @@ describe.each(THEME_NAMES)('the tokens derived from the built-in %s palette', (t
     '--st-idle',
     '--line-strong',
     '--ring',
+    '--danger',
   ])('keeps %s at 3:1 on every surface', (name) => {
     for (const surface of SURFACES) {
       expect(ratioOnSurface(map(), name, surface), `${name} on ${surface}`).toBeGreaterThanOrEqual(

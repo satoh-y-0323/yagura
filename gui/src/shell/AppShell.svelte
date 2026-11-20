@@ -343,6 +343,7 @@
     themes,
     describeDetectionWarning,
     describeDiscardedKeymapEntries,
+    describeEventTime,
     describeOperationFailure,
     describeThemeName,
     foldExternalText,
@@ -3005,7 +3006,12 @@
 
   /** Records an event that reports an action that did not go through. */
   function recordFailure(key: FailureEventKey, text: string): void {
-    const next = appendEvent(eventLog, noticeMemory, failureEvent(key, text));
+    const next = appendEvent(
+      eventLog,
+      noticeMemory,
+      failureEvent(key, text),
+      describeEventTime(new Date())
+    );
     eventLog = next.log;
     noticeMemory = next.memory;
   }

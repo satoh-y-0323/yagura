@@ -33,6 +33,13 @@ function lookup<T>(table: Readonly<Record<string, T>>, id: string): T {
   return table[camelCase(id)] as T;
 }
 
+// 24-hour with two digits whatever the system's locale, as the restore timestamp is.
+const EVENT_TIME = new Intl.DateTimeFormat('en', {
+  hour: '2-digit',
+  minute: '2-digit',
+  hourCycle: 'h23',
+});
+
 const KEYBOARD_GROUP_HEADINGS = {
   find: 'Go to and commands',
   windows: 'Windows',
@@ -371,6 +378,22 @@ export const messagesEn = {
       count === 1 ? 'Not restored' : `Not restored (${count})`,
     // Ends that notice when the lines that did not fit are only counted.
     restoreNotRestoredMore: (count: number): string => `+${count} more`,
+
+    // Pop-ups, the Notifications list and what is read out.
+    actionsAvailable: 'Actions available',
+    /** A pop-up that later events of its kind were folded into: the latest event's sentence first. */
+    noticeAndMore: (sentence: string, count: number): string => `${sentence} and ${count} more`,
+    windowNeedsApproval: (name: string): string => `“${name}” needs approval`,
+    windowNeedsInput: (name: string): string => `“${name}” needs input`,
+    goToWindow: 'Go to window',
+    waitingForYouMore: (count: number): string => `+${count} waiting for you`,
+    notificationsMore: (count: number): string => `+${count} more in Notifications`,
+    notifications: 'Notifications',
+    notificationsUnseen: (count: number): string =>
+      `Notifications, ${count > 9 ? '9+' : String(count)} new`,
+    noNotifications: 'No notifications',
+    clearNotifications: 'Clear',
+    notificationSettings: 'Notification settings',
   },
 
   hints: {
@@ -406,6 +429,8 @@ export const messagesEn = {
 
   formats: {
     exitCode: (code: number): string => `(exit code ${code})`,
+    /** When a notification event was recorded, `HH:mm` in local time. */
+    eventTime: (date: Date): string => EVENT_TIME.format(date),
     windowListTitle: (label: string, count: number): string => `${label} (${count})`,
 
     /** Plural form policy lives with the resource, not the machinery. */
