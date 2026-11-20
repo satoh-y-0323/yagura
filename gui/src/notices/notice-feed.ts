@@ -97,7 +97,14 @@ interface LaneItemBody {
 /** One card on the lane as the parts draw it. */
 export type LaneItem = LaneItemBody &
   (
-    | { kind: 'notice'; windowId: null; action: NoticeAction | null }
+    | {
+        kind: 'notice';
+        windowId: null;
+        action: NoticeAction | null;
+        /** The seq of the notice the title, action and detail come from, the latest folded in. */
+        titleSeq: number;
+        detail: string | null;
+      }
     | { kind: 'needs-you'; windowId: string; status: NeedsYouToastStatus }
   );
 
@@ -132,6 +139,8 @@ export interface NoticeFeedOutput {
     visible: LaneItem[];
     /** Window calls on the lane that did not fit. */
     moreCalls: number;
+    /** The most pressing state among the window calls that did not fit, `'waiting_input'` when none. */
+    moreCallsStatus: NeedsYouToastStatus;
     /** Notices on the lane that did not fit, whether or not they have been seen. */
     moreNotices: number;
     state: LaneState;
@@ -416,10 +425,10 @@ export function noticeFeed(input: NoticeFeedInput): NoticeFeedOutput {
     }
   }
   if (unreadCalls > 0) {
-    polite.push(banners.waitingForYouMore(unreadCalls));
+    polite.push(banners.waitingForYouMoreAnnouncement(unreadCalls));
   }
   if (unreadNotices > 0) {
-    polite.push(banners.notificationsMore(unreadNotices));
+    polite.push(banners.notificationsMoreAnnouncement(unreadNotices));
   }
 
   const visible = lane
@@ -459,6 +468,8 @@ export function noticeFeed(input: NoticeFeedInput): NoticeFeedOutput {
           id: entry.id,
           windowId: null,
           action: latest.notice.action,
+          titleSeq: latest.notice.seq,
+          detail: latest.notice.detail,
           title:
             folded > 0 ? describeNoticeAndMore(latest.notice.title, folded) : latest.notice.title,
           sentence: latest.notice.title,
@@ -472,6 +483,9 @@ export function noticeFeed(input: NoticeFeedInput): NoticeFeedOutput {
     });
   const measured = input.capacity !== null;
   const left = lane.filter((entry) => measured && !shown.has(entryKey(entry)));
+  const approvalLeft = left.some(
+    (entry) => entry.kind === 'call' && calls.get(entry.windowId)?.status === 'waiting_approval'
+  );
 
   return {
     memory: { ...numbered.memory, handledThrough },
@@ -481,6 +495,7 @@ export function noticeFeed(input: NoticeFeedInput): NoticeFeedOutput {
     lane: {
       visible,
       moreCalls: left.filter((entry) => entry.kind === 'call').length,
+      moreCallsStatus: approvalLeft ? 'waiting_approval' : 'waiting_input',
       moreNotices: left.filter((entry) => entry.kind === 'notice').length,
       state: { lane, readCalls, nextMark },
     },

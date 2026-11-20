@@ -29,7 +29,7 @@ export interface NewEvent {
   text: string;
   /** `text` split around the window's name, so a card cuts only the name short; `null` when it names none. */
   parts: TitleParts | null;
-  /** Whether the event may pop up as a toast; `false` when something else already shows it. */
+  /** Whether the event may become a card on the notification bar; `false` when something else already shows it. */
   toast: boolean;
   /** The window the event is about, `null` when it is about no window. */
   windowId: string | null;

@@ -208,6 +208,10 @@ export const dummyMessages: Messages = {
     }),
     waitingForYouMore: (count: number) => `DUMMY_waitingForYouMore(${count})`,
     notificationsMore: (count: number) => `DUMMY_notificationsMore(${count})`,
+    waitingForYouMoreAnnouncement: (count: number) =>
+      `DUMMY_waitingForYouMoreAnnouncement(${count})`,
+    notificationsMoreAnnouncement: (count: number) =>
+      `DUMMY_notificationsMoreAnnouncement(${count})`,
     notifications: 'DUMMY_notifications',
     notificationsUnseen: (count: number) => `DUMMY_notificationsUnseen(${count})`,
     noNotifications: 'DUMMY_noNotifications',

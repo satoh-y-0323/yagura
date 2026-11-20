@@ -460,6 +460,9 @@ export const messagesEn = {
     goToCallingWindowParts: (name: string): TitleParts => ({ before: 'Go to “', name, after: '”' }),
     waitingForYouMore: (count: number): string => `+${count} waiting for you`,
     notificationsMore: (count: number): string => `+${count} more in Notifications`,
+    // Read out, so the count is said as a number rather than the "+N" the chip shows.
+    waitingForYouMoreAnnouncement: (count: number): string => `${count} more waiting for you`,
+    notificationsMoreAnnouncement: (count: number): string => `${count} more in Notifications`,
     notifications: 'Notifications',
     notificationsUnseen: (count: number): string =>
       `Notifications, ${count > 9 ? '9+' : String(count)} new`,

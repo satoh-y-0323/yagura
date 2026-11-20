@@ -55,7 +55,6 @@
     emptyNeedsYouToastState,
     stepNeedsYouToasts,
     type NeedsYouToastState,
-    type NeedsYouToastStatus,
   } from '../notices/needs-you-toasts';
   import {
     dismissLaneNotice,
@@ -907,7 +906,6 @@
     isNoticeCenterOpen
   );
   $: laneSecondLines = secondLinesOf(feed, $registry.windows);
-  $: moreCallsStatus = leftOverCallsStatus(feed, needsYouToasts);
   $: closeNoticeCenterBehindModal(openModalCount);
   // Recomputed on every registry change so the already-open hint (cwd + name
   // match) tracks which windows are actually open right now.
@@ -2935,9 +2933,8 @@
       console.error('failed to pull the pending approvals:', error);
     }
 
-    // After every subscription: a push only ever carries a later state than
-    // the read, and the start's warning may have been announced before the
-    // session subscription opened.
+    // Last, after every subscription: the start's warning may have been
+    // announced before the session subscription opened.
     let connection: DaemonConnectedPayload | null = null;
     try {
       const announced = await invokeGetDaemonConnection();
@@ -3713,43 +3710,16 @@
     output: NoticeFeedOutput,
     windows: readonly WindowEntry[]
   ): ReadonlyMap<string, string> {
-    const details = new Map(output.center.map((notice) => [notice.seq, notice.detail]));
-    const notices = output.lane.state.lane.flatMap((entry): [string, string][] => {
-      if (entry.kind !== 'notice') {
-        return [];
-      }
-      const detail = details.get(entry.seqs[entry.seqs.length - 1] ?? -1) ?? null;
-      return detail === null ? [] : [[entry.id, detail]];
-    });
     const byId = new Map(windows.map((entry) => [entry.windowId, entry]));
-    const places = output.lane.visible.flatMap((item): [string, string][] => {
-      const entry = item.kind === 'needs-you' ? byId.get(item.windowId) : undefined;
-      return entry === undefined ? [] : [[item.id, roomNameOf(entry)]];
-    });
-    return new Map([...notices, ...places]);
-  }
-
-  /**
-   * The mark on the lane's waiting count: approval when any call left off the lane's cards
-   * waits for one, as the feed ranks approval first.
-   */
-  function leftOverCallsStatus(
-    output: NoticeFeedOutput,
-    calls: NeedsYouToastState
-  ): NeedsYouToastStatus {
-    const shown = new Set(
-      output.lane.visible.flatMap((item) => (item.kind === 'needs-you' ? [item.windowId] : []))
+    return new Map(
+      output.lane.visible.flatMap((item): [string, string][] => {
+        if (item.kind === 'notice') {
+          return item.detail === null ? [] : [[item.id, item.detail]];
+        }
+        const entry = byId.get(item.windowId);
+        return entry === undefined ? [] : [[item.id, roomNameOf(entry)]];
+      })
     );
-    const leftOver = new Set(
-      output.lane.state.lane.flatMap((entry) =>
-        entry.kind === 'call' && !shown.has(entry.windowId) ? [entry.windowId] : []
-      )
-    );
-    return calls.toasts.some(
-      (toast) => leftOver.has(toast.windowId) && toast.status === 'waiting_approval'
-    )
-      ? 'waiting_approval'
-      : 'waiting_input';
   }
 
   /** A closed, timed-out or pressed card; a window call stays away until its window arrives again. */
@@ -3780,15 +3750,9 @@
       }
       return;
     }
-    // A folded card's title is its latest notice, so that is the row the list starts on.
-    const entry = laneState.lane.find(
-      (candidate) => candidate.kind === 'notice' && candidate.id === item.id
-    );
-    const seqs = entry?.kind === 'notice' ? entry.seqs : [];
-    const latest = seqs[seqs.length - 1] ?? null;
     dismissLaneCard(item);
     if (item.action === null) {
-      void showNoticeInCenter(latest);
+      void showNoticeInCenter(item.titleSeq);
     } else {
       handleNoticeAction(item.action);
     }
@@ -3800,22 +3764,30 @@
     }
   }
 
-  /** Opens or closes the Notifications list; opening marks everything listed so far as seen. */
+  /**
+   * Opens the Notifications list on the row of `initialSeq` (`null` for the list's own first
+   * focus); opening marks everything listed so far as seen.
+   */
+  function openNoticeCenterAt(initialSeq: number | null): void {
+    noticeCenterAnchor = notificationsButton?.getBoundingClientRect() ?? null;
+    noticeCenterNewerThan = seenThrough;
+    noticeCenterInitialSeq = initialSeq;
+    seenThrough = Math.max(seenThrough, ...feed.center.map((notice) => notice.seq));
+    isNoticeCenterOpen = true;
+  }
+
+  /** Opens or closes the Notifications list. */
   function toggleNoticeCenter(): void {
     if (isNoticeCenterOpen) {
       closeNoticeCenter('close-button');
       return;
     }
-    noticeCenterAnchor = notificationsButton?.getBoundingClientRect() ?? null;
-    noticeCenterNewerThan = seenThrough;
-    noticeCenterInitialSeq = null;
-    seenThrough = Math.max(seenThrough, ...feed.center.map((notice) => notice.seq));
-    isNoticeCenterOpen = true;
+    openNoticeCenterAt(null);
   }
 
   function openNoticeCenter(): void {
     if (!isNoticeCenterOpen) {
-      toggleNoticeCenter();
+      openNoticeCenterAt(null);
     }
   }
 
@@ -3824,12 +3796,12 @@
    * list places its first focus once per opening.
    */
   async function showNoticeInCenter(seq: number | null): Promise<void> {
+    // Not `closeNoticeCenter`, which would hand focus back to the bell before the list takes it.
     if (isNoticeCenterOpen) {
       isNoticeCenterOpen = false;
       await tick();
     }
-    toggleNoticeCenter();
-    noticeCenterInitialSeq = seq;
+    openNoticeCenterAt(seq);
   }
 
   /**
@@ -4052,7 +4024,6 @@
       </div>
       <NoticeLane
         lane={feed.lane}
-        {moreCallsStatus}
         secondLines={laneSecondLines}
         {timersRunning}
         onPress={pressLaneCard}

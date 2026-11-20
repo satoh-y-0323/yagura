@@ -17,7 +17,6 @@
   import { cubicOut } from 'svelte/easing';
 
   import type { LaneItem, NoticeFeedOutput } from '../notices/notice-feed';
-  import type { NeedsYouToastStatus } from '../notices/needs-you-toasts';
   import { STATUS_PRESENTATION } from '../status-presentation';
   import { banners } from '../ui-messages';
   import Icon from './Icon.svelte';
@@ -25,12 +24,11 @@
   import LaneCard from './LaneCard.svelte';
   import { pressedByKeyboard } from './press-source';
 
-  export let lane: Pick<NoticeFeedOutput['lane'], 'visible' | 'moreCalls' | 'moreNotices'>;
-  /**
-   * The mark on the waiting count: the most urgent status among the calls
-   * that did not fit, which only the shell can tell.
-   */
-  export let moreCallsStatus: NeedsYouToastStatus;
+  /** The waiting count's mark is `moreCallsStatus`: the most urgent status among the calls that did not fit. */
+  export let lane: Pick<
+    NoticeFeedOutput['lane'],
+    'visible' | 'moreCalls' | 'moreCallsStatus' | 'moreNotices'
+  >;
   /** The tooltip's line under each card's sentence, by card id; the shell decides what it says. */
   export let secondLines: ReadonlyMap<string, string> = new Map();
   /** False while the app is hidden or not focused; the shell decides. */
@@ -180,7 +178,7 @@
   {#if lane.moreCalls > 0 || lane.moreNotices > 0}
     <div class="notice-lane__more">
       {#if lane.moreCalls > 0}
-        {@const presentation = STATUS_PRESENTATION[moreCallsStatus]}
+        {@const presentation = STATUS_PRESENTATION[lane.moreCallsStatus]}
         <IconButton
           class="notice-lane__count"
           label={banners.waitingForYouMore(lane.moreCalls)}
