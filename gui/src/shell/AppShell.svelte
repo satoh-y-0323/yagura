@@ -51,7 +51,11 @@
     type FailureEventKey,
     type NewEvent,
   } from '../notices/event-log';
-  import { emptyNeedsYouToastState } from '../notices/needs-you-toasts';
+  import {
+    emptyNeedsYouToastState,
+    stepNeedsYouToasts,
+    type NeedsYouToastState,
+  } from '../notices/needs-you-toasts';
   import {
     dismissToast,
     emptyNoticeMemory,
@@ -326,6 +330,7 @@
   import {
     groupByRoom,
     roomIdsOf,
+    roomNameOf,
     windowIdsOfRoom,
     windowsInDisplayOrder,
     type RoomGroup,
@@ -341,6 +346,7 @@
     beginAttentionSend,
     emptyArrivalMemory,
     emptyAttentionSendState,
+    needsYou,
     noteAttentionArrival,
     observeNeedsYouArrivals,
     settleAttentionSend,
@@ -475,6 +481,8 @@
   let noticeMemory = emptyNoticeMemory();
   // What the pop-ups hold between runs of the feed, handed back as it returned them.
   let toastSlots = emptyToastSlots();
+  // The windows calling the user, stepped on each observed arrival and whenever the view or list moves.
+  let needsYouToasts: NeedsYouToastState = emptyNeedsYouToastState();
   // The newest notice the user has seen in the Notifications list.
   let seenThrough = -1;
   // Counted where the modal focus port hears a dialog open and close; a reactive value so the
@@ -879,13 +887,14 @@
     noticeDrafts,
     eventLog,
     seenThrough,
+    needsYouToasts,
     notificationPreferences,
     openModalCount,
     toastSlots,
     windowNames,
     isNoticeCenterOpen
   );
-  $: toastSecondLines = secondLinesOf(feed);
+  $: toastSecondLines = secondLinesOf(feed, $registry.windows);
   $: closeNoticeCenterBehindModal(openModalCount);
   // Recomputed on every registry change so the already-open hint (cwd + name
   // match) tracks which windows are actually open right now.
@@ -928,6 +937,8 @@
   $: workView = workViewOf($shell);
   // The window keyboard operations act on; derived so no second record of it can drift.
   $: current = currentWindowFor(workView, $registry.windows);
+  // A call goes once its window is the one being looked at, so moving the view re-steps it.
+  $: needsYouToasts = stepCallToasts(needsYouToasts, $registry.windows, current);
 
   // The single source the float-area render loop pairs from: an
   // entry only renders once its pane exists, so no flush can read a pane off
@@ -2427,7 +2438,33 @@
     if (observed.arrived.length > 0) {
       attentionSend = noteAttentionArrival(attentionSend);
     }
+    needsYouToasts = stepCallToasts(
+      needsYouToasts,
+      state.windows,
+      currentWindowFor(workViewOf(get(shell)), state.windows),
+      observed.arrived
+    );
     sendAttentionSummary(state, approvals, false);
+  }
+
+  /** One step of the window calls over `windows`, read through the same `needsYou` as every list. */
+  function stepCallToasts(
+    state: NeedsYouToastState,
+    windows: readonly WindowEntry[],
+    seen: WindowEntry | null,
+    arrived: readonly string[] = [],
+    dismissed: string | null = null
+  ): NeedsYouToastState {
+    return stepNeedsYouToasts(state, {
+      arrived,
+      windows: windows.map((entry) => ({
+        windowId: entry.windowId,
+        status: entry.detected.status,
+        needsYou: needsYou(entry),
+      })),
+      seenWindowId: seen?.windowId ?? null,
+      ...(dismissed === null ? {} : { dismissed }),
+    });
   }
 
   /** Sends when the totals moved or an arrival is pending, or always when `always`. */
@@ -3572,6 +3609,7 @@
     drafts: NoticeFeedInput['drafts'],
     log: EventLog,
     seen: number,
+    calls: NeedsYouToastState,
     prefs: NoticeFeedInput['prefs'],
     modals: number,
     slots: NoticeFeedInput['slots'],
@@ -3583,7 +3621,7 @@
       log,
       memory: noticeMemory,
       seenThrough: seen,
-      needsYou: emptyNeedsYouToastState(),
+      needsYou: calls,
       prefs,
       openModalCount: modals,
       slots,
@@ -3602,21 +3640,41 @@
     return output;
   }
 
-  /** The line under each notice pop-up's title: the detail of the latest notice it holds. */
-  function secondLinesOf(output: NoticeFeedOutput): ReadonlyMap<string, string> {
+  /**
+   * The line under each pop-up's title: for a notice, the detail of the latest notice it holds;
+   * for a window call, the place the sidebar lists the window under.
+   */
+  function secondLinesOf(
+    output: NoticeFeedOutput,
+    windows: readonly WindowEntry[]
+  ): ReadonlyMap<string, string> {
     const details = new Map(output.center.map((notice) => [notice.seq, notice.detail]));
-    return new Map(
-      output.toasts.slots.notices.flatMap((slot): [string, string][] => {
-        const detail = details.get(slot.seqs[slot.seqs.length - 1] ?? -1) ?? null;
-        return detail === null ? [] : [[slot.id, detail]];
-      })
-    );
+    const notices = output.toasts.slots.notices.flatMap((slot): [string, string][] => {
+      const detail = details.get(slot.seqs[slot.seqs.length - 1] ?? -1) ?? null;
+      return detail === null ? [] : [[slot.id, detail]];
+    });
+    const byId = new Map(windows.map((entry) => [entry.windowId, entry]));
+    const places = output.toasts.visible.flatMap((item): [string, string][] => {
+      const entry = item.kind === 'needs-you' ? byId.get(item.windowId) : undefined;
+      return entry === undefined ? [] : [[item.id, roomNameOf(entry)]];
+    });
+    return new Map([...notices, ...places]);
   }
 
+  /** A closed or timed-out pop-up; a window call stays away until its window arrives again. */
   function handleToastDone(item: ToastItem): void {
     if (item.kind === 'notice') {
       toastSlots = dismissToast(toastSlots, item.id);
+      return;
     }
+    const { windows } = get(registry);
+    needsYouToasts = stepCallToasts(
+      needsYouToasts,
+      windows,
+      currentWindowFor(workViewOf(get(shell)), windows),
+      [],
+      item.windowId
+    );
   }
 
   function handleGoToWindowFromToast(windowId: string): void {
