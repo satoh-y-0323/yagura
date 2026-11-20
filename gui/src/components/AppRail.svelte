@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { chat, describeAttentionBadge, nav, plans } from '../ui-messages';
+  import { banners, chat, describeAttentionBadge, nav, plans } from '../ui-messages';
   import type { WindowStatusSummary } from '../status-tone';
   import StatusBadge from './StatusBadge.svelte';
   import PlansAttentionMark from './PlansAttentionMark.svelte';
@@ -33,6 +33,12 @@
   export let plansAttention: PlansAttention;
   export let onSettingsToggle: () => void;
   export let isSettingsOpen: boolean;
+  /** Notifications that came after the list was last opened. */
+  export let notificationsUnseen: number;
+  export let isNotificationsOpen: boolean;
+  export let onNotificationsToggle: () => void;
+  /** The bell, which the Notifications list opens beside and gives focus back to. */
+  export let notificationsButton: HTMLButtonElement | undefined = undefined;
 
   // The badge is a bare dot, so the button itself carries the reason as a
   // hover tooltip; an aria-label alone is never shown to a sighted user.
@@ -44,6 +50,10 @@
   // The button's own name replaces the badge's, so the count is described instead.
   $: windowsHint =
     windowsSummary.count > 0 ? describeAttentionBadge(windowsSummary.count) : undefined;
+  $: notificationsLabel =
+    notificationsUnseen > 0
+      ? banners.notificationsUnseen(notificationsUnseen)
+      : banners.notifications;
 </script>
 
 <nav class="app-rail">
@@ -201,6 +211,37 @@
 
   <IconButton
     class="app-rail__button"
+    label={notificationsLabel}
+    aria-expanded={isNotificationsOpen}
+    bind:element={notificationsButton}
+    on:click={onNotificationsToggle}
+  >
+    <svg class="app-rail__icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+      <path
+        d="M6 16.5V11a6 6 0 0 1 12 0v5.5l1.5 2H4.5z"
+        fill="none"
+        stroke="currentColor"
+        stroke-width="2"
+        stroke-linejoin="round"
+      />
+      <path
+        d="M10 20.5a2.2 2.2 0 0 0 4 0"
+        fill="none"
+        stroke="currentColor"
+        stroke-width="2"
+        stroke-linecap="round"
+      />
+    </svg>
+    {#if notificationsUnseen > 0}
+      <!-- The button's name carries the count, so the badge is not read twice. -->
+      <span class="app-rail__badge app-rail__count" aria-hidden="true">
+        {notificationsUnseen}
+      </span>
+    {/if}
+  </IconButton>
+
+  <IconButton
+    class="app-rail__button"
     label={nav.settings}
     aria-pressed={isSettingsOpen}
     on:click={onSettingsToggle}
@@ -307,6 +348,21 @@
     border-radius: var(--radius-full);
     background-color: var(--st-input);
     box-shadow: 0 0 0 var(--line-width-strong) var(--bg-chrome);
+  }
+
+  .app-rail__count {
+    min-width: 16px;
+    height: 16px;
+    justify-content: center;
+    align-items: center;
+    padding: 0 var(--space-1);
+    border: var(--line-width) solid var(--line);
+    border-radius: var(--radius-full);
+    background-color: var(--bg-selected);
+    color: var(--fg-default);
+    font-size: var(--text-2xs);
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
   }
 
   .app-rail__plans-mark {

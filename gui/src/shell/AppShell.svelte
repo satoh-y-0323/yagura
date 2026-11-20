@@ -5,19 +5,22 @@
   import { describeBoundaryNotice, type BoundaryOperation } from '../notices/boundary-notice';
   import type { OpenWindowSubmission, ProfileOption } from '../components/add-window-dialog-types';
   import AddWindowDialog from '../components/AddWindowDialog.svelte';
+  import AlertStrip from '../components/AlertStrip.svelte';
   import AppRail from '../components/AppRail.svelte';
   import ApprovalDialog from '../components/ApprovalDialog.svelte';
   import ChatPanel from '../components/ChatPanel.svelte';
   import CommandPicker from '../components/CommandPicker.svelte';
   import ConfirmDialog from '../components/ConfirmDialog.svelte';
-  import Icon from '../components/Icon.svelte';
-  import IconButton from '../components/IconButton.svelte';
+  import NoticeAnnouncer from '../components/NoticeAnnouncer.svelte';
+  import NoticeCenter from '../components/NoticeCenter.svelte';
   import PlansPanel from '../components/PlansPanel.svelte';
   import RenameDialog from '../components/RenameDialog.svelte';
-  import RestoreBanner from '../components/RestoreBanner.svelte';
   import RestoreDialog from '../components/RestoreDialog.svelte';
   import SettingsPanel from '../components/SettingsPanel.svelte';
+  import ToastRegion from '../components/ToastRegion.svelte';
   import Tooltip from '../components/Tooltip.svelte';
+  import type { OutsideDismissReason } from '../components/dismiss-on-outside';
+  import type { Rect } from '../components/menu-position';
   import { focusAsLastInput } from '../components/input-modality';
   import { bodyEscapePanel } from '../components/panel-focus';
   import { pointerDrag, type PointerDragOptions } from '../components/pointer-drag';
@@ -39,11 +42,26 @@
   import { daemonProblemNotices } from '../notices/daemon-health';
   import {
     appendEvent,
+    clearEvents,
+    daemonReconnectedEvent,
     dismissEvent,
     failureEvent,
+    windowExitEvent,
     type EventLog,
     type FailureEventKey,
+    type NewEvent,
   } from '../notices/event-log';
+  import { emptyNeedsYouToastState } from '../notices/needs-you-toasts';
+  import {
+    dismissToast,
+    emptyNoticeMemory,
+    emptyToastSlots,
+    noticeFeed,
+    type Notice,
+    type NoticeFeedInput,
+    type NoticeFeedOutput,
+    type ToastItem,
+  } from '../notices/notice-feed';
   import {
     applyClientConfigFailure,
     applyRecoveryUpdate,
@@ -52,10 +70,10 @@
     profilesNeedingNativeProgram,
     recordApprovalExpiredUnseen,
     reopenOffer,
+    type DaemonRecoveryUpdate,
     type NoticeAction,
     type NoticeCategory,
     type NoticeSourceState,
-    type StateNoticeKey,
   } from '../notices/notice-model';
   import type { DropSignal } from '../ipc/folder-drop-model';
   import { writeClipboardText } from '../ipc/clipboard';
@@ -200,6 +218,7 @@
     type ModelChoicesEntry,
   } from '../profile/model-aliases-model';
   import * as approvalQueue from '../session/approval-queue';
+  import { appHidden } from '../session/app-visibility';
   import { isApprovalDialogAllowed } from '../session/modal-state';
   import { describeUntargeted } from '../session/approval-target';
   import type { WithdrawReason } from '../session/approval-types';
@@ -257,6 +276,7 @@
     type OrderedWindow,
     type ShellEvent,
     type ShellState,
+    type ShellStep,
   } from '../session/shell-state';
   import { createGuardedLocalStorage } from '../storage/guarded-storage';
   import {
@@ -339,13 +359,11 @@
   import { isBuiltInSelection, type AppThemeSelection } from '../theme/theme-resolve';
   import { createBrowserThemeDeps, createThemeStore } from '../theme/theme-store';
   import {
-    buttons,
     chat,
     dialogs,
     forms,
     errors,
     banners,
-    hints,
     nav,
     themes,
     describeDetectionWarning,
@@ -454,7 +472,23 @@
 
   // Things that happened, kept until the user dismisses them; `noticeMemory` numbers them.
   let eventLog: EventLog = [];
-  let noticeMemory = { nextSeq: 1 };
+  let noticeMemory = emptyNoticeMemory();
+  // What the pop-ups hold between runs of the feed, handed back as it returned them.
+  let toastSlots = emptyToastSlots();
+  // The newest notice the user has seen in the Notifications list.
+  let seenThrough = -1;
+  // Counted where the modal focus port hears a dialog open and close; a reactive value so the
+  // pop-ups held behind a modal come up as soon as the last one closes.
+  let openModalCount = 0;
+  // Pop-up timers stand still while the app is not in front.
+  let appFocused = document.hasFocus();
+  $: timersRunning = !$appHidden && appFocused;
+
+  let isNoticeCenterOpen = false;
+  let noticeCenterAnchor: Rect | null = null;
+  // Fixed for one opening, so what came after the last opening stays marked new while it is open.
+  let noticeCenterNewerThan = Number.POSITIVE_INFINITY;
+  let notificationsButton: HTMLButtonElement | undefined;
 
   const keyboardPlatform = hostKeyboardPlatform();
   const keymapStore = createKeymapStore({
@@ -710,7 +744,7 @@
    * The keyboard moves only when the reducer says so: the window list changing
    * on its own never moves it. The work mode is saved only when a step changes it.
    */
-  function dispatchShell(event: ShellEvent): void {
+  function dispatchShell(event: ShellEvent): ShellStep {
     const modeBefore = get(shell).workMode;
     const step = reduceShell(get(shell), event);
     shell.set(step.state);
@@ -734,6 +768,7 @@
           break;
       }
     }
+    return step;
   }
 
   function selectWindow(windowId: string): void {
@@ -834,10 +869,24 @@
         : null,
     hasOpenWindows: $registry.windows.length > 0,
   } satisfies NoticeSourceState;
-  // The reopen offer keeps its own element (RestoreBanner) above the strip.
-  $: stateNotices = buildNotices(sourceState).filter((notice) => notice.key !== 'reopen-offer');
+  $: noticeDrafts = buildNotices(sourceState);
   // With no window open the work area makes the offer, so the two never make it together.
   $: restoreOffer = reopenOffer(sourceState);
+  $: windowNames = new Map($registry.windows.map((entry) => [entry.windowId, entry.displayName]));
+  // The slots are an input so a closed or timed-out pop-up runs the feed again; the
+  // function writes them back, which a statement reading them could not do itself.
+  $: feed = runNoticeFeed(
+    noticeDrafts,
+    eventLog,
+    seenThrough,
+    notificationPreferences,
+    openModalCount,
+    toastSlots,
+    windowNames,
+    isNoticeCenterOpen
+  );
+  $: toastSecondLines = secondLinesOf(feed);
+  $: closeNoticeCenterBehindModal(openModalCount);
   // Recomputed on every registry change so the already-open hint (cwd + name
   // match) tracks which windows are actually open right now.
   $: restoreOpenWindows = $registry.windows.map((entry) => ({ cwd: entry.cwd, name: entry.name }));
@@ -2285,6 +2334,7 @@
       const token = nextModalToken;
       nextModalToken += 1;
       openModals.set(token, { subject, origin: modalOrigin() });
+      openModalCount += 1;
       return token;
     },
     closed: (token) => {
@@ -2293,6 +2343,7 @@
         return;
       }
       openModals.delete(token);
+      openModalCount -= 1;
       // An offer: a move asked for while the dialog was open, or the return of
       // a dialog that closed before it, wins.
       pendingFocus.offer(
@@ -2347,7 +2398,17 @@
     ];
     listedBefore = listed;
     for (const event of events) {
-      dispatchShell(event);
+      const step = dispatchShell(event);
+      if (event.type === 'windowGone') {
+        const exit = windowExitEvent({
+          ...event,
+          goneByUser: step.goneByUser === true,
+          carded: step.state.exitedCard?.windowId === event.windowId,
+        });
+        if (exit !== null) {
+          recordEvent(exit);
+        }
+      }
     }
   }
 
@@ -2699,7 +2760,7 @@
           noticeState = { ...noticeState, approverRegistrationRefused: true };
         },
         onDaemonRecovery: (payload) => {
-          noticeState = applyRecoveryUpdate(noticeState, payload);
+          applyRecovery(payload);
         },
       });
     } catch (error) {
@@ -2726,11 +2787,9 @@
     // be lost, the same reasoning the approval sync pull below follows.
     try {
       const report = await invokeGetRecoveryStatus();
+      applyRecovery({ status: report.status, rev: report.rev });
       noticeState = {
-        ...applyClientConfigFailure(
-          applyRecoveryUpdate(noticeState, { status: report.status, rev: report.rev }),
-          report.config_failure
-        ),
+        ...applyClientConfigFailure(noticeState, report.config_failure),
         startupEnvFailure: report.startup_env_failure,
       };
     } catch (error) {
@@ -3018,16 +3077,26 @@
     console.error(`${operation} boundary error:`, detail);
   }
 
-  /** Records an event that reports an action that did not go through. */
-  function recordFailure(key: FailureEventKey, text: string): void {
-    const next = appendEvent(
-      eventLog,
-      noticeMemory,
-      failureEvent(key, text),
-      describeEventTime(new Date())
-    );
+  /** Records one thing that happened, numbered from the counter the feed numbers from. */
+  function recordEvent(event: NewEvent): void {
+    const next = appendEvent(eventLog, noticeMemory, event, describeEventTime(new Date()));
     eventLog = next.log;
     noticeMemory = next.memory;
+  }
+
+  /** Records an event that reports an action that did not go through. */
+  function recordFailure(key: FailureEventKey, text: string): void {
+    recordEvent(failureEvent(key, text));
+  }
+
+  /** Folds a recovery status change in; recovery reaching the daemon again is an event. */
+  function applyRecovery(update: DaemonRecoveryUpdate): void {
+    const before = noticeState.daemonRecovery;
+    noticeState = applyRecoveryUpdate(noticeState, update);
+    const reconnected = daemonReconnectedEvent(before, noticeState.daemonRecovery);
+    if (reconnected !== null) {
+      recordEvent(reconnected);
+    }
   }
 
   /**
@@ -3096,7 +3165,7 @@
     isRestoreDialogOpen = false;
   }
 
-  function dismissRestoreBanner(): void {
+  function dismissReopenOffer(): void {
     noticeState = dismissNotice(noticeState, 'reopen-offer');
   }
 
@@ -3159,7 +3228,7 @@
       .filter((candidate) => restoreSelection.has(candidate.position))
       .sort((a, b) => a.position - b.position);
     isRestoreDialogOpen = false;
-    dismissRestoreBanner();
+    dismissReopenOffer();
 
     const { opened, failed } = await restoreSelected(selected, invokeRestoreLaunch);
     for (const { name, failure } of failed) {
@@ -3499,8 +3568,131 @@
     renameDialog = { isOpen: true, entry };
   }
 
-  function handleDismissNotice(key: StateNoticeKey): void {
-    noticeState = dismissNotice(noticeState, key);
+  function runNoticeFeed(
+    drafts: NoticeFeedInput['drafts'],
+    log: EventLog,
+    seen: number,
+    prefs: NoticeFeedInput['prefs'],
+    modals: number,
+    slots: NoticeFeedInput['slots'],
+    names: NoticeFeedInput['windowNames'],
+    listOpen: boolean
+  ): NoticeFeedOutput {
+    const input: NoticeFeedInput = {
+      drafts,
+      log,
+      memory: noticeMemory,
+      seenThrough: seen,
+      needsYou: emptyNeedsYouToastState(),
+      prefs,
+      openModalCount: modals,
+      slots,
+      windowNames: names,
+    };
+    let output = noticeFeed(input);
+    // What arrives while the list is open is in front of the user, so it is seen. The feed is
+    // pure, so running it again on the same input with the new mark only moves what the mark decides.
+    const listed = Math.max(seen, ...output.center.map((notice) => notice.seq));
+    if (listOpen && listed > seen) {
+      seenThrough = listed;
+      output = noticeFeed({ ...input, seenThrough: listed });
+    }
+    noticeMemory = output.memory;
+    toastSlots = output.toasts.slots;
+    return output;
+  }
+
+  /** The line under each notice pop-up's title: the detail of the latest notice it holds. */
+  function secondLinesOf(output: NoticeFeedOutput): ReadonlyMap<string, string> {
+    const details = new Map(output.center.map((notice) => [notice.seq, notice.detail]));
+    return new Map(
+      output.toasts.slots.notices.flatMap((slot): [string, string][] => {
+        const detail = details.get(slot.seqs[slot.seqs.length - 1] ?? -1) ?? null;
+        return detail === null ? [] : [[slot.id, detail]];
+      })
+    );
+  }
+
+  function handleToastDone(item: ToastItem): void {
+    if (item.kind === 'notice') {
+      toastSlots = dismissToast(toastSlots, item.id);
+    }
+  }
+
+  function handleGoToWindowFromToast(windowId: string): void {
+    const entry = get(registry).windows.find((candidate) => candidate.windowId === windowId);
+    if (entry !== undefined) {
+      goToWindowByUser(entry);
+    }
+  }
+
+  function showWaitingWindows(): void {
+    if (needsYouView === null) {
+      toggleNeedsYouFilter();
+    }
+  }
+
+  /** Opens or closes the Notifications list; opening marks everything listed so far as seen. */
+  function toggleNoticeCenter(): void {
+    if (isNoticeCenterOpen) {
+      closeNoticeCenter('close-button');
+      return;
+    }
+    noticeCenterAnchor = notificationsButton?.getBoundingClientRect() ?? null;
+    noticeCenterNewerThan = seenThrough;
+    seenThrough = Math.max(seenThrough, ...feed.center.map((notice) => notice.seq));
+    isNoticeCenterOpen = true;
+  }
+
+  function openNoticeCenter(): void {
+    if (!isNoticeCenterOpen) {
+      toggleNoticeCenter();
+    }
+  }
+
+  /**
+   * Closes the Notifications list. Focus goes back to the bell when the list held it, except
+   * after a press outside, which put focus where the user pressed.
+   */
+  function closeNoticeCenter(
+    reason: OutsideDismissReason | 'escape' | 'tab' | 'close-button'
+  ): void {
+    const shouldReturnFocus =
+      reason !== 'outside' && (panelHoldsFocus('.notice-center') || isFocusOnBody());
+    isNoticeCenterOpen = false;
+    if (shouldReturnFocus) {
+      notificationsButton?.focus();
+    }
+  }
+
+  // A modal makes the list behind it unusable; the modal takes focus itself.
+  function closeNoticeCenterBehindModal(modals: number): void {
+    if (modals > 0) {
+      isNoticeCenterOpen = false;
+    }
+  }
+
+  function dismissListedNotice(notice: Notice): void {
+    if (notice.source === 'state') {
+      noticeState = dismissNotice(noticeState, notice.key);
+    } else {
+      eventLog = dismissEvent(eventLog, notice.seq);
+    }
+  }
+
+  function clearNoticeEvents(): void {
+    eventLog = clearEvents(eventLog);
+  }
+
+  /** Opens Settings on the Notifications tab, in place of the list. */
+  function openNotificationSettings(): void {
+    isNoticeCenterOpen = false;
+    selectSettingsTab('notifications');
+    if (isSettingsOpen) {
+      pendingFocus.request({ kind: 'panel', panel: 'settings' });
+    } else {
+      void toggleSettings();
+    }
   }
 
   function handleNoticeAction(action: NoticeAction): void {
@@ -3559,54 +3751,18 @@
   void loadRestoreCandidates();
 </script>
 
-<svelte:window on:keydown|capture={handleWindowKeydown} on:resize={handleWindowResize} />
+<svelte:window
+  on:keydown|capture={handleWindowKeydown}
+  on:resize={handleWindowResize}
+  on:focus={() => (appFocused = true)}
+  on:blur={() => (appFocused = false)}
+/>
 <svelte:document on:focusin={notePanelFocus} />
 
 <main class="app">
-  {#if restoreOffer !== null && $registry.windows.length > 0}
-    <RestoreBanner
-      count={restoreOffer.count}
-      timestamp={restoreOffer.timestamp}
-      onChoose={openRestoreDialog}
-      onDismiss={dismissRestoreBanner}
-    />
-  {/if}
+  <NoticeAnnouncer announce={feed.announce} />
 
-  {#each stateNotices as notice (`${notice.key}:${notice.detail ?? notice.title}`)}
-    <div class="banner banner-warning" role="alert">
-      <span class="banner-text">{notice.detail ?? notice.title}</span>
-      {#if notice.action}
-        {@const action = notice.action}
-        <button class="banner-action" type="button" on:click={() => handleNoticeAction(action)}>
-          {buttons[action.labelKey]}
-        </button>
-      {/if}
-      {#if notice.dismissible}
-        <IconButton
-          class="banner-close"
-          label={hints.dismissBanner}
-          on:click={() => handleDismissNotice(notice.key)}
-        >
-          <Icon name="x" />
-        </IconButton>
-      {/if}
-    </div>
-  {/each}
-
-  {#each eventLog as event (event.seq)}
-    <div class="banner banner-warning" role="alert">
-      <span class="banner-text">{event.text}</span>
-      <IconButton
-        class="banner-close"
-        label={hints.dismissBanner}
-        on:click={() => {
-          eventLog = dismissEvent(eventLog, event.seq);
-        }}
-      >
-        <Icon name="x" />
-      </IconButton>
-    </div>
-  {/each}
+  <AlertStrip notices={feed.strip} onAction={handleNoticeAction} />
 
   <RestoreDialog
     isOpen={isRestoreDialogOpen}
@@ -3635,6 +3791,23 @@
       plansAttention={plansAttention(planList)}
       onSettingsToggle={toggleSettings}
       {isSettingsOpen}
+      notificationsUnseen={feed.unseen}
+      isNotificationsOpen={isNoticeCenterOpen}
+      onNotificationsToggle={toggleNoticeCenter}
+      bind:notificationsButton
+    />
+
+    <NoticeCenter
+      isOpen={isNoticeCenterOpen}
+      anchor={noticeCenterAnchor}
+      keepOpenWithin={notificationsButton}
+      notices={feed.center}
+      newerThan={noticeCenterNewerThan}
+      onAction={handleNoticeAction}
+      onDismiss={dismissListedNotice}
+      onClear={clearNoticeEvents}
+      onOpenSettings={openNotificationSettings}
+      onClose={closeNoticeCenter}
     />
 
     <Navigator
@@ -3667,28 +3840,44 @@
          layer, so the divider is not exposed to assistive technology. -->
     <div class="sidebar-resize" aria-hidden="true" use:pointerDrag={sidebarDrag}></div>
 
-    <WorkArea
-      bind:element={mainContentElement}
-      windows={$registry.windows}
-      rendered={renderedPanes}
-      {workView}
-      currentWindowId={current?.windowId ?? null}
-      {area}
-      {layout}
-      {actions}
-      {themeStore}
-      trackArea={trackFloatArea}
-      onRename={handleRenameWindow}
-      onPressed={(entry: WindowEntry, pressOnControl: boolean) =>
-        activateWindow({ byUser: true, target: entry.windowId, pressOnControl })}
-      exitedCard={$shell.exitedCard}
-      keys={$keymapStore.keys}
-      platform={keyboardPlatform}
-      reopen={$registry.windows.length === 0 ? restoreOffer : null}
-      onNewWindow={openAddDialog}
-      onChooseWindows={openRestoreDialog}
-      onExitedCardGoTo={() => dispatchShell({ type: 'exitedCardGoTo' })}
-    />
+    <div class="work-surface">
+      <div class="work-surface__windows">
+        <WorkArea
+          bind:element={mainContentElement}
+          windows={$registry.windows}
+          rendered={renderedPanes}
+          {workView}
+          currentWindowId={current?.windowId ?? null}
+          {area}
+          {layout}
+          {actions}
+          {themeStore}
+          trackArea={trackFloatArea}
+          onRename={handleRenameWindow}
+          onPressed={(entry: WindowEntry, pressOnControl: boolean) =>
+            activateWindow({ byUser: true, target: entry.windowId, pressOnControl })}
+          exitedCard={$shell.exitedCard}
+          keys={$keymapStore.keys}
+          platform={keyboardPlatform}
+          reopen={$registry.windows.length === 0 ? restoreOffer : null}
+          onNewWindow={openAddDialog}
+          onChooseWindows={openRestoreDialog}
+          onExitedCardGoTo={() => dispatchShell({ type: 'exitedCardGoTo' })}
+        />
+      </div>
+      <ToastRegion
+        toasts={feed.toasts}
+        secondLines={toastSecondLines}
+        {timersRunning}
+        onAction={handleNoticeAction}
+        onGoToWindow={handleGoToWindowFromToast}
+        onDismiss={handleToastDone}
+        onExpire={handleToastDone}
+        onShowWaiting={showWaitingWindows}
+        onShowNotifications={openNoticeCenter}
+        onReturnFocus={focusCurrentTerminal}
+      />
+    </div>
   </div>
 </main>
 
@@ -3856,6 +4045,7 @@
     isRequesterOpen={isApprovalRequesterOpen}
     pendingCount={approvalQueue.size(approvals)}
     openedAt={approvalOpenedAt}
+    decisionFailed={approvalQueue.decisionFailed(approvals, approvalRequest.request_id)}
     onDecide={decideApproval}
   />
 {/if}
@@ -3901,34 +4091,29 @@
     height: 100vh;
   }
 
-  .banner {
-    display: flex;
-    align-items: center;
-    gap: var(--space-sm);
-    padding: var(--space-sm) var(--space-md);
-    border-bottom: 1px solid var(--color-border);
-    font-size: var(--font-size-sm);
-  }
-
-  .banner-warning {
-    background-color: var(--st-approval-tint);
-    color: var(--fg-default);
-    border-bottom-color: var(--st-approval);
-  }
-
-  .banner-text {
-    flex: 1 1 auto;
-  }
-
-  .banner-action {
-    flex: 0 0 auto;
-  }
-
   .layout {
     display: flex;
     flex: 1 1 auto;
     min-height: 0;
     gap: 0;
+  }
+
+  /* The positioned box the pop-ups sit in, at the work surface's bottom right. */
+  .work-surface {
+    position: relative;
+    display: flex;
+    flex: 1 1 auto;
+    min-width: 0;
+    min-height: 0;
+  }
+
+  /* Window z-orders grow with the window count; kept inside their own stack so pop-ups stay above. */
+  .work-surface__windows {
+    display: flex;
+    flex: 1 1 auto;
+    min-width: 0;
+    min-height: 0;
+    isolation: isolate;
   }
 
   /* Both the divider and the grab target for the resize, which is why it is
