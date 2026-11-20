@@ -72,6 +72,14 @@
   --icon-button-size: 28px;
   --icon-button-hit-min: 24px;
 
+  /* The notice lane: the shell works out how many cards fit from these, so they stay in px */
+  --notice-lane-height: 40px;
+  --lane-card-width: 240px;
+  --lane-card-min-width: 160px;
+  --lane-gap: 8px;
+  --lane-padding-inline: 8px;
+  --lane-chip-width: 56px;
+
   /* Icon sizes */
   --icon-xs: 12px;
   --icon-sm: 14px;

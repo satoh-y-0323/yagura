@@ -215,6 +215,10 @@ export const dummyMessages: Messages = {
     clearNotifications: 'DUMMY_clearNotifications',
     notificationSettings: 'DUMMY_notificationSettings',
     notificationPopUps: 'DUMMY_notificationPopUps',
+    noticeLane: 'DUMMY_noticeLane',
+    laneCardName: (sentence: string, action: string) => `DUMMY_laneCardName(${sentence},${action})`,
+    laneCount: (count: number) => `DUMMY_laneCount(${count})`,
+    showInNotifications: 'DUMMY_showInNotifications',
     screenReaderAnnouncements: 'DUMMY_screenReaderAnnouncements',
     noticeTones: {
       info: 'DUMMY_noticeToneInfo',

@@ -38,6 +38,8 @@
   export let notices: readonly Notice[];
   /** Notices numbered above this came after the list was last opened and are marked new; the default marks none. */
   export let newerThan: number = Number.POSITIVE_INFINITY;
+  /** The row to start on when an opening comes from a notice: its close button, else the list's. */
+  export let initialSeq: number | null = null;
   export let onAction: (action: NoticeAction) => void;
   export let onDismiss: (notice: Notice) => void;
   /** Clears the events; state notices stay. */
@@ -99,9 +101,15 @@
     return dialog === undefined ? [] : Array.from(dialog.querySelectorAll<HTMLElement>(FOCUSABLE));
   }
 
-  /** The first control after the close button, else the close button. */
+  /** The asked-for row's close button, else the first control after the close button, else the close button. */
   function focusInitial(): void {
     if (!isOpen || closeButton === undefined) {
+      return;
+    }
+    if (initialSeq !== null) {
+      const row = dialog?.querySelector<HTMLElement>(`[data-notice-seq="${initialSeq}"]`) ?? null;
+      row?.scrollIntoView({ block: 'nearest' });
+      (row?.querySelector<HTMLElement>('[data-notice-dismiss]') ?? closeButton).focus();
       return;
     }
     const elements = focusables();

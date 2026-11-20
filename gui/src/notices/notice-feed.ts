@@ -81,6 +81,8 @@ interface LaneItemBody {
   id: string;
   /** The whole sentence, with "and N more" when events are folded in: the name and the tooltip. */
   title: string;
+  /** The latest sentence alone, without the folded count: what a card draws when it names no one. */
+  sentence: string;
   /** The title split around the window's name so only the name is cut short; `null` when it names none. */
   parts: TitleParts | null;
   /** How many other events are folded into the card. */
@@ -429,13 +431,15 @@ export function noticeFeed(input: NoticeFeedInput): NoticeFeedOutput {
           return [];
         }
         const name = nameOf(input.windowNames, toast.windowId);
+        const title = callTitle(toast);
         return [
           {
             kind: 'needs-you',
             id: entryKey(entry),
             windowId: toast.windowId,
             status: toast.status,
-            title: callTitle(toast),
+            title,
+            sentence: title,
             parts: describeWindowCallParts(name, toast.status),
             folded: 0,
             tone: toast.tone,
@@ -457,6 +461,7 @@ export function noticeFeed(input: NoticeFeedInput): NoticeFeedOutput {
           action: latest.notice.action,
           title:
             folded > 0 ? describeNoticeAndMore(latest.notice.title, folded) : latest.notice.title,
+          sentence: latest.notice.title,
           parts: latest.parts,
           folded,
           tone: entry.tone,

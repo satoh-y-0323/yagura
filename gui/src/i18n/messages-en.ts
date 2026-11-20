@@ -468,6 +468,13 @@ export const messagesEn = {
     clearNotifications: 'Clear',
     notificationSettings: 'Notification settings',
     notificationPopUps: 'Notification pop-ups',
+    // The band at the foot of the work surface; a different word from the bell's list.
+    noticeLane: 'Notification bar',
+    // A lane card's name: its whole sentence, then what pressing it does.
+    laneCardName: (sentence: string, action: string): string => `${sentence}, ${action}`,
+    // The short count on a lane card or a count of cards left over; the whole sentence is the name.
+    laneCount: (count: number): string => (count > 99 ? '99+' : `+${count}`),
+    showInNotifications: 'Show in Notifications',
     screenReaderAnnouncements: 'Screen reader announcements',
     // Names each tone's icon, so a tone is never told by colour alone.
     noticeTones: { info: 'Information', warning: 'Warning', error: 'Error' },
