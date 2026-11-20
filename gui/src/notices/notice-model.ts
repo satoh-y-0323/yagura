@@ -28,15 +28,19 @@ export type StateNoticeKey =
 /** Identifies one kind of notice: a state the app is in, or something that happened. */
 export type NoticeKey = StateNoticeKey | EventKey;
 
-/** The settings rows a notice kind can be switched off from. */
-export type NoticeCategory =
-  | 'needs-approval'
-  | 'needs-input'
-  | 'window-exits'
-  | 'reconnected'
-  | 'failed-actions'
-  | 'setup-problems'
-  | 'last-session';
+/** The settings rows a notice kind can be switched off from, in the order the settings table lists them. */
+export const NOTICE_CATEGORIES = [
+  'needs-approval',
+  'needs-input',
+  'window-exits',
+  'reconnected',
+  'failed-actions',
+  'setup-problems',
+  'last-session',
+] as const;
+
+/** One settings row a notice kind can be switched off from. */
+export type NoticeCategory = (typeof NOTICE_CATEGORIES)[number];
 
 /** How a kind of notice is treated, wherever it is shown. */
 export interface NoticeClass {
