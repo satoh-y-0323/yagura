@@ -90,6 +90,7 @@
     type ChatHistoryCleared,
     type ChatPosted,
     type ChatRoomInfo,
+    type DaemonConnectedPayload,
     type RestoreEntry,
   } from '../ipc/session-boundary';
   import {
@@ -109,6 +110,7 @@
     invokeCloseWindow,
     invokeDecideApproval,
     invokeGetRecoveryStatus,
+    invokeGetDaemonConnection,
     invokeGetDaemonHealth,
     invokeSyncApprovals,
     invokeInterruptWindow,
@@ -2758,13 +2760,17 @@
   // emits while the list is loading is missed, and the pull comes last so a
   // daemon that has to be waited out (ATTACH_TIMEOUT) cannot delay it.
   async function initialize(): Promise<void> {
+    // Set by the first announcement heard: from then on the events carry every
+    // later start, so the start-up read of the last one must not overwrite them.
+    let isDaemonConnectionHeard = false;
     try {
       unsubscribeSession = await subscribeSession(registry.resolveWindowHandlers, {
         onStatus: (payload) => {
           applyStatusPush(registry, protocol_revision, payload);
         },
-        onDaemonSpawnWarning: (payload) => {
-          noticeState = { ...noticeState, daemonSpawnNotice: foldExternalText(payload.message) };
+        onDaemonConnected: (payload) => {
+          isDaemonConnectionHeard = true;
+          void rereadDaemonFacts(payload);
         },
         onBoundaryError: (error) => {
           reportBoundaryNotice('sessionEvent', error);
@@ -2820,15 +2826,6 @@
       };
     } catch (error) {
       console.error('failed to pull the daemon recovery status:', error);
-    }
-
-    try {
-      noticeState = {
-        ...noticeState,
-        daemonHealthNotices: daemonProblemNotices(await invokeGetDaemonHealth()),
-      };
-    } catch (error) {
-      console.error('failed to pull the daemon health:', error);
     }
 
     await refreshWindowList();
@@ -2925,27 +2922,17 @@
       console.error('failed to pull the pending approvals:', error);
     }
 
-    // Seeds the room list and the aggregate badge from the daemon's state as
-    // of connect time: a `chat_changed` push only ever carries a later
-    // state, so without this read the badge would stay dark until the first
-    // push. Read directly rather than through `refreshChatRooms`: nothing
-    // else can be racing this, the very first room-list read of the run.
+    // After every subscription: a push only ever carries a later state than
+    // the read, and the start's warning may have been announced before the
+    // session subscription opened.
+    let connection: DaemonConnectedPayload | null = null;
     try {
-      chatRooms = applyRoomsList(await invokeListChatRooms());
-      chatNeedsUser = anyNeedsUser(chatRooms);
+      const announced = await invokeGetDaemonConnection();
+      connection = isDaemonConnectionHeard ? null : announced;
     } catch (error) {
-      console.error('failed to list chat rooms at startup:', error);
+      console.error('failed to pull the daemon connection:', error);
     }
-
-    // Seeds the plan list -- and with it the plans-attention badge -- from
-    // the daemon's state as of connect time, the same reason chatRooms is
-    // seeded just above: a `plan_changed` push only ever carries a later
-    // state.
-    try {
-      planList = await invokeListPlans();
-    } catch (error) {
-      console.error('failed to list plans at startup:', error);
-    }
+    await rereadDaemonFacts(connection);
 
     // Unconditional: the core learns this shell's totals even when nothing
     // moved while starting.
@@ -3157,9 +3144,8 @@
   }
 
   /**
-   * Fetches the restore candidates once at startup. A
-   * failure leaves the candidate list empty and records
-   * `banners.restoreLoadFailed`.
+   * Fetches the restore candidates, which a daemon start decides. A failure
+   * keeps what was read last and records `banners.restoreLoadFailed`.
    */
   async function loadRestoreCandidates(): Promise<void> {
     try {
@@ -3169,7 +3155,51 @@
     } catch (error) {
       console.error('failed to list restore candidates:', error);
       recordFailure('restore-load-failed', banners.restoreLoadFailed);
+      return;
     }
+    // A position counts among the rows of this read, so a choice made against
+    // an earlier read would land on another candidate.
+    restoreSelectionOverrides.clear();
+    if (isRestoreDialogOpen) {
+      restoreSelection = defaultSelection(restoreCandidates, restoreOpenWindows);
+    }
+  }
+
+  /**
+   * Reads what belongs to one daemon start and is pushed neither again to a
+   * new connection nor across a restart: the health, the profiles' usability,
+   * the rooms and plans with their badges, and the restore candidates.
+   * Sequential, so the reads do not compete for the one control connection.
+   */
+  async function rereadDaemonFactsOnce(): Promise<void> {
+    try {
+      const problems = await invokeGetDaemonHealth();
+      noticeState = { ...noticeState, daemonHealthNotices: daemonProblemNotices(problems) };
+    } catch (error) {
+      console.error('failed to pull the daemon health:', error);
+    }
+    await loadProfiles();
+    await refreshChatRooms();
+    await refreshPlanList();
+    await loadRestoreCandidates();
+  }
+
+  const rereadDaemonStart = serializeRefresh(rereadDaemonFactsOnce);
+
+  /**
+   * Takes in one daemon start: its spawn warning replaces the last start's,
+   * and its facts are read again. `null` names no start, so the warning is
+   * left as it is.
+   */
+  function rereadDaemonFacts(connection: DaemonConnectedPayload | null): Promise<void> {
+    if (connection !== null) {
+      const warning = connection.spawn_warning;
+      noticeState = {
+        ...noticeState,
+        daemonSpawnNotice: warning === null ? null : foldExternalText(warning),
+      };
+    }
+    return rereadDaemonStart();
   }
 
   /**
@@ -3772,9 +3802,9 @@
     }
   }
 
-  // Initialize on mount. The two enumerations are chained behind the startup
-  // sequence so they do not compete with it for the one control connection.
-  void initialize().then(() => Promise.all([loadDetections(), loadProfiles()]));
+  // Initialize on mount. The enumeration is chained behind the startup
+  // sequence so it does not compete with it for the one control connection.
+  void initialize().then(() => loadDetections());
   void loadKeymap();
   void loadKeymapFilePath();
   // After the themes file settles, so the daemon is never sent the state from
@@ -3785,7 +3815,6 @@
       invokeSetDefaultPalettes(app, vendors)
     );
   });
-  void loadRestoreCandidates();
 </script>
 
 <svelte:window

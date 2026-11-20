@@ -20,7 +20,7 @@ import type {
 export const SESSION_EVENT = {
   exit: 'session://exit',
   windowLink: 'session://window-link',
-  daemonSpawnWarning: 'session://daemon-spawn-warning',
+  daemonConnected: 'session://daemon-connected',
   status: 'session://status',
   approvalRequested: 'session://approval-requested',
   approvalWithdrawn: 'session://approval-withdrawn',
@@ -215,10 +215,19 @@ export type WindowLinkPayload = WindowScoped & { epoch: number } & (
     { state: 'lost'; reason: WindowLinkLostReason } | { state: Exclude<WindowLinkState, 'lost'> }
   );
 
-/** Payload of `session://daemon-spawn-warning`. */
-export interface DaemonSpawnWarningPayload {
-  /** English, human-readable description for `console.warn`. */
-  message: string;
+/**
+ * Payload of `session://daemon-connected`, and the reply of the
+ * `get_daemon_connection` command: the control connection reached a daemon
+ * start it had not announced, so the facts of that start are read again.
+ */
+export interface DaemonConnectedPayload {
+  /** The start the daemon named; `null` from a daemon that names none. */
+  status_boot: StatusBoot | null;
+  /**
+   * English text naming the consequence when this GUI started the daemon
+   * with the weaker detachment; `null` for any other start.
+   */
+  spawn_warning: string | null;
 }
 
 /**
@@ -1128,14 +1137,21 @@ export function narrowWindowLinkPayload(value: unknown): WindowLinkPayload {
 }
 
 /**
- * Validates a `session://daemon-spawn-warning` payload.
+ * Validates a `session://daemon-connected` payload or a non-null
+ * `get_daemon_connection` reply. A missing key reads as `null`, and a
+ * negative boot part drops the boot alone: the reader only reads the start's
+ * facts again, so the warning is never lost to a boot it cannot keep.
  *
- * @throws {BoundaryError} when the payload does not match the contract.
+ * @throws {BoundaryError} when the payload is not a record, the boot is
+ * malformed other than by a negative part, or the warning is not a string.
  */
-export function narrowDaemonSpawnWarningPayload(value: unknown): DaemonSpawnWarningPayload {
-  const context = SESSION_EVENT.daemonSpawnWarning;
+export function narrowDaemonConnectedPayload(value: unknown): DaemonConnectedPayload {
+  const context = SESSION_EVENT.daemonConnected;
   const record = requireRecord(value, context);
-  return { message: requireString(record, 'message', context) };
+  return {
+    status_boot: readOptionalStatusBoot(record, context, 'drop'),
+    spawn_warning: readOptionalString(record, 'spawn_warning', context),
+  };
 }
 
 /**

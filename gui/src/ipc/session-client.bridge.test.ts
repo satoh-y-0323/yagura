@@ -139,6 +139,20 @@ describe('the thin window commands', () => {
     expect(invokeMock).toHaveBeenLastCalledWith('reconnect_daemon');
   });
 
+  it('reads the last daemon connection by command name and narrows the reply', async () => {
+    const { invokeGetDaemonConnection } = await import('./session-client');
+    invokeMock.mockResolvedValueOnce(null);
+    await expect(invokeGetDaemonConnection()).resolves.toBeNull();
+    expect(invokeMock).toHaveBeenLastCalledWith('get_daemon_connection');
+    invokeMock.mockResolvedValueOnce({ status_boot: { origin: 2, seq: 1 } });
+    await expect(invokeGetDaemonConnection()).resolves.toEqual({
+      status_boot: { origin: 2, seq: 1 },
+      spawn_warning: null,
+    });
+    invokeMock.mockResolvedValueOnce({ status_boot: null, spawn_warning: 5 });
+    await expect(invokeGetDaemonConnection()).rejects.toThrow(BoundaryError);
+  });
+
   it('renames a window and returns the stored name', async () => {
     invokeMock.mockResolvedValueOnce('stored');
     await expect(invokeRenameWindow('w', 'asked')).resolves.toBe('stored');
@@ -581,7 +595,7 @@ describe('invokeLoadThemes refusals', () => {
 describe('subscribeSession routing', () => {
   function appHandlers(overrides: Partial<AppEventHandlers> = {}): AppEventHandlers {
     return {
-      onDaemonSpawnWarning: vi.fn(),
+      onDaemonConnected: vi.fn(),
       onBoundaryError: vi.fn(),
       ...overrides,
     };
@@ -614,8 +628,11 @@ describe('subscribeSession routing', () => {
     });
     await subscribeSession(() => undefined, app);
 
-    push(SESSION_EVENT.daemonSpawnWarning, { message: 'm' });
-    expect(app.onDaemonSpawnWarning).toHaveBeenCalledWith({ message: 'm' });
+    push(SESSION_EVENT.daemonConnected, { status_boot: { origin: 7, seq: 3 } });
+    expect(app.onDaemonConnected).toHaveBeenCalledWith({
+      status_boot: { origin: 7, seq: 3 },
+      spawn_warning: null,
+    });
     push(SESSION_EVENT.status, { window_id: 'w', status: 'idle' });
     expect(app.onStatus).toHaveBeenCalledWith({
       window_id: 'w',
@@ -660,9 +677,11 @@ describe('subscribeSession routing', () => {
     await subscribeSession(() => undefined, app);
     push(SESSION_EVENT.status, { status: 'idle' });
     push(SESSION_EVENT.daemonRecovery, 5);
+    push(SESSION_EVENT.daemonConnected, { status_boot: null, spawn_warning: 5 });
     expect(app.onStatus).not.toHaveBeenCalled();
     expect(app.onDaemonRecovery).not.toHaveBeenCalled();
-    expect(app.onBoundaryError).toHaveBeenCalledTimes(2);
+    expect(app.onDaemonConnected).not.toHaveBeenCalled();
+    expect(app.onBoundaryError).toHaveBeenCalledTimes(3);
   });
 
   it('routes a window event to the handlers of the window it names', async () => {

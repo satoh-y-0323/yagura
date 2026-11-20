@@ -1052,7 +1052,7 @@ describe('subscribeSession', () => {
       },
     };
     const app: AppEventHandlers = {
-      onDaemonSpawnWarning: vi.fn(),
+      onDaemonConnected: vi.fn(),
       onBoundaryError: vi.fn(),
     };
 

@@ -7,7 +7,7 @@ import {
   MAX_PTY_DIMENSION,
   narrowExitPayload,
   narrowWindowLinkPayload,
-  narrowDaemonSpawnWarningPayload,
+  narrowDaemonConnectedPayload,
   narrowWindowInfo,
   narrowWindowInfoList,
   isValidSize,
@@ -38,7 +38,7 @@ describe('SESSION_EVENT', () => {
   it('defines the five canonical session events of a window', () => {
     expect(SESSION_EVENT.exit).toBe('session://exit');
     expect(SESSION_EVENT.windowLink).toBe('session://window-link');
-    expect(SESSION_EVENT.daemonSpawnWarning).toBe('session://daemon-spawn-warning');
+    expect(SESSION_EVENT.daemonConnected).toBe('session://daemon-connected');
   });
 
   it('adds the three approval events', () => {
@@ -179,28 +179,69 @@ describe('narrowWindowLinkPayload', () => {
   });
 });
 
-describe('narrowDaemonSpawnWarningPayload', () => {
-  it('accepts valid daemon spawn warning payload', () => {
-    const payload = narrowDaemonSpawnWarningPayload({ message: 'Failed to start daemon' });
-    expect(payload).toEqual({ message: 'Failed to start daemon' });
+describe('narrowDaemonConnectedPayload', () => {
+  it('reads the boot and the spawn warning', () => {
+    const payload = narrowDaemonConnectedPayload({
+      status_boot: { origin: 7, seq: 3 },
+      spawn_warning: 'Started without breakaway',
+    });
+    expect(payload).toEqual({
+      status_boot: { origin: 7, seq: 3 },
+      spawn_warning: 'Started without breakaway',
+    });
   });
 
-  it('accepts empty message string', () => {
-    const payload = narrowDaemonSpawnWarningPayload({ message: '' });
-    expect(payload).toEqual({ message: '' });
+  it('reads null for both keys when the daemon named no boot and nothing went wrong', () => {
+    expect(narrowDaemonConnectedPayload({ status_boot: null, spawn_warning: null })).toEqual({
+      status_boot: null,
+      spawn_warning: null,
+    });
   });
 
-  it('rejects missing message field', () => {
-    expect(() => narrowDaemonSpawnWarningPayload({})).toThrow(BoundaryError);
+  it('reads missing keys as null instead of refusing them', () => {
+    expect(narrowDaemonConnectedPayload({})).toEqual({ status_boot: null, spawn_warning: null });
+    expect(narrowDaemonConnectedPayload({ spawn_warning: 'w' })).toEqual({
+      status_boot: null,
+      spawn_warning: 'w',
+    });
   });
 
-  it('rejects non-string message', () => {
-    expect(() => narrowDaemonSpawnWarningPayload({ message: 123 })).toThrow(BoundaryError);
+  it.each([
+    ['a negative origin', { origin: -1, seq: 3 }],
+    ['a negative seq', { origin: 7, seq: -1 }],
+  ])('drops the boot alone for %s and keeps the spawn warning', (_label, status_boot) => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      expect(narrowDaemonConnectedPayload({ status_boot, spawn_warning: 'w' })).toEqual({
+        status_boot: null,
+        spawn_warning: 'w',
+      });
+    } finally {
+      warn.mockRestore();
+    }
   });
 
-  it('ignores extra fields', () => {
-    const payload = narrowDaemonSpawnWarningPayload({ message: 'Warning', extra: 'ignored' });
-    expect(payload).toEqual({ message: 'Warning' });
+  it.each([
+    ['a payload that is not a record', 5],
+    ['a boot that is not a record', { status_boot: 'boot', spawn_warning: null }],
+    ['a boot without an origin', { status_boot: { seq: 3 }, spawn_warning: null }],
+    ['a boot without a seq', { status_boot: { origin: 7 }, spawn_warning: null }],
+    ['a boot origin that is text', { status_boot: { origin: '7', seq: 3 }, spawn_warning: null }],
+    [
+      'a boot seq that is fractional',
+      { status_boot: { origin: 7, seq: 1.5 }, spawn_warning: null },
+    ],
+    ['a spawn warning that is a number', { status_boot: null, spawn_warning: 5 }],
+    ['a spawn warning that is a boolean', { status_boot: null, spawn_warning: true }],
+    ['a spawn warning that is a record', { status_boot: null, spawn_warning: { text: 'w' } }],
+  ])('rejects %s', (_label, value) => {
+    expect(() => narrowDaemonConnectedPayload(value)).toThrow(BoundaryError);
+  });
+
+  it('ignores extra keys', () => {
+    expect(
+      narrowDaemonConnectedPayload({ status_boot: null, spawn_warning: 'w', extra: 'ignored' })
+    ).toEqual({ status_boot: null, spawn_warning: 'w' });
   });
 });
 

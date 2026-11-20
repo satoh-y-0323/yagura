@@ -37,7 +37,7 @@ import {
   narrowChatRooms,
   narrowCloseOutcome,
   narrowDaemonRecoveryPayload,
-  narrowDaemonSpawnWarningPayload,
+  narrowDaemonConnectedPayload,
   narrowDecideApprovalOutcome,
   narrowExitPayload,
   narrowFrame,
@@ -75,7 +75,7 @@ import {
   type CloseOutcome,
   type DaemonProblem,
   type DaemonRecoveryPayload,
-  type DaemonSpawnWarningPayload,
+  type DaemonConnectedPayload,
   type DecideApprovalOutcome,
   type ExitPayload,
   type Frame,
@@ -110,8 +110,11 @@ export interface WindowEventHandlers {
 
 /** Callbacks for events that belong to the application, not to one window. */
 export interface AppEventHandlers {
-  /** The daemon had to be started without `CREATE_BREAKAWAY_FROM_JOB`. */
-  onDaemonSpawnWarning: (payload: DaemonSpawnWarningPayload) => void;
+  /**
+   * The control connection reached a daemon start it had not announced, so
+   * the facts that belong to a daemon start are read again.
+   */
+  onDaemonConnected: (payload: DaemonConnectedPayload) => void;
   /** A value from the core failed boundary validation. */
   onBoundaryError: (error: unknown) => void;
   /**
@@ -1115,6 +1118,18 @@ export async function invokeGetRecoveryStatus(): Promise<RecoveryStatusReport> {
 }
 
 /**
+ * Reads the last daemon start the control connection announced, so one
+ * announced before the subscription opened is not lost; `null` when none has
+ * been announced yet.
+ *
+ * @throws {BoundaryError} when the reply does not match the contract.
+ */
+export async function invokeGetDaemonConnection(): Promise<DaemonConnectedPayload | null> {
+  const reply = await invoke<unknown>('get_daemon_connection');
+  return reply === null ? null : narrowDaemonConnectedPayload(reply);
+}
+
+/**
  * Asks the daemon what keeps it from opening windows. A daemon that predates
  * the request answers with no problems.
  *
@@ -1397,9 +1412,9 @@ export async function subscribeSession(
       }
     ),
     listenAppEvent(
-      SESSION_EVENT.daemonSpawnWarning,
-      narrowDaemonSpawnWarningPayload,
-      app.onDaemonSpawnWarning,
+      SESSION_EVENT.daemonConnected,
+      narrowDaemonConnectedPayload,
+      app.onDaemonConnected,
       app.onBoundaryError
     ),
     listenAppEvent(
