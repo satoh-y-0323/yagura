@@ -130,10 +130,10 @@ of how each one reaches the person running it:
 |---|---|
 | `yagura-daemon` | Writes the reason to stderr and exits with a non-zero status. It never binds an endpoint and never touches the default (or any) config, state or data root. |
 | `yagura-mcp` | Same as `yagura-daemon`: writes the reason to stderr and exits non-zero, without connecting to any daemon. This matches the existing fail-closed behavior when the current user's identity cannot be resolved. |
-| GUI | **Starts.** A release build's GUI runs with no console (`windows_subsystem = "windows"` on Windows), so stderr reaches nobody; exiting silently would leave the person who started it looking at nothing happening for no visible reason. Instead, the GUI opens with a banner explaining what is wrong and how to fix it, and does none of the following: it does not spawn or connect to a daemon, it does not read or write the default instance's config, state or data root, and its window title stays the product's own name (it is not the invalid instance's, since none was resolved). |
+| GUI | **Starts.** A release build's GUI runs with no console (`windows_subsystem = "windows"` on Windows), so stderr reaches nobody; exiting silently would leave the person who started it looking at nothing happening for no visible reason. Instead, the GUI opens with an alert at the top of the window explaining what is wrong and how to fix it (the alert cannot be closed), and does none of the following: it does not spawn or connect to a daemon, it does not read or write the default instance's config, state or data root, and its window title stays the product's own name (it is not the invalid instance's, since none was resolved). |
 
 None of the three ever echoes the rejected value back -- not to stderr, not to a log, and not to
-the GUI's banner. What each of them states instead is the rule the value broke (for example, which
+the GUI's alert. What each of them states instead is the rule the value broke (for example, which
 characters are allowed) and how to fix it: correct the value, or unset `YAGURA_INSTANCE` to use the
 default instance, then start yagura again. The value itself came from an environment variable you
 set yourself, and remains readable there (for example with `echo $env:YAGURA_INSTANCE` in

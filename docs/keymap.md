@@ -30,6 +30,7 @@ and Linux share a table; macOS has its own. On macOS `Cmd` is the `Meta` modifie
 | `toggle-chat`            | Chat panel                              | `Ctrl+Shift+l`      | `Shift+Meta+l` |
 | `toggle-plans`           | Board panel                             | `Ctrl+Shift+t`      | `Shift+Meta+t` |
 | `toggle-settings`        | Settings panel                          | `Ctrl+Shift+s`      | `Meta+,`      |
+| `toggle-notifications`   | Notifications list                      | —                   | —             |
 
 yagura has two work views. In **Focus** (the default) the current window fills the work area and
 the other windows keep running out of sight. In **Canvas** windows float and can be dragged,
@@ -132,9 +133,9 @@ list in Chat), and an `Esc` typed inside a window still goes to the program runn
   Canvas), or its maximize button. After you switch between Focus and Canvas from the view menu,
   focus goes to the terminal of the window the new view shows. Pressing a control in the header,
   such as `⋯` or a button, leaves focus to that control.
-- When you minimize or close a window, or restore windows from the banner, focus moves to the
-  current window (or the start of the sidebar when none is left) only if it has nowhere to type
-  into: it was on the window that went away, on a window's own buttons, or on nothing. A button in
+- When you minimize or close a window, or reopen windows from the **Reopen windows** dialog, focus
+  moves to the current window (or the start of the sidebar when none is left) only if it has
+  nowhere to type into: it was on the window that went away, on a window's own buttons, or on nothing. A button in
   the sidebar that is still there keeps focus.
 - When a dialog about a window closes (interrupt, close or rename), whether you confirmed or
   cancelled it, focus goes to that window if it is the current window. Otherwise, and for any other
@@ -146,6 +147,9 @@ list in Chat), and an `Esc` typed inside a window still goes to the program runn
   window either: in Focus a card says which window ended and with what exit code, and offers
   **Go to** the next window or a new window; focus stays where it was, so what you type does not
   reach another CLI. Only a window you close yourself moves you to the next one.
+- **Go to window** on the pop-up of a window that needs you is your own choice of that window: it
+  comes on screen and what you type next goes to its terminal. A pop-up that arrives, is replaced
+  or times out does not move focus.
 - When you choose a row in the Go to window and Commands box, the box closes first. A window you
   chose gets what you type next; an operation you chose runs from where the focus was before the
   box opened.

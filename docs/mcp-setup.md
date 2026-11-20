@@ -697,6 +697,8 @@ Returns a list of all active and exited windows managed by the daemon.
 
 `room` is omitted entirely for a window whose `status` is `exited`.
 
+`exit_code` is `null` while the window runs, and for an exited window whose code the daemon could not learn (`status` is `exited` and `exit_code` is `null` means the code is unknown). `-1` is a code the command really exited with.
+
 `unknown_reason` is present only on an entry whose `status` is `unknown`, and names one of six reasons (`no_definition`, `no_rule_matched`, `screen_lost`, `detector_stopped`, `not_yet_judged`, `declared_unknown`); what each one means and what it asks of you is in [Why a window is `unknown`](#why-a-window-is-unknown). `detection_warning` is present on a window that is running no detection definition -- no layer carries its name, the layer that would carry it could not be read, or the daemon has no definition layer configured at all -- and carries the same text [open_window](#open_window) returned when the window was opened. Either key being absent -- they are omitted, never sent as `null` -- means there is nothing to report.
 
 `mcp_connected` says whether a yagura MCP bridge has identified itself as that window over a connection that is still open:
@@ -730,6 +732,8 @@ Get detailed status and screen content summary for a specific window.
   "mcp_connected": false
 }
 ```
+
+`exit_code` is `null` while the window runs, and when `status` is `exited` and the code could not be learned; `-1` is a code the command really exited with.
 
 The `last_output_summary` contains up to 500 characters from the end of the text the window's screen shows, read the way [`read_output`](#read_output) reads it (a line longer than the window is wide is one line) but without the rows that scrolled off its top. `mcp_connected` and `queued_count` mean the same as in [list_windows](#list_windows).
 
@@ -1998,7 +2002,7 @@ Two consequences follow directly from what registration grants:
 
 **Residual risk (pid reuse)**: the peer's executable is resolved through the connecting process's pid (Windows: `GetNamedPipeClientProcessId`, then `OpenProcess`; Linux: `SO_PEERCRED`; macOS: `LOCAL_PEERPID`). The pid is fixed when the peer connects, while the daemon samples it later, inside the task it spawns for the connection it has accepted: **the window of concern therefore runs from the connecting process's exit to the daemon's sampling, and it includes the time the connection spends waiting to be accepted and, once accepted, waiting for its task to be scheduled** (no timing figure is claimed here -- opening many connections at once makes the daemon accept each one later). If, within that window, another process is handed the same pid and that process is running the executable named by `--approver-exe`, the daemon would sample the wrong executable and let the registration through. The connection itself has to stay open the whole time, which means another process must have inherited (or duplicated) its file descriptor / handle and be holding it: a connection normally closes when the process that opened it exits, so the only shape that works is "pass the connection to a child, then exit the parent". **This stays inside the same-OS-user residual risk above for two reasons**: connecting at all is restricted to the same OS user, and the pid must be reused by a process that is itself running the approver executable (no privilege condition is placed on pid recycling itself). Resolving this at the root needs a process identifier that does not go through a pid; what the supported platforms offer for that differs between them, so it is not addressed.
 
-**The GUI's own control connection registers automatically**, and re-registers on every fresh connection (including a reconnect), but **never sends a destructive operation (`close_window` / `interrupt_window`) before that registration has completed**. While registration is still outstanding, the corresponding action fails internally rather than sending the request unguarded, and is surfaced to the WebView through the same operation-error banner as any other failed close/interrupt.
+**The GUI's own control connection registers automatically**, and re-registers on every fresh connection (including a reconnect), but **never sends a destructive operation (`close_window` / `interrupt_window`) before that registration has completed**. While registration is still outstanding, the corresponding action fails internally rather than sending the request unguarded, and is shown as a failed-action notice in the corner of the window and in the Notifications list, like any other failed close/interrupt.
 
 ## Interrupt Effectiveness
 
