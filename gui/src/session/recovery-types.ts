@@ -18,6 +18,6 @@ export type ClientConfigFailure = 'not_found' | 'read_failed' | 'invalid_toml' |
 /**
  * Why start-up could not resolve which instance this process belongs to
  * (mirrors the Rust `StartupEnvFailure` enum). The rejected identifier is
- * not part of this type: the reason alone reaches the banner.
+ * not part of this type: the reason alone reaches the notice.
  */
 export type StartupEnvFailure = 'invalid_instance_id' | 'store_override_with_named_instance';

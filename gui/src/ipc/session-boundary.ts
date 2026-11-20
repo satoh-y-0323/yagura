@@ -53,7 +53,7 @@ export const MAX_PTY_DIMENSION = 1000;
  * The wire revision a daemon must have settled on before `attach_view` reaches
  * it (mirrors `FRAME_MIN_REVISION`, `yagura-protocol`): below it no window
  * can be shown. Informational only: it decides what the
- * `daemon-protocol-stale` banner shows, never what a request may send --
+ * `daemon-protocol-stale` notice shows, never what a request may send --
  * the core's own gate is the authority for that.
  */
 export const ATTACH_VIEW_MIN_REVISION = 19;

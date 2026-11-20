@@ -39,7 +39,6 @@ function makeEntry(overrides: Partial<WindowEntry> & { status?: WindowStatus } =
     detected: status === 'unknown' ? { status, reason: null } : { status },
     statusRev: null,
     statusBoot: null,
-    exitCode: null,
     room: null,
     detectionWarning: null,
     displayDetectionWarning: null,
@@ -305,7 +304,7 @@ describe('window-actions: close removes the pane once the daemon has confirmed i
     expect(removeWindow).not.toHaveBeenCalled();
   });
 
-  it('still propagates a refused close to the caller, which is what raises the banner', async () => {
+  it('still propagates a refused close to the caller, which is what raises the notice', async () => {
     const ipc = makeIpc();
     ipc.invokeCloseWindow.mockRejectedValue(new Error('daemon refused the close'));
     const { actions } = buildActions({

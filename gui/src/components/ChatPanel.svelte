@@ -628,7 +628,7 @@
         <span class="chat-notice__text">{shownUnresolved}</span>
         <IconButton
           class="banner-close"
-          label={hints.dismissBanner}
+          label={hints.dismissNotice}
           on:click={() => (unresolvedNotice = null)}
         >
           <Icon name="x" />

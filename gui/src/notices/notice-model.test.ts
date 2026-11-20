@@ -20,7 +20,7 @@ import type {
   NoticeKey,
   NoticeSourceState,
 } from './notice-model';
-import { banners, describeRestoreBanner, describeThemeIssues } from '../ui-messages';
+import { banners, describeReopenNotice, describeThemeIssues } from '../ui-messages';
 
 const DAEMON_SPAWN_NOTICE = 'spawn-probe: started without the strongest detachment mode';
 const DAEMON_HEALTH_NOTICE = 'health-probe: windows cannot be opened';
@@ -190,7 +190,7 @@ const NOTICES: { label: string; on: Partial<NoticeSourceState>; notice: ShownNot
     on: { lastSession: LAST_SESSION, hasOpenWindows: true },
     notice: {
       key: 'reopen-offer',
-      sentence: describeRestoreBanner(LAST_SESSION.count, LAST_SESSION.timestamp),
+      sentence: describeReopenNotice(LAST_SESSION.count, LAST_SESSION.timestamp),
       action: { labelKey: 'chooseWindows' },
     },
   },

@@ -26,11 +26,6 @@ export function describeStatus(messages: Messages, status: string): string {
     : messages.statusLabels.unknown;
 }
 
-/** Describes an exit code shown next to a window status that already says the process has exited. */
-export function describeExitCode(messages: Messages, exitCode: number): string {
-  return messages.formats.exitCode(exitCode);
-}
-
 /**
  * Describes the card that stands in for a window that ended without this GUI
  * closing it: the window's name, and its exit code once known.
@@ -266,7 +261,7 @@ export function describeUndeliveredUnknownReason(
  * Describes the reopen offer's text: how many windows from the last
  * session can be reopened, and when that configuration was recorded.
  */
-export function describeRestoreBanner(
+export function describeReopenNotice(
   messages: Messages,
   count: number,
   timestamp: string | null
@@ -359,7 +354,7 @@ function detailText(detail: unknown): string {
     return JSON.stringify(detail) ?? '';
   } catch {
     // A circular reference or a BigInt makes JSON.stringify throw. The notice
-    // has to survive that: losing the detail beats losing the whole banner.
+    // has to survive that: losing the detail beats losing the whole notice.
     return '';
   }
 }

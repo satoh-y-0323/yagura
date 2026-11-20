@@ -23,7 +23,8 @@
   export let timersRunning: boolean;
   export let onAction: (action: NoticeAction) => void;
   export let onGoToWindow: (windowId: string) => void;
-  export let onDismiss: () => void;
+  /** Called with the close button's `click`, which tells a key from a pointer. */
+  export let onDismiss: (event: MouseEvent) => void;
   export let onExpire: () => void;
 
   const LIFETIME_MS = 8000;
@@ -126,7 +127,12 @@
       </div>
     {/if}
   </div>
-  <IconButton class="toast__close" label={hints.dismissBanner} on:click={onDismiss}>
+  <IconButton
+    class="toast__close"
+    label={hints.dismissNotice}
+    data-toast-close
+    on:click={onDismiss}
+  >
     <Icon name="x" size="sm" />
   </IconButton>
 </div>

@@ -11,7 +11,6 @@ import {
   describeDetectionWarning as renderDescribeDetectionWarning,
   describeDiscardedKeymapEntries as renderDescribeDiscardedKeymapEntries,
   describeEventTime as renderDescribeEventTime,
-  describeExitCode as renderDescribeExitCode,
   describeExitedWindow as renderDescribeExitedWindow,
   describeGoToWindow as renderDescribeGoToWindow,
   describeHaltReason as renderDescribeHaltReason,
@@ -25,7 +24,7 @@ import {
   describePickerWindowRow as renderDescribePickerWindowRow,
   describeQueuedMessages as renderDescribeQueuedMessages,
   describeReopenOffer as renderDescribeReopenOffer,
-  describeRestoreBanner as renderDescribeRestoreBanner,
+  describeReopenNotice as renderDescribeReopenNotice,
   describeRestoreSelectionCount as renderDescribeRestoreSelectionCount,
   describeRestoreConfirm as renderDescribeRestoreConfirm,
   describeRoomTitle as renderDescribeRoomTitle,
@@ -72,7 +71,7 @@ export const themes = messages.themes;
 /** Error messages. */
 export const errors = messages.errors;
 
-/** Banner messages. */
+/** Notices' text, wherever a notice shows. */
 export const banners = messages.banners;
 
 /** Tooltips and helper text. */
@@ -260,15 +259,6 @@ export function describePaneNotice(phase: string): string | null {
 }
 
 /**
- * Describes an exit code shown next to a window status that already says the
- * process has exited.
- * @param exitCode the exit code of the child process
- */
-export function describeExitCode(exitCode: number): string {
-  return renderDescribeExitCode(messages, exitCode);
-}
-
-/**
  * Describes how many keymap entries were rejected while resolving the
  * effective keymap.
  * @param count the number of discarded entries
@@ -300,8 +290,8 @@ export function describeAttentionBadge(count: number): string {
  * @param count the number of restore candidates
  * @param timestamp the formatted recording time, `null` when unknown
  */
-export function describeRestoreBanner(count: number, timestamp: string | null): string {
-  return renderDescribeRestoreBanner(messages, count, timestamp);
+export function describeReopenNotice(count: number, timestamp: string | null): string {
+  return renderDescribeReopenNotice(messages, count, timestamp);
 }
 
 /**

@@ -451,7 +451,7 @@ export const messagesEn = {
     maximizeWindow: 'Maximize the window',
     restoreWindow: 'Restore the window to its previous size',
     whyUnknown: 'Why is the status unknown?',
-    dismissBanner: 'Dismiss this notice',
+    dismissNotice: 'Dismiss this notice',
     tileWindows: 'Tile windows',
     restoreAlreadyOpen: 'Already open',
     restoreNoteExecution: 'Running state and unsaved output are not restored.',
@@ -475,7 +475,6 @@ export const messagesEn = {
   },
 
   formats: {
-    exitCode: (code: number): string => `(exit code ${code})`,
     /** When a notification event was recorded, `HH:mm` in local time. */
     eventTime: (date: Date): string => EVENT_TIME.format(date),
     windowListTitle: (label: string, count: number): string => `${label} (${count})`,
@@ -1020,7 +1019,8 @@ export const messagesEn = {
     notificationsTab: 'Notifications',
     notificationsDescription:
       'Choose which notifications pop up. One you turn off is not read aloud either, and stays ' +
-      'in the Notifications list. Windows that need you are not listed there; their rows in the ' +
+      'in the Notifications list. A window that ends while Focus shows it is still read aloud, ' +
+      'since its card says so. Windows that need you are not listed there; their rows in the ' +
       'sidebar stay marked.',
     notificationsColumnName: 'Notification',
     notificationsColumnInApp: NOTIFICATIONS_IN_APP_COLUMN,

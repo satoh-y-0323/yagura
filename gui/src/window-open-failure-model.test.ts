@@ -154,7 +154,7 @@ describe('describeWindowOpenFailure: the daemon has not settled a wire revision 
     expect(line).not.toContain(REQUEST_TYPE);
   });
 
-  it('carries the restart-consequence sentence shared with the approver-registration-refused banner (iii)', () => {
+  it('carries the restart-consequence sentence shared with the approver-registration-refused notice (iii)', () => {
     const RESTART_CLOSES_ALL_WINDOWS =
       'Restarting the daemon closes every window that is currently open.';
     expect(describeWindowOpenFailure(SUMMARY, unsupported())).toContain(RESTART_CLOSES_ALL_WINDOWS);

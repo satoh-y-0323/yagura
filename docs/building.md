@@ -117,8 +117,8 @@ The files reach a daemon's directory in one of these ways:
 
 At run time the daemon checks the same pins beside its own executable, and that the `conpty.dll` it
 loaded is that one; if not, it opens no window and reports `spawn_failed` asking for a reinstall,
-stays running, and lists the problem in its `get_daemon_health` answer, which the GUI shows as a
-banner. To update the ConPTY, follow `vendor/conpty/README.md` and change the hashes in both places.
+stays running, and lists the problem in its `get_daemon_health` answer, which the GUI shows in the
+strip at the top. To update the ConPTY, follow `vendor/conpty/README.md` and change the hashes in both places.
 
 **Before pushing, check the dependencies for known vulnerabilities** with
 `python scripts/dep-audit/dep_audit.py`, which runs `cargo audit` and `npm audit` with the same

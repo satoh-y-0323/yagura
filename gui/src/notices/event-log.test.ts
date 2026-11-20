@@ -106,9 +106,7 @@ describe('event log: what is kept', () => {
   });
 
   it('clears every event', () => {
-    const { log } = appendAll([failure('a'), failure('b')]);
-
-    expect(clearEvents(log)).toEqual([]);
+    expect(clearEvents()).toEqual([]);
   });
 });
 
@@ -128,9 +126,9 @@ describe('event log: numbering', () => {
     expect(second.log.map((entry) => entry.at)).toEqual(['09:41', '09:42']);
   });
 
-  it('does not hand out a number again after events are dismissed or cleared', () => {
+  it('does not hand out a number again after the log is cleared', () => {
     const added = appendAll([failure('a'), failure('b')]);
-    const emptied = clearEvents(dismissEvent(added.log, 1));
+    const emptied = clearEvents();
 
     const next = appendEvent(emptied, added.memory, failure('c'), '12:00');
 

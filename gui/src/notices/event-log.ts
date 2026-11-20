@@ -72,11 +72,8 @@ export function dismissEvent(log: EventLog, seq: number): EventLog {
   return log.filter((entry) => entry.seq !== seq);
 }
 
-/**
- * Removes every event.
- * @param _log the events recorded so far
- */
-export function clearEvents(_log: EventLog): EventLog {
+/** An empty log, for when every event is removed. */
+export function clearEvents(): EventLog {
   return [];
 }
 

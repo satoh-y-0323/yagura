@@ -269,7 +269,10 @@ export function noticeFeed(input: NoticeFeedInput): NoticeFeedOutput {
   let notices: NoticeSlot[] = input.slots.notices
     .map((slot) => ({ ...slot, seqs: slot.seqs.filter(listed) }))
     .filter((slot) => slot.seqs.length > 0);
-  let waiting = input.slots.waiting.filter(listed);
+  // A kind switched off while it waited for a slot no longer pops up; the list still has it.
+  let waiting = input.slots.waiting.filter(
+    (seq) => listed(seq) && switchedOn(bySeq.get(seq)?.category ?? null)
+  );
   const pushedOut = input.slots.pushedOut.filter(listed);
 
   const calls = input.needsYou.toasts.filter((toast) => switchedOn(CALL_CATEGORIES[toast.status]));

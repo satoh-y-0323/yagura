@@ -73,8 +73,6 @@ export interface WindowEntry {
   statusRev: number | null;
   /** The daemon boot `statusRev` was counted in, `null` when none was named. */
   statusBoot: StatusBoot | null;
-  /** Exit code once the child has exited, `null` otherwise. */
-  exitCode: number | null;
   /**
    * The room the window belongs to, `null` when the daemon reported none.
    * `displayName` is `name` prepared for display.
@@ -448,6 +446,55 @@ export function retirementFromList(
 }
 
 /**
+ * Hands one status push to `registry`: an `exited` push that carries the code
+ * retires the window, any other push records the status.
+ * @param registry the windows the push is about
+ * @param protocolRevision the daemon's protocol revision, `null` while not known
+ * @param payload the push
+ */
+export function applyStatusPush(
+  registry: WindowRegistry,
+  protocolRevision: number | null,
+  payload: StatusPayload
+): void {
+  const retirement = retirementFromStatus(protocolRevision, payload);
+  if (retirement !== null) {
+    registry.retireWindow(payload.window_id, retirement.exitCode);
+    return;
+  }
+  registry.setStatus(
+    payload.window_id,
+    payload.detected,
+    payload.status_rev ?? null,
+    payload.status_boot ?? null,
+    payload.task_report
+  );
+}
+
+/**
+ * Hands one window-list entry to `registry`: an exited window is retired,
+ * never opened, since the daemon lists it until it is evicted; any other is
+ * opened or refreshed.
+ * @param registry the windows the list is about
+ * @param protocolRevision the daemon's protocol revision, `null` while not known
+ * @param info the entry
+ * @returns whether the window is still live
+ */
+export function applyListedWindow(
+  registry: WindowRegistry,
+  protocolRevision: number | null,
+  info: WindowInfo
+): boolean {
+  const retirement = retirementFromList(protocolRevision, info);
+  if (retirement !== null) {
+    registry.retireWindow(info.window_id, retirement.exitCode);
+    return false;
+  }
+  registry.openWindow(info);
+  return true;
+}
+
+/**
  * The count a window's waiting-messages mark shows, `null` when no mark is
  * shown: nothing waits, or the daemon predates the count.
  */
@@ -512,7 +559,6 @@ function toEntry(info: WindowInfo, zOrder: number): WindowEntry {
     detected: info.detected,
     statusRev: info.status_rev ?? null,
     statusBoot: info.status_boot ?? null,
-    exitCode: info.exit_code,
     mcpConnected: info.mcp_connected ?? null,
     statusReportsMissing: info.status_reports_missing ?? null,
     display: {

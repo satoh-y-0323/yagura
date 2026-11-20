@@ -132,15 +132,21 @@
     onClose('tab');
   }
 
+  // Focus goes to another close button, never to a row's action, where the next key typed would act.
   async function dismiss(notice: Notice, index: number): Promise<void> {
-    const neighbour = others[index + 1] ?? others[index - 1];
+    const neighbour =
+      others.slice(index + 1).find((other) => other.dismissible) ??
+      others
+        .slice(0, index)
+        .reverse()
+        .find((other) => other.dismissible);
     onDismiss(notice);
     await tick();
     const row =
       neighbour === undefined
         ? null
         : (dialog?.querySelector<HTMLElement>(`[data-notice-seq="${neighbour.seq}"]`) ?? null);
-    (row?.querySelector<HTMLElement>(FOCUSABLE) ?? closeButton)?.focus();
+    (row?.querySelector<HTMLElement>('[data-notice-dismiss]') ?? closeButton)?.focus();
   }
 
   async function clear(): Promise<void> {
@@ -232,7 +238,8 @@
             {#if notice.dismissible}
               <IconButton
                 class="notice-center__dismiss"
-                label={hints.dismissBanner}
+                label={hints.dismissNotice}
+                data-notice-dismiss
                 on:click={() => void dismiss(notice, index)}
               >
                 <Icon name="x" size="sm" />

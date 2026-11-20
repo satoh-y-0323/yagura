@@ -17,7 +17,6 @@
   import { roomNameOf } from '../sidebar/room-groups';
   import type { ThemeStore } from '../theme/theme-store';
   import {
-    describeExitCode,
     describeUnknownExplanation,
     describeUnknownReasonSuffix,
     describeWindowHeader,
@@ -94,9 +93,6 @@
     >
       <Icon name="info" size="sm" />
     </IconButton>
-  {/if}
-  {#if entry.detected.status === 'exited' && entry.exitCode !== null}
-    <span class="window-header__exit">{describeExitCode(entry.exitCode)}</span>
   {/if}
   <span class="window-header__marks">
     <McpMark mcpConnected={entry.mcpConnected} />
@@ -185,12 +181,6 @@
   :global(.window-header__why:focus-visible) {
     outline: var(--line-width-strong) solid var(--ring);
     outline-offset: 1px;
-  }
-
-  .window-header__exit {
-    flex: 0 0 auto;
-    color: var(--fg-muted);
-    font-size: var(--text-xs);
   }
 
   /* The marks recede behind the status pill: one muted colour for all of them. */

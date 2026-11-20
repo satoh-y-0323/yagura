@@ -18,7 +18,6 @@ import type { ConfirmTarget } from '../session/confirm-target';
 import {
   describeDeliveryState,
   describeStatus,
-  describeExitCode,
   describeExitedWindow,
   describeWindowHeader,
   describeWindowLocation,
@@ -29,7 +28,7 @@ import {
   describeThemeIssues,
   describeThemeName,
   describeAttentionBadge,
-  describeRestoreBanner,
+  describeReopenNotice,
   describeRestoreSelectionCount,
   describeRestoreConfirm,
   describeRoomTitle,
@@ -53,12 +52,6 @@ describe('render.ts: output is driven by the given locale (dummy-locale swap)', 
     const result = describeStatus(dummyMessages, 'running');
     expect(result).toBe(dummyMessages.statusLabels.running);
     expect(result).not.toBe(english.statusLabels.running);
-  });
-
-  it('describeExitCode: renders from the dummy formats.exitCode template', () => {
-    const result = describeExitCode(dummyMessages, 3);
-    expect(result).toBe(dummyMessages.formats.exitCode(3));
-    expect(result).not.toBe(english.formats.exitCode(3));
   });
 
   it('describePaneNotice: renders the dummy banner text for a failed phase', () => {
@@ -103,8 +96,8 @@ describe('render.ts: output is driven by the given locale (dummy-locale swap)', 
     expect(result).not.toBe(english.formats.attentionBadge(4));
   });
 
-  it('describeRestoreBanner: renders from the dummy banners.restoreAvailable template', () => {
-    const result = describeRestoreBanner(dummyMessages, 2, null);
+  it('describeReopenNotice: renders from the dummy banners.restoreAvailable template', () => {
+    const result = describeReopenNotice(dummyMessages, 2, null);
     expect(result).toBe(dummyMessages.banners.restoreAvailable(2, null));
     expect(result).not.toBe(english.banners.restoreAvailable(2, null));
   });
@@ -161,14 +154,14 @@ describe('render.ts: plural forms (contract (3), English locale)', () => {
     expect(result).toBe('Excluded 1 invalid theme entry. That theme cannot be selected.');
   });
 
-  it('describeRestoreBanner: uses the singular form ("1 window") for a count of 1', () => {
-    const result = describeRestoreBanner(english, 1, null);
+  it('describeReopenNotice: uses the singular form ("1 window") for a count of 1', () => {
+    const result = describeReopenNotice(english, 1, null);
     expect(result).toContain('1 window');
     expect(result).not.toContain('1 windows');
   });
 
-  it.each([2, 5])('describeRestoreBanner: uses the plural form for count %i', (count) => {
-    const result = describeRestoreBanner(english, count, null);
+  it.each([2, 5])('describeReopenNotice: uses the plural form for count %i', (count) => {
+    const result = describeReopenNotice(english, count, null);
     expect(result).toContain(`${count} windows`);
   });
 
@@ -177,14 +170,14 @@ describe('render.ts: plural forms (contract (3), English locale)', () => {
     expect(describeRestoreConfirm(english, 5)).toBe('Reopen 5 windows');
   });
 
-  it('describeRestoreBanner: includes the given timestamp text when provided', () => {
-    const result = describeRestoreBanner(english, 2, '2026-08-29 10:15');
+  it('describeReopenNotice: includes the given timestamp text when provided', () => {
+    const result = describeReopenNotice(english, 2, '2026-08-29 10:15');
     expect(result).toContain('2026-08-29 10:15');
   });
 
-  it('describeRestoreBanner: omits timestamp text when the timestamp is null', () => {
-    const withTimestamp = describeRestoreBanner(english, 2, '2026-08-29 10:15');
-    const withoutTimestamp = describeRestoreBanner(english, 2, null);
+  it('describeReopenNotice: omits timestamp text when the timestamp is null', () => {
+    const withTimestamp = describeReopenNotice(english, 2, '2026-08-29 10:15');
+    const withoutTimestamp = describeReopenNotice(english, 2, null);
     expect(withoutTimestamp).not.toContain('2026-08-29 10:15');
     expect(withoutTimestamp).not.toBe(withTimestamp);
   });

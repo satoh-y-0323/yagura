@@ -6,7 +6,13 @@
 import { describe, it, expect, vi } from 'vitest';
 import { get } from 'svelte/store';
 
-import { createWindowRegistry, retirementFromList, retirementFromStatus } from './window-registry';
+import {
+  applyListedWindow,
+  applyStatusPush,
+  createWindowRegistry,
+  retirementFromList,
+  retirementFromStatus,
+} from './window-registry';
 import { MAX_DISPLAY_FIELD_CHARS } from '../display/untrusted-text';
 import { resolveMessages } from '../i18n/messages';
 import type { WindowRegistry, WindowRegistryState } from './window-registry';
@@ -223,7 +229,6 @@ function openedEntry(
     detected: { status: 'running' },
     statusRev: null,
     statusBoot: null,
-    exitCode: null,
     room: room === null ? null : { ...room, displayName: room.name },
     detectionWarning: null,
     displayDetectionWarning: null,
@@ -886,7 +891,7 @@ describe('createWindowRegistry: which message retires an ended window', () => {
 
   type Message = 'push' | 'list';
 
-  /** Hands one exited message about `w-a` to the registry the way the shell routes it. */
+  /** Hands one exited message about `w-a` to the registry through the shell's routing. */
   function deliver(
     registry: WindowRegistry,
     revision: number | null,
@@ -899,25 +904,14 @@ describe('createWindowRegistry: which message retires an ended window', () => {
         detected: { status: 'exited' },
         exit_code: exitCode,
       };
-      const retirement = retirementFromStatus(revision, payload);
-      if (retirement === null) {
-        registry.setStatus(payload.window_id, payload.detected, null, null);
-      } else {
-        registry.retireWindow(payload.window_id, retirement.exitCode);
-      }
+      applyStatusPush(registry, revision, payload);
       return;
     }
-    const info = makeWindowInfo({
-      window_id: 'w-a',
-      detected: { status: 'exited' },
-      exit_code: exitCode,
-    });
-    const retirement = retirementFromList(revision, info);
-    if (retirement === null) {
-      registry.openWindow(info);
-    } else {
-      registry.retireWindow(info.window_id, retirement.exitCode);
-    }
+    applyListedWindow(
+      registry,
+      revision,
+      makeWindowInfo({ window_id: 'w-a', detected: { status: 'exited' }, exit_code: exitCode })
+    );
   }
 
   /**

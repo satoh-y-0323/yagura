@@ -435,6 +435,23 @@ describe('notice feed: the settings rows', () => {
     expect(out.announce.polite).toBeNull();
     expect(out.center.map((notice) => notice.title)).toContain('exit-w-a');
     expect(out.unseen).toBe(1);
+
+    // A notice of the kind that was waiting for a slot when it was switched off stays down too.
+    s.seenThrough = seqOf(out, 'exit-w-a');
+    s.prefs = readPreferences(null);
+    s.drafts = ['s-1', 's-2', 's-3'].map((title) => setup('detection-warning', title));
+    run(s);
+    record(s, exitOf('w-b', 1));
+    const full = run(s);
+    expect(titles(full)).toEqual(['s-1', 's-2', 's-3']);
+    expect(full.toasts.overflowNotices).toBe(1);
+    s.prefs = withPreference(readPreferences(null), 'window-exits', false);
+    dismiss(s, full, 's-1');
+    const freed = run(s);
+    expect(titles(freed)).toEqual(['s-2', 's-3']);
+    expect(freed.announce.polite).toBeNull();
+    expect(freed.center.map((notice) => notice.title)).toContain('exit-w-b');
+    expect(freed.unseen).toBe(4);
   });
 
   it('pops up and reads blocking notices and expired approval requests whatever the table says', () => {

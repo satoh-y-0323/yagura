@@ -354,9 +354,9 @@
   } from '../status-tone';
   import { createWindowSessionStore } from '../stores/session-store';
   import {
+    applyListedWindow,
+    applyStatusPush,
     createWindowRegistry,
-    retirementFromList,
-    retirementFromStatus,
     type WindowEntry,
     type WindowRegistryState,
   } from '../stores/window-registry';
@@ -1093,7 +1093,7 @@
   /**
    * One room-list read: a failed one is reported to the console only, the
    * same fail-quiet rule the startup read follows, since there is no
-   * obviously-relevant banner slot for a background list refresh.
+   * obviously-relevant notice for a background list refresh.
    */
   async function refreshChatRoomsOnce(): Promise<void> {
     try {
@@ -2107,7 +2107,7 @@
   });
 
   // The view starts these operations without awaiting them, so a refusal has
-  // to become a banner here, where the banner is owned. Rename is awaited by
+  // to become a notice here, where the notices are owned. Rename is awaited by
   // its dialog, which shows the refusal itself.
   // Maximizing and minimizing are the user's own choice of front window, so the
   // keyboard follows (activateWindow).
@@ -2530,7 +2530,7 @@
   };
   const runShortcut = createShortcutRunner(runnerDeps);
 
-  /** The one way an action runs, from a key or from the picker; a failure shows in the banner. */
+  /** The one way an action runs, from a key or from the picker; a failure shows as a notice. */
   function runAction(action: ActionId): Promise<void> {
     return reportIfFailed(errors.shortcutFailed, runShortcut(action));
   }
@@ -2762,18 +2762,7 @@
     try {
       unsubscribeSession = await subscribeSession(registry.resolveWindowHandlers, {
         onStatus: (payload) => {
-          const retirement = retirementFromStatus(protocol_revision, payload);
-          if (retirement !== null) {
-            registry.retireWindow(payload.window_id, retirement.exitCode);
-            return;
-          }
-          registry.setStatus(
-            payload.window_id,
-            payload.detected,
-            payload.status_rev ?? null,
-            payload.status_boot ?? null,
-            payload.task_report
-          );
+          applyStatusPush(registry, protocol_revision, payload);
         },
         onDaemonSpawnWarning: (payload) => {
           noticeState = { ...noticeState, daemonSpawnNotice: foldExternalText(payload.message) };
@@ -3286,22 +3275,12 @@
     }
   }
 
-  /**
-   * Brings the panes in line with one window-list snapshot.
-   *
-   * Exited windows are retired, never opened: the daemon keeps an entry in its
-   * list until it is evicted, so opening them would re-open panes the view has
-   * already dropped.
-   */
+  /** Brings the panes in line with one window-list snapshot; exited windows are retired, never opened. */
   async function applyWindowList(windows: WindowInfo[]): Promise<void> {
     const liveWindows: WindowInfo[] = [];
     for (const info of windows) {
-      const retirement = retirementFromList(protocol_revision, info);
-      if (retirement === null) {
+      if (applyListedWindow(registry, protocol_revision, info)) {
         liveWindows.push(info);
-        registry.openWindow(info);
-      } else {
-        registry.retireWindow(info.window_id, retirement.exitCode);
       }
     }
     const livePaneIds = [...get(panes).keys()];
@@ -3740,7 +3719,7 @@
   }
 
   function clearNoticeEvents(): void {
-    eventLog = clearEvents(eventLog);
+    eventLog = clearEvents();
   }
 
   /** Opens Settings on the Notifications tab, in place of the list. */
@@ -3783,7 +3762,7 @@
    * Asks the supervisor to start the daemon again (exhausted-only action).
    *
    * The command never reports a failed start: whether the daemon came back is
-   * answered by the next recovery status, which moves the banner within a tick.
+   * answered by the next recovery status, which moves the strip within a tick.
    * The catch below guards the bridge itself, not the start.
    */
   async function handleReconnect(): Promise<void> {

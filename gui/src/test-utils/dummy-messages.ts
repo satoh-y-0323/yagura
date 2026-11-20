@@ -30,7 +30,7 @@ export const dummyMessages: Messages = {
     // The approval dialog's two decision buttons.
     approve: 'DUMMY_approve',
     deny: 'DUMMY_deny',
-    // The manual reconnect trigger on the recovery banner.
+    // The manual reconnect trigger on the recovery notice.
     reconnect: 'DUMMY_reconnect',
     howToInstall: 'DUMMY_howToInstall',
   },
@@ -199,7 +199,7 @@ export const dummyMessages: Messages = {
     maximizeWindow: 'DUMMY_maximizeWindow',
     restoreWindow: 'DUMMY_restoreWindow',
     whyUnknown: 'DUMMY_whyUnknown',
-    dismissBanner: 'DUMMY_dismissBanner',
+    dismissNotice: 'DUMMY_dismissNotice',
     tileWindows: 'DUMMY_tileWindows',
     restoreAlreadyOpen: 'DUMMY_restoreAlreadyOpen',
     restoreNoteExecution: 'DUMMY_restoreNoteExecution',
@@ -214,7 +214,6 @@ export const dummyMessages: Messages = {
     statusReportsMissing: 'DUMMY_statusReportsMissing',
   },
   formats: {
-    exitCode: (code: number) => `DUMMY_exitCode(${code})`,
     windowListTitle: (label: string, count: number) => `DUMMY_windowListTitle(${label}, ${count})`,
     attentionBadge: (count: number) => `DUMMY_attentionBadge(${count})`,
     restoreSelectionCount: (selected: number, total: number) =>

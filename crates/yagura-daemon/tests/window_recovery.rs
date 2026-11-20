@@ -3299,8 +3299,8 @@ async fn the_first_start_over_a_0_3_store_moves_its_last_windows_into_lost_rows(
 }
 
 /// A window whose holder is killed from outside while its daemon is connected reads as
-/// exited, its holder's files are removed, and where holders are the daemon's children the
-/// holder is reaped, not left as a zombie.
+/// exited with no exit code wherever it is read, its holder's files are removed, and where
+/// holders are the daemon's children the holder is reaped, not left as a zombie.
 #[tokio::test]
 async fn a_connected_windows_holder_killed_from_outside_ends_the_window_and_is_reaped() {
     let sandbox = Sandbox::new("holder-killed-connected");
@@ -3331,13 +3331,27 @@ async fn a_connected_windows_holder_killed_from_outside_ends_the_window_and_is_r
         },
     )
     .await;
-    match read_response(&mut daemon.client).await {
-        DaemonMessage::WaitResult { outcome, .. } if outcome == "reached" => {}
-        other => panic!(
-            "the window {window_id} never read as exited once its holder was killed: \
-             {other:?}; daemon log:\n{}",
-            sandbox.daemon_log()
-        ),
+    // The attached view is pushed the exit too, before or after the wait's answer.
+    let mut reached = false;
+    let mut exited_push = None;
+    while !reached || exited_push.is_none() {
+        match read_frame(&mut daemon.client).await {
+            DaemonMessage::WaitResult { outcome, .. } if outcome == "reached" => reached = true,
+            DaemonMessage::StatusChanged {
+                window_id: id,
+                status: WindowStatus::Exited,
+                exit_code,
+                ..
+            } if id == window_id => exited_push = Some(exit_code),
+            DaemonMessage::Frame(_)
+            | DaemonMessage::StatusChanged { .. }
+            | DaemonMessage::ChatParticipantsChanged => {}
+            other => panic!(
+                "the window {window_id} never read as exited once its holder was killed: \
+                 {other:?}; daemon log:\n{}",
+                sandbox.daemon_log()
+            ),
+        }
     }
     settle!(
         sandbox,
@@ -3355,6 +3369,55 @@ async fn a_connected_windows_holder_killed_from_outside_ends_the_window_and_is_r
             problems
         }
     );
+
+    // The holder died with the window, so its code is unknown: `null`, never a code.
+    assert_eq!(
+        exited_push,
+        Some(None),
+        "the Exited push of a window whose code is unknown"
+    );
+    let info = listed(&mut daemon, &sandbox, &window_id).await;
+    assert_eq!(
+        (info.status, info.exit_code),
+        (WindowStatus::Exited, None),
+        "the listing of a window whose code is unknown"
+    );
+    send(
+        &mut daemon.client,
+        &ClientMessage::GetWindowStatus {
+            window_id: window_id.clone(),
+        },
+    )
+    .await;
+    match read_response(&mut daemon.client).await {
+        DaemonMessage::WindowStatus {
+            status, exit_code, ..
+        } => assert_eq!(
+            (status, exit_code),
+            (WindowStatus::Exited, None),
+            "the status answer of a window whose code is unknown"
+        ),
+        other => panic!("expected window_status, got {other:?}"),
+    }
+    send(
+        &mut daemon.client,
+        &ClientMessage::AttachView {
+            window_id: window_id.clone(),
+            size: None,
+        },
+    )
+    .await;
+    match read_response(&mut daemon.client).await {
+        DaemonMessage::Attached {
+            child_exited,
+            exit_code,
+        } => assert_eq!(
+            (child_exited, exit_code),
+            (true, None),
+            "the attach answer of a window whose code is unknown"
+        ),
+        other => panic!("expected attached, got {other:?}"),
+    }
 }
 
 /// Reads the daemon's window list until `window_id`'s `mcp_connected` is

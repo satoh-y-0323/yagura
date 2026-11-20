@@ -104,11 +104,6 @@ const CASES: ReadonlyArray<[string, () => unknown, () => unknown]> = [
     () => render.describePaneNotice(messages, 'failed'),
   ],
   [
-    'describeExitCode',
-    () => facade.describeExitCode(5),
-    () => render.describeExitCode(messages, 5),
-  ],
-  [
     'describeDiscardedKeymapEntries',
     () => facade.describeDiscardedKeymapEntries(2),
     () => render.describeDiscardedKeymapEntries(messages, 2),
@@ -124,9 +119,9 @@ const CASES: ReadonlyArray<[string, () => unknown, () => unknown]> = [
     () => render.describeAttentionBadge(messages, 4),
   ],
   [
-    'describeRestoreBanner',
-    () => facade.describeRestoreBanner(3, '2026-01-02 03:04'),
-    () => render.describeRestoreBanner(messages, 3, '2026-01-02 03:04'),
+    'describeReopenNotice',
+    () => facade.describeReopenNotice(3, '2026-01-02 03:04'),
+    () => render.describeReopenNotice(messages, 3, '2026-01-02 03:04'),
   ],
   [
     'describeRestoreSelectionCount',

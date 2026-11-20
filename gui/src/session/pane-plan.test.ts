@@ -56,7 +56,6 @@ function makeEntry(windowId: string): WindowEntry {
     detected: { status: 'running' },
     statusRev: null,
     statusBoot: null,
-    exitCode: null,
     room: null,
     detectionWarning: null,
     displayDetectionWarning: null,

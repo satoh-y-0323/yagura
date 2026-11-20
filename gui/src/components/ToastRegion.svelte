@@ -3,14 +3,18 @@
    * The one container pop-ups appear in, a named region at the bottom right of
    * the positioned box it is placed in. Display only: what shows, in what
    * order, and how many wait is the feed's; this draws it and calls back.
-   * Focus moves only when the user closes the pop-up holding it: to the next
-   * pop-up left, or through `onReturnFocus` when none is.
+   * Focus moves only when the user closes the pop-up holding it. Closed with a
+   * pointer, it goes back through `onReturnFocus`; closed from the keyboard, to
+   * the close button of the next pop-up (else the one before), or back through
+   * `onReturnFocus` when none is left. It never lands on a pop-up's action,
+   * where the next key typed would act.
    */
   import { tick } from 'svelte';
 
   import type { NoticeAction } from '../notices/notice-model';
   import type { NoticeFeedOutput, ToastItem } from '../notices/notice-feed';
   import { banners } from '../ui-messages';
+  import { pressedByKeyboard } from './press-source';
   import Toast from './Toast.svelte';
 
   export let toasts: Pick<
@@ -38,22 +42,26 @@
     return region.querySelector<HTMLElement>(`[data-toast-id="${CSS.escape(id)}"]`);
   }
 
-  async function dismiss(item: ToastItem, index: number): Promise<void> {
+  async function dismiss(item: ToastItem, index: number, event: MouseEvent): Promise<void> {
     const held = toastElement(item.id)?.contains(document.activeElement) ?? false;
     const neighbour = toasts.visible[index + 1] ?? toasts.visible[index - 1];
     onDismiss(item);
     if (!held) {
       return;
     }
+    if (!pressedByKeyboard(event)) {
+      onReturnFocus();
+      return;
+    }
     await tick();
     const next =
       (neighbour === undefined ? null : toastElement(neighbour.id)) ??
       region.querySelector<HTMLElement>('[data-toast-id]');
-    const control = next?.querySelector<HTMLElement>('button') ?? null;
-    if (control === null) {
+    const close = next?.querySelector<HTMLElement>('[data-toast-close]') ?? null;
+    if (close === null) {
       onReturnFocus();
     } else {
-      control.focus();
+      close.focus();
     }
   }
 </script>
@@ -67,7 +75,7 @@
       {timersRunning}
       {onAction}
       {onGoToWindow}
-      onDismiss={() => void dismiss(item, index)}
+      onDismiss={(event: MouseEvent) => void dismiss(item, index, event)}
       onExpire={() => onExpire(item)}
     />
   {/each}

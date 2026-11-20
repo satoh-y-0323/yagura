@@ -1,6 +1,6 @@
 /**
  * What an approval request with no target window is addressed to, as the
- * approval dialog and the "expired unseen" banner both name it.
+ * approval dialog and the "expired unseen" notice both name it.
  */
 import { formatPathForDisplay } from '../display/untrusted-text';
 import type { ApprovalRequest } from '../ipc/session-boundary';

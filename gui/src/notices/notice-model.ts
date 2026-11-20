@@ -1,4 +1,4 @@
-import { banners, describeRestoreBanner, describeThemeIssues } from '../ui-messages';
+import { banners, describeReopenNotice, describeThemeIssues } from '../ui-messages';
 import type { WithdrawReason } from '../session/approval-types';
 import type {
   ClientConfigFailure,
@@ -408,7 +408,7 @@ export function buildNotices(state: NoticeSourceState): NoticeDraft[] {
       draftOf(
         'reopen-offer',
         {},
-        sentenceText(describeRestoreBanner(offer.count, offer.timestamp)),
+        sentenceText(describeReopenNotice(offer.count, offer.timestamp)),
         { labelKey: 'chooseWindows' }
       )
     );
