@@ -410,10 +410,8 @@ enum MadeStartReached {
 }
 
 impl DaemonStart {
-    /// The value after `generation` first settles on `boot`, and the
-    /// announcement to emit, which only a control connection makes. A boot
-    /// already announced is not again; a daemon that names no boot is
-    /// announced on every generation, as it may be another start each time.
+    /// The value after `generation` first settles on `boot`, with the control
+    /// connection's announcement unless that boot was already announced.
     fn first_settled(
         &self,
         generation: u64,
@@ -1783,10 +1781,8 @@ impl IpcClient {
         }
     }
 
-    /// Records `generation` as settled on `revision` and `boot`, announcing
-    /// what its first settle tells, and returns whether this call was that
-    /// first settle. A generation no longer current records nothing: its
-    /// connection is gone, and a newer settle must not be written over.
+    /// Records `generation`'s first settle and announces it, returning whether
+    /// this call made it; a generation not current when compared records nothing.
     fn settle(
         &self,
         app: &impl GuiHost,

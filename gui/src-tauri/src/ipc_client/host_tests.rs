@@ -189,9 +189,8 @@ async fn connecting_reaches_the_daemon_it_started() {
     assert!(client.is_connected().await);
     assert_eq!(announced(&host.take_events()), std::slice::from_ref(&weak));
 
-    // A daemon whose answer names no boot may be another boot on every
-    // connection, so each one is announced, and it may be the start this
-    // client made, so its warning stays.
+    // A daemon naming no boot may be a new start on each connection, so each is
+    // announced; it may also be the start this client made, so its warning stays.
     daemon.hang_up();
     assert_eq!(host.next_event(EVENT_DAEMON_CONNECTED).await, weak);
 
