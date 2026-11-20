@@ -331,6 +331,7 @@ export const messagesEn = {
     // drive it were not used.
     daemonReconnecting: 'Lost the connection to the daemon. Reconnecting…',
     daemonReconnectFailed: 'Could not reconnect to the daemon after several attempts.',
+    daemonReconnected: 'Reconnected to the daemon',
     clientConfigLoadFailed:
       'Could not load the client settings. Falling back to the default reconnection settings.',
 

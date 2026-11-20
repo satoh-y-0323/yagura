@@ -8,7 +8,7 @@
 import { describe, it, expect } from 'vitest';
 
 import { resolveMessages } from './messages';
-import { dummyMessages } from './messages.test';
+import { dummyMessages } from '../test-utils/dummy-messages';
 import type {
   ChatDeliveryOutcome,
   DetectedStatusView,

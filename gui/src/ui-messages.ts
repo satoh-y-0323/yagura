@@ -46,6 +46,9 @@ import type { ConfirmTarget } from './session/confirm-target';
 
 const messages = resolveMessages();
 
+/** The shape every locale fills, for a locale written outside `i18n/` such as a test's. */
+export type { Messages } from './i18n/messages';
+
 /** Status display strings. */
 export const statusLabels = messages.statusLabels;
 
