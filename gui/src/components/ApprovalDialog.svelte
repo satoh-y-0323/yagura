@@ -3,7 +3,8 @@
   import type { ApprovalRequest } from '../ipc/session-boundary';
   import { isWithinGuard } from '../session/approval-queue';
   import { describeUntargeted } from '../session/approval-target';
-  import { buttons, dialogs, describeStatus } from '../ui-messages';
+  import { banners, buttons, dialogs, describeStatus } from '../ui-messages';
+  import Icon from './Icon.svelte';
   import ModalDialog from './ModalDialog.svelte';
 
   export let isOpen: boolean = false;
@@ -15,6 +16,14 @@
   /** When the dialog was opened, for the click guard. */
   export let openedAt: number;
   export let onDecide: (requestId: string, approved: boolean) => void;
+  /**
+   * Whether the decision on the request shown now could not be sent. The
+   * shell answers it for this request only; the note never moves focus.
+   */
+  export let decisionFailed: boolean = false;
+
+  const failureNoteId = 'approval-decision-failed';
+  $: describedBy = decisionFailed ? failureNoteId : undefined;
 
   $: requesterName = sanitizeForDisplay(request.requester.name ?? '');
   $: requesterLabel =
@@ -65,6 +74,12 @@
 <ModalDialog bind:isOpen onCancel={handleCancel} refocusKey={request.request_id}>
   <div class="dialog-content">
     <h2 class="dialog-title">{title}</h2>
+    {#if decisionFailed}
+      <p class="approval-failure" id={failureNoteId}>
+        <Icon name="circle-exclamation-point" size="sm" />
+        {banners.approvalDecisionFailed}
+      </p>
+    {/if}
     <p class="dialog-message">{requesterLabel} → {request.tool} → {targetLabel}</p>
     {#if body !== ''}
       <pre class="approval-body">{body}</pre>
@@ -73,10 +88,21 @@
       <!-- The dialog focusing steps pick the autofocus element, so initial focus is always the
            safe choice; markup order stays Deny first for when autofocus is not honored. -->
       <!-- svelte-ignore a11y_autofocus -->
-      <button type="button" class="btn btn-secondary" autofocus on:click={handleDeny}>
+      <button
+        type="button"
+        class="btn btn-secondary"
+        autofocus
+        aria-describedby={describedBy}
+        on:click={handleDeny}
+      >
         {buttons.deny}
       </button>
-      <button type="button" class="btn btn-danger" on:click={handleApprove}>
+      <button
+        type="button"
+        class="btn btn-danger"
+        aria-describedby={describedBy}
+        on:click={handleApprove}
+      >
         {buttons.approve}
       </button>
     </div>
@@ -84,6 +110,28 @@
 </ModalDialog>
 
 <style>
+  .approval-failure {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    margin: 0;
+    padding: var(--space-1_5) var(--space-2);
+    border-left: 3px solid var(--danger);
+    background-color: var(--bg-hover);
+    color: var(--fg-default);
+    font-size: var(--text-sm);
+  }
+
+  .approval-failure :global(.icon) {
+    color: var(--danger);
+  }
+
+  @media (forced-colors: active) {
+    .approval-failure {
+      border-left-color: CanvasText;
+    }
+  }
+
   .approval-body {
     margin: 0;
     max-height: 12rem;

@@ -180,6 +180,14 @@ export const dummyMessages: Messages = {
     noNotifications: 'DUMMY_noNotifications',
     clearNotifications: 'DUMMY_clearNotifications',
     notificationSettings: 'DUMMY_notificationSettings',
+    notificationPopUps: 'DUMMY_notificationPopUps',
+    screenReaderAnnouncements: 'DUMMY_screenReaderAnnouncements',
+    noticeTones: {
+      info: 'DUMMY_noticeToneInfo',
+      warning: 'DUMMY_noticeToneWarning',
+      error: 'DUMMY_noticeToneError',
+    },
+    noticeDetails: 'DUMMY_noticeDetails',
   },
   hints: {
     noWindows: 'DUMMY_noWindows',

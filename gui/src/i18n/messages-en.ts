@@ -394,6 +394,11 @@ export const messagesEn = {
     noNotifications: 'No notifications',
     clearNotifications: 'Clear',
     notificationSettings: 'Notification settings',
+    notificationPopUps: 'Notification pop-ups',
+    screenReaderAnnouncements: 'Screen reader announcements',
+    // Names each tone's icon, so a tone is never told by colour alone.
+    noticeTones: { info: 'Information', warning: 'Warning', error: 'Error' },
+    noticeDetails: 'Details',
   },
 
   hints: {
