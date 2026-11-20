@@ -147,12 +147,12 @@ list in Chat), and an `Esc` typed inside a window still goes to the program runn
   window either: in Focus a card says which window ended and with what exit code, and offers
   **Go to** the next window or a new window; focus stays where it was, so what you type does not
   reach another CLI. Only a window you close yourself moves you to the next one.
-- Pressing a card on the notice lane, at the foot of the work area, is your own choice of what it
+- Pressing a card on the notification bar, at the foot of the work area, is your own choice of what it
   offers. The whole card is one button, with no separate **Go to window** button: for a window that
   needs you, the window comes on screen and what you type next goes to its terminal; for a notice,
   its action runs or the Notifications list opens on it. A card that arrives, is replaced or times
   out does not move focus, and a card's time stands still while the keyboard is in it.
-- When a card that holds the keyboard leaves the lane, focus moves off it. After you close it with
+- When a card that holds the keyboard leaves the bar, focus moves off it. After you close it with
   the pointer, focus goes to the current window's terminal. After you close it from the keyboard,
   or when it leaves for any other reason (its window no longer needs you, or it no longer fits),
   focus goes to the **✕** of the next card, else of the card before it, and to the current window's
