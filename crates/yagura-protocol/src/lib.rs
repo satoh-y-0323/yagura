@@ -246,6 +246,15 @@
 //! "unknown"; a caller establishes [`EXIT_CODE_ON_STATUS_MIN_REVISION`] before
 //! reading it that way. It also adds an optional `boot` to
 //! `protocol_revision`: the daemon start that answered.
+//!
+//! Revision 38 adds an optional `correlation_id` (an unsigned 64-bit integer)
+//! beside the `type` of any frame. A request may carry one, and the answer to
+//! it carries the same value back, so a caller can tell which request an
+//! answer is for. A frame without the key reads and answers as before; a
+//! pushed message carries none. A `correlation_id` that is not an unsigned
+//! 64-bit integer makes the frame malformed. [`read_frame_label`] reads the key
+//! and the `type` of a frame apart from decoding its variant, so a frame that
+//! does not decode can still be answered by name.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -270,7 +279,7 @@ pub use screen_copy::{
 /// anything a peer can observe on the wire. It is what a peer reports when
 /// asked which wire it speaks, and what a caller compares against before
 /// sending something an older peer would mishandle.
-pub const PROTOCOL_REVISION: u32 = 37;
+pub const PROTOCOL_REVISION: u32 = 38;
 
 /// The largest column count, and the largest row count, a window takes.
 ///
@@ -5585,23 +5594,124 @@ pub fn daemon_message_wire_tags() -> &'static [&'static str] {
     DAEMON_MESSAGE_TYPES
 }
 
+/// The key a frame names the request it belongs to by.
+const CORRELATION_ID_KEY: &str = "correlation_id";
+
+/// What a frame body says about itself apart from its variant: the
+/// correlation id it carries and its `type` tag.
+///
+/// Either part is `None` when the body does not carry it in a readable form
+/// (not a JSON object, no such key, or a value of the wrong JSON type).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct FrameLabel {
+    /// The `correlation_id`, when present and an unsigned 64-bit integer.
+    pub correlation_id: Option<u64>,
+    /// The `type` tag, when present and a string. It is not checked against
+    /// the known tables.
+    pub tag: Option<String>,
+}
+
+/// Reads the correlation id and the `type` tag of a frame body, in either
+/// direction, without decoding the variant.
+///
+/// A body that fails to decode into a message still yields its label whenever
+/// it is a JSON object, which lets a reader answer a malformed frame by name.
+pub fn read_frame_label(body: &[u8]) -> FrameLabel {
+    match serde_json::from_slice::<serde_json::Value>(body) {
+        Ok(value) => label_of(&value),
+        Err(_) => FrameLabel::default(),
+    }
+}
+
+fn label_of(value: &serde_json::Value) -> FrameLabel {
+    FrameLabel {
+        correlation_id: value
+            .get(CORRELATION_ID_KEY)
+            .and_then(serde_json::Value::as_u64),
+        tag: value
+            .get("type")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned),
+    }
+}
+
 /// Shared decode path for both message directions: parse as generic JSON
 /// first so that an unrecognized `type` can be distinguished from a known
-/// type with malformed/missing fields.
-fn decode_message<T>(body: &[u8], known_types: &[&str]) -> Result<T, MessageError>
+/// type with malformed/missing fields. A `correlation_id` that is present but
+/// not an unsigned 64-bit integer is a malformed frame.
+fn decode_message<T>(body: &[u8], known_types: &[&str]) -> Result<(Option<u64>, T), MessageError>
 where
     T: serde::de::DeserializeOwned,
 {
     let value: serde_json::Value =
         serde_json::from_slice(body).map_err(|_| MessageError::InvalidJson)?;
-    let type_field = value
-        .get("type")
-        .and_then(serde_json::Value::as_str)
-        .ok_or(MessageError::InvalidJson)?;
+    let label = label_of(&value);
+    if value.get(CORRELATION_ID_KEY).is_some() && label.correlation_id.is_none() {
+        return Err(MessageError::InvalidJson);
+    }
+    let type_field = label.tag.as_deref().ok_or(MessageError::InvalidJson)?;
     if !known_types.contains(&type_field) {
         return Err(MessageError::UnknownType);
     }
-    serde_json::from_value(value).map_err(|_| MessageError::InvalidJson)
+    let message = serde_json::from_value(value).map_err(|_| MessageError::InvalidJson)?;
+    Ok((label.correlation_id, message))
+}
+
+/// Serializes `msg` with `correlation_id` beside its `type` when given.
+fn encode_with_correlation_id<T: Serialize>(msg: &T, correlation_id: Option<u64>) -> Vec<u8> {
+    let Some(id) = correlation_id else {
+        return serde_json::to_vec(msg).unwrap_or_default();
+    };
+    let mut value = serde_json::to_value(msg).unwrap_or_default();
+    if let serde_json::Value::Object(fields) = &mut value {
+        fields.insert(CORRELATION_ID_KEY.to_string(), serde_json::Value::from(id));
+    }
+    serde_json::to_vec(&value).unwrap_or_default()
+}
+
+/// Serializes `msg` with an optional `correlation_id` at the top level.
+///
+/// With `None` the body is what [`encode_client_message`] writes.
+pub fn encode_correlated_client_message(
+    msg: &ClientMessage,
+    correlation_id: Option<u64>,
+) -> Vec<u8> {
+    encode_with_correlation_id(msg, correlation_id)
+}
+
+/// Serializes `msg` with an optional `correlation_id` at the top level.
+///
+/// With `None` the body is what [`encode_daemon_message`] writes.
+pub fn encode_correlated_daemon_message(
+    msg: &DaemonMessage,
+    correlation_id: Option<u64>,
+) -> Vec<u8> {
+    encode_with_correlation_id(msg, correlation_id)
+}
+
+/// Like [`decode_client_message`], and also returns the frame's
+/// `correlation_id`.
+///
+/// # Errors
+///
+/// As [`decode_client_message`]; additionally [`MessageError::InvalidJson`]
+/// when a `correlation_id` is present but is not an unsigned 64-bit integer.
+pub fn decode_correlated_client_message(
+    body: &[u8],
+) -> Result<(Option<u64>, ClientMessage), MessageError> {
+    decode_message(body, CLIENT_MESSAGE_TYPES)
+}
+
+/// Like [`decode_daemon_message`], and also returns the frame's
+/// `correlation_id`.
+///
+/// # Errors
+///
+/// As [`decode_correlated_client_message`].
+pub fn decode_correlated_daemon_message(
+    body: &[u8],
+) -> Result<(Option<u64>, DaemonMessage), MessageError> {
+    decode_message(body, DAEMON_MESSAGE_TYPES)
 }
 
 /// Decodes a JSON message body into a [`ClientMessage`].
@@ -5612,14 +5722,14 @@ where
 /// is known but the JSON is otherwise malformed or missing required fields,
 /// [`MessageError::InvalidJson`] is returned.
 pub fn decode_client_message(body: &[u8]) -> Result<ClientMessage, MessageError> {
-    decode_message(body, CLIENT_MESSAGE_TYPES)
+    decode_message(body, CLIENT_MESSAGE_TYPES).map(|(_, message)| message)
 }
 
 /// Decodes a JSON message body into a [`DaemonMessage`].
 ///
 /// See [`decode_client_message`] for the type-checking behavior.
 pub fn decode_daemon_message(body: &[u8]) -> Result<DaemonMessage, MessageError> {
-    decode_message(body, DAEMON_MESSAGE_TYPES)
+    decode_message(body, DAEMON_MESSAGE_TYPES).map(|(_, message)| message)
 }
 
 #[cfg(test)]

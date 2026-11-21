@@ -205,8 +205,20 @@ fn daemon_message_error_matches_adr2_json_example_shape() {
 
 // ---------------------------------------------------------------------
 // Malformed-frame table: non-JSON, missing required field, unknown type,
-// direction-violating type, ignored unknown field
+// direction-violating type, ignored unknown field. A frame's label (its
+// correlation id and its type tag) is read apart from decoding its variant,
+// so a frame that does not decode still names the request it answers.
 // ---------------------------------------------------------------------
+
+/// The correlation id and the type tag a frame's label reads out of `body`.
+fn label_of(body: &[u8]) -> (Option<u64>, Option<String>) {
+    let label = yagura_protocol::read_frame_label(body);
+    (label.correlation_id, label.tag)
+}
+
+fn named(correlation_id: u64, tag: &str) -> (Option<u64>, Option<String>) {
+    (Some(correlation_id), Some(tag.to_string()))
+}
 
 #[test]
 fn decode_client_message_rejects_non_json_body() {
@@ -216,6 +228,23 @@ fn decode_client_message_rejects_non_json_body() {
         decode_daemon_message(b"this is not json"),
         Err(MessageError::InvalidJson)
     );
+    for body in [
+        &b"this is not json"[..],
+        b"",
+        br#"{"type":"ping","correlation_id":1"#,
+    ] {
+        assert_eq!(
+            label_of(body),
+            (None, None),
+            "a body that is not JSON carries no label: {:?}",
+            String::from_utf8_lossy(body)
+        );
+    }
+    assert_eq!(
+        label_of(br#"[{"type":"ping","correlation_id":1}]"#),
+        (None, None),
+        "a JSON body that is not an object carries no label"
+    );
 }
 
 #[test]
@@ -223,12 +252,37 @@ fn decode_client_message_rejects_known_type_missing_required_field() {
     // "text" requires text.
     let result = decode_client_message(br#"{"type":"text"}"#);
     assert_eq!(result, Err(MessageError::InvalidJson));
+
+    for (body, correlation_id) in [
+        (&br#"{"type":"text","correlation_id":3}"#[..], 3),
+        (br#"{"type":"text","text":42,"correlation_id":4}"#, 4),
+    ] {
+        let shown = String::from_utf8_lossy(body);
+        assert_eq!(
+            yagura_protocol::decode_correlated_client_message(body),
+            Err(MessageError::InvalidJson),
+            "{shown}"
+        );
+        assert_eq!(label_of(body), named(correlation_id, "text"), "{shown}");
+    }
+    assert_eq!(
+        label_of(br#"{"type":7,"correlation_id":8}"#),
+        (Some(8), None),
+        "a type that is not a string is no tag, and the key is still read"
+    );
 }
 
 #[test]
 fn decode_client_message_rejects_unknown_type() {
     let result = decode_client_message(br#"{"type":"bogus"}"#);
     assert_eq!(result, Err(MessageError::UnknownType));
+
+    let keyed = br#"{"type":"bogus","correlation_id":5}"#;
+    assert_eq!(
+        yagura_protocol::decode_correlated_client_message(keyed),
+        Err(MessageError::UnknownType)
+    );
+    assert_eq!(label_of(keyed), named(5, "bogus"));
 }
 
 #[test]
@@ -244,6 +298,51 @@ fn decode_daemon_message_treats_direction_violating_type_as_unknown_type() {
     // "text" is client-to-daemon only, unknown from the daemon enum's side.
     let result = decode_daemon_message(br#"{"type":"text","text":"hello"}"#);
     assert_eq!(result, Err(MessageError::UnknownType));
+
+    let keyed = br#"{"type":"text","text":"hello","correlation_id":6}"#;
+    assert_eq!(
+        yagura_protocol::decode_correlated_daemon_message(keyed),
+        Err(MessageError::UnknownType)
+    );
+    assert_eq!(label_of(keyed), named(6, "text"));
+}
+
+/// A correlation id is an unsigned 64-bit integer. Any other value is no key,
+/// and a frame that carries one is malformed in either direction.
+#[test]
+fn a_correlation_id_that_is_not_an_unsigned_64_bit_integer_is_no_key_and_a_malformed_frame() {
+    for value in [r#""7""#, "-1", "1.5", "null", "18446744073709551616"] {
+        let request = format!(r#"{{"type":"ping","correlation_id":{value}}}"#);
+        assert_eq!(
+            label_of(request.as_bytes()),
+            (None, Some("ping".to_string())),
+            "{request}"
+        );
+        assert_eq!(
+            yagura_protocol::decode_correlated_client_message(request.as_bytes()),
+            Err(MessageError::InvalidJson),
+            "{request}"
+        );
+
+        let answer = format!(r#"{{"type":"pong","correlation_id":{value}}}"#);
+        assert_eq!(
+            label_of(answer.as_bytes()),
+            (None, Some("pong".to_string())),
+            "{answer}"
+        );
+        assert_eq!(
+            yagura_protocol::decode_correlated_daemon_message(answer.as_bytes()),
+            Err(MessageError::InvalidJson),
+            "{answer}"
+        );
+    }
+
+    let largest = format!(r#"{{"type":"ping","correlation_id":{}}}"#, u64::MAX);
+    assert_eq!(label_of(largest.as_bytes()), named(u64::MAX, "ping"));
+    assert_eq!(
+        yagura_protocol::decode_correlated_client_message(largest.as_bytes()),
+        Ok((Some(u64::MAX), ClientMessage::Ping))
+    );
 }
 
 #[test]

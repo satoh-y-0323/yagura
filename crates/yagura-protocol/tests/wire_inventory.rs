@@ -20,6 +20,12 @@
 //! - **WL-4 (revision <-> frozen-file correspondence)**: a frozen file exists
 //!   for every `N` in `1..=PROTOCOL_REVISION`, and for no `N` above it.
 //!
+//! WL-2 also freezes the keys a frame carries beside its variant (the
+//! correlation key from revision 38): their names and JSON types, for a
+//! request and for an answer. A frozen file older than such a key has none.
+//! Whether a push carries the key is not a property of the encoding, so it is
+//! measured by the daemon's tests, not here.
+//!
 //! # The corpus is built exclusively through `wire_sample!`
 //!
 //! Every `Sample` impl for a wire struct, and every `ClientMessage` /
@@ -1898,11 +1904,21 @@ struct WireShapes {
     daemon: BTreeMap<String, Value>,
 }
 
+/// The keys a frame carries beside its variant, name -> reduced structure,
+/// for a request (client to daemon) and for an answer (daemon to client).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+struct FrameKeys {
+    request: BTreeMap<String, Value>,
+    answer: BTreeMap<String, Value>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 struct WireLedger {
     revision: u32,
     shapes: WireShapes,
     enums: BTreeMap<String, BTreeSet<String>>,
+    #[serde(default)]
+    frame_keys: FrameKeys,
 }
 
 fn current_ledger() -> WireLedger {
@@ -1913,7 +1929,58 @@ fn current_ledger() -> WireLedger {
             daemon: shapes_for(&daemon_message_corpus()),
         },
         enums: current_enum_wire_variants(),
+        frame_keys: current_frame_keys(),
     }
+}
+
+/// The top-level keys of one encoded message.
+fn top_level_keys(body: &[u8]) -> BTreeSet<String> {
+    let value: Value = serde_json::from_slice(body).expect("an encoded message must be JSON");
+    value
+        .as_object()
+        .expect("an encoded message must be a JSON object")
+        .keys()
+        .cloned()
+        .collect()
+}
+
+/// The keys `keyed` carries that `plain` does not, reduced to their structure.
+fn keys_beside_the_variant(plain: &[u8], keyed: &[u8]) -> BTreeMap<String, Value> {
+    let plain_keys = top_level_keys(plain);
+    let keyed: Value = serde_json::from_slice(keyed).expect("an encoded message must be JSON");
+    keyed
+        .as_object()
+        .expect("an encoded message must be a JSON object")
+        .iter()
+        .filter(|(key, _)| !plain_keys.contains(*key))
+        .map(|(key, value)| (key.clone(), reduce_shape(value)))
+        .collect()
+}
+
+fn current_frame_keys() -> FrameKeys {
+    let correlation_id = u64::sample();
+    let mut keys = FrameKeys::default();
+    for message in client_message_corpus() {
+        keys.request.extend(keys_beside_the_variant(
+            &yagura_protocol::encode_client_message(&message),
+            &yagura_protocol::encode_correlated_client_message(&message, Some(correlation_id)),
+        ));
+    }
+    for message in daemon_message_corpus() {
+        keys.answer.extend(keys_beside_the_variant(
+            &yagura_protocol::encode_daemon_message(&message),
+            &yagura_protocol::encode_correlated_daemon_message(&message, Some(correlation_id)),
+        ));
+    }
+    keys
+}
+
+/// The one key a frame carries beside its variant, as the wire spells it.
+fn correlation_key_beside_the_variant() -> BTreeMap<String, Value> {
+    BTreeMap::from([(
+        "correlation_id".to_string(),
+        Value::String("number".to_string()),
+    )])
 }
 
 fn wire_shape_dir() -> PathBuf {
@@ -1969,8 +2036,16 @@ fn corpus_tag_set_matches_decoder_tag_table_for_daemon_messages() {
 #[test]
 fn current_revision_shapes_match_the_frozen_file() {
     let revision = yagura_protocol::PROTOCOL_REVISION;
-    let current = current_ledger().shapes;
-    let frozen = load_frozen_ledger(revision).shapes;
+    let current_ledger = current_ledger();
+    let frozen_ledger = load_frozen_ledger(revision);
+    assert_eq!(
+        current_ledger.frame_keys, frozen_ledger.frame_keys,
+        "the keys a frame carries beside its variant no longer match revision {revision}'s \
+         frozen file; bump PROTOCOL_REVISION and mint a new frozen file for an intentional wire \
+         change"
+    );
+    let current = current_ledger.shapes;
+    let frozen = frozen_ledger.shapes;
 
     for (tag, shape) in &current.client {
         assert_eq!(
@@ -2002,6 +2077,180 @@ fn current_revision_shapes_match_the_frozen_file() {
              corpus no longer builds"
         );
     }
+}
+
+// ---------------------------------------------------------------------
+// The correlation key (revision 38): a request may carry `correlation_id`
+// beside its variant, and the answer carries the same value back. The key
+// collides with no variant's own top-level key, so adding it changes no
+// variant.
+// ---------------------------------------------------------------------
+
+#[test]
+fn every_request_reads_the_same_beside_a_correlation_id_and_gives_the_key_back() {
+    for message in client_message_corpus() {
+        let tag = wire_tag(&message);
+        let plain = yagura_protocol::encode_client_message(&message);
+        let expected = yagura_protocol::decode_client_message(&plain)
+            .unwrap_or_else(|err| panic!("client message \"{tag}\" must decode: {err}"));
+        assert!(
+            !top_level_keys(&plain).contains("correlation_id"),
+            "client message \"{tag}\" has a key of its own named correlation_id"
+        );
+        assert_eq!(
+            yagura_protocol::decode_correlated_client_message(&plain),
+            Ok((None, expected.clone())),
+            "client message \"{tag}\" without a key"
+        );
+
+        for correlation_id in [0, 1, u64::MAX] {
+            let mut keyed: Value = serde_json::from_slice(&plain).expect("valid json");
+            keyed
+                .as_object_mut()
+                .expect("a JSON object")
+                .insert("correlation_id".to_string(), Value::from(correlation_id));
+            let keyed = serde_json::to_vec(&keyed).expect("serializes");
+            assert_eq!(
+                yagura_protocol::decode_correlated_client_message(&keyed),
+                Ok((Some(correlation_id), expected.clone())),
+                "client message \"{tag}\" with key {correlation_id}"
+            );
+            assert_eq!(
+                yagura_protocol::decode_client_message(&keyed),
+                Ok(expected.clone()),
+                "a reader that does not know the key reads client message \"{tag}\" the same"
+            );
+
+            let written =
+                yagura_protocol::encode_correlated_client_message(&message, Some(correlation_id));
+            assert_eq!(
+                keys_beside_the_variant(&plain, &written),
+                correlation_key_beside_the_variant(),
+                "client message \"{tag}\" written with a key"
+            );
+            assert_eq!(
+                yagura_protocol::decode_correlated_client_message(&written),
+                Ok((Some(correlation_id), expected.clone())),
+                "client message \"{tag}\" written with key {correlation_id}"
+            );
+        }
+
+        let written = yagura_protocol::encode_correlated_client_message(&message, None);
+        assert_eq!(
+            top_level_keys(&written),
+            top_level_keys(&plain),
+            "client message \"{tag}\" written without a key"
+        );
+    }
+}
+
+#[test]
+fn every_answer_written_with_or_without_a_correlation_id_reads_back_the_same() {
+    for message in daemon_message_corpus() {
+        let tag = wire_tag(&message);
+        let plain = yagura_protocol::encode_daemon_message(&message);
+        let expected = yagura_protocol::decode_daemon_message(&plain)
+            .unwrap_or_else(|err| panic!("daemon message \"{tag}\" must decode: {err}"));
+        assert!(
+            !top_level_keys(&plain).contains("correlation_id"),
+            "daemon message \"{tag}\" has a key of its own named correlation_id"
+        );
+
+        for correlation_id in [0, 1, u64::MAX] {
+            let written =
+                yagura_protocol::encode_correlated_daemon_message(&message, Some(correlation_id));
+            let value: Value = serde_json::from_slice(&written).expect("valid json");
+            assert_eq!(
+                value.get("correlation_id").and_then(Value::as_u64),
+                Some(correlation_id),
+                "daemon message \"{tag}\" must carry the key at its top level: {value}"
+            );
+            assert_eq!(
+                keys_beside_the_variant(&plain, &written),
+                correlation_key_beside_the_variant(),
+                "daemon message \"{tag}\" written with a key"
+            );
+            assert_eq!(
+                yagura_protocol::decode_correlated_daemon_message(&written),
+                Ok((Some(correlation_id), expected.clone())),
+                "daemon message \"{tag}\" written with key {correlation_id}"
+            );
+            assert_eq!(
+                yagura_protocol::decode_daemon_message(&written),
+                Ok(expected.clone()),
+                "a reader that does not know the key reads daemon message \"{tag}\" the same"
+            );
+            let label = yagura_protocol::read_frame_label(&written);
+            assert_eq!(
+                (label.correlation_id, label.tag.as_deref()),
+                (Some(correlation_id), Some(tag.as_str())),
+                "the label of daemon message \"{tag}\""
+            );
+        }
+
+        let written = yagura_protocol::encode_correlated_daemon_message(&message, None);
+        assert_eq!(
+            top_level_keys(&written),
+            top_level_keys(&plain),
+            "daemon message \"{tag}\" written without a key must carry no key"
+        );
+        assert_eq!(
+            yagura_protocol::decode_correlated_daemon_message(&written),
+            Ok((None, expected.clone())),
+            "daemon message \"{tag}\" written without a key"
+        );
+        let label = yagura_protocol::read_frame_label(&written);
+        assert_eq!(
+            (label.correlation_id, label.tag.as_deref()),
+            (None, Some(tag.as_str())),
+            "the label of daemon message \"{tag}\" without a key"
+        );
+    }
+}
+
+/// The label is read apart from decoding the variant, in either direction: a
+/// frame whose required fields are missing still gives its key and its tag.
+#[test]
+fn a_frame_that_does_not_decode_still_gives_its_correlation_id_and_type() {
+    let directions = [
+        ("daemon", yagura_protocol::daemon_message_wire_tags()),
+        ("client", yagura_protocol::client_message_wire_tags()),
+    ];
+    for (direction, tags) in directions {
+        for tag in tags {
+            let body = serde_json::to_vec(&serde_json::json!({
+                "type": tag,
+                "correlation_id": 7,
+            }))
+            .expect("serializes");
+            let label = yagura_protocol::read_frame_label(&body);
+            assert_eq!(
+                (label.correlation_id, label.tag.as_deref()),
+                (Some(7), Some(*tag)),
+                "{direction} message \"{tag}\" with every field missing"
+            );
+        }
+    }
+
+    // An answer to `interrupt_window` as a daemon before revision 34 writes it.
+    let interrupted = daemon_message_corpus()
+        .into_iter()
+        .find(|message| wire_tag(message) == "window_interrupted")
+        .expect("the corpus builds window_interrupted");
+    let mut older: Value = serde_json::to_value(&interrupted).expect("serializes");
+    let fields = older.as_object_mut().expect("a JSON object");
+    assert!(fields.remove("outcome").is_some(), "{fields:?}");
+    fields.insert("correlation_id".to_string(), Value::from(9_u64));
+    let body = serde_json::to_vec(&older).expect("serializes");
+    assert!(
+        yagura_protocol::decode_daemon_message(&body).is_err(),
+        "window_interrupted without its outcome must not decode: {older}"
+    );
+    let label = yagura_protocol::read_frame_label(&body);
+    assert_eq!(
+        (label.correlation_id, label.tag.as_deref()),
+        (Some(9), Some("window_interrupted"))
+    );
 }
 
 // ---------------------------------------------------------------------

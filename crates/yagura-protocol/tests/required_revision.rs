@@ -968,7 +968,7 @@ fn the_view_messages_require_the_frame_threshold_whatever_they_carry() {
 }
 
 #[test]
-fn run_hook_requires_revision_thirty_one_and_the_current_revision_is_thirty_seven() {
+fn run_hook_requires_revision_thirty_one_and_the_current_revision_is_thirty_eight() {
     let message = ClientMessage::RunHook {
         window_id: "w1".to_string(),
         token: "t".to_string(),
@@ -982,7 +982,7 @@ fn run_hook_requires_revision_thirty_one_and_the_current_revision_is_thirty_seve
         HOOK_EVENTS_MIN_REVISION
     );
     assert_eq!(HOOK_EVENTS_MIN_REVISION, 31);
-    assert_eq!(PROTOCOL_REVISION, 37);
+    assert_eq!(PROTOCOL_REVISION, 38);
     // From this revision `status_changed` carries the exit code, so an older
     // peer's `-1` cannot be told from a real one.
     assert_eq!(EXIT_CODE_ON_STATUS_MIN_REVISION, 37);
