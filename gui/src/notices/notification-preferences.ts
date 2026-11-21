@@ -5,7 +5,7 @@ export const NOTIFICATION_PREFERENCES_KEY = 'yagura.notification-preferences';
 
 const FORMAT_VERSION = 1;
 
-/** Which notice kinds the user lets pop up in the app, one switch per settings row. */
+/** Which notice kinds the user lets appear on the notification bar, one switch per settings row. */
 export interface NotificationPreferences {
   inApp: Readonly<Record<NoticeCategory, boolean>>;
 }
@@ -66,7 +66,7 @@ export function writePreferences(prefs: NotificationPreferences): string {
  * New preferences with one row switched; the ones given are left unchanged.
  * @param prefs the current preferences
  * @param category the row to switch
- * @param enabled whether that kind may pop up
+ * @param enabled whether that kind may appear on the notification bar
  */
 export function withPreference(
   prefs: NotificationPreferences,

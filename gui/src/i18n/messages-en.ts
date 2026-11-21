@@ -1056,13 +1056,13 @@ export const messagesEn = {
     keyboardEditBlocked: (block: keyof typeof KEYBOARD_EDIT_BLOCKS, location: string): string =>
       KEYBOARD_EDIT_BLOCKS[block](location),
 
-    // The Notifications tab: which notice kinds may pop up in the app.
+    // The Notifications tab: which notice kinds may appear on the notification bar.
     notificationsTab: 'Notifications',
     notificationsDescription:
-      'Choose which notifications pop up. One you turn off is not read aloud either, and stays ' +
-      'in the Notifications list. A window that ends while Focus shows it is still read aloud, ' +
-      'since its card says so. Windows that need you are not listed there; their rows in the ' +
-      'sidebar stay marked.',
+      'Choose which notifications appear on the notification bar. One you turn off is not read ' +
+      'aloud either, and stays in the Notifications list. A window that ends while Focus shows ' +
+      'it is still read aloud, since its card says so. Windows that need you are not listed ' +
+      'there; their rows in the sidebar stay marked.',
     notificationsColumnName: 'Notification',
     notificationsColumnInApp: NOTIFICATIONS_IN_APP_COLUMN,
     notificationsRowName: (row: NoticeCategory): string => NOTIFICATION_ROWS[row].name,
