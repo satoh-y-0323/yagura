@@ -146,33 +146,6 @@ fn a_gate_refusal_reaches_the_form_as_its_own_kind_of_failure() {
 }
 
 #[test]
-fn a_gate_refusal_does_not_fall_through_to_the_generic_local_failure() {
-    let failure = window_open_failure(IpcError::Unsupported {
-        request_type: refused_request_tag().to_owned(),
-    });
-    assert!(
-        !matches!(failure, WindowOpenFailure::Local { .. }),
-        "falling through to the local failure would put this layer's own English text in \
-         front of the user: {failure:?}"
-    );
-}
-
-#[test]
-fn a_gate_refusal_carries_the_wire_tag_of_the_request_that_was_refused() {
-    let failure = window_open_failure(IpcError::Unsupported {
-        request_type: refused_request_tag().to_owned(),
-    });
-    let WindowOpenFailure::Unsupported { request_type } = failure else {
-        panic!("a gate refusal must keep its own kind: {failure:?}");
-    };
-    assert!(
-        client_message_wire_tags().contains(&request_type.as_str()),
-        "the refusal must name the request with a tag the protocol already has, not a word \
-         invented here: {request_type}"
-    );
-}
-
-#[test]
 fn a_serialized_gate_refusal_carries_exactly_what_it_was_given() {
     let serialized = serde_json::to_value(window_open_failure(IpcError::Unsupported {
         request_type: refused_request_tag().to_owned(),

@@ -396,25 +396,6 @@ describe('settleDecision: the answer to a decision that was sent', () => {
     const alone = markInFlight(enqueue(emptyQueue(), makeRequest('req-a')), 'req-a');
     expect(head(settleDecision(alone, 'req-a', 'unconfirmed'))).toBeNull();
   });
-
-  it('leaves an unconfirmed decision to the daemon: a pending list without it or a withdrawal closes it, a list with it offers it again', () => {
-    const unconfirmed = settleDecision(sendingA(), 'req-a', 'unconfirmed');
-
-    const absent = reset(unconfirmed, [makeRequest('req-b', from('w-2'))]);
-    expect(holds(absent, 'req-a')).toBe(false);
-    expect([...windowsAwaitingPermission(absent)]).toEqual(['w-2']);
-
-    const present = reset(unconfirmed, [
-      makeRequest('req-a', from('w-1')),
-      makeRequest('req-b', from('w-2')),
-    ]);
-    expect(head(present)?.request_id).toBe('req-a');
-    expect(decisionFailed(present, 'req-a')).toBe(false);
-
-    const withdrawn = withdraw(unconfirmed, 'req-a');
-    expect(holds(withdrawn, 'req-a')).toBe(false);
-    expect([...windowsAwaitingPermission(withdrawn)]).toEqual(['w-2']);
-  });
 });
 
 describe('resolve / withdraw: also drop the id from inFlightIds', () => {

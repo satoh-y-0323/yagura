@@ -383,6 +383,24 @@ async fn an_internal_error_answers_the_attach_it_arrives_during() {
         is_rejected_with(&outcome, ERROR_CODE_INTERNAL),
         "got {outcome:?}"
     );
+
+    // A daemon that returns no key leaves the error to be weighed by its
+    // code, and `internal` is one the attach itself can produce.
+    let older = ScriptedDaemon::new(|request| match request {
+        ClientMessage::AttachView { .. } => {
+            Reaction::sends(vec![SentFrame::Unkeyed(error_frame(ERROR_CODE_INTERNAL))])
+        }
+        _ => older_housekeeping(request),
+    });
+    let host = FakeHost::served_by("attach-internal-older", &older).await;
+    let client = Arc::new(IpcClient::new_window(Arc::new(WindowRecord::new())));
+
+    let outcome = reply_within("the attach", client.attach_window(&host, "w1", None)).await;
+
+    assert!(
+        is_rejected_with(&outcome, ERROR_CODE_INTERNAL),
+        "an older daemon: got {outcome:?}"
+    );
 }
 
 // Only a daemon that returns no key leaves an error to be weighed by its

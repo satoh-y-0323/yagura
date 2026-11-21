@@ -2355,6 +2355,25 @@ mod tests {
                 .is_empty()
         );
 
+        let (behind, sent) = tokio::join!(
+            client.get_daemon_health(&host),
+            answer(
+                &generation,
+                &mut peer,
+                PendingKind::GetDaemonHealth,
+                Err(IpcError::Unsupported {
+                    request_type: "get_daemon_health".to_owned()
+                })
+            )
+        );
+        assert_eq!(sent, ClientMessage::GetDaemonHealth);
+        assert!(
+            behind
+                .expect("a daemon whose revision cannot carry the request has no problem to report")
+                .problems
+                .is_empty()
+        );
+
         let (updated, sent) = tokio::join!(
             client.update_window_layout("w1", "{}".to_owned()),
             answer(
@@ -2949,16 +2968,36 @@ mod tests {
         let client = Arc::new(IpcClient::new());
         client.connect(&host).await.expect("connect");
         assert!(client.is_connected().await);
+        let generation = client.shared.open().expect("the open generation");
 
-        let (listed, ()) = tokio::join!(client.list_windows(), async {
-            yagura_test_support::ipc::reply_within("the held list", reached.notified()).await;
-            client.disconnect().await;
-        });
+        let (listed, ()) = tokio::join!(
+            yagura_test_support::ipc::reply_within("the held list", client.list_windows()),
+            async {
+                yagura_test_support::ipc::reply_within("the held list", reached.notified()).await;
+                client.disconnect().await;
+            }
+        );
         assert!(
             matches!(listed, Err(IpcError::ConnectionLost)),
             "got {listed:?}"
         );
         assert!(!client.is_connected().await);
+
+        // A caller still holding the ended generation is refused before
+        // anything is written: unlike a request lost after its frame went
+        // out, whose decision the daemon may have applied.
+        let asked = generation
+            .request(&ClientMessage::ListWindows, PendingKind::ListWindows)
+            .await;
+        let sent = generation.write(&ClientMessage::ListWindows).await;
+        assert!(
+            matches!(asked, Err(IpcError::NotConnected)),
+            "a request on an ended generation: got {asked:?}"
+        );
+        assert!(
+            matches!(sent, Err(IpcError::NotConnected)),
+            "a write on an ended generation: got {sent:?}"
+        );
     }
 
     #[test]

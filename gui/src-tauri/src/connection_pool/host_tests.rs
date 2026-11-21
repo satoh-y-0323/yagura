@@ -291,10 +291,16 @@ async fn a_decision_lost_after_it_was_written_is_unconfirmed_and_one_never_writt
     let host = FakeHost::served_by("decision-lost", &daemon).await;
     let pool = ConnectionPool::new();
 
-    let (decided, ()) = tokio::join!(pool.decide_approval(&host, "r1", true), async {
-        reply_within("the held decision", reached.notified()).await;
-        daemon.hang_up();
-    });
+    let (decided, ()) = tokio::join!(
+        reply_within(
+            "the decision lost with its connection",
+            pool.decide_approval(&host, "r1", true)
+        ),
+        async {
+            reply_within("the held decision", reached.notified()).await;
+            daemon.hang_up();
+        }
+    );
 
     assert!(
         matches!(decided, Ok(DecideApprovalOutcome::Unconfirmed)),

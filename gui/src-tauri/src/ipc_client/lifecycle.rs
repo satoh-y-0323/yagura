@@ -4376,6 +4376,15 @@ mod owner_tests {
         rig.observe(count, Vec::new())
     }
 
+    /// (f) alone: the revision gate's refusal is the step's answer, so the
+    /// attach fails on it with no news of the connection's end.
+    async fn refused_by_the_gate_and_never_ended() -> Observed {
+        let (mut rig, _restoring, stage) = chain_restoring(false, BEFORE_FRAMES).await;
+        let outcome = stage.await;
+        rig.deliver(vec![Item::Result(outcome)]);
+        rig.observe(1, Vec::new())
+    }
+
     /// (g) The step's write failed on this side while the daemon is alive.
     async fn failed_write_with_a_live_peer(order: usize) -> Observed {
         let (mut rig, mut restoring, stage) = chain_restoring(true, REVISION).await;
@@ -4584,11 +4593,14 @@ mod owner_tests {
             ),
             (
                 "(f) refused by the revision gate, then superseded",
-                across_orders(
-                    |order| refused_then_superseded(order, true),
-                    lost_to_a_failed_reconnect,
-                )
-                .await,
+                all(vec![
+                    across_orders(
+                        |order| refused_then_superseded(order, true),
+                        lost_to_a_failed_reconnect,
+                    )
+                    .await,
+                    lost_to_a_failed_reconnect(&refused_by_the_gate_and_never_ended().await),
+                ]),
             ),
             (
                 "(g) failed write with a live peer",
