@@ -30,9 +30,11 @@ use common::{
 use yagura_daemon::DaemonConfig;
 use yagura_protocol::{
     ApprovalRequest, ApprovalSettingsInfo, ClientMessage, DaemonMessage, PlanInfo, PlanReview,
-    PlanTaskSpec,
+    PlanTaskSpec, WithdrawReason,
 };
-use yagura_test_support::ipc::Connection;
+use yagura_test_support::ipc::{
+    Connection, read_correlated_daemon_frame, send_correlated_client_message, send_raw_frame,
+};
 use yagura_test_support::paths::TempDir;
 use yagura_test_support::process::profile_source;
 
@@ -127,6 +129,63 @@ async fn switch_tool(approver: &mut Connection, tool: &str, auto_approve: bool) 
         Some(auto_approve),
         "the answer must carry the daemon's value after the switch, got {settings:?}"
     );
+}
+
+// --- correlation ids ----------------------------------------------------------
+
+const REQUESTER_CORRELATION_ID: u64 = 7_001;
+const BYSTANDER_CORRELATION_ID: u64 = 7_003;
+// The top of the range: the daemon must hand the value back whole.
+const DECIDER_CORRELATION_ID: u64 = u64::MAX;
+
+fn assert_carries(actual: Option<u64>, expected: Option<u64>, frame: &str) {
+    assert_eq!(actual, expected, "correlation_id on {frame}");
+}
+
+/// Reads the next frame that is not a push a connection may be sent at any
+/// moment, asserting that every push it skips carries no `correlation_id`.
+async fn read_correlated_reply(client: &mut Connection) -> (Option<u64>, DaemonMessage) {
+    loop {
+        let (correlation_id, message) = read_correlated_daemon_frame(client)
+            .await
+            .expect("the connection closed while a reply was awaited");
+        match message {
+            DaemonMessage::Frame(_)
+            | DaemonMessage::StatusChanged { .. }
+            | DaemonMessage::ChatParticipantsChanged
+            | DaemonMessage::ChatChanged { .. }
+            | DaemonMessage::PlanChanged { .. } => {
+                assert_carries(correlation_id, None, &format!("the push {message:?}"));
+            }
+            other => return (correlation_id, other),
+        }
+    }
+}
+
+/// Sends `msg` with `correlation_id` and returns its answer, asserting that the
+/// answer carries the same id.
+async fn correlated_request(
+    client: &mut Connection,
+    msg: &ClientMessage,
+    correlation_id: u64,
+) -> DaemonMessage {
+    send_correlated_client_message(client, msg, Some(correlation_id)).await;
+    let (carried, reply) = read_correlated_reply(client).await;
+    assert_carries(
+        carried,
+        Some(correlation_id),
+        &format!("the answer {reply:?}"),
+    );
+    reply
+}
+
+async fn expect_uncorrelated_approval_requested(client: &mut Connection) -> ApprovalRequest {
+    let (correlation_id, reply) = read_correlated_reply(client).await;
+    let DaemonMessage::ApprovalRequested { request } = reply else {
+        panic!("expected approval_requested, got {reply:?}");
+    };
+    assert_carries(correlation_id, None, "the approval_requested push");
+    request
 }
 
 // --- send_message -------------------------------------------------------------
@@ -335,37 +394,102 @@ async fn switching_interrupt_window_to_automatic_and_back_takes_effect_on_the_ne
 
 // --- close_window -------------------------------------------------------------
 
-async fn request_close(client: &mut Connection, window_id: &str) {
-    send(
-        client,
-        &ClientMessage::CloseWindow {
-            window_id: window_id.to_string(),
-            force: None,
-        },
-    )
-    .await;
+fn close_window(window_id: &str) -> ClientMessage {
+    ClientMessage::CloseWindow {
+        window_id: window_id.to_string(),
+        force: None,
+    }
 }
 
+async fn request_close(client: &mut Connection, window_id: &str) {
+    send(client, &close_window(window_id)).await;
+}
+
+/// Also measures, on the first decision, which frames carry the
+/// `correlation_id` of the request they answer: the decider's
+/// `approval_resolved` and the requester's final answer do; the
+/// `approval_requested` and `approval_withdrawn` pushes do not, nor does the
+/// answer to a request sent without one.
 #[tokio::test]
 async fn switching_close_window_to_automatic_and_back_takes_effect_on_the_next_request() {
     let (h, mut approver) =
         start_with_approver("live-close-window", NO_AUTO_APPROVE_PLAYBOOK).await;
+    let mut bystander = h.connect().await;
+    let registered: DaemonMessage = correlated_request(
+        &mut bystander,
+        &ClientMessage::RegisterApprover,
+        BYSTANDER_CORRELATION_ID,
+    )
+    .await;
+    assert!(
+        matches!(registered, DaemonMessage::ApproverRegistered { .. }),
+        "expected approver_registered, got {registered:?}"
+    );
     let mut requester = h.connect().await;
     let first = h.open_idle_window(&mut requester).await;
     let second = h.open_idle_window(&mut requester).await;
 
-    request_close(&mut requester, &first).await;
-    let request: ApprovalRequest = expect_approval_requested_skipping_pushes(&mut approver).await;
+    send_correlated_client_message(
+        &mut requester,
+        &close_window(&first),
+        Some(REQUESTER_CORRELATION_ID),
+    )
+    .await;
+    let request: ApprovalRequest = expect_uncorrelated_approval_requested(&mut approver).await;
     assert_eq!(request.tool, "close_window");
-    deny(&mut approver, &mut requester, &request).await;
+    // The bystander's last request carried an id: a push that took the
+    // connection's last id would show it here.
+    let seen: ApprovalRequest = expect_uncorrelated_approval_requested(&mut bystander).await;
+    assert_eq!(seen.request_id, request.request_id);
+
+    let resolved: DaemonMessage = correlated_request(
+        &mut approver,
+        &ClientMessage::ApprovalDecision {
+            request_id: request.request_id.clone(),
+            approved: false,
+        },
+        DECIDER_CORRELATION_ID,
+    )
+    .await;
+    match resolved {
+        DaemonMessage::ApprovalResolved { request_id } => {
+            assert_eq!(request_id, request.request_id);
+        }
+        other => panic!("expected approval_resolved, got {other:?}"),
+    }
+    let (correlation_id, withdrawn) = read_correlated_reply(&mut bystander).await;
+    match withdrawn {
+        DaemonMessage::ApprovalWithdrawn { request_id, reason } => {
+            assert_eq!(request_id, request.request_id);
+            assert_eq!(reason, WithdrawReason::Resolved);
+        }
+        other => panic!("expected approval_withdrawn, got {other:?}"),
+    }
+    assert_carries(
+        correlation_id,
+        None,
+        "the approval_withdrawn push to another approver",
+    );
+    let (correlation_id, denied) = read_correlated_reply(&mut requester).await;
+    expect_error(denied, "approval_denied");
+    assert_carries(
+        correlation_id,
+        Some(REQUESTER_CORRELATION_ID),
+        "the requester's answer after the decision",
+    );
 
     switch_tool(&mut approver, "close_window", true).await;
     request_close(&mut requester, &first).await;
-    let reply: DaemonMessage = read_response(&mut requester).await;
+    let (correlation_id, reply) = read_correlated_reply(&mut requester).await;
     match reply {
         DaemonMessage::WindowClosed { window_id } => assert_eq!(window_id, first),
         other => panic!("expected window_closed without approval, got {other:?}"),
     }
+    assert_carries(
+        correlation_id,
+        None,
+        "the answer to a request sent without a correlation_id",
+    );
     assert_eq!(
         pending_request_ids(&mut approver).await,
         Vec::<String>::new(),
@@ -702,5 +826,64 @@ async fn a_request_already_waiting_for_approval_keeps_waiting_after_its_tool_is_
     // decision, so the first answer `waiting_source` reads must be the denial:
     // an answer the switch had caused would come ahead of it.
     deny(&mut approver, &mut waiting_source, &request).await;
+    h.registry.terminate_all().await;
+}
+
+// --- a frame that does not decode ---------------------------------------------
+
+#[tokio::test]
+async fn a_frame_that_does_not_decode_is_answered_with_the_correlation_id_it_carries() {
+    let h = Harness::start("live-correlation-undecodable", common::opening_config()).await;
+
+    // A value that is not an unsigned 64-bit integer makes the frame malformed:
+    // its error names no request, and the connection closes.
+    for value in ["\"42\"", "-1", "4.5", "null"] {
+        let mut client = h.connect().await;
+        let body = format!(r#"{{"type":"ping","correlation_id":{value}}}"#);
+        send_raw_frame(&mut client, body.as_bytes()).await;
+        let (correlation_id, reply) = read_correlated_reply(&mut client).await;
+        expect_error(reply, "invalid_json");
+        assert_carries(
+            correlation_id,
+            None,
+            &format!("the error for a correlation_id of {value}"),
+        );
+        assert!(
+            read_correlated_daemon_frame(&mut client).await.is_none(),
+            "a correlation_id of {value} must close the connection"
+        );
+    }
+
+    let mut client = h.connect().await;
+    send_raw_frame(
+        &mut client,
+        br#"{"type":"no_such_type","correlation_id":41}"#,
+    )
+    .await;
+    let (correlation_id, reply) = read_correlated_reply(&mut client).await;
+    expect_error(reply, "unknown_type");
+    assert_carries(correlation_id, Some(41), "the unknown_type error");
+    send(&mut client, &ClientMessage::Ping).await;
+    let (correlation_id, reply) = read_correlated_reply(&mut client).await;
+    assert!(
+        matches!(reply, DaemonMessage::Pong),
+        "the connection must go on after unknown_type, got {reply:?}"
+    );
+    assert_carries(correlation_id, None, "the pong to a ping without one");
+
+    // A known type without its required field.
+    send_raw_frame(
+        &mut client,
+        br#"{"type":"close_window","correlation_id":42}"#,
+    )
+    .await;
+    let (correlation_id, reply) = read_correlated_reply(&mut client).await;
+    expect_error(reply, "invalid_json");
+    assert_carries(correlation_id, Some(42), "the invalid_json error");
+    assert!(
+        read_correlated_daemon_frame(&mut client).await.is_none(),
+        "invalid_json must close the connection"
+    );
+
     h.registry.terminate_all().await;
 }

@@ -249,12 +249,55 @@ pub async fn reply_within<F: std::future::Future>(what: &str, exchange: F) -> F:
 ///
 /// Panics if the frame cannot be written to the connection.
 pub async fn send_client_message(client: &mut Connection, msg: &ClientMessage) {
-    let body = yagura_protocol::encode_client_message(msg);
-    let frame = yagura_protocol::frame_encode(&body);
+    send_raw_frame(client, &yagura_protocol::encode_client_message(msg)).await;
+}
+
+/// Encodes `msg` with `correlation_id` beside its `type` (none when `None`)
+/// and writes it to `client` as one length-prefixed frame.
+///
+/// # Panics
+///
+/// Panics if the frame cannot be written to the connection.
+pub async fn send_correlated_client_message(
+    client: &mut Connection,
+    msg: &ClientMessage,
+    correlation_id: Option<u64>,
+) {
+    let body = yagura_protocol::encode_correlated_client_message(msg, correlation_id);
+    send_raw_frame(client, &body).await;
+}
+
+/// Writes `body`, whatever it holds, to `client` as one length-prefixed
+/// frame: the way to hand the daemon a body no [`ClientMessage`] encodes to.
+///
+/// # Panics
+///
+/// Panics if the frame cannot be written to the connection.
+pub async fn send_raw_frame(client: &mut Connection, body: &[u8]) {
+    let frame = yagura_protocol::frame_encode(body);
     client
         .write_all(&frame)
         .await
         .expect("write_all frame to endpoint");
+}
+
+/// Reads exactly one frame of whatever kind arrives next, with the
+/// `correlation_id` it carried; `None` when the peer closed the connection.
+///
+/// # Panics
+///
+/// Panics if nothing arrives within [`HANG_GUARD`], or if the daemon emitted
+/// a frame that does not decode.
+pub async fn read_correlated_daemon_frame(
+    client: &mut Connection,
+) -> Option<(Option<u64>, DaemonMessage)> {
+    let body = tokio::time::timeout(HANG_GUARD, read_frame_body(client))
+        .await
+        .unwrap_or_else(|_| panic!("timed out waiting for a frame"))?;
+    Some(
+        yagura_protocol::decode_correlated_daemon_message(&body)
+            .expect("daemon must only ever emit well-formed frames"),
+    )
 }
 
 /// The result of reading from a connection: a message, or a peer that closed
@@ -330,19 +373,24 @@ async fn read_daemon_frame_until(
 ///
 /// Panics if the daemon emitted a frame that does not decode.
 pub(crate) async fn read_next_frame(client: &mut Connection) -> ReadOutcome {
-    let mut len_buf = [0u8; 4];
-    if client.read_exact(&mut len_buf).await.is_err() {
+    let Some(body) = read_frame_body(client).await else {
         return ReadOutcome::Closed;
-    }
-    let len = u32::from_le_bytes(len_buf) as usize;
-    let mut body = vec![0u8; len];
-    if client.read_exact(&mut body).await.is_err() {
-        return ReadOutcome::Closed;
-    }
+    };
     ReadOutcome::Message(
         yagura_protocol::decode_daemon_message(&body)
             .expect("daemon must only ever emit well-formed frames"),
     )
+}
+
+/// Reads one length-prefixed frame body; `None` when the peer closed the
+/// connection first.
+async fn read_frame_body(client: &mut Connection) -> Option<Vec<u8>> {
+    let mut len_buf = [0u8; 4];
+    client.read_exact(&mut len_buf).await.ok()?;
+    let len = u32::from_le_bytes(len_buf) as usize;
+    let mut body = vec![0u8; len];
+    client.read_exact(&mut body).await.ok()?;
+    Some(body)
 }
 
 /// Reads the next frame that is not a `StatusChanged` push.

@@ -84,11 +84,12 @@ pub(super) async fn handle_list_model_choices(
     });
 
     let config = config.clone();
-    let outbound = Arc::clone(outbound);
+    // A push, not this request's answer: it carries no correlation id.
+    let connection = Arc::clone(outbound.connection());
     tokio::spawn(async move {
         let _permit = permit;
         let (source, choices, error) = list_choices(&config, &profile).await;
-        outbound.reply(&DaemonMessage::ModelChoices {
+        connection.push(&DaemonMessage::ModelChoices {
             request_id,
             profile,
             source,

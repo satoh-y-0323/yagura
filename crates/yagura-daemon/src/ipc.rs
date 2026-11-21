@@ -28,8 +28,9 @@ use yagura_protocol::{
     FrameError, HANDOFF_NOTE_MAX_BYTES, HANDOFF_REFERENCE_MAX_BYTES, InstructionNoticeState,
     InterruptOutcome, MessageError, OnNameTaken, PROTOCOL_REVISION, PointerButton, PointerInput,
     PointerKind, ProfileInfo, RestoreCandidate, TerminalSize, WindowInfo, WindowStatus,
-    check_input_bounds, decode_client_message, encode_daemon_message, frame_decode, frame_encode,
-    is_valid_source, validate_handoff_target, validate_handoff_text, validate_launch_option_value,
+    check_input_bounds, decode_correlated_client_message, encode_correlated_daemon_message,
+    encode_daemon_message, frame_decode, frame_encode, is_valid_source, read_frame_label,
+    validate_handoff_target, validate_handoff_text, validate_launch_option_value,
     validate_message_text,
 };
 
@@ -780,26 +781,39 @@ fn size_out_of_range_msg() -> DaemonMessage {
 ///
 /// A closed queue (the writer task exited after a write error) is likewise
 /// terminal and closes the connection.
-struct Outbound {
+///
+/// # Pushes and answers
+///
+/// This is the connection's side for what no request asked for: pushes,
+/// view frames, and errors about the connection itself. It knows no
+/// request, so nothing sent through it can carry a `correlation_id`. A
+/// request is answered through an [`Outbound`] made for it.
+struct ConnectionOutbound {
     tx: mpsc::Sender<Vec<u8>>,
-    /// Shared by every handle onto the same connection, so a handle made for
-    /// one request still marks the connection itself broken.
+    /// Shared with the view's frame sink, so a frame that cannot be queued
+    /// marks the connection itself broken.
     broken: Arc<AtomicBool>,
-    /// `Some` on a handle made for one request ([`Outbound::for_one_answer`]):
-    /// set by its first reply, after which its replies are dropped.
-    answered: Option<AtomicBool>,
-    /// Turns `true` once the peer has closed its side, shared like `broken`.
-    gone: Arc<watch::Sender<bool>>,
+    /// Turns `true` once the peer has closed its side.
+    gone: watch::Sender<bool>,
 }
 
-impl Outbound {
+impl ConnectionOutbound {
     fn new(tx: mpsc::Sender<Vec<u8>>) -> Self {
         Self {
             tx,
             broken: Arc::new(AtomicBool::new(false)),
-            answered: None,
-            gone: Arc::new(watch::channel(false).0),
+            gone: watch::channel(false).0,
         }
+    }
+
+    /// The side one request is answered through; `correlation_id` is the one
+    /// that request carried, returned on every answer without being read.
+    fn answer_for(self: &Arc<Self>, correlation_id: Option<u64>) -> Arc<Outbound> {
+        Arc::new(Outbound {
+            connection: Arc::clone(self),
+            correlation_id,
+            answered: None,
+        })
     }
 
     /// Records that the peer has closed its side of the connection.
@@ -815,26 +829,16 @@ impl Outbound {
         let _ = gone.wait_for(|gone| *gone).await;
     }
 
-    /// A handle onto the same connection for one request that two parties may
-    /// race to answer: whichever replies first is the request's answer.
-    fn for_one_answer(&self) -> Arc<Self> {
-        Arc::new(Self {
-            tx: self.tx.clone(),
-            broken: Arc::clone(&self.broken),
-            answered: Some(AtomicBool::new(false)),
-            gone: Arc::clone(&self.gone),
-        })
+    /// Queues a frame no request asked for, through the same non-droppable
+    /// path as an answer.
+    fn push(&self, msg: &DaemonMessage) {
+        self.queue(encode_frame(msg));
     }
 
-    /// Queues a reply to a client request. Failure to queue is terminal for
-    /// the connection (see the back-pressure rules above).
-    fn reply(&self, msg: &DaemonMessage) {
-        if let Some(answered) = &self.answered
-            && answered.swap(true, Ordering::AcqRel)
-        {
-            return;
-        }
-        if self.tx.try_send(encode_frame(msg)).is_err() {
+    /// Queues an encoded frame. Failure to queue is terminal for the
+    /// connection (see the back-pressure rules above).
+    fn queue(&self, frame: Vec<u8>) {
+        if self.tx.try_send(frame).is_err() {
             self.broken.store(true, Ordering::Relaxed);
         }
     }
@@ -891,14 +895,79 @@ impl FrameSink for ViewFrames {
     }
 }
 
-impl ApproverSink for Outbound {
+/// The side one request is answered through: every frame it sends carries
+/// the `correlation_id` the request carried, and a request that carried none
+/// is answered with none.
+///
+/// It sends answers only. A frame that follows the answer unasked goes
+/// through [`Outbound::connection`], which knows no `correlation_id`.
+struct Outbound {
+    connection: Arc<ConnectionOutbound>,
+    correlation_id: Option<u64>,
+    /// `Some` on a handle made for one request that two parties race to
+    /// answer ([`Outbound::for_one_answer`]): set by its first reply, after
+    /// which its replies are dropped.
+    answered: Option<AtomicBool>,
+}
+
+impl Outbound {
+    /// The answering side of a request carrying no `correlation_id`, on a
+    /// connection of its own.
+    #[cfg(test)]
+    fn new(tx: mpsc::Sender<Vec<u8>>) -> Self {
+        Self {
+            connection: Arc::new(ConnectionOutbound::new(tx)),
+            correlation_id: None,
+            answered: None,
+        }
+    }
+
+    /// The connection this request came in on, for what follows its answer
+    /// unasked.
+    fn connection(&self) -> &Arc<ConnectionOutbound> {
+        &self.connection
+    }
+
+    /// A handle for the same request that two parties may race to answer:
+    /// whichever replies first is the request's answer.
+    fn for_one_answer(&self) -> Arc<Self> {
+        Arc::new(Self {
+            connection: Arc::clone(&self.connection),
+            correlation_id: self.correlation_id,
+            answered: Some(AtomicBool::new(false)),
+        })
+    }
+
+    /// Queues an answer to the request. Failure to queue is terminal for the
+    /// connection (see the back-pressure rules on [`ConnectionOutbound`]).
+    fn reply(&self, msg: &DaemonMessage) {
+        if let Some(answered) = &self.answered
+            && answered.swap(true, Ordering::AcqRel)
+        {
+            return;
+        }
+        let body = encode_correlated_daemon_message(msg, self.correlation_id);
+        self.connection.queue(frame_encode(&body));
+    }
+
+    fn is_broken(&self) -> bool {
+        self.connection.is_broken()
+    }
+
+    /// See [`ConnectionOutbound::gone`].
+    async fn gone(&self) {
+        self.connection.gone().await;
+    }
+}
+
+impl ApproverSink for ConnectionOutbound {
     /// An unsolicited approval frame is queued through the same non-droppable
     /// path as a reply: a human who never learns that a request exists is the
     /// worst failure this feature has. A queue that cannot take it therefore
     /// marks the connection broken, and reporting that back evicts this
     /// approver from the ledger.
     fn push(&self, msg: &DaemonMessage) -> bool {
-        self.reply(msg);
+        ConnectionOutbound::push(self, msg);
         !self.is_broken()
     }
 }
@@ -1371,18 +1440,18 @@ impl IpcServer {
         // drains, so a client that stops reading cannot stall the reader.
         let (mut reader, writer) = tokio::io::split(stream);
         let (tx, rx) = mpsc::channel::<Vec<u8>>(OUTBOUND_QUEUE_CAPACITY);
-        // Detached: dropping `outbound` at the end of this function closes the
+        // Detached: dropping `connection` at the end of this function closes the
         // queue, and the writer task then flushes what is still queued (e.g.
         // the `superseded` error) before releasing the connection.
         tokio::spawn(write_loop(writer, rx));
-        // Shared with this connection's waiter tasks, which is the
-        // only reason it is reference-counted.
-        let outbound = Arc::new(Outbound::new(tx));
+        // Shared with every request's answering side and with the approval
+        // ledger, which is why it is reference-counted.
+        let connection = Arc::new(ConnectionOutbound::new(tx));
 
         let mut recv_chunk = [0u8; 8192];
 
         'conn: loop {
-            if outbound.is_broken() {
+            if connection.is_broken() {
                 break 'conn;
             }
 
@@ -1394,11 +1463,11 @@ impl IpcServer {
                         let body_owned = body.to_vec();
                         read_buf.drain(..consumed);
                         let outcome = handle_while_reading(
-                            self.handle_frame(&outbound, &body_owned, &mut state),
+                            self.handle_frame(&connection, &body_owned, &mut state),
                             &mut reader,
                             &mut read_buf,
                             &mut recv_chunk,
-                            &outbound,
+                            &connection,
                         )
                         .await;
                         match outcome {
@@ -1415,7 +1484,7 @@ impl IpcServer {
                     }
                     Ok(None) => break,
                     Err(FrameError::TooLarge) => {
-                        outbound.reply(&error_msg(
+                        connection.push(&error_msg(
                             "frame_too_large",
                             "frame body exceeds maximum size",
                         ));
@@ -1440,7 +1509,7 @@ impl IpcServer {
                             // A status change dropped by back pressure is
                             // handled like a skipped one below: the next change
                             // republishes the current status.
-                            if let StreamSend::Closed = outbound.stream(&msg) {
+                            if let StreamSend::Closed = connection.stream(&msg) {
                                 break 'conn;
                             }
                         }
@@ -1455,7 +1524,7 @@ impl IpcServer {
                 }
 
                 () = recv_kick(&mut state.kick_rx) => {
-                    outbound.reply(
+                    connection.push(
                         &error_msg("superseded", "another connection has attached to this window"),
                     );
                     break 'conn;
@@ -1490,14 +1559,23 @@ impl IpcServer {
         }
     }
 
-    /// Decodes and dispatches one complete frame body.
+    /// Decodes and dispatches one complete frame body, answering it through
+    /// a side made for it that returns its `correlation_id`.
     async fn handle_frame(
         &self,
-        outbound: &Arc<Outbound>,
+        connection: &Arc<ConnectionOutbound>,
         body: &[u8],
         state: &mut ConnectionState,
     ) -> FrameOutcome {
-        match decode_client_message(body) {
+        let decoded = decode_correlated_client_message(body);
+        let correlation_id = match &decoded {
+            Ok((correlation_id, _)) => *correlation_id,
+            // Read apart from the variant, so a frame that does not decode is
+            // still answered by name. A value that is no u64 reads as none.
+            Err(_) => read_frame_label(body).correlation_id,
+        };
+        let outbound = &connection.answer_for(correlation_id);
+        match decoded.map(|(_, message)| message) {
             Err(MessageError::InvalidJson) => {
                 outbound.reply(&error_msg(
                     "invalid_json",
@@ -2601,7 +2679,9 @@ impl IpcServer {
         outbound.reply(&msg);
         session.show_view(
             generation,
-            outbound.view_frames(Arc::clone(&state.frames_failed)),
+            outbound
+                .connection()
+                .view_frames(Arc::clone(&state.frames_failed)),
         );
         // The screen the view starts from goes before the status: the holder
         // sends the attach's first frame before it settles, and the link hands
@@ -2615,7 +2695,7 @@ impl IpcServer {
         // One read of the published pair, so this snapshot's status, reason and
         // generation all describe the same transition.
         let at = entry.status_snapshot();
-        outbound.reply(&entry.status_changed(&at));
+        outbound.connection().push(&entry.status_changed(&at));
     }
 
     /// Opens a new window through the registry, once the approval gate lets
@@ -3889,7 +3969,9 @@ impl IpcServer {
             return;
         }
         state.origin = RequestOrigin::Approver;
-        let sink: Arc<dyn ApproverSink> = Arc::<Outbound>::clone(outbound);
+        // The connection's side, not this request's: what the ledger pushes
+        // answers no request.
+        let sink: Arc<dyn ApproverSink> = Arc::<ConnectionOutbound>::clone(outbound.connection());
         let pending = self.broker.register_approver(state.conn_id, sink);
         outbound.reply(&DaemonMessage::ApproverRegistered { pending });
     }
@@ -4619,7 +4701,7 @@ async fn verify_once_settled(
 const READ_AHEAD_LIMIT: usize = yagura_protocol::MAX_FRAME_BODY_LEN + 4;
 
 /// Runs `handling` to its end while still reading the connection, so a
-/// handler waiting without a bound learns from [`Outbound::gone`] that the
+/// handler waiting without a bound learns from [`ConnectionOutbound::gone`] that the
 /// peer has closed it. `handling` is never cut short; what is read is kept in
 /// `read_buf` for the frames after. Reading pauses at [`READ_AHEAD_LIMIT`].
 async fn handle_while_reading<R: tokio::io::AsyncRead + Unpin>(
@@ -4627,7 +4709,7 @@ async fn handle_while_reading<R: tokio::io::AsyncRead + Unpin>(
     reader: &mut R,
     read_buf: &mut Vec<u8>,
     chunk: &mut [u8],
-    outbound: &Outbound,
+    connection: &ConnectionOutbound,
 ) -> FrameOutcome {
     tokio::pin!(handling);
     let mut open = true;
@@ -4638,7 +4720,7 @@ async fn handle_while_reading<R: tokio::io::AsyncRead + Unpin>(
                 match read {
                     Ok(0) | Err(_) => {
                         open = false;
-                        outbound.mark_gone();
+                        connection.mark_gone();
                     }
                     Ok(n) => read_buf.extend_from_slice(&chunk[..n]),
                 }
@@ -4652,7 +4734,7 @@ async fn handle_while_reading<R: tokio::io::AsyncRead + Unpin>(
 /// This is the only place that blocks on the client's read pace. It owns the
 /// write half exclusively, so the connection task can keep reading while a
 /// write is stalled -- the property that breaks the read/write deadlock (see
-/// [`Outbound`]).
+/// [`ConnectionOutbound`]).
 ///
 /// The loop ends when the queue is closed *and* drained (the connection task
 /// finished, so its last frames -- e.g. `superseded` -- are still flushed), or

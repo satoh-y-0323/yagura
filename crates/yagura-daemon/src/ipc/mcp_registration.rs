@@ -109,7 +109,9 @@ pub(super) async fn handle_list_mcp_registrations(
     };
 
     let config = config.clone();
-    let outbound = Arc::clone(outbound);
+    // The rows are pushes, not this request's answer: they carry no
+    // correlation id.
+    let connection = Arc::clone(outbound.connection());
     let row_permits = Arc::clone(row_permits);
     let writes = Arc::clone(writes);
     tokio::spawn(async move {
@@ -119,7 +121,7 @@ pub(super) async fn handle_list_mcp_registrations(
         for source in built.sources {
             let row_permits = Arc::clone(&row_permits);
             let config = config.clone();
-            let outbound = Arc::clone(&outbound);
+            let connection = Arc::clone(&connection);
             let bridge = bridge.clone();
             let writes = Arc::clone(&writes);
             tasks.spawn(async move {
@@ -130,7 +132,7 @@ pub(super) async fn handle_list_mcp_registrations(
                     return;
                 };
                 let status = compute_status(&config, &source, &bridge, Some(&writes)).await;
-                outbound.reply(&DaemonMessage::McpRegistrationStatus { request_id, status });
+                connection.push(&DaemonMessage::McpRegistrationStatus { request_id, status });
             });
         }
         while tasks.join_next().await.is_some() {}
@@ -1675,7 +1677,9 @@ pub(super) async fn handle_run_mcp_registration(
     });
 
     let config = config.clone();
-    let outbound = Arc::clone(outbound);
+    // The result is a push, not this request's answer: it carries no
+    // correlation id.
+    let connection = Arc::clone(outbound.connection());
     let writes = Arc::clone(writes);
     tokio::spawn(async move {
         // Held until the operation below, and the status re-read that
@@ -1694,7 +1698,7 @@ pub(super) async fn handle_run_mcp_registration(
         let status = compute_status(&config, &source, bridge, None).await;
         let error =
             error.or_else(|| unconfirmed_toml_set(&source, config.host_os, action, &status));
-        outbound.reply(&DaemonMessage::McpRegistrationResult {
+        connection.push(&DaemonMessage::McpRegistrationResult {
             request_id,
             profile: source.profile,
             action,
