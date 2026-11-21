@@ -10,43 +10,35 @@ use yagura_protocol::{ApprovalRequest, PROTOCOL_REVISION_BASELINE};
 use crate::ipc_client::IpcError;
 
 /// Whether a frame that needs `required_revision` may be written to a
-/// connection whose peer settled on `settled_revision` as of
-/// `settled_generation`, weighed against the connection's `generation` now.
+/// connection whose peer settled on `settled_revision`.
 ///
 /// A message that needs nothing beyond [`PROTOCOL_REVISION_BASELINE`] always
 /// carries: every peer that speaks this wire at all implements the baseline,
 /// including one that has not answered the revision probe yet -- which is
 /// what lets that probe itself go out over an unsettled connection.
 ///
-/// A settled revision recorded for a generation other than the one being
-/// written to is weighed the same as no revision at all: a value learned
-/// from a connection that has since been replaced is not a fact about the
-/// connection this call is about.
+/// The revision is the one the connection being written to settled: each
+/// connection carries its own, so a value learned from another connection
+/// never reaches this judgement.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProtocolRevisionGate {
     /// The connection's peer is known to carry the requirement, or the
     /// message needs nothing beyond the baseline.
     Carried,
-    /// The connection's peer has not settled a revision for its current
-    /// generation, or settled on one below the requirement.
+    /// The connection's peer has not settled a revision, or settled on one
+    /// below the requirement.
     Refused,
 }
 
-/// The pure judgement behind [`ProtocolRevisionGate`]. Held apart from
-/// [`crate::ipc_client::IpcClient::send`] (which needs the live connection
-/// state to supply these four values) so the decision itself is
+/// The pure judgement behind [`ProtocolRevisionGate`], held apart from the
+/// connection that supplies the settled revision so the decision itself is
 /// unit-testable without one.
 pub fn protocol_revision_gate(
     settled_revision: Option<u32>,
-    settled_generation: u64,
-    generation: u64,
     required_revision: u32,
 ) -> ProtocolRevisionGate {
     if required_revision <= PROTOCOL_REVISION_BASELINE {
         return ProtocolRevisionGate::Carried;
-    }
-    if settled_generation != generation {
-        return ProtocolRevisionGate::Refused;
     }
     match settled_revision {
         Some(revision) if revision >= required_revision => ProtocolRevisionGate::Carried,
@@ -66,6 +58,10 @@ pub enum DecideApprovalOutcome {
     Decided,
     /// The request was no longer pending when the decision arrived.
     NotPending,
+    /// The decision was written, and the connection was gone before the
+    /// daemon answered: it may have been applied. The next registration's
+    /// pending list says which.
+    Unconfirmed,
 }
 
 /// Maps the result of one `decide_approval` round trip onto
@@ -80,6 +76,8 @@ pub(crate) fn map_decide_approval_result(
         Err(IpcError::Rejected { code, .. }) if code == "approval_not_pending" => {
             Ok(DecideApprovalOutcome::NotPending)
         }
+        // Written, whole or in part, so the daemon may have applied it.
+        Err(IpcError::Write | IpcError::ConnectionLost) => Ok(DecideApprovalOutcome::Unconfirmed),
         Err(error) => Err(error),
     }
 }
@@ -148,9 +146,8 @@ pub(crate) fn map_close_result(result: Result<(), IpcError>) -> Result<CloseOutc
         Err(
             IpcError::EndpointName(_)
             | IpcError::NotConnected
+            | IpcError::ConnectionLost
             | IpcError::ConnectTimeout
-            | IpcError::AttachTimeout
-            | IpcError::RequestTimeout
             | IpcError::Write
             | IpcError::DaemonNotFound
             | IpcError::DaemonSpawn,
@@ -191,6 +188,26 @@ mod tests {
         assert!(matches!(
             result,
             Err(IpcError::Rejected { code, .. }) if code == "invalid_state"
+        ));
+    }
+
+    // Once the decision is written the daemon may have applied it, so only a
+    // failure before writing is one the approver can simply decide again.
+    #[test]
+    fn map_decide_approval_result_maps_a_decision_that_may_have_been_applied_to_unconfirmed() {
+        for written in [IpcError::Write, IpcError::ConnectionLost] {
+            let debug = format!("{written:?}");
+            assert!(
+                matches!(
+                    map_decide_approval_result(Err(written)),
+                    Ok(DecideApprovalOutcome::Unconfirmed)
+                ),
+                "expected Unconfirmed for {debug}"
+            );
+        }
+        assert!(matches!(
+            map_decide_approval_result(Err(IpcError::NotConnected)),
+            Err(IpcError::NotConnected)
         ));
     }
 
@@ -265,9 +282,8 @@ mod tests {
         let unreachable_cases = [
             IpcError::EndpointName(yagura_os::OsError::Security("boom".to_owned())),
             IpcError::NotConnected,
+            IpcError::ConnectionLost,
             IpcError::ConnectTimeout,
-            IpcError::AttachTimeout,
-            IpcError::RequestTimeout,
             IpcError::Write,
             IpcError::DaemonNotFound,
             IpcError::DaemonSpawn,

@@ -1221,6 +1221,11 @@ pub type PlatformIpc = platform_windows::WindowsIpc;
 #[cfg(not(windows))]
 pub type PlatformIpc = platform_unix::UnixIpc;
 
+#[cfg(not(windows))]
+pub use platform_unix::{ClientReadHalf, split_client, write_error_shows_peer_closed};
+#[cfg(windows)]
+pub use platform_windows::{ClientReadHalf, split_client, write_error_shows_peer_closed};
+
 /// The unit that owns a child's whole process tree on the platform being
 /// compiled for: a job object on Windows, a process group on Unix. Ending it
 /// ends every process in it, and dropping it does too.

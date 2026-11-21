@@ -13,10 +13,6 @@ pub const CONNECT_RETRY_INTERVAL: Duration = Duration::from_millis(200);
 /// Maximum number of connection attempts after the daemon has been spawned.
 pub const CONNECT_RETRY_LIMIT: u32 = 25;
 
-/// How long to wait for the reply to a request -- `attach` as much as any
-/// window-scoped one -- before giving up.
-pub const ATTACH_TIMEOUT: Duration = Duration::from_secs(5);
-
 /// How many times an unexpected disconnect is automatically recovered from
 /// (exactly one attempt, and never after `error(superseded)`).
 pub const RECONNECT_ATTEMPT_LIMIT: u32 = 1;

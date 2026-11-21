@@ -673,6 +673,101 @@ impl IpcTransport for UnixIpc {
     }
 }
 
+/// The read half of a client connection, as [`split_client`] splits it off.
+#[derive(Debug)]
+pub struct ClientReadHalf {
+    half: tokio::io::ReadHalf<UnixStream>,
+    /// The socket of the stream `half` holds: open for as long as `half` is.
+    fd: std::os::fd::RawFd,
+}
+
+impl tokio::io::AsyncRead for ClientReadHalf {
+    fn poll_read(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<io::Result<()>> {
+        std::pin::Pin::new(&mut self.half).poll_read(cx, buf)
+    }
+}
+
+impl ClientReadHalf {
+    /// Appends to `into`, without waiting, the bytes the operating system
+    /// already delivered to this end that were not read yet, and returns how
+    /// many.
+    ///
+    /// Reads straight from the socket, as the runtime returns only what it
+    /// was told is readable, and no more than the socket held when called
+    /// (`FIONREAD`), so a peer that keeps writing cannot keep it reading.
+    ///
+    /// # Errors
+    ///
+    /// The error of `ioctl` or `recv`, other than one saying a read would
+    /// wait. The bytes read before it stay appended to `into`.
+    pub fn read_delivered(&mut self, into: &mut Vec<u8>) -> io::Result<usize> {
+        let mut queued: libc::c_int = 0;
+        // SAFETY: `self.fd` is the socket of the stream `self.half` holds, so
+        // it is open for this call; `FIONREAD` writes one `int` to `queued`.
+        if unsafe { libc::ioctl(self.fd, libc::FIONREAD, &raw mut queued) } == -1 {
+            return Err(io::Error::last_os_error());
+        }
+        let wanted = usize::try_from(queued).unwrap_or(0);
+        let start = into.len();
+        into.resize(start + wanted, 0);
+        let mut read = 0;
+        let outcome = loop {
+            if read == wanted {
+                break Ok(());
+            }
+            let rest = &mut into[start + read..];
+            // SAFETY: `self.fd` is open as above; `rest` is a writable buffer
+            // of `rest.len()` bytes that outlives the call.
+            let got = unsafe {
+                libc::recv(
+                    self.fd,
+                    rest.as_mut_ptr().cast(),
+                    rest.len(),
+                    libc::MSG_DONTWAIT,
+                )
+            };
+            match usize::try_from(got) {
+                Ok(0) => break Ok(()),
+                Ok(count) => read += count,
+                Err(_) => {
+                    let error = io::Error::last_os_error();
+                    match error.kind() {
+                        io::ErrorKind::WouldBlock => break Ok(()),
+                        io::ErrorKind::Interrupted => {}
+                        _ => break Err(error),
+                    }
+                }
+            }
+        };
+        into.truncate(start + read);
+        outcome.map(|()| read)
+    }
+}
+
+/// Splits a client connection into the half its reader takes and the half
+/// written through. Dropping the write half alone does not close the
+/// connection.
+pub fn split_client(connection: UnixStream) -> (ClientReadHalf, tokio::io::WriteHalf<UnixStream>) {
+    let fd = connection.as_raw_fd();
+    let (half, write) = tokio::io::split(connection);
+    (ClientReadHalf { half, fd }, write)
+}
+
+/// Whether a write to a client connection that failed with `error` says the
+/// daemon's end closed, so that its reader reads every byte the daemon sent
+/// and then the connection's end. Any other failure is `false`.
+#[must_use]
+pub fn write_error_shows_peer_closed(error: &io::Error) -> bool {
+    matches!(
+        error.kind(),
+        io::ErrorKind::BrokenPipe | io::ErrorKind::ConnectionReset
+    )
+}
+
 /// The lock on an endpoint, taken on the file its lock path named once the
 /// lock was held. Held until dropped.
 #[derive(Debug)]

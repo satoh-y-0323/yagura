@@ -39,26 +39,16 @@ async fn poll_window_list(pool: &ConnectionPool, app: &impl GuiHost) {
     {
         return;
     }
-    // An already-connected control returns early without reaching the
-    // registration retry, so this tick is what retries a generation that
-    // is neither registered nor refused; a refused generation stays
-    // latched until a reconnect advances it.
-    pool.control_connection()
-        .ensure_approver_registered(app)
-        .await;
-    pool.control_connection()
-        .ensure_protocol_revision(app)
-        .await;
     // A failed round emits nothing, so no window disappears. The records follow
     // this list, though a later list may reach the WebView before it.
-    let Ok(windows) = pool.listed_windows().await else {
+    let Ok((windows, protocol_revision)) = pool.listed_windows().await else {
         return;
     };
     app.emit_event(
         EVENT_WINDOW_LIST,
         WindowListPayload {
             windows: windows.clone(),
-            protocol_revision: pool.control_connection().protocol_revision(),
+            protocol_revision,
         },
     );
     pool.reconcile(app, &windows).await;

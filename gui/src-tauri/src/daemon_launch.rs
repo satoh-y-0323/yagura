@@ -1,5 +1,4 @@
-//! Starts the daemon process when none is running, and connects to it once
-//! it has bound its endpoint.
+//! Starts the daemon process when none is running.
 
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
@@ -8,9 +7,8 @@ use yagura_os::program::Platform;
 use yagura_os::{DetachedSpawn, OsError, resolve_sibling_executable, spawn_daemon_detached};
 
 use crate::config_paths::resolve_playbook_path;
-use crate::constants::{CONNECT_RETRY_INTERVAL, POST_SPAWN_CONNECT_RETRY_LIMIT};
 use crate::instance::StartupContext;
-use crate::ipc_client::{Connection, IpcError, connect_retrying_with_limit};
+use crate::ipc_client::IpcError;
 
 /// Starts the daemon detached, returning the warning the WebView must show
 /// when the platform refused the strongest detachment mode.
@@ -72,18 +70,6 @@ fn resolve_daemon_path() -> Result<PathBuf, IpcError> {
     let directory = executable.parent().ok_or(IpcError::DaemonNotFound)?;
     resolve_sibling_executable(directory, "yagura-daemon", Platform::host())
         .ok_or(IpcError::DaemonNotFound)
-}
-
-/// Connects to a daemon that was just spawned. Unlike
-/// [`crate::ipc_client::connect_retrying`] this waits before the first
-/// attempt, because the daemon still has to bind its endpoint -- reading the
-/// login shell's environment first on Unix, so the budget
-/// ([`POST_SPAWN_CONNECT_RETRY_LIMIT`]) is longer than the ordinary one.
-pub(crate) async fn connect_after_spawn(endpoint: &str) -> Result<Connection, IpcError> {
-    tokio::time::sleep(CONNECT_RETRY_INTERVAL).await;
-    connect_retrying_with_limit(endpoint, POST_SPAWN_CONNECT_RETRY_LIMIT)
-        .await
-        .ok_or(IpcError::ConnectTimeout)
 }
 
 #[cfg(test)]

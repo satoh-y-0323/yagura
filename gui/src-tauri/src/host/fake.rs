@@ -5,17 +5,19 @@
 //! answers frame by frame.
 
 use std::future::Future;
+use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use serde::Serialize;
 use serde_json::{Value, json};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::sync::{Notify, mpsc, watch};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::sync::{Notify, broadcast, mpsc, watch};
 use yagura_os::{IpcTransport, PeerAuth, PlatformIpc};
 use yagura_protocol::{
     ClientMessage, DaemonMessage, PROTOCOL_REVISION, Palette, StatusBoot, TerminalSize, WindowInfo,
-    WindowStatus, decode_client_message, encode_daemon_message, frame_encode,
+    WindowStatus, decode_correlated_client_message, encode_correlated_daemon_message,
+    encode_daemon_message, frame_encode,
 };
 use yagura_test_support::ipc::{reply_within, unique_endpoint_name};
 
@@ -23,15 +25,56 @@ use super::GuiHost;
 use crate::connection_pool::ConnectionPool;
 use crate::events::{EVENT_DAEMON_CONNECTED, EVENT_WINDOW_LINK};
 use crate::frame_mailbox::FrameMailbox;
-use crate::ipc_client::IpcError;
+use crate::ipc_client::{ERROR_CODE_SUPERSEDED, IpcError};
 
 const ENDPOINT_PREFIX: &str = "yagura-test-gui-host";
 
-type PeerConnection = <PlatformIpc as PeerAuth>::Connection;
+/// The wire key a request's answer carries its correlation id under.
+const CORRELATION_ID: &str = "correlation_id";
+
+/// One request as the daemon read it: the correlation id it carried, if any.
+type Request = (Option<u64>, ClientMessage);
+
+/// One frame a scripted daemon sends back for a request.
+#[derive(Debug, Clone)]
+pub(crate) enum SentFrame {
+    /// The answer, carrying the request's correlation id as a daemon does.
+    Answer(DaemonMessage),
+    /// The message with no correlation id at all.
+    Unkeyed(DaemonMessage),
+    /// The message under a correlation id that is not the request's.
+    OtherKey(DaemonMessage),
+    /// A JSON object with the `type` tag and the request's correlation id and
+    /// nothing else, which reads as no message of that type.
+    UnreadableAnswer(&'static str),
+    /// These bytes as one frame body, as they are.
+    Raw(Vec<u8>),
+}
+
+impl SentFrame {
+    fn body(&self, key: Option<u64>) -> Vec<u8> {
+        match self {
+            Self::Answer(message) => encode_correlated_daemon_message(message, key),
+            Self::Unkeyed(message) => encode_daemon_message(message),
+            Self::OtherKey(message) => {
+                let other = key.map_or(u64::MAX, |key| key.wrapping_add(1));
+                encode_correlated_daemon_message(message, Some(other))
+            }
+            Self::UnreadableAnswer(tag) => {
+                let mut body = json!({ "type": tag });
+                if let Some(key) = key {
+                    body[CORRELATION_ID] = json!(key);
+                }
+                serde_json::to_vec(&body).expect("a JSON object serializes")
+            }
+            Self::Raw(bytes) => bytes.clone(),
+        }
+    }
+}
 
 /// What a scripted daemon does with one request: the frames to send back.
 pub(crate) struct Reaction {
-    send: Vec<DaemonMessage>,
+    send: Vec<SentFrame>,
     /// Told when the request has arrived, then waited on before answering.
     hold: Option<(Arc<Notify>, Arc<Notify>)>,
 }
@@ -44,8 +87,13 @@ impl Reaction {
 
     /// Answers with `messages`, in order.
     pub(crate) fn replies(messages: Vec<DaemonMessage>) -> Option<Self> {
+        Self::sends(messages.into_iter().map(SentFrame::Answer).collect())
+    }
+
+    /// Sends `frames`, in order.
+    pub(crate) fn sends(frames: Vec<SentFrame>) -> Option<Self> {
         Some(Self {
-            send: messages,
+            send: frames,
             hold: None,
         })
     }
@@ -58,10 +106,16 @@ impl Reaction {
         gate: Arc<Notify>,
         messages: Vec<DaemonMessage>,
     ) -> Option<Self> {
-        Some(Self {
-            send: messages,
+        Self::replies(messages).map(|reaction| reaction.held(reached, gate))
+    }
+
+    /// This reaction, sent only once the test opens `gate`, after telling
+    /// `reached` that the request has arrived.
+    pub(crate) fn held(self, reached: Arc<Notify>, gate: Arc<Notify>) -> Self {
+        Self {
             hold: Some((reached, gate)),
-        })
+            ..self
+        }
     }
 }
 
@@ -76,10 +130,12 @@ pub(crate) fn error_frame(code: &str) -> DaemonMessage {
 
 /// This build's revision answer from a daemon running in `boot`.
 pub(crate) fn protocol_revision(boot: Option<StatusBoot>) -> DaemonMessage {
-    DaemonMessage::ProtocolRevision {
-        revision: PROTOCOL_REVISION,
-        boot,
-    }
+    protocol_revision_at(PROTOCOL_REVISION, boot)
+}
+
+/// The revision answer of a daemon that speaks `revision`, running in `boot`.
+pub(crate) fn protocol_revision_at(revision: u32, boot: Option<StatusBoot>) -> DaemonMessage {
+    DaemonMessage::ProtocolRevision { revision, boot }
 }
 
 /// A script part that answers the `n`th revision probe, counted across
@@ -193,11 +249,28 @@ type Script = dyn Fn(&ClientMessage) -> Option<Reaction> + Send + Sync;
 
 struct DaemonState {
     script: Box<Script>,
-    received: Mutex<Vec<ClientMessage>>,
+    received: Mutex<Vec<Request>>,
+    /// The number of requests read so far, answered or not.
+    recorded: watch::Sender<usize>,
     /// The number of requests received so far, for waiting on the next one.
     arrived: watch::Sender<usize>,
     /// Bumped to end every connection currently being served.
     hang_up: watch::Sender<u64>,
+    /// Frame bodies written, unasked, on every connection being served.
+    pushes: broadcast::Sender<Vec<u8>>,
+}
+
+impl DaemonState {
+    /// Records `request` and returns how many have been read with it.
+    fn record(&self, request: &Request) -> usize {
+        let count = {
+            let mut received = self.received.lock().expect("received log");
+            received.push(request.clone());
+            received.len()
+        };
+        self.recorded.send_replace(count);
+        count
+    }
 }
 
 /// A daemon that answers each request with what its script says. A request
@@ -216,8 +289,10 @@ impl ScriptedDaemon {
             state: Arc::new(DaemonState {
                 script: Box::new(script),
                 received: Mutex::new(Vec::new()),
+                recorded: watch::channel(0).0,
                 arrived: watch::channel(0).0,
                 hang_up: watch::channel(0).0,
+                pushes: broadcast::channel(16).0,
             }),
         }
     }
@@ -236,13 +311,31 @@ impl ScriptedDaemon {
         tokio::spawn(async move {
             while let Ok(connection) = ipc.accept(&mut listener).await {
                 let hang_up = state.hang_up.subscribe();
-                tokio::spawn(serve(connection, Arc::clone(&state), hang_up));
+                let pushes = state.pushes.subscribe();
+                tokio::spawn(serve(connection, Arc::clone(&state), hang_up, pushes));
             }
         });
     }
 
+    /// Serves `stream` as one connection, whatever carries it.
+    pub(crate) fn serve_stream(&self, stream: impl AsyncRead + AsyncWrite + Send + 'static) {
+        let state = Arc::clone(&self.state);
+        let hang_up = state.hang_up.subscribe();
+        let pushes = state.pushes.subscribe();
+        tokio::spawn(serve(stream, state, hang_up, pushes));
+    }
+
     /// Every request received so far, in arrival order across connections.
     pub(crate) fn received(&self) -> Vec<ClientMessage> {
+        self.received_correlated()
+            .into_iter()
+            .map(|(_, request)| request)
+            .collect()
+    }
+
+    /// Every request received so far with the correlation id it carried, in
+    /// arrival order across connections.
+    pub(crate) fn received_correlated(&self) -> Vec<(Option<u64>, ClientMessage)> {
         self.state.received.lock().expect("received log").clone()
     }
 
@@ -255,6 +348,16 @@ impl ScriptedDaemon {
         self.received()
     }
 
+    /// Waits until at least `count` requests have been read, whether or not
+    /// they have been answered yet, and returns them all.
+    pub(crate) async fn recorded_at_least(&self, count: usize) -> Vec<ClientMessage> {
+        let mut recorded = self.state.recorded.subscribe();
+        reply_within("daemon requests read", recorded.wait_for(|n| *n >= count))
+            .await
+            .expect("the daemon state outlives the wait");
+        self.received()
+    }
+
     /// Ends every connection being served; later connections are served as
     /// usual.
     pub(crate) fn hang_up(&self) {
@@ -262,38 +365,100 @@ impl ScriptedDaemon {
             .hang_up
             .send_modify(|generation| *generation += 1);
     }
+
+    /// Tells every connection being served that another GUI took the daemon
+    /// over, with the error frame a daemon sends unasked: no correlation id.
+    pub(crate) fn supersede(&self) {
+        let body = encode_daemon_message(&error_frame(ERROR_CODE_SUPERSEDED));
+        // No connection being served is no one to tell.
+        let _ = self.state.pushes.send(body);
+    }
+}
+
+type Reading<R> = Pin<Box<dyn Future<Output = (R, Option<Request>)> + Send>>;
+
+/// The read half of a served connection. A request is read only when the
+/// daemon asks for the next one, as a daemon that is busy reads nothing.
+struct Requests<R> {
+    idle: Option<R>,
+    reading: Option<Reading<R>>,
+}
+
+impl<R: AsyncRead + Unpin + Send + 'static> Requests<R> {
+    /// Starts reading the next request, unless one is being read already.
+    fn pull(&mut self) {
+        if let Some(mut reader) = self.idle.take() {
+            self.reading = Some(Box::pin(async move {
+                let request = read_request(&mut reader).await;
+                (reader, request)
+            }));
+        }
+    }
+
+    /// The request being read, `None` once the connection ends. Pending while
+    /// nothing is being read. Dropping it mid-read keeps the read for the next
+    /// call, so it can wait beside other events.
+    async fn next(&mut self) -> Option<Request> {
+        let Some(reading) = self.reading.as_mut() else {
+            return std::future::pending().await;
+        };
+        let (reader, request) = reading.await;
+        self.reading = None;
+        self.idle = Some(reader);
+        request
+    }
 }
 
 async fn serve(
-    mut connection: PeerConnection,
+    connection: impl AsyncRead + AsyncWrite + Send + 'static,
     state: Arc<DaemonState>,
     mut hang_up: watch::Receiver<u64>,
+    mut pushes: broadcast::Receiver<Vec<u8>>,
 ) {
+    let (reader, mut writer) = tokio::io::split(connection);
+    let mut requests = Requests {
+        idle: Some(reader),
+        reading: None,
+    };
     loop {
-        let request = tokio::select! {
-            request = read_request(&mut connection) => match request {
-                Some(request) => request,
+        requests.pull();
+        let (count, (key, request)) = tokio::select! {
+            request = requests.next() => match request {
+                Some(request) => (state.record(&request), request),
                 None => return,
             },
             _ = hang_up.changed() => return,
-        };
-        let count = {
-            let mut received = state.received.lock().expect("received log");
-            received.push(request.clone());
-            received.len()
+            Ok(body) = pushes.recv() => {
+                if writer.write_all(&frame_encode(&body)).await.is_err() {
+                    return;
+                }
+                continue;
+            }
         };
         let reaction = (state.script)(&request).or_else(|| housekeeping(&request));
         if let Some(reaction) = reaction {
             if let Some((reached, gate)) = &reaction.hold {
                 reached.notify_one();
-                tokio::select! {
-                    () = gate.notified() => {}
-                    _ = hang_up.changed() => return,
+                let opened = gate.notified();
+                tokio::pin!(opened);
+                loop {
+                    tokio::select! {
+                        () = &mut opened => break,
+                        _ = hang_up.changed() => return,
+                        Ok(body) = pushes.recv() => {
+                            if writer.write_all(&frame_encode(&body)).await.is_err() {
+                                return;
+                            }
+                        }
+                    }
                 }
             }
-            for message in &reaction.send {
-                let frame = frame_encode(&encode_daemon_message(message));
-                if connection.write_all(&frame).await.is_err() {
+            for frame in &reaction.send {
+                if writer
+                    .write_all(&frame_encode(&frame.body(key)))
+                    .await
+                    .is_err()
+                {
                     return;
                 }
             }
@@ -304,12 +469,12 @@ async fn serve(
     }
 }
 
-async fn read_request(connection: &mut PeerConnection) -> Option<ClientMessage> {
+async fn read_request(connection: &mut (impl AsyncRead + Unpin)) -> Option<Request> {
     let mut length = [0u8; 4];
     connection.read_exact(&mut length).await.ok()?;
     let mut body = vec![0u8; u32::from_le_bytes(length) as usize];
     connection.read_exact(&mut body).await.ok()?;
-    decode_client_message(&body).ok()
+    decode_correlated_client_message(&body).ok()
 }
 
 /// What a daemon answers without being told to: the two requests every
@@ -373,8 +538,12 @@ pub(crate) struct RecordedEvent {
 struct HostState {
     /// `None` makes the endpoint unresolvable, as a failed start-up does.
     endpoint: Mutex<Option<String>>,
+    /// The failure an unresolvable endpoint reports.
+    endpoint_failure: Mutex<fn() -> IpcError>,
     /// The daemon a spawn brings up; `None` makes a spawn fail.
     daemon_on_spawn: Mutex<Option<ScriptedDaemon>>,
+    /// The failure a spawn that brings no daemon up reports.
+    spawn_failure: Mutex<fn() -> IpcError>,
     /// The warning a spawn that brings the daemon up hands back.
     spawn_warning: Mutex<Option<String>>,
     spawns: watch::Sender<usize>,
@@ -398,7 +567,9 @@ impl FakeHost {
         Self {
             state: Arc::new(HostState {
                 endpoint: Mutex::new(Some(unique_endpoint_name(ENDPOINT_PREFIX, tag))),
+                endpoint_failure: Mutex::new(|| IpcError::NotConnected),
                 daemon_on_spawn: Mutex::new(None),
+                spawn_failure: Mutex::new(|| IpcError::DaemonSpawn),
                 spawn_warning: Mutex::new(None),
                 spawns: watch::channel(0).0,
                 events,
@@ -428,6 +599,22 @@ impl FakeHost {
     /// Replaces the endpoint; `None` makes it unresolvable.
     pub(crate) fn set_endpoint(&self, endpoint: Option<String>) {
         *self.state.endpoint.lock().expect("endpoint") = endpoint;
+    }
+
+    /// Makes the endpoint unresolvable for the reason `failure` names.
+    pub(crate) fn fails_endpoint_with(&self, failure: fn() -> IpcError) {
+        *self
+            .state
+            .endpoint_failure
+            .lock()
+            .expect("endpoint failure") = failure;
+        self.set_endpoint(None);
+    }
+
+    /// Makes a daemon start that brings no daemon up fail for the reason
+    /// `failure` names.
+    pub(crate) fn fails_spawns_with(&self, failure: fn() -> IpcError) {
+        *self.state.spawn_failure.lock().expect("spawn failure") = failure;
     }
 
     /// Makes a daemon start bring `daemon` up on the host's endpoint.
@@ -525,7 +712,13 @@ impl GuiHost for FakeHost {
             .lock()
             .expect("endpoint")
             .clone()
-            .ok_or(IpcError::NotConnected)
+            .ok_or_else(|| {
+                (self
+                    .state
+                    .endpoint_failure
+                    .lock()
+                    .expect("endpoint failure"))()
+            })
     }
 
     fn spawn_daemon(&self) -> Result<Option<String>, IpcError> {
@@ -536,7 +729,7 @@ impl GuiHost for FakeHost {
             .lock()
             .expect("spawn behaviour")
             .clone()
-            .ok_or(IpcError::DaemonSpawn)?;
+            .ok_or_else(|| (self.state.spawn_failure.lock().expect("spawn failure"))())?;
         let endpoint = self.endpoint_name();
         tokio::spawn(async move { daemon.listen(&endpoint).await });
         Ok(self

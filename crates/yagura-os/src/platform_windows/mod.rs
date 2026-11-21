@@ -38,6 +38,7 @@ use tokio::net::windows::named_pipe::NamedPipeServer;
 use tokio::net::windows::named_pipe::ServerOptions;
 use windows::Win32::Foundation::CloseHandle;
 use windows::Win32::Foundation::ERROR_PIPE_BUSY;
+use windows::Win32::Foundation::ERROR_PIPE_NOT_CONNECTED;
 use windows::Win32::Foundation::HANDLE;
 use windows::Win32::Foundation::HLOCAL;
 use windows::Win32::Foundation::LocalFree;
@@ -407,6 +408,58 @@ impl IpcTransport for WindowsIpc {
             }
         }
     }
+}
+
+/// The read half of a client connection, as [`split_client`] splits it off.
+#[derive(Debug)]
+pub struct ClientReadHalf(tokio::io::ReadHalf<NamedPipeClient>);
+
+impl tokio::io::AsyncRead for ClientReadHalf {
+    fn poll_read(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.0).poll_read(cx, buf)
+    }
+}
+
+impl ClientReadHalf {
+    /// Appends to `into`, without waiting, the bytes the operating system
+    /// already delivered to this end that were not read yet, and returns how
+    /// many.
+    ///
+    /// Always `Ok(0)` on Windows: a pipe's bytes reach this end through the
+    /// one overlapped read the runtime keeps outstanding, so taking any
+    /// without it would reorder them. They are read as usual instead.
+    ///
+    /// # Errors
+    ///
+    /// None on Windows.
+    pub fn read_delivered(&mut self, _into: &mut Vec<u8>) -> std::io::Result<usize> {
+        Ok(0)
+    }
+}
+
+/// Splits a client connection into the half its reader takes and the half
+/// written through. Dropping the write half alone does not close the
+/// connection.
+pub fn split_client(
+    connection: NamedPipeClient,
+) -> (ClientReadHalf, tokio::io::WriteHalf<NamedPipeClient>) {
+    let (read, write) = tokio::io::split(connection);
+    (ClientReadHalf(read), write)
+}
+
+/// Whether a write to a client connection that failed with `error` says the
+/// daemon's end closed, so that its reader reads every byte the daemon sent
+/// and then the connection's end. Any other failure is `false`.
+#[must_use]
+pub fn write_error_shows_peer_closed(error: &std::io::Error) -> bool {
+    // std reads `ERROR_BROKEN_PIPE` and `ERROR_NO_DATA` as `BrokenPipe`, and
+    // gives `ERROR_PIPE_NOT_CONNECTED` no kind of its own.
+    error.kind() == std::io::ErrorKind::BrokenPipe
+        || error.raw_os_error() == Some(ERROR_PIPE_NOT_CONNECTED.0 as i32)
 }
 
 /// How long [`WindowsIpc::connect`] waits for an instance of a pipe whose instances are all

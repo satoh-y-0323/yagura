@@ -6,10 +6,9 @@
 //!
 //! Every test below drives pure items directly ([`protocol_revision_gate`],
 //! [`window_open_failure`]). None of them builds an `AppHandle`, a `State` or
-//! a live connection, so the decision is measured on its four inputs alone:
-//! the revision this connection settled on, the generation that settling
-//! belongs to, the generation the connection is on now, and the revision the
-//! message being written requires.
+//! a live connection, so the decision is measured on its two inputs alone:
+//! the revision the connection settled on and the revision the message being
+//! written requires.
 
 use yagura_gui::commands::{WindowOpenFailure, window_open_failure};
 use yagura_gui::ipc_client::IpcError;
@@ -18,12 +17,6 @@ use yagura_protocol::{
     ClientMessage, LAUNCH_OPTIONS_MIN_REVISION, PROTOCOL_REVISION_BASELINE,
     client_message_wire_tags, required_protocol_revision,
 };
-
-/// The generation a connection is on in every test that is not about a
-/// generation mismatch. Any value other than zero, so a gate reading a
-/// default-initialized counter instead of the one it was handed cannot meet
-/// these expectations by accident.
-const CURRENT_GENERATION: u64 = 7;
 
 /// An `open_window_from_profile` request that carries no launch option.
 fn plain_request() -> ClientMessage {
@@ -61,7 +54,7 @@ fn refused_request_tag() -> &'static str {
 }
 
 // ---------------------------------------------------------------------
-// The gate itself: one decision taken from four values.
+// The gate itself: one decision taken from two values.
 // ---------------------------------------------------------------------
 
 #[test]
@@ -69,8 +62,6 @@ fn the_requirement_the_gate_weighs_comes_from_the_message_being_written() {
     let settled_at_baseline = |message: &ClientMessage| {
         protocol_revision_gate(
             Some(PROTOCOL_REVISION_BASELINE),
-            CURRENT_GENERATION,
-            CURRENT_GENERATION,
             required_protocol_revision(message),
         )
     };
@@ -91,8 +82,6 @@ fn a_settled_revision_that_meets_the_requirement_lets_the_frame_out() {
     assert_eq!(
         protocol_revision_gate(
             Some(LAUNCH_OPTIONS_MIN_REVISION),
-            CURRENT_GENERATION,
-            CURRENT_GENERATION,
             LAUNCH_OPTIONS_MIN_REVISION,
         ),
         ProtocolRevisionGate::Carried
@@ -104,8 +93,6 @@ fn a_settled_revision_above_the_requirement_lets_the_frame_out() {
     assert_eq!(
         protocol_revision_gate(
             Some(LAUNCH_OPTIONS_MIN_REVISION + 1),
-            CURRENT_GENERATION,
-            CURRENT_GENERATION,
             LAUNCH_OPTIONS_MIN_REVISION,
         ),
         ProtocolRevisionGate::Carried
@@ -117,8 +104,6 @@ fn a_settled_revision_below_the_requirement_refuses_the_frame() {
     assert_eq!(
         protocol_revision_gate(
             Some(PROTOCOL_REVISION_BASELINE),
-            CURRENT_GENERATION,
-            CURRENT_GENERATION,
             LAUNCH_OPTIONS_MIN_REVISION,
         ),
         ProtocolRevisionGate::Refused
@@ -128,12 +113,7 @@ fn a_settled_revision_below_the_requirement_refuses_the_frame() {
 #[test]
 fn an_unsettled_connection_refuses_a_frame_that_needs_a_revision() {
     assert_eq!(
-        protocol_revision_gate(
-            None,
-            CURRENT_GENERATION,
-            CURRENT_GENERATION,
-            LAUNCH_OPTIONS_MIN_REVISION,
-        ),
+        protocol_revision_gate(None, LAUNCH_OPTIONS_MIN_REVISION,),
         ProtocolRevisionGate::Refused,
         "an unsettled connection must be weighed as the weakest peer, not the strongest"
     );
@@ -142,43 +122,10 @@ fn an_unsettled_connection_refuses_a_frame_that_needs_a_revision() {
 #[test]
 fn an_unsettled_connection_still_lets_a_frame_with_no_requirement_out() {
     assert_eq!(
-        protocol_revision_gate(
-            None,
-            CURRENT_GENERATION,
-            CURRENT_GENERATION,
-            PROTOCOL_REVISION_BASELINE,
-        ),
+        protocol_revision_gate(None, PROTOCOL_REVISION_BASELINE,),
         ProtocolRevisionGate::Carried,
         "the round trip that settles the revision asks for nothing beyond the baseline, so \
          refusing here would leave every connection unsettled forever"
-    );
-}
-
-#[test]
-fn a_revision_settled_for_another_generation_refuses_the_frame() {
-    assert_eq!(
-        protocol_revision_gate(
-            Some(LAUNCH_OPTIONS_MIN_REVISION),
-            CURRENT_GENERATION - 1,
-            CURRENT_GENERATION,
-            LAUNCH_OPTIONS_MIN_REVISION,
-        ),
-        ProtocolRevisionGate::Refused,
-        "a revision learned from a connection that has since been replaced is not a fact \
-         about the connection being written to"
-    );
-}
-
-#[test]
-fn a_revision_settled_for_another_generation_still_lets_a_frame_with_no_requirement_out() {
-    assert_eq!(
-        protocol_revision_gate(
-            Some(LAUNCH_OPTIONS_MIN_REVISION),
-            CURRENT_GENERATION - 1,
-            CURRENT_GENERATION,
-            PROTOCOL_REVISION_BASELINE,
-        ),
-        ProtocolRevisionGate::Carried
     );
 }
 

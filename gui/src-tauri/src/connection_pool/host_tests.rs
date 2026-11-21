@@ -1,7 +1,7 @@
 //! The pool against a host that records and a daemon that is scripted: which
 //! requests are allowed through, and when a daemon is started.
 
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use serde_json::json;
 use tokio::sync::Notify;
@@ -179,11 +179,23 @@ async fn a_request_that_needs_a_daemon_starts_one_when_none_runs_and_keeps_what_
     const BOOT_A: StatusBoot = StatusBoot { origin: 7, seq: 1 };
     const BOOT_B: StatusBoot = StatusBoot { origin: 7, seq: 2 };
     const WEAK_START: &str = "started without breaking away";
-    let daemon = ScriptedDaemon::new(probes_answered_in(vec![
-        Some(BOOT_A),
-        Some(BOOT_A),
-        Some(BOOT_B),
-    ]));
+    let probe_reached = Arc::new(Notify::new());
+    let probe_gate = Arc::new(Notify::new());
+    let daemon = ScriptedDaemon::new({
+        let probe = probes_answered_in(vec![Some(BOOT_A), Some(BOOT_A), Some(BOOT_B)]);
+        let first_probe = AtomicBool::new(true);
+        let probe_reached = Arc::clone(&probe_reached);
+        let probe_gate = Arc::clone(&probe_gate);
+        move |request| {
+            let reaction = probe(request)?;
+            // The first connection is accepted, and its revision probe held.
+            Some(if first_probe.swap(false, Ordering::SeqCst) {
+                reaction.held(Arc::clone(&probe_reached), Arc::clone(&probe_gate))
+            } else {
+                reaction
+            })
+        }
+    });
     let host = FakeHost::new("starts-for-request");
     host.starts_daemon_with_warning(&daemon, WEAK_START);
     let pool = ConnectionPool::new();
@@ -192,10 +204,37 @@ async fn a_request_that_needs_a_daemon_starts_one_when_none_runs_and_keeps_what_
     };
     assert_eq!(last_announced(&pool), json!(null), "nothing announced yet");
 
-    pool.ensure_daemon_running(&host)
+    reply_within("ensure_daemon_running", pool.ensure_daemon_running(&host))
         .await
         .expect("ensure_daemon_running");
 
+    // A daemon that accepted the connection is running, whether or not the
+    // connection has opened yet.
+    assert_eq!(host.spawn_count(), 1);
+    assert!(pool.has_live_control_connection().await);
+    let control = pool.control_connection();
+    assert_eq!(control.protocol_revision(), None);
+    let early = reply_within(
+        "a request before the connection opens",
+        control.list_windows(),
+    )
+    .await;
+    assert!(
+        matches!(early, Err(IpcError::NotConnected)),
+        "got {early:?}"
+    );
+
+    probe_gate.notify_one();
+    reply_within(
+        "the connection opens",
+        pool.control_connected(&host, ControlConnect::Existing),
+    )
+    .await
+    .expect("the connection opens");
+    assert_eq!(
+        control.protocol_revision(),
+        Some(yagura_protocol::PROTOCOL_REVISION)
+    );
     assert_eq!(host.spawn_count(), 1);
     assert!(pool.has_live_control_connection().await);
     // Read before any event is taken, as a WebView that subscribes late does.
@@ -203,10 +242,13 @@ async fn a_request_that_needs_a_daemon_starts_one_when_none_runs_and_keeps_what_
     assert_eq!(last_announced(&pool), weak);
     assert_eq!(announced(&host.take_events()), std::slice::from_ref(&weak));
 
-    // The pull is a round trip behind the second connection's revision
-    // probe, so that connection has settled on the same boot.
+    // The pull waits for the second connection to open, so that connection
+    // has settled on the same boot.
     daemon.hang_up();
     daemon.received_at_least(4).await;
+    pool.control_connected(&host, ControlConnect::Existing)
+        .await
+        .expect("the second connection opens");
     pool.control_connection()
         .sync_approvals(&host)
         .await
@@ -225,6 +267,45 @@ async fn a_request_that_needs_a_daemon_starts_one_when_none_runs_and_keeps_what_
     );
     assert_eq!(last_announced(&pool), started_elsewhere);
     assert_eq!(host.spawn_count(), 1);
+}
+
+// The daemon may have applied a decision it read, so a decision whose answer
+// is lost with the connection is unconfirmed; one that never reached a
+// daemon fails, and the approver decides again.
+#[tokio::test]
+async fn a_decision_lost_after_it_was_written_is_unconfirmed_and_one_never_written_fails() {
+    let reached = Arc::new(Notify::new());
+    let daemon = ScriptedDaemon::new({
+        let reached = Arc::clone(&reached);
+        move |request| match request {
+            ClientMessage::ApprovalDecision { request_id, .. } => Reaction::replies_after(
+                Arc::clone(&reached),
+                Arc::new(Notify::new()),
+                vec![DaemonMessage::ApprovalResolved {
+                    request_id: request_id.clone(),
+                }],
+            ),
+            _ => None,
+        }
+    });
+    let host = FakeHost::served_by("decision-lost", &daemon).await;
+    let pool = ConnectionPool::new();
+
+    let (decided, ()) = tokio::join!(pool.decide_approval(&host, "r1", true), async {
+        reply_within("the held decision", reached.notified()).await;
+        daemon.hang_up();
+    });
+
+    assert!(
+        matches!(decided, Ok(DecideApprovalOutcome::Unconfirmed)),
+        "got {decided:?}"
+    );
+
+    let unreachable = FakeHost::new("decision-unreachable");
+    let never_written = ConnectionPool::new()
+        .decide_approval(&unreachable, "r1", true)
+        .await;
+    assert!(never_written.is_err(), "got {never_written:?}");
 }
 
 #[tokio::test]
@@ -896,4 +977,23 @@ async fn an_attach_that_finds_the_child_exited_drops_the_held_input() {
     assert_eq!(connecting.state, "connecting");
     assert_eq!(exit, json!({ "window_id": "w4", "exit_code": null }));
     assert!(no_text_reached(&daemon), "{:?}", daemon.received());
+    // One client numbers its requests in one run across its connections,
+    // so an answer meant for the first connection matches nothing later.
+    let keys: Vec<u64> = daemon
+        .received_correlated()
+        .into_iter()
+        .filter(|(_, request)| {
+            matches!(
+                request,
+                ClientMessage::GetProtocolRevision
+                    | ClientMessage::AttachView { .. }
+                    | ClientMessage::CopySelection
+            )
+        })
+        .map(|(key, request)| key.unwrap_or_else(|| panic!("{request:?} carries no key")))
+        .collect();
+    assert!(
+        keys.windows(2).all(|pair| pair[0] < pair[1]),
+        "keys across the reconnect: {keys:?}"
+    );
 }

@@ -1,10 +1,13 @@
 //! IPC client: the GUI side of the length-prefixed JSON framing (LPJF)
 //! protocol defined by `yagura-protocol`.
 //!
-//! One `IpcClient` owns exactly one connection to the daemon. A connection is
-//! attached to at most one window, so watching N windows takes N
-//! clients plus one attach-less client for the window-scoped requests; the
-//! [`crate::connection_pool`] module owns that fan-out.
+//! One `IpcClient` holds one connection to the daemon at a time, and that
+//! connection is attached to at most one window, so watching N windows takes
+//! N clients plus one attach-less client for the window-scoped requests; the
+//! [`crate::connection_pool`] module owns that fan-out. When the connection
+//! opens, is lost and is replaced is decided by the client's owner task
+//! ([`lifecycle`]) alone: callers ask it for a connection and use the
+//! generation it opened.
 //!
 //! The GUI never owns a PTY or a child process: this module only connects to
 //! the daemon's endpoint and forwards validated commands. Turning daemon
@@ -16,10 +19,8 @@
 //! this module names no platform type and is not conditionally compiled.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 
-use tokio::io::WriteHalf;
-use tokio::sync::{Mutex, oneshot};
 use yagura_os::{IpcTransport, OsError, PeerAuth, PlatformIpc, default_endpoint};
 use yagura_protocol::{
     ApprovalRequest, ClientMessage, DefaultPalettes, LaunchOptionAlias, McpRegistrationAction,
@@ -35,20 +36,19 @@ use crate::commands::{
     ProfileListReply, RestoreCandidateListReply, RoleListReply, TaskWindowOpenedReply,
     TicketListReply, UpdateWindowLayoutReply,
 };
-use crate::constants::{
-    ATTACH_TIMEOUT, CONNECT_RETRY_INTERVAL, CONNECT_RETRY_LIMIT, RECONNECT_ATTEMPT_LIMIT,
-};
-use crate::daemon_launch::connect_after_spawn;
 use crate::events::{
     ApprovalRegistrationRefusedPayload, ApprovalRequestedPayload, ApprovalResetPayload,
     AttachResponse, DaemonConnectedPayload, EVENT_APPROVAL_REGISTRATION_REFUSED,
-    EVENT_APPROVAL_REQUESTED, EVENT_APPROVAL_RESET, EVENT_DAEMON_CONNECTED, EVENT_EXIT,
-    ExitPayload, LinkLostReason,
+    EVENT_APPROVAL_REQUESTED, EVENT_APPROVAL_RESET, EVENT_EXIT, ExitPayload, LinkLostReason,
 };
 use crate::host::GuiHost;
 use crate::instance::InstanceResolution;
-use crate::message_dispatch::read_loop;
-use crate::window_record::{LinkState, RecordState, SentSize, WindowRecord};
+use crate::window_record::{LinkState, RecordState, SentSize};
+
+mod lifecycle;
+
+pub(crate) use lifecycle::{BoxedRead, EndKind, Generation, Interrupt, ReaderLink, Settled};
+use lifecycle::{ClientKind, Registration, Shared, StepReply, Take, TakenAnswer, Until};
 
 /// A client-side connection to the daemon's endpoint.
 pub(crate) type Connection = <PlatformIpc as IpcTransport>::ClientConnection;
@@ -60,10 +60,20 @@ pub(crate) const ERROR_CODE_SUPERSEDED: &str = "superseded";
 pub(crate) const ERROR_CODE_INTERNAL: &str = "internal";
 
 /// `error.code` a daemon built before a message type existed answers it
-/// with. Settles [`IpcClient::ensure_protocol_revision`]'s probe the same as
-/// a genuine answer would: the refusal itself says which wire the peer
-/// speaks.
+/// with. Settles a generation's revision probe the same as a genuine answer
+/// would: the refusal itself says which wire the peer speaks.
 const ERROR_CODE_UNKNOWN_TYPE: &str = "unknown_type";
+
+/// The first wire revision whose daemon answers a request under the
+/// correlation id the request carried.
+const CORRELATION_ID_MIN_REVISION: u32 = 38;
+
+/// Whether a daemon of `revision` names the request each answer belongs to.
+/// `None` -- a generation still probing -- does not: the probe's answer is
+/// matched by its kind, whichever daemon sends it.
+pub(crate) fn answers_carry_correlation_ids(revision: Option<u32>) -> bool {
+    revision.is_some_and(|revision| revision >= CORRELATION_ID_MIN_REVISION)
+}
 
 /// The rendered tail of a rejection: the daemon's reason behind a separator,
 /// or nothing at all when the error frame carried no reason.
@@ -85,15 +95,13 @@ pub enum IpcError {
     /// No connection to the daemon is currently established.
     #[error("not connected to the yagura daemon")]
     NotConnected,
+    /// The request was written, and the connection ended before the daemon
+    /// answered it: the daemon may have carried it out.
+    #[error("the connection to the yagura daemon ended before it answered")]
+    ConnectionLost,
     /// The daemon did not accept a connection within the retry budget.
     #[error("timed out waiting for the yagura daemon to accept a connection")]
     ConnectTimeout,
-    /// No `attached` reply arrived in time.
-    #[error("timed out waiting for the attach reply")]
-    AttachTimeout,
-    /// No reply to a window-scoped request arrived in time.
-    #[error("timed out waiting for the daemon reply")]
-    RequestTimeout,
     /// The daemon answered the outstanding request with an error frame.
     ///
     /// The rendered form carries the daemon's reason as well as the code:
@@ -141,8 +149,8 @@ pub enum IpcError {
     #[error("not yet registered as an approver with the daemon")]
     ApproverNotRegistered,
     /// The connected daemon has not settled on a wire revision this request
-    /// needs, so [`IpcClient::send`] refused to write it rather than risk a
-    /// frame an older daemon cannot parse.
+    /// needs, so the frame was refused rather than risk one an older daemon
+    /// cannot parse.
     #[error(
         "this request needs a wire revision the connected daemon does not speak: {request_type}"
     )]
@@ -153,8 +161,54 @@ pub enum IpcError {
     },
 }
 
-/// Which request a [`Pending`] slot is waiting for. The reply is matched to
-/// the request by this tag because the protocol carries no correlation id.
+impl IpcError {
+    /// The same failure again, for when one failed connect attempt answers
+    /// several callers. An endpoint name failure keeps its text.
+    fn duplicate(&self) -> Self {
+        match self {
+            Self::EndpointName(error) => Self::EndpointName(duplicate_os_error(error)),
+            Self::NotConnected => Self::NotConnected,
+            Self::ConnectionLost => Self::ConnectionLost,
+            Self::ConnectTimeout => Self::ConnectTimeout,
+            Self::Rejected {
+                code,
+                message,
+                rejected_argument,
+            } => Self::Rejected {
+                code: code.clone(),
+                message: message.clone(),
+                rejected_argument: rejected_argument.clone(),
+            },
+            Self::UnexpectedReply => Self::UnexpectedReply,
+            Self::Write => Self::Write,
+            Self::DaemonNotFound => Self::DaemonNotFound,
+            Self::DaemonSpawn => Self::DaemonSpawn,
+            Self::InvalidArgument(argument) => Self::InvalidArgument(argument),
+            Self::WindowNotAttached { window_id } => Self::WindowNotAttached {
+                window_id: window_id.clone(),
+            },
+            Self::ApproverNotRegistered => Self::ApproverNotRegistered,
+            Self::Unsupported { request_type } => Self::Unsupported {
+                request_type: request_type.clone(),
+            },
+        }
+    }
+}
+
+/// An [`OsError`] with the same text, which an [`std::io::Error`] does not
+/// let be cloned.
+fn duplicate_os_error(error: &OsError) -> OsError {
+    match error {
+        OsError::Unsupported { feature } => OsError::Unsupported { feature },
+        OsError::Io(error) => OsError::Io(std::io::Error::new(error.kind(), error.to_string())),
+        OsError::Security(message) => OsError::Security(message.clone()),
+        OsError::EndpointHeld(message) => OsError::EndpointHeld(message.clone()),
+    }
+}
+
+/// Which request a generation's waiting slot holds. A daemon that returns
+/// correlation ids is matched by the key and checked against this; an older
+/// one is matched by this alone.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PendingKind {
     Attach,
@@ -204,17 +258,6 @@ pub(crate) enum PendingKind {
     /// Every request answered with a whole ticket waits under one tag; this
     /// client only reads, so the one it sends is `get_ticket`.
     TicketDetail,
-}
-
-impl PendingKind {
-    /// Attach keeps a timeout error of its own: it is the one request the
-    /// WebView shows as an attach failure rather than a command failure.
-    fn timeout_error(self) -> IpcError {
-        match self {
-            Self::Attach => IpcError::AttachTimeout,
-            _ => IpcError::RequestTimeout,
-        }
-    }
 }
 
 /// How hard a connect attempt tries to reach the daemon.
@@ -295,96 +338,25 @@ pub(crate) enum Reply {
     Done,
 }
 
-/// The request currently awaiting a reply on this connection.
-#[derive(Debug)]
-struct Pending {
-    kind: PendingKind,
-    sender: oneshot::Sender<Result<Reply, IpcError>>,
-}
-
-/// Whether a connection may register as an approver of destructive
-/// operations. `IpcClient::default()` -- and so
-/// `IpcClient::new()` -- yields `Control`, which is what the connection pool's
-/// single control connection relies on without naming a role explicitly;
-/// `IpcClient::new_window(record)` is the one way to get `Window` instead, so a
-/// per-window connection always states its role rather than inheriting one.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Role {
-    Control,
-    Window,
-}
-
-/// One connection to the daemon, attached to at most one window.
+/// One client of the daemon, attached to at most one window.
+///
+/// `IpcClient::default()` -- and so `IpcClient::new()` -- is the control
+/// client, which registers as the approver of destructive operations;
+/// `IpcClient::new_window(record)` is the one way to get a window client, so
+/// a per-window connection always states its role rather than inheriting one.
 #[derive(Debug)]
 pub struct IpcClient {
-    writer: Mutex<wire::Writer<WriteHalf<Connection>>>,
-    /// The single outstanding request. There is never more than one: the
-    /// protocol has no correlation id and an `error` frame carries no window
-    /// id, so a reply can only be attributed to a request by being the only
-    /// one in flight. [`IpcClient::request`] holds `request_lock` across the
-    /// whole round trip to keep that true.
-    pending: Mutex<Option<Pending>>,
-    request_lock: Mutex<()>,
-    /// Cancels the reader task of the current connection, which is what makes
-    /// [`IpcClient::disconnect`] release the connection: the reader owns the
-    /// read half, so dropping the write half alone would keep it open.
-    ///
-    /// A blocking mutex, never held across an await: `install` has to stay
-    /// synchronous, or the reader task it spawns would have to prove its own
-    /// future `Send` recursively (it reconnects, which installs again).
-    cancel_reader: std::sync::Mutex<Option<oneshot::Sender<()>>>,
-    /// Incremented on every connection install. A reader task only reports its
-    /// own disconnect if it is still the current connection, which keeps a
-    /// replaced (stale) connection from emitting events or triggering an extra
-    /// reconnect.
-    generation: AtomicU64,
-    /// The `generation` whose `register_approver` round trip last completed.
-    /// The sentinel `u64::MAX` means none has: no real connection reaches
-    /// that many installs, so it never collides with an actual generation.
-    registered_generation: AtomicU64,
-    /// The most recent `generation` whose `register_approver` attempt was
-    /// refused (`auth_failed`). The sentinel `u64::MAX` means none has been.
-    /// Latching by generation is what stops a live-lock with the window-list
-    /// poll: a refusal is not retried until a reconnect advances the
-    /// generation, rather than on every tick.
-    refused_generation: AtomicU64,
-    /// The wire revision the peer settled on, and the `generation` it was
-    /// settled for. Only the gates read it; whether a settle is a
-    /// generation's first is [`DaemonStart::settled`]'s to say.
-    settled: wire::SettledRevision,
-    /// The daemon start this client settled on, made and announced. A
-    /// blocking mutex, never held across an await.
-    daemon_start: std::sync::Mutex<DaemonStart>,
-    /// The window this client is attached to, or `None` for a control connection.
-    /// Set by `request_attach` and cleared by `on_disconnect`.
-    window_id: Mutex<Option<String>>,
-    /// The record of the window this client serves, `None` for a control
-    /// connection. It outlives this client: what the daemon forgets with a
-    /// connection is restored from it by [`Self::attach_restoring`].
-    record: Option<Arc<WindowRecord>>,
-    /// Tells this client apart from every other one, as a record's owner.
-    serial: u64,
-    /// Set by [`Self::disconnect`] on a window client: one the pool let go of
-    /// changes no record and never attaches again.
-    retired: AtomicBool,
-    /// The default palettes last asked for, sent again on every connection
-    /// once its revision settles: a daemon that started again without a store would
-    /// otherwise answer with its built-in ones.
-    default_palettes: Mutex<SentDefaultPalettes>,
-    role: Role,
+    shared: Arc<Shared>,
 }
 
 /// The serial of the next client built. Starts above `0`, which no record
 /// names as its owner.
 static NEXT_SERIAL: AtomicU64 = AtomicU64::new(1);
 
-/// What this client knows of the daemon start it reached: the generation
-/// that settled its revision, the start it made, and what it last announced.
+/// What this client knows of the daemon start it reached: the start it made
+/// and what it last announced.
 #[derive(Debug, Clone, Default)]
 struct DaemonStart {
-    /// The `generation` whose revision probe settled, and the boot the
-    /// daemon answered it with.
-    settled: Option<(u64, Option<StatusBoot>)>,
     /// The start this client made last, until a settle shows it reached
     /// another one; the next start it makes replaces it.
     made: Option<MadeStart>,
@@ -410,19 +382,15 @@ enum MadeStartReached {
 }
 
 impl DaemonStart {
-    /// The value after `generation` first settles on `boot`, with the control
+    /// The value after a generation settles on `boot`, with the control
     /// connection's announcement unless that boot was already announced.
     fn first_settled(
         &self,
-        generation: u64,
         boot: Option<StatusBoot>,
-        role: Role,
+        kind: ClientKind,
     ) -> (Self, Option<DaemonConnectedPayload>) {
-        let mut next = Self {
-            settled: Some((generation, boot)),
-            ..self.clone()
-        };
-        if role != Role::Control {
+        let mut next = self.clone();
+        if kind != ClientKind::Control {
             return (next, None);
         }
         let told = boot.is_some()
@@ -463,7 +431,7 @@ impl DaemonStart {
 }
 
 /// [`IpcClient::set_default_palettes`]'s memory: the palettes, and the
-/// connection `generation` they were last sent on.
+/// generation they were last sent on.
 #[derive(Debug, Default)]
 struct SentDefaultPalettes {
     latest: Option<DefaultPalettes>,
@@ -472,55 +440,60 @@ struct SentDefaultPalettes {
 
 impl Default for IpcClient {
     fn default() -> Self {
-        Self {
-            writer: Mutex::new(wire::Writer::empty()),
-            pending: Mutex::new(None),
-            request_lock: Mutex::new(()),
-            cancel_reader: std::sync::Mutex::new(None),
-            generation: AtomicU64::new(0),
-            registered_generation: AtomicU64::new(u64::MAX),
-            refused_generation: AtomicU64::new(u64::MAX),
-            settled: wire::SettledRevision::new(),
-            daemon_start: std::sync::Mutex::new(DaemonStart::default()),
-            window_id: Mutex::new(None),
-            record: None,
-            serial: NEXT_SERIAL.fetch_add(1, Ordering::SeqCst),
-            retired: AtomicBool::new(false),
-            default_palettes: Mutex::new(SentDefaultPalettes::default()),
-            role: Role::Control,
-        }
+        Self::with(ClientKind::Control, None)
+    }
+}
+
+impl Drop for IpcClient {
+    // The owner task holds what it shares with the client, not the client:
+    // letting the client go is what closes the owner's inbox.
+    fn drop(&mut self) {
+        self.shared.release();
     }
 }
 
 impl IpcClient {
+    fn with(kind: ClientKind, record: Option<Arc<crate::window_record::WindowRecord>>) -> Self {
+        let serial = NEXT_SERIAL.fetch_add(1, Ordering::SeqCst);
+        if let Some(record) = &record {
+            record.set_owner(serial);
+        }
+        Self {
+            shared: Arc::new(Shared::new(kind, record, serial)),
+        }
+    }
+
     /// Creates a client with no connection established yet.
     pub fn new() -> Self {
         Self::default()
     }
 
     /// Creates a per-window client with no connection established yet, which
-    /// becomes the owner of `record`. Never `Control`: only the connection
-    /// pool's single control connection may register as an approver.
-    pub(crate) fn new_window(record: Arc<WindowRecord>) -> Self {
-        let client = Self {
-            role: Role::Window,
-            ..Self::default()
-        };
-        record.set_owner(client.serial);
+    /// becomes the owner of `record`. Never the control client: only the
+    /// connection pool's single control connection may register as an approver.
+    pub(crate) fn new_window(record: Arc<crate::window_record::WindowRecord>) -> Self {
+        Self::with(ClientKind::Window, Some(record))
+    }
+
+    /// A control client open on `generation`, which nothing owns.
+    #[cfg(test)]
+    pub(crate) fn wired(generation: Arc<Generation>) -> Self {
         Self {
-            record: Some(record),
-            ..client
+            shared: Arc::new(Shared::wired(
+                generation,
+                NEXT_SERIAL.fetch_add(1, Ordering::SeqCst),
+            )),
         }
     }
 
-    /// Connects to the daemon, starting one when none answers
-    /// Does nothing when already connected.
+    /// Waits until a connection to the daemon is open, starting a daemon
+    /// when none answers. Returns at once when one is open.
     ///
     /// # Errors
     /// Returns [`IpcError`] when the daemon can neither be reached nor
-    /// started.
-    pub async fn connect(self: &Arc<Self>, app: &impl GuiHost) -> Result<(), IpcError> {
-        self.connect_inner(app, ConnectMode::Spawn).await
+    /// started, or reached and not opened.
+    pub async fn connect(&self, app: &impl GuiHost) -> Result<(), IpcError> {
+        self.shared.want(app, ConnectMode::Spawn, Until::Open).await
     }
 
     /// Makes a single attempt to reach a daemon that is already running. The
@@ -529,8 +502,20 @@ impl IpcClient {
     ///
     /// # Errors
     /// Returns [`IpcError::NotConnected`] when no daemon answers.
-    pub async fn connect_existing(self: &Arc<Self>, app: &impl GuiHost) -> Result<(), IpcError> {
-        self.connect_inner(app, ConnectMode::Once).await
+    pub async fn connect_existing(&self, app: &impl GuiHost) -> Result<(), IpcError> {
+        self.shared.want(app, ConnectMode::Once, Until::Open).await
+    }
+
+    /// Waits until the daemon accepts a connection, starting one when none
+    /// answers; it does not wait for the connection to open. What the
+    /// recovery supervisor needs to know is only whether a daemon answers.
+    ///
+    /// # Errors
+    /// Returns [`IpcError`] when the daemon can neither be reached nor started.
+    pub(crate) async fn reach_daemon(&self, app: &impl GuiHost) -> Result<(), IpcError> {
+        self.shared
+            .want(app, ConnectMode::Spawn, Until::Reached)
+            .await
     }
 
     /// Attaches this connection to `window_id`, connecting first if needed,
@@ -545,13 +530,22 @@ impl IpcClient {
     /// does not exist, and [`IpcError::WindowNotAttached`] on a control
     /// connection.
     pub async fn attach_window(
-        self: &Arc<Self>,
+        &self,
         app: &impl GuiHost,
         window_id: &str,
         size: Option<TerminalSize>,
     ) -> Result<AttachResponse, IpcError> {
-        let attached = match self.connect_inner(app, ConnectMode::Retry).await {
-            Ok(()) => self.attach_restoring(app, window_id, size).await,
+        let attached = match self
+            .shared
+            .want(app, ConnectMode::Retry, Until::Open)
+            .await
+            .and_then(|()| self.shared.open())
+        {
+            Ok(generation) => {
+                attach_restoring(app, &self.shared, &generation, window_id, size, None)
+                    .await
+                    .into_result()
+            }
             Err(error) => Err(error),
         };
         if attached.is_err() {
@@ -775,11 +769,10 @@ impl IpcClient {
     /// Returns [`IpcError`] when the daemon cannot be reached.
     pub async fn get_daemon_health(
         &self,
-        app: &impl GuiHost,
+        _app: &impl GuiHost,
     ) -> Result<DaemonHealthReply, IpcError> {
-        // Settled first: the gate refuses an unsettled revision as unsupported,
-        // which would read as an older daemon with no problem to report.
-        self.ensure_protocol_revision(app).await;
+        // An open connection has settled its revision, so `Unsupported` here
+        // is an older daemon's, never one not yet probed.
         match self
             .request(
                 &ClientMessage::GetDaemonHealth,
@@ -1389,61 +1382,43 @@ impl IpcClient {
     }
 
     /// Gives the daemon the palettes a window it opens from now on answers
-    /// color queries with, unless this connection already sent the same ones.
-    /// They are remembered and sent again whenever a connection first settles
-    /// its revision, so a daemon that is not reachable now, or not yet, still
-    /// gets them.
+    /// color queries with, unless the open connection already has the same
+    /// ones. They are remembered and sent again whenever a connection opens,
+    /// so a daemon that is not reachable now, or not yet, still gets them.
     ///
     /// # Errors
-    /// Returns [`IpcError`] when a connected daemon could not be written to.
+    /// Returns [`IpcError`] when the open connection could not be written to.
     /// A daemon too old to take them is not sent them, which is not an error.
     pub async fn set_default_palettes(
         &self,
-        app: &impl GuiHost,
+        _app: &impl GuiHost,
         palettes: DefaultPalettes,
     ) -> Result<(), IpcError> {
-        // Settled before `default_palettes` is locked: a first settle sends
-        // the remembered ones, which locks it too.
-        self.ensure_protocol_revision(app).await;
-        let mut sent = self.default_palettes.lock().await;
-        let generation = self.generation.load(Ordering::SeqCst);
-        if sent.latest.as_ref() == Some(&palettes) && sent.sent_on == Some(generation) {
+        // The owner publishes a generation open under this lock, so the
+        // value is sent by the opening or here, never by neither.
+        let mut sent = self.shared.palettes().lock().await;
+        let open = self.shared.open().ok();
+        let open_number = open.as_ref().map(|generation| generation.number());
+        if sent.latest.as_ref() == Some(&palettes)
+            && open_number.is_some()
+            && sent.sent_on == open_number
+        {
             return Ok(());
         }
         sent.latest = Some(palettes.clone());
-        sent.sent_on = None;
-        match self
-            .send(&ClientMessage::SetDefaultPalettes(palettes))
+        let Some(generation) = open else {
+            return Ok(());
+        };
+        match generation
+            .write(&ClientMessage::SetDefaultPalettes(palettes))
             .await
         {
             Ok(()) => {
-                sent.sent_on = Some(generation);
+                sent.sent_on = Some(generation.number());
                 Ok(())
             }
             Err(IpcError::NotConnected | IpcError::Unsupported { .. }) => Ok(()),
             Err(error) => Err(error),
-        }
-    }
-
-    /// Sends the remembered default palettes on a connection that has not
-    /// had them yet. Called once its revision settles: before that, the
-    /// gate refuses them.
-    async fn resend_default_palettes(&self) {
-        let mut sent = self.default_palettes.lock().await;
-        let generation = self.generation.load(Ordering::SeqCst);
-        let Some(latest) = sent.latest.clone() else {
-            return;
-        };
-        if sent.sent_on == Some(generation) {
-            return;
-        }
-        // A failed write is the next disconnect's business.
-        if self
-            .send(&ClientMessage::SetDefaultPalettes(latest))
-            .await
-            .is_ok()
-        {
-            sent.sent_on = Some(generation);
         }
     }
 
@@ -1466,851 +1441,461 @@ impl IpcClient {
     /// for is its record's.
     ///
     /// # Errors
-    /// Returns [`IpcError`] when no connection is established or the write
-    /// fails.
+    /// Returns [`IpcError`] when no connection is open or the write fails.
     pub async fn resize(&self, cols: u16, rows: u16) -> Result<(), IpcError> {
         self.send(&ClientMessage::Resize { cols, rows }).await
     }
 
-    /// Releases the connection on purpose: the reader task is cancelled, and
-    /// the bumped generation keeps it from reconnecting or reporting a
-    /// disconnect for a window that was retired deliberately. A window client
-    /// is retired for good: it never changes its record again.
+    /// Lets the client go for good: once this returns, nothing of it is
+    /// open and nothing opens again, the request in flight has ended, and a
+    /// window client changes its record no more.
     pub async fn disconnect(&self) {
-        if let Some(record) = &self.record {
-            // Under the record's lock, so no change this client makes to the
-            // record is midway.
-            let _record = record.lock().await;
-            self.retired.store(true, Ordering::SeqCst);
-        }
-        self.generation.fetch_add(1, Ordering::SeqCst);
-        {
-            let mut slot = self.writer.lock().await;
-            slot.clear();
-            if let Some(cancel) = lock_blocking(&self.cancel_reader).take() {
-                let _ = cancel.send(());
-            }
-        }
-        *self.window_id.lock().await = None;
-        self.fail_pending(IpcError::NotConnected).await;
+        self.shared.retire().await;
     }
 
-    /// Whether a connection is established right now.
+    /// Whether the daemon is reached right now, as far as the recovery
+    /// supervisor is concerned.
     ///
     /// A predicate, not a step: unlike [`IpcClient::connect`] it neither
     /// establishes a connection nor starts a daemon, so a supervisor can
     /// observe an outage without changing it.
     pub(crate) async fn is_connected(&self) -> bool {
-        self.writer.lock().await.is_connected()
+        self.shared.published().public().is_connected()
     }
 
-    /// The window this client is currently attached to, or `None` for a
-    /// control connection. A read-only accessor over the private field, kept
-    /// for [`crate::message_dispatch::read_loop`], which needs the value to
-    /// route an incoming message but must not otherwise reach into the
-    /// connection's internal state.
+    /// The window the open connection is attached to, `None` when none is
+    /// open or it attached none.
+    #[cfg(test)]
     pub(crate) async fn window_id(&self) -> Option<String> {
-        self.window_id.lock().await.clone()
+        self.shared
+            .open()
+            .ok()
+            .and_then(|generation| generation.window_id())
     }
 
-    /// This client's current connection: its serial, and the generation of
-    /// the connection installed now.
+    /// This client's current connection: its serial, and the number of the
+    /// generation open now, `u64::MAX` -- a number no generation gets -- when
+    /// none is.
     pub(crate) fn connection_id(&self) -> (u64, u64) {
-        (self.serial, self.generation.load(Ordering::SeqCst))
-    }
-
-    /// Whether this client may change `record`: it is the record's owner and
-    /// the pool has not let go of it.
-    fn holds(&self, record: &WindowRecord) -> bool {
-        record.owner() == self.serial && !self.retired.load(Ordering::SeqCst)
+        let open = self
+            .shared
+            .open()
+            .map_or(u64::MAX, |generation| generation.number());
+        (self.shared.serial(), open)
     }
 
     /// Moves the window's link to lost, when this client still holds the
     /// record.
     async fn lose_link(&self, app: &impl GuiHost, window_id: &str, reason: LinkLostReason) {
-        let Some(record) = &self.record else {
+        let Some(record) = self.shared.record() else {
             return;
         };
         let mut state = record.lock().await;
-        if self.holds(record) {
+        if self.shared.holds(record) {
             state.move_to(app, window_id, LinkState::Lost(reason));
         }
     }
 
-    /// The generation whose `register_approver` round trip is still owed, or
-    /// `None` when there is nothing to send (role `Window`, or the current
-    /// generation already registered).
-    ///
-    /// Takes no host on purpose: this is the pure half of
-    /// [`Self::ensure_approver_registered`].
-    pub(crate) fn approver_registration_due(&self) -> Option<u64> {
-        if self.role != Role::Control {
-            return None;
-        }
-        let generation = self.generation.load(Ordering::SeqCst);
-        if self.registered_generation.load(Ordering::SeqCst) == generation
-            || self.refused_generation.load(Ordering::SeqCst) == generation
-        {
-            None
-        } else {
-            Some(generation)
-        }
-    }
-
-    /// Records that `generation`'s `register_approver` round trip completed.
-    pub(crate) fn mark_approver_registered(&self, generation: u64) {
-        self.registered_generation
-            .store(generation, Ordering::SeqCst);
-    }
-
-    /// Whether the current generation's registration has actually completed
-    /// -- distinct from [`Self::approver_registration_due`], which also
-    /// returns "nothing to send" while a refusal is latched even though
-    /// registration never succeeded. Callers that must not act
-    /// without a registered approver (destructive-operation gating) use this,
-    /// not the absence of `due`.
+    /// Whether the open connection registered as the approver. A generation
+    /// whose registration was refused opens too, so destructive operations
+    /// gate on this rather than on being connected.
     pub(crate) fn is_approver_registered(&self) -> bool {
-        self.registered_generation.load(Ordering::SeqCst) == self.generation.load(Ordering::SeqCst)
+        self.shared.published().public().is_approver_registered()
     }
 
-    /// Latches `generation` as refused. Returns `true` only the first time a
-    /// given generation is latched, which is what makes the caller's
-    /// `EVENT_APPROVAL_REGISTRATION_REFUSED` emission happen once per
-    /// generation rather than once per concurrent caller.
+    /// Pulls the requests pending for this approver, on the WebView's own
+    /// initiative: the same idempotent registration on the open connection,
+    /// which answers with the current pending list.
     ///
-    /// `swap` rather than `compare_exchange` against the sentinel: the
-    /// sentinel is only ever the *initial* value, so a `compare_exchange`
-    /// against it could never latch a second (or later) generation's refusal.
-    pub(crate) fn mark_approver_refused(&self, generation: u64) -> bool {
-        self.refused_generation.swap(generation, Ordering::SeqCst) != generation
-    }
-
-    /// One `register_approver` round trip for `generation`, and the only
-    /// place that sends it: sending, recording a completed registration,
-    /// latching an `auth_failed` refusal and emitting the refusal event are
-    /// one unit, so the push and the pull caller cannot drift apart.
+    /// This emits nothing: the caller applies the returned list itself, so
+    /// an event here would deliver it twice. What opening the connection
+    /// settled about the registration is not changed by it.
+    ///
+    /// Only the control connection registers as an approver, so this is never
+    /// reached on a window client; an empty list means "nothing is
+    /// pending", never "wrong role".
     ///
     /// # Errors
-    /// Returns [`IpcError::Rejected`] with `auth_failed` when the daemon
-    /// refused this connection as an approver (having latched the generation,
-    /// and emitted `EVENT_APPROVAL_REGISTRATION_REFUSED` if this was the
-    /// first refusal of that generation), [`IpcError::UnexpectedReply`] for a
-    /// reply of any other kind, and the transport's own error otherwise. Only
-    /// the accepted registration records the generation, so every other
-    /// outcome leaves it owed.
-    async fn register_round_trip(
+    /// Returns [`IpcError::NotConnected`] when no connection is open, and
+    /// the daemon's refusal unchanged: the caller maps the `auth_failed`
+    /// refusal onto its own outcome type.
+    pub(crate) async fn sync_approvals(
         &self,
-        app: &impl GuiHost,
-        generation: u64,
+        _app: &impl GuiHost,
     ) -> Result<Vec<ApprovalRequest>, IpcError> {
-        let result = self
+        debug_assert!(self.shared.kind() == ClientKind::Control);
+        match self
             .request(
                 &ClientMessage::RegisterApprover,
                 PendingKind::RegisterApprover,
             )
-            .await;
-        match result {
-            Ok(Reply::ApproverRegistered(pending)) => {
-                self.mark_approver_registered(generation);
-                Ok(pending)
-            }
-            Ok(_) => Err(IpcError::UnexpectedReply),
-            Err(IpcError::Rejected {
-                code,
-                message,
-                rejected_argument,
-            }) if code == "auth_failed" => {
-                if self.mark_approver_refused(generation) {
-                    app.emit_event(
-                        EVENT_APPROVAL_REGISTRATION_REFUSED,
-                        ApprovalRegistrationRefusedPayload {},
-                    );
-                }
-                Err(IpcError::Rejected {
-                    code,
-                    message,
-                    rejected_argument,
-                })
-            }
-            Err(error) => Err(error),
+            .await?
+        {
+            Reply::ApproverRegistered(pending) => Ok(pending),
+            _ => Err(IpcError::UnexpectedReply),
         }
     }
 
-    /// Registers this connection as an approver when [`Self::approver_registration_due`]
-    /// says it is owed, and forwards the requests pending at that moment to
-    /// the WebView as a reset followed by one `session://approval-requested`
-    /// event per item -- the same shape a fresh registration would produce,
-    /// so a reconnect's restored queue looks no different.
-    ///
-    /// Idempotent per generation: a round trip refused with anything other
-    /// than `auth_failed` (a timeout, a dropped connection) leaves the
-    /// generation neither registered nor refused, so the next call (from any
-    /// of this client's three call sites) retries it. An `auth_failed`
-    /// refusal instead latches the generation: retrying it on
-    /// every call site's next tick would live-lock with the window-list
-    /// poll's own reconnect-on-failure.
-    pub(crate) async fn ensure_approver_registered(&self, app: &impl GuiHost) {
-        let Some(generation) = self.approver_registration_due() else {
-            return;
-        };
-        let Ok(pending) = self.register_round_trip(app, generation).await else {
-            return;
-        };
-        app.emit_event(
-            EVENT_APPROVAL_RESET,
-            ApprovalResetPayload {
-                requests: pending.clone(),
-            },
-        );
-        for request in pending {
-            app.emit_event(
-                EVENT_APPROVAL_REQUESTED,
-                ApprovalRequestedPayload { request },
-            );
-        }
+    /// The wire revision the open connection settled on, `None` when none
+    /// is open. Never a gate: the open generation's write is the only body
+    /// that weighs [`crate::pool_outcomes::protocol_revision_gate`].
+    #[cfg(test)]
+    pub(crate) fn protocol_revision(&self) -> Option<u32> {
+        self.shared.published().public().protocol_revision()
     }
 
-    /// Pulls the requests pending for this approver, on the WebView's own
-    /// initiative rather than on the connection's: the round trip is the same
-    /// registration, so a generation that was never registered is registered
-    /// here, and one that already is answers with its current pending list.
-    ///
-    /// Unlike [`Self::ensure_approver_registered`] this emits nothing and
-    /// ignores [`Self::approver_registration_due`]: the caller applies the
-    /// returned list itself, so an event here would deliver it twice, and a
-    /// registered generation must still answer the pull with the list.
-    ///
-    /// Only the control connection registers as an approver, so this is never
-    /// reached on a `Window`-role client; an empty list means "nothing is
-    /// pending", never "wrong role".
+    /// Lists the windows, with the wire revision of the connection that
+    /// answered: the two are one fact, where a revision read afterwards may
+    /// be another connection's.
     ///
     /// # Errors
-    /// Returns whatever [`Self::register_round_trip`] returns, unchanged: the
-    /// caller maps the `auth_failed` refusal onto its own outcome type.
-    pub(crate) async fn sync_approvals(
+    /// As [`Self::list_windows`].
+    pub(crate) async fn list_windows_with_revision(
         &self,
-        app: &impl GuiHost,
-    ) -> Result<Vec<ApprovalRequest>, IpcError> {
-        debug_assert!(self.role == Role::Control);
-        self.register_round_trip(app, self.generation.load(Ordering::SeqCst))
-            .await
-    }
-
-    /// The generation whose wire-revision probe is still owed, or `None`
-    /// when this connection has already settled one for its current
-    /// generation.
-    ///
-    /// Unlike [`Self::approver_registration_due`] this applies to every
-    /// role: a window connection's revision is recorded the same way, even
-    /// though only [`Self::send`] ever weighs it.
-    fn protocol_revision_settle_due(&self) -> Option<u64> {
-        let generation = self.generation.load(Ordering::SeqCst);
-        let (_, settled_generation) = self.settled.load();
-        if settled_generation == generation {
-            None
-        } else {
-            Some(generation)
+    ) -> Result<(Vec<WindowInfo>, Option<u32>), IpcError> {
+        let generation = self.shared.open()?;
+        match generation
+            .request(&ClientMessage::ListWindows, PendingKind::ListWindows)
+            .await?
+        {
+            Reply::WindowList(windows) => Ok((windows, generation.revision())),
+            _ => Err(IpcError::UnexpectedReply),
         }
-    }
-
-    /// The wire revision this connection has settled on for its *current*
-    /// generation, `None` when it has not. Read by the
-    /// window-list poll to push information to the WebView; never a gate --
-    /// `wire::Writer::send` is the only body that weighs
-    /// [`crate::pool_outcomes::protocol_revision_gate`].
-    pub(crate) fn protocol_revision(&self) -> Option<u32> {
-        let (revision, settled_generation) = self.settled.load();
-        if settled_generation == self.generation.load(Ordering::SeqCst) {
-            revision
-        } else {
-            None
-        }
-    }
-
-    /// Settles this connection's wire revision when
-    /// [`Self::protocol_revision_settle_due`] says it is owed, doing nothing
-    /// otherwise.
-    ///
-    /// Idempotent per generation, the same shape as
-    /// [`Self::ensure_approver_registered`]: a round trip that fails
-    /// outright (a timeout, a dropped connection) leaves the generation
-    /// unsettled for the next caller to retry, while either a revision
-    /// answer or an `unknown_type` refusal settles it for good, because both
-    /// are themselves an answer to "which wire does this peer speak" (a
-    /// daemon built before `get_protocol_revision` existed answers with the
-    /// latter, and is credited with [`PROTOCOL_REVISION_BASELINE`]).
-    ///
-    /// A failure here is never surfaced to the caller that triggered it:
-    /// the probe is this connection's own housekeeping, not
-    /// the request that happened to prompt it, the same reason
-    /// [`Self::ensure_approver_registered`] swallows its own failures.
-    ///
-    /// A generation's first settle, whichever caller makes it, is also where
-    /// a control connection tells the WebView of a daemon start it was not
-    /// told of, and where the remembered default palettes are sent again:
-    /// both follow from reaching a start, and settling is what says which.
-    /// The announcement is emitted after the settle is recorded, so a WebView
-    /// reading again on it sees the settled generation; an emit that drops
-    /// it, or panics, leaves the settle recorded and only that announcement
-    /// missing.
-    ///
-    /// Takes no guard of its own and must never be called while one of
-    /// `writer`, `request_lock`, `pending` or `default_palettes` is held: it
-    /// runs a round trip of its own through [`Self::request`], which locks
-    /// the first three, and a first settle sends the default palettes, which
-    /// locks the last; holding any of them here would deadlock against itself.
-    pub(crate) async fn ensure_protocol_revision(&self, app: &impl GuiHost) {
-        let Some(generation) = self.protocol_revision_settle_due() else {
-            return;
-        };
-        let result = self
-            .request(
-                &ClientMessage::GetProtocolRevision,
-                PendingKind::GetProtocolRevision,
-            )
-            .await;
-        let (revision, boot) = match result {
-            Ok(Reply::ProtocolRevision { revision, boot }) => (revision, boot),
-            Err(IpcError::Rejected { code, .. }) if code == ERROR_CODE_UNKNOWN_TYPE => {
-                (PROTOCOL_REVISION_BASELINE, None)
-            }
-            _ => return,
-        };
-        if self.settle(app, generation, revision, boot) {
-            self.resend_default_palettes().await;
-        }
-    }
-
-    /// Records `generation`'s first settle and announces it, returning whether
-    /// this call made it; a generation not current when compared records nothing.
-    fn settle(
-        &self,
-        app: &impl GuiHost,
-        generation: u64,
-        revision: u32,
-        boot: Option<StatusBoot>,
-    ) -> bool {
-        let mut start = lock_blocking(&self.daemon_start);
-        let settled_before = start
-            .settled
-            .is_some_and(|(settled, _)| settled == generation);
-        if settled_before || generation != self.generation.load(Ordering::SeqCst) {
-            return false;
-        }
-        let (next, announcement) = start.first_settled(generation, boot, self.role);
-        *start = next;
-        // After the slot, under the same lock: a stale read of `settled`
-        // only costs one more probe, which the slot then finds settled.
-        self.settled.store(revision, generation);
-        if let Some(payload) = announcement {
-            app.emit_event(EVENT_DAEMON_CONNECTED, payload);
-        }
-        true
-    }
-
-    /// What every new connection does before it is used: the approver
-    /// registration first, so the WebView reads a new daemon start, which
-    /// the settle announces, after what the registration reported.
-    async fn after_connect(&self, app: &impl GuiHost) {
-        self.ensure_approver_registered(app).await;
-        self.ensure_protocol_revision(app).await;
     }
 
     /// The daemon start this client last announced, `None` before the first.
     pub(crate) fn daemon_connection(&self) -> Option<DaemonConnectedPayload> {
-        lock_blocking(&self.daemon_start).last.clone()
+        self.shared.daemon_connection()
     }
 
-    async fn connect_inner(
-        self: &Arc<Self>,
-        app: &impl GuiHost,
-        mode: ConnectMode,
-    ) -> Result<(), IpcError> {
-        let mut slot = self.writer.lock().await;
-        if slot.is_connected() {
-            return Ok(());
-        }
-        let endpoint = app.endpoint()?;
-        let reached = match mode {
-            // One attempt decides whether a daemon has to be
-            // started, so this path does not spend the retry budget first.
-            ConnectMode::Once | ConnectMode::Spawn => connect_once(&endpoint).await,
-            ConnectMode::Retry => connect_retrying(&endpoint).await,
-        };
-        let connection = match reached {
-            Some(connection) => connection,
-            None if mode == ConnectMode::Spawn => {
-                let warning = app.spawn_daemon()?;
-                lock_blocking(&self.daemon_start).made = Some(MadeStart {
-                    warning,
-                    reached: MadeStartReached::NotYet,
-                });
-                connect_after_spawn(&endpoint).await?
-            }
-            None => return Err(IpcError::NotConnected),
-        };
-        self.install(app, connection, &mut slot);
-        // Dropped explicitly before the requests below: `send` also locks
-        // `writer`, and holding this guard across either would deadlock.
-        drop(slot);
-        self.after_connect(app).await;
-        Ok(())
-    }
-
-    fn install(
-        self: &Arc<Self>,
-        app: &impl GuiHost,
-        connection: Connection,
-        slot: &mut wire::Writer<WriteHalf<Connection>>,
-    ) {
-        let (reader, writer) = tokio::io::split(connection);
-        slot.install(writer);
-        let (cancel_tx, cancel_rx) = oneshot::channel();
-        *lock_blocking(&self.cancel_reader) = Some(cancel_tx);
-        let generation = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
-        app.spawn_task(read_loop(
-            reader,
-            app.clone(),
-            Arc::clone(self),
-            generation,
-            cancel_rx,
-        ));
-    }
-
-    /// Sends `message` and waits for the reply the daemon answers it with.
-    ///
-    /// The request lock is held for the whole round trip, which is what makes
-    /// the single [`Pending`] slot sufficient (see its documentation).
+    /// Sends `message` on the open connection and waits for its answer. Never
+    /// waits for a connection to open: none open is [`IpcError::NotConnected`].
     async fn request(&self, message: &ClientMessage, kind: PendingKind) -> Result<Reply, IpcError> {
-        let _in_flight = self.request_lock.lock().await;
-        let (sender, receiver) = oneshot::channel();
-        *self.pending.lock().await = Some(Pending { kind, sender });
-        if let Err(error) = self.send(message).await {
-            *self.pending.lock().await = None;
-            return Err(error);
-        }
-        match tokio::time::timeout(ATTACH_TIMEOUT, receiver).await {
-            Ok(Ok(result)) => result,
-            // The sender was dropped, which only happens when the connection
-            // went away before replying.
-            Ok(Err(_)) => Err(IpcError::NotConnected),
-            Err(_) => {
-                *self.pending.lock().await = None;
-                Err(kind.timeout_error())
-            }
-        }
+        self.shared.open()?.request(message, kind).await
     }
 
-    /// Attaches at `size`, or at the size the window's record holds when
-    /// `size` is `None`, and then brings the daemon to what the record asks
-    /// for: the one place a window's state is restored, whether the attach is
-    /// the WebView's, the window-list poll's or a reconnect's.
-    ///
-    /// Restoring happens under the record's lock taken again after the reply,
-    /// in this order: the visibility, palette and size, then the input held
-    /// meanwhile in the order it was typed, then the link becomes attached,
-    /// only if all of it was written on the connection that answered and that
-    /// connection is still installed.
-    /// The state goes first because it is what the screen was when the input
-    /// was typed. A child that has exited is restored nothing: its held input
-    /// is dropped and the exit is reported.
-    async fn attach_restoring(
-        &self,
-        app: &impl GuiHost,
-        window_id: &str,
-        size: Option<TerminalSize>,
-    ) -> Result<AttachResponse, IpcError> {
-        // A control connection has no record, and attaches no window.
-        let Some(record) = &self.record else {
-            return Err(IpcError::WindowNotAttached {
-                window_id: window_id.to_owned(),
-            });
-        };
-        let size = {
-            let mut state = record.lock().await;
-            if size.is_some() {
-                state.size = size;
-            }
-            state.size
-        };
-        let generation = self.generation.load(Ordering::SeqCst);
-        let response = self.request_attach(app, window_id, size).await?;
-        let mut state = record.lock().await;
-        if !self.holds(record) || state.link == LinkState::Superseded {
-            return Ok(response);
-        }
-        if response.child_exited {
-            state.move_to(app, window_id, LinkState::Exited);
-            app.emit_event(
-                EVENT_EXIT,
-                ExitPayload {
-                    window_id: window_id.to_owned(),
-                    exit_code: response.exit_code,
-                },
-            );
-            return Ok(response);
-        }
-        if state.link == LinkState::Exited {
-            return Ok(response);
-        }
-        let restored = match self.restore_state(&state, size, generation).await {
-            Ok(()) => self.send_held(&mut state, generation).await,
-            Err(error) => Err(error),
-        };
-        let still_connected = {
-            let slot = self.writer.lock().await;
-            slot.is_connected() && self.generation.load(Ordering::SeqCst) == generation
-        };
-        if restored.is_err() || !still_connected {
-            // The answering connection is gone or going; its disconnect or its
-            // replacement attaches again. Every attach still reports its outcome.
-            state.report(app, window_id);
-            return Ok(response);
-        }
-        state.sent = Some(SentSize {
-            size: state.size,
-            connection: (self.serial, generation),
-        });
-        state.move_to(app, window_id, LinkState::Attached);
-        Ok(response)
-    }
-
-    /// Sends what the record asks for that the daemon forgot with the old
-    /// connection, on the connection of `generation`, stopping at the first
-    /// write that fails.
-    async fn restore_state(
-        &self,
-        state: &RecordState,
-        attached_at: Option<TerminalSize>,
-        generation: u64,
-    ) -> Result<(), IpcError> {
-        let resize = state
-            .size
-            .filter(|size| Some(*size) != attached_at)
-            .map(|size| ClientMessage::Resize {
-                cols: size.cols,
-                rows: size.rows,
-            });
-        let restoring = [
-            visibility_restore(state.visible),
-            state.palette.clone().map(ClientMessage::SetPalette),
-            resize,
-        ];
-        for message in restoring.into_iter().flatten() {
-            self.send_on(&message, generation).await?;
-        }
-        Ok(())
-    }
-
-    /// Writes the held input, oldest first, on the connection of `generation`.
-    /// Each input is let go of only once it is written; a write that fails, or
-    /// a connection that is no longer the one the attach was answered on,
-    /// leaves the rest held for the next attach.
-    async fn send_held(&self, state: &mut RecordState, generation: u64) -> Result<(), IpcError> {
-        while let Some(input) = state.first_pending() {
-            self.send_on(input, generation).await?;
-            state.sent_first();
-        }
-        state.release_bound_if_drained();
-        Ok(())
-    }
-
-    /// Attaches at `size` (`None` keeps the window's own size).
-    ///
-    /// `attach_view` is gated on the daemon's wire revision, so a revision the
-    /// connection has not settled yet is settled first; an older daemon is
-    /// refused with [`IpcError::Unsupported`] without a frame being sent.
+    /// Attaches the open connection at `size` (`None` keeps the window's own size).
+    #[cfg(test)]
     async fn request_attach(
         &self,
-        app: &impl GuiHost,
+        _app: &impl GuiHost,
         window_id: &str,
         size: Option<TerminalSize>,
     ) -> Result<AttachResponse, IpcError> {
-        self.ensure_protocol_revision(app).await;
-        // Recorded before the request goes out: the daemon may stream output
-        // for the window between its `attached` reply and this task waking
-        // up, and the reader needs the window id to route it.
-        *self.window_id.lock().await = Some(window_id.to_owned());
-        let message = ClientMessage::AttachView {
-            window_id: window_id.to_owned(),
-            size,
-        };
-        match self.request(&message, PendingKind::Attach).await {
-            Ok(Reply::Attached(response)) => Ok(response),
-            Ok(_) => {
-                *self.window_id.lock().await = None;
-                Err(IpcError::UnexpectedReply)
-            }
-            Err(error) => {
-                *self.window_id.lock().await = None;
-                Err(error)
-            }
-        }
+        let generation = self.shared.open()?;
+        request_attach(&generation, window_id, size, None)
+            .await
+            .into_result()
     }
 
-    /// Writes `message` on the connection installed now.
+    /// Writes `message` on the open connection.
     ///
     /// # Errors
-    /// Returns [`IpcError`] when no connection is established, the
-    /// connection's revision cannot carry the message, or the write fails.
+    /// Returns [`IpcError`] when no connection is open, the connection's
+    /// revision cannot carry the message, or the write fails.
     pub(crate) async fn send(&self, message: &ClientMessage) -> Result<(), IpcError> {
-        self.writer
-            .lock()
-            .await
-            .send(message, &self.settled, &self.generation)
-            .await
-    }
-
-    /// Writes `message` on the connection of `generation` only. The
-    /// generation is compared under the writer's guard, which `install`
-    /// also holds, so the connection cannot be replaced between the
-    /// comparison and the write.
-    async fn send_on(&self, message: &ClientMessage, generation: u64) -> Result<(), IpcError> {
-        let mut slot = self.writer.lock().await;
-        if self.generation.load(Ordering::SeqCst) != generation {
-            return Err(IpcError::NotConnected);
-        }
-        slot.send(message, &self.settled, &self.generation).await
-    }
-
-    /// Kind of the outstanding request, if any.
-    pub(crate) async fn pending_kind(&self) -> Option<PendingKind> {
-        self.pending
-            .lock()
-            .await
-            .as_ref()
-            .map(|pending| pending.kind)
-    }
-
-    /// Answers the outstanding request, but only when it is the one `kind`
-    /// belongs to: a message that answers nothing in flight is dropped rather
-    /// than mis-attributed.
-    pub(crate) async fn complete_pending(&self, kind: PendingKind, reply: Reply) {
-        let taken = self
-            .pending
-            .lock()
-            .await
-            .take_if(|pending| pending.kind == kind);
-        if let Some(pending) = taken {
-            let _ = pending.sender.send(Ok(reply));
-        }
-    }
-
-    /// Fails the outstanding request, whatever it is.
-    pub(crate) async fn fail_pending(&self, error: IpcError) {
-        if let Some(pending) = self.pending.lock().await.take() {
-            let _ = pending.sender.send(Err(error));
-        }
-    }
-
-    /// Reports the end of the reader task owning `generation`.
-    ///
-    /// A reader task that is no longer the current connection stays silent:
-    /// its slot has already been taken over by a newer connection, so it must
-    /// neither clear that connection nor emit events for it. The generation
-    /// check and the slot reset share one lock because `install` bumps the
-    /// generation while holding it.
-    pub(crate) async fn on_disconnect(
-        self: &Arc<Self>,
-        app: &impl GuiHost,
-        superseded: bool,
-        generation: u64,
-    ) {
-        let wid = self.window_id.lock().await.clone();
-        {
-            let mut slot = self.writer.lock().await;
-            if self.generation.load(Ordering::SeqCst) != generation {
-                return;
-            }
-            slot.clear();
-        }
-        *self.window_id.lock().await = None;
-
-        self.fail_pending(IpcError::NotConnected).await;
-
-        // Taken only now that the writer's guard is released: the order is
-        // always the record, then the writer.
-        if let (Some(record), Some(window_id)) = (&self.record, wid.as_deref()) {
-            let mut state = record.lock().await;
-            if self.holds(record) {
-                if superseded {
-                    state.move_to(app, window_id, LinkState::Superseded);
-                } else if state.link == LinkState::Attached {
-                    state.move_to(app, window_id, LinkState::Connecting);
-                }
-            }
-        }
-
-        // A superseded session must not fight the new GUI for the
-        // daemon, so it never reconnects.
-        if superseded {
-            return;
-        }
-
-        for _ in 0..RECONNECT_ATTEMPT_LIMIT {
-            if self.try_reconnect(app, wid.as_deref()).await {
-                return;
-            }
-        }
-        if let Some(window_id) = wid.as_deref() {
-            self.lose_link(app, window_id, LinkLostReason::ReconnectFailed)
-                .await;
-        }
-    }
-
-    /// Reconnects to an existing daemon and re-attaches to the window this
-    /// connection was serving. The daemon is never spawned here: an automatic
-    /// reconnect only recovers from a lost connection, not from a daemon that
-    /// is gone.
-    async fn try_reconnect(self: &Arc<Self>, app: &impl GuiHost, window_id: Option<&str>) -> bool {
-        if self.retired.load(Ordering::SeqCst) {
-            return false;
-        }
-        let Ok(endpoint) = app.endpoint() else {
-            return false;
-        };
-        // Same retry form as the initial window connection: N
-        // connections dropped at once would otherwise fight over the single
-        // pending endpoint instance.
-        let Some(connection) = connect_retrying(&endpoint).await else {
-            return false;
-        };
-        {
-            let mut slot = self.writer.lock().await;
-            // A client the pool let go of meanwhile must not take the window
-            // back from the one that replaced it.
-            if self.retired.load(Ordering::SeqCst) {
-                return false;
-            }
-            self.install(app, connection, &mut slot);
-        }
-        self.after_connect(app).await;
-
-        // A control connection has no attachment to restore.
-        let Some(window_id) = window_id else {
-            return true;
-        };
-        if self.retired.load(Ordering::SeqCst) {
-            return false;
-        }
-
-        match self.attach_restoring(app, window_id, None).await {
-            // The daemon follows the answer with a frame of the whole screen,
-            // which replaces whatever the WebView drew before.
-            Ok(_) => true,
-            Err(_) => {
-                // Retire the connection so its reader task stays silent and the
-                // next explicit attach starts from a clean state.
-                let mut slot = self.writer.lock().await;
-                self.generation.fetch_add(1, Ordering::SeqCst);
-                slot.clear();
-                false
-            }
-        }
+        self.shared.open()?.write(message).await
     }
 }
 
-/// The connection's write half and the wire revision it is weighed against.
-/// Bytes reach the connection only through [`Writer::send`], which weighs the
-/// frame against the settled revision while the caller holds the writer's
-/// guard, so a connection cannot be replaced between the judgement and the
-/// write.
-mod wire {
-    use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+/// Registers a generation that is opening as the approver, and tells the
+/// WebView what the registration reported: the pending requests as a reset
+/// followed by one event each, or the refusal. Both come before the opening
+/// announces the daemon start. An answer read as `None` opens nothing.
+async fn register_approver(
+    app: &impl GuiHost,
+    generation: &Generation,
+) -> StepReply<Option<Registration>> {
+    let reply = generation
+        .request_step(
+            &ClientMessage::RegisterApprover,
+            PendingKind::RegisterApprover,
+            Some(registration_taken),
+        )
+        .await;
+    reply.map(|answer| {
+        let registration = registration_answer(&answer);
+        match (registration, answer) {
+            (Some(Registration::Accepted), Ok(Reply::ApproverRegistered(pending))) => {
+                app.emit_event(
+                    EVENT_APPROVAL_RESET,
+                    ApprovalResetPayload {
+                        requests: pending.clone(),
+                    },
+                );
+                for request in pending {
+                    app.emit_event(
+                        EVENT_APPROVAL_REQUESTED,
+                        ApprovalRequestedPayload { request },
+                    );
+                }
+            }
+            (Some(Registration::Refused), _) => app.emit_event(
+                EVENT_APPROVAL_REGISTRATION_REFUSED,
+                ApprovalRegistrationRefusedPayload {},
+            ),
+            _ => {}
+        }
+        registration
+    })
+}
 
+/// The registration the daemon's answer to `RegisterApprover` settles on;
+/// `None` is an answer that opens nothing.
+fn registration_answer(answer: &Result<Reply, IpcError>) -> Option<Registration> {
+    match answer {
+        Ok(Reply::ApproverRegistered(_)) => Some(Registration::Accepted),
+        Err(IpcError::Rejected { code, .. }) if code == "auth_failed" => {
+            Some(Registration::Refused)
+        }
+        _ => None,
+    }
+}
+
+/// The revision and boot a generation's probe settles on: the daemon's
+/// answer, or the baseline for a daemon built before the probe existed.
+/// `None` is any other outcome, which leaves the generation unopened.
+fn revision_probe_outcome(result: &Result<Reply, IpcError>) -> Option<(u32, Option<StatusBoot>)> {
+    match result {
+        Ok(Reply::ProtocolRevision { revision, boot }) => Some((*revision, *boot)),
+        Err(IpcError::Rejected { code, .. }) if code == ERROR_CODE_UNKNOWN_TYPE => {
+            Some((PROTOCOL_REVISION_BASELINE, None))
+        }
+        _ => None,
+    }
+}
+
+/// The response an answer to `AttachView` attaches with; `None` is an answer
+/// that attaches nothing.
+fn attached(answer: &Result<Reply, IpcError>) -> Option<AttachResponse> {
+    match answer {
+        Ok(Reply::Attached(response)) => Some(response.clone()),
+        _ => None,
+    }
+}
+
+// What each opening step's answer counts as once its generation ends: read by
+// the same function the step's own outcome is read by.
+
+fn revision_taken(answer: &Result<Reply, IpcError>) -> TakenAnswer {
+    revision_probe_outcome(answer).map_or(TakenAnswer::Refused, |(revision, _)| {
+        TakenAnswer::Revision(revision)
+    })
+}
+
+fn registration_taken(answer: &Result<Reply, IpcError>) -> TakenAnswer {
+    registration_answer(answer).map_or(TakenAnswer::Refused, TakenAnswer::Registration)
+}
+
+fn restore_taken(answer: &Result<Reply, IpcError>) -> TakenAnswer {
+    attached(answer).map_or(TakenAnswer::Refused, |_| TakenAnswer::Restore)
+}
+
+/// Attaches `generation` at `size`, or at the size the window's record holds
+/// when `size` is `None`, and then brings the daemon to what the record asks
+/// for: the one place a window's state is restored, whether the attach is
+/// the WebView's, the window-list poll's or a reconnect's.
+///
+/// Restoring happens under the record's lock taken again after the reply,
+/// in this order: the visibility, palette and size, then the input held
+/// meanwhile in the order it was typed, then the link becomes attached,
+/// only if all of it was written on `generation` and it is still the open one.
+/// The state goes first because it is what the screen was when the input
+/// was typed. A child that has exited is restored nothing: its held input
+/// is dropped and the exit is reported.
+///
+/// `take` makes the attach a step of the generation's opening: its answer,
+/// a refusal before the request included, is what the generation took.
+async fn attach_restoring(
+    app: &impl GuiHost,
+    shared: &Shared,
+    generation: &Arc<Generation>,
+    window_id: &str,
+    size: Option<TerminalSize>,
+    take: Option<Take>,
+) -> StepReply<Result<AttachResponse, IpcError>> {
+    // A control connection has no record, and attaches no window.
+    let Some(record) = shared.record() else {
+        let refusal = IpcError::WindowNotAttached {
+            window_id: window_id.to_owned(),
+        };
+        return generation.refuse(take, refusal).map(Err);
+    };
+    let size = {
+        let mut state = record.lock().await;
+        if size.is_some() {
+            state.size = size;
+        }
+        state.size
+    };
+    let response = match request_attach(generation, window_id, size, take).await {
+        StepReply::Answered(Ok(response)) => response,
+        other => return other,
+    };
+    let mut state = record.lock().await;
+    if !shared.holds(record) || state.link == LinkState::Superseded {
+        return StepReply::Answered(Ok(response));
+    }
+    if response.child_exited {
+        state.move_to(app, window_id, LinkState::Exited);
+        app.emit_event(
+            EVENT_EXIT,
+            ExitPayload {
+                window_id: window_id.to_owned(),
+                exit_code: response.exit_code,
+            },
+        );
+        return StepReply::Answered(Ok(response));
+    }
+    if state.link == LinkState::Exited {
+        return StepReply::Answered(Ok(response));
+    }
+    let restored = match restore_state(generation, &state, size).await {
+        Ok(()) => send_held(generation, &mut state).await,
+        Err(error) => Err(error),
+    };
+    let still_open = shared
+        .open()
+        .is_ok_and(|open| open.number() == generation.number());
+    if restored.is_err() || !still_open {
+        // The answering connection is gone or going; its end or its
+        // replacement attaches again. Every attach still reports its outcome.
+        state.report(app, window_id);
+        return StepReply::Answered(Ok(response));
+    }
+    state.sent = Some(SentSize {
+        size: state.size,
+        connection: (shared.serial(), generation.number()),
+    });
+    state.move_to(app, window_id, LinkState::Attached);
+    StepReply::Answered(Ok(response))
+}
+
+/// Sends what the record asks for that the daemon forgot with the old
+/// connection, on `generation`, stopping at the first write that fails.
+async fn restore_state(
+    generation: &Generation,
+    state: &RecordState,
+    attached_at: Option<TerminalSize>,
+) -> Result<(), IpcError> {
+    let resize = state
+        .size
+        .filter(|size| Some(*size) != attached_at)
+        .map(|size| ClientMessage::Resize {
+            cols: size.cols,
+            rows: size.rows,
+        });
+    let restoring = [
+        visibility_restore(state.visible),
+        state.palette.clone().map(ClientMessage::SetPalette),
+        resize,
+    ];
+    for message in restoring.into_iter().flatten() {
+        generation.write(&message).await?;
+    }
+    Ok(())
+}
+
+/// Writes the held input, oldest first, on `generation`. Each input is let
+/// go of only once it is written; a write that fails, or a generation that
+/// ended, leaves the rest held for the next attach.
+async fn send_held(generation: &Generation, state: &mut RecordState) -> Result<(), IpcError> {
+    while let Some(input) = state.first_pending() {
+        generation.write(input).await?;
+        state.sent_first();
+    }
+    state.release_bound_if_drained();
+    Ok(())
+}
+
+/// Attaches `generation` at `size` (`None` keeps the window's own size), as
+/// a step of its opening when `take` is given.
+async fn request_attach(
+    generation: &Generation,
+    window_id: &str,
+    size: Option<TerminalSize>,
+    take: Option<Take>,
+) -> StepReply<Result<AttachResponse, IpcError>> {
+    // Recorded before the request goes out: the daemon may stream output
+    // for the window between its `attached` reply and this task waking up,
+    // and the reader needs the window id to route it.
+    generation.set_window_id(Some(window_id.to_owned()));
+    let message = ClientMessage::AttachView {
+        window_id: window_id.to_owned(),
+        size,
+    };
+    let reply = generation
+        .request_step(&message, PendingKind::Attach, take)
+        .await;
+    // Only an answer that attached nothing takes the window back: with no
+    // answer the generation is ending, and its end reports the window.
+    reply.map(|answer| match attached(&answer) {
+        Some(response) => Ok(response),
+        None => {
+            generation.set_window_id(None);
+            Err(answer.err().unwrap_or(IpcError::UnexpectedReply))
+        }
+    })
+}
+
+/// How a frame reaches a connection: weighed against the connection's
+/// settled revision first, so a frame its peer cannot parse is never written.
+mod wire {
     use tokio::io::{AsyncWrite, AsyncWriteExt};
     use yagura_protocol::{
-        ClientMessage, PROTOCOL_REVISION_BASELINE, encode_client_message, frame_encode,
-        required_protocol_revision,
+        ClientMessage, encode_correlated_client_message, frame_encode, required_protocol_revision,
     };
 
     use super::{IpcError, client_message_wire_tag};
     use crate::pool_outcomes::{ProtocolRevisionGate, protocol_revision_gate};
 
-    /// The wire revision the peer answered `get_protocol_revision` with (the
-    /// baseline when it refused the request as unknown), and the generation
-    /// it was settled for. Atomics rather than a locked value, so settling
-    /// never needs a guard the round trip it takes also needs.
+    /// Why a frame was not written whole.
     #[derive(Debug)]
-    pub(super) struct SettledRevision {
-        revision: AtomicU32,
-        /// The sentinel `u64::MAX` means no generation has settled one yet.
-        generation: AtomicU64,
+    pub(super) enum WriteError {
+        /// The settled revision cannot carry the frame: no byte was written.
+        Refused { request_type: String },
+        /// The write failed. Only the generation reads the error itself.
+        Io(std::io::Error),
     }
 
-    impl SettledRevision {
-        pub(super) fn new() -> Self {
-            Self {
-                revision: AtomicU32::new(PROTOCOL_REVISION_BASELINE),
-                generation: AtomicU64::new(u64::MAX),
+    impl From<WriteError> for IpcError {
+        fn from(error: WriteError) -> Self {
+            match error {
+                WriteError::Refused { request_type } => Self::Unsupported { request_type },
+                WriteError::Io(_) => Self::Write,
             }
-        }
-
-        /// The settled revision and its generation. The revision is `None`
-        /// while no generation has settled one, which keeps a fresh client
-        /// from reading as settled at generation `0`.
-        pub(super) fn load(&self) -> (Option<u32>, u64) {
-            let generation = self.generation.load(Ordering::SeqCst);
-            let revision = (generation != u64::MAX).then(|| self.revision.load(Ordering::SeqCst));
-            (revision, generation)
-        }
-
-        pub(super) fn store(&self, revision: u32, generation: u64) {
-            self.revision.store(revision, Ordering::SeqCst);
-            self.generation.store(generation, Ordering::SeqCst);
         }
     }
 
-    /// The write half of the current connection, `None` while disconnected.
-    #[derive(Debug)]
-    pub(super) struct Writer<W>(Option<W>);
-
-    impl<W: AsyncWrite + Unpin> Writer<W> {
-        pub(super) fn empty() -> Self {
-            Self(None)
+    /// Refuses `message` when `revision` -- the one the connection settled,
+    /// `None` before it did -- cannot carry it.
+    pub(super) fn gate(message: &ClientMessage, revision: Option<u32>) -> Result<(), WriteError> {
+        if protocol_revision_gate(revision, required_protocol_revision(message))
+            == ProtocolRevisionGate::Refused
+        {
+            return Err(WriteError::Refused {
+                request_type: client_message_wire_tag(&encode_correlated_client_message(
+                    message, None,
+                )),
+            });
         }
+        Ok(())
+    }
 
-        pub(super) fn install(&mut self, writer: W) {
-            self.0 = Some(writer);
-        }
-
-        pub(super) fn clear(&mut self) {
-            self.0 = None;
-        }
-
-        pub(super) fn is_connected(&self) -> bool {
-            self.0.is_some()
-        }
-
-        /// Writes `message` as one frame, unless the revision `settled` holds
-        /// for the connection's current `generation` cannot carry it. A failed
-        /// write drops the connection.
-        pub(super) async fn send(
-            &mut self,
-            message: &ClientMessage,
-            settled: &SettledRevision,
-            generation: &AtomicU64,
-        ) -> Result<(), IpcError> {
-            let writer = self.0.as_mut().ok_or(IpcError::NotConnected)?;
-            let body = encode_client_message(message);
-            let (settled_revision, settled_generation) = settled.load();
-            if protocol_revision_gate(
-                settled_revision,
-                settled_generation,
-                generation.load(Ordering::SeqCst),
-                required_protocol_revision(message),
-            ) == ProtocolRevisionGate::Refused
-            {
-                return Err(IpcError::Unsupported {
-                    request_type: client_message_wire_tag(&body),
-                });
-            }
-            if writer.write_all(&frame_encode(&body)).await.is_err() {
-                self.0 = None;
-                return Err(IpcError::Write);
-            }
-            Ok(())
-        }
+    /// Writes `message` as one frame carrying `correlation_id`, unless
+    /// [`gate`] refuses it, in which case no byte is written.
+    pub(super) async fn write_frame<W: AsyncWrite + Unpin + ?Sized>(
+        writer: &mut W,
+        message: &ClientMessage,
+        correlation_id: Option<u64>,
+        revision: Option<u32>,
+    ) -> Result<(), WriteError> {
+        gate(message, revision)?;
+        let body = encode_correlated_client_message(message, correlation_id);
+        writer
+            .write_all(&frame_encode(&body))
+            .await
+            .map_err(WriteError::Io)
     }
 }
 
@@ -2321,21 +1906,15 @@ fn visibility_restore(last_visible: Option<bool>) -> Option<ClientMessage> {
 }
 
 /// The wire `type` tag of an already-encoded client message body, read back
-/// from the JSON [`encode_client_message`] already produced rather than a
+/// from the JSON the encoder already produced rather than a
 /// second `ClientMessage`-to-tag mapping kept in step with it by hand.
 ///
-/// Never panics: a body this crate did not itself produce (which
-/// `encode_client_message` never yields) reads back as the empty string
-/// rather than a tag invented here.
+/// Never panics: a body this crate did not itself produce (which the encoder
+/// never yields) reads back as the empty string rather than a tag invented here.
 fn client_message_wire_tag(body: &[u8]) -> String {
-    let Ok(value) = serde_json::from_slice::<serde_json::Value>(body) else {
-        return String::new();
-    };
-    value
-        .get("type")
-        .and_then(serde_json::Value::as_str)
+    yagura_protocol::read_frame_label(body)
+        .tag
         .unwrap_or_default()
-        .to_owned()
 }
 
 /// Locks a blocking slot, recovering from poisoning: a holder writes a slot in one store of
@@ -2364,32 +1943,6 @@ pub fn current_endpoint_with(resolution: &InstanceResolution) -> Result<String, 
     ))
 }
 
-async fn connect_once(endpoint: &str) -> Option<Connection> {
-    PlatformIpc::default().connect(endpoint).await.ok()
-}
-
-/// Connects to a running daemon, retrying a refused endpoint up to `limit`
-/// times. The first attempt precedes any wait, so an endpoint that is free
-/// costs no delay (waiting first would cost one interval per window).
-pub(crate) async fn connect_retrying_with_limit(endpoint: &str, limit: u32) -> Option<Connection> {
-    for attempt in 0..limit {
-        if attempt > 0 {
-            tokio::time::sleep(CONNECT_RETRY_INTERVAL).await;
-        }
-        if let Some(connection) = connect_once(endpoint).await {
-            return Some(connection);
-        }
-    }
-    None
-}
-
-/// [`connect_retrying_with_limit`] with the ordinary [`CONNECT_RETRY_LIMIT`]
-/// budget; [`crate::daemon_launch::connect_after_spawn`] is the one caller
-/// that needs a different budget.
-pub(crate) async fn connect_retrying(endpoint: &str) -> Option<Connection> {
-    connect_retrying_with_limit(endpoint, CONNECT_RETRY_LIMIT).await
-}
-
 #[cfg(test)]
 mod host_tests;
 
@@ -2408,14 +1961,14 @@ mod tests {
     /// the outcome with every byte that reached the other end.
     async fn send_and_collect(
         message: &ClientMessage,
-        settled: &wire::SettledRevision,
+        settled: Option<u32>,
     ) -> (Result<(), IpcError>, Vec<u8>) {
         use tokio::io::AsyncReadExt;
-        let (near, mut far) = tokio::io::duplex(64 * 1024);
-        let mut writer = wire::Writer::empty();
-        writer.install(near);
-        let outcome = writer.send(message, settled, &AtomicU64::new(0)).await;
-        drop(writer);
+        let (mut near, mut far) = tokio::io::duplex(64 * 1024);
+        let outcome = wire::write_frame(&mut near, message, None, settled)
+            .await
+            .map_err(IpcError::from);
+        drop(near);
         let mut written = Vec::new();
         far.read_to_end(&mut written)
             .await
@@ -2425,8 +1978,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_frame_the_settled_revision_cannot_carry_is_refused_before_any_byte_is_written() {
-        let (outcome, written) =
-            send_and_collect(&frame_gated_message(), &wire::SettledRevision::new()).await;
+        let (outcome, written) = send_and_collect(&frame_gated_message(), None).await;
         assert!(
             matches!(outcome, Err(IpcError::Unsupported { .. })),
             "got {outcome:?}"
@@ -2436,10 +1988,9 @@ mod tests {
 
     #[tokio::test]
     async fn a_frame_is_written_once_the_current_generation_settled_a_revision_that_carries_it() {
-        let settled = wire::SettledRevision::new();
-        settled.store(yagura_protocol::PROTOCOL_REVISION, 0);
+        let settled = Some(yagura_protocol::PROTOCOL_REVISION);
         let message = frame_gated_message();
-        let (outcome, written) = send_and_collect(&message, &settled).await;
+        let (outcome, written) = send_and_collect(&message, settled).await;
         assert!(outcome.is_ok(), "got {outcome:?}");
         assert_eq!(
             written,
@@ -2452,31 +2003,17 @@ mod tests {
         let message = ClientMessage::ClearChatRoom {
             room_id: "main".to_owned(),
         };
-        let behind = wire::SettledRevision::new();
-        behind.store(yagura_protocol::CHAT_ROOM_REMOVAL_MIN_REVISION - 1, 0);
-        let (refused, written) = send_and_collect(&message, &behind).await;
+        let behind = Some(yagura_protocol::CHAT_ROOM_REMOVAL_MIN_REVISION - 1);
+        let (refused, written) = send_and_collect(&message, behind).await;
         assert!(
             matches!(refused, Err(IpcError::Unsupported { .. })),
             "got {refused:?}"
         );
         assert!(written.is_empty(), "wrote {written:?}");
 
-        let level = wire::SettledRevision::new();
-        level.store(yagura_protocol::CHAT_ROOM_REMOVAL_MIN_REVISION, 0);
-        let (sent, _) = send_and_collect(&message, &level).await;
+        let level = Some(yagura_protocol::CHAT_ROOM_REMOVAL_MIN_REVISION);
+        let (sent, _) = send_and_collect(&message, level).await;
         assert!(sent.is_ok(), "got {sent:?}");
-    }
-
-    #[tokio::test]
-    async fn a_revision_settled_for_another_generation_does_not_carry_a_frame() {
-        let settled = wire::SettledRevision::new();
-        settled.store(yagura_protocol::PROTOCOL_REVISION, 1);
-        let (outcome, written) = send_and_collect(&frame_gated_message(), &settled).await;
-        assert!(
-            matches!(outcome, Err(IpcError::Unsupported { .. })),
-            "got {outcome:?}"
-        );
-        assert!(written.is_empty(), "wrote {written:?}");
     }
 
     #[test]
@@ -2496,90 +2033,6 @@ mod tests {
         assert_eq!(visibility_restore(None), None);
     }
 
-    #[test]
-    fn approver_registration_due_is_owed_for_the_initial_generation_of_a_new_client() {
-        let client = IpcClient::new();
-        assert_eq!(client.approver_registration_due(), Some(0));
-    }
-
-    #[test]
-    fn approver_registration_due_clears_once_the_current_generation_is_marked_registered() {
-        let client = IpcClient::new();
-        client.mark_approver_registered(0);
-        assert_eq!(client.approver_registration_due(), None);
-    }
-
-    #[test]
-    fn approver_registration_due_reopens_when_the_generation_advances_past_the_registered_one() {
-        let client = IpcClient::new();
-        client.mark_approver_registered(0);
-        client.generation.fetch_add(1, Ordering::SeqCst);
-        assert_eq!(client.approver_registration_due(), Some(1));
-    }
-
-    #[test]
-    fn approver_registration_due_is_always_none_for_a_window_role_client() {
-        let client = IpcClient::new_window(Arc::new(WindowRecord::new()));
-        assert_eq!(client.approver_registration_due(), None);
-        client.mark_approver_registered(0);
-        assert_eq!(client.approver_registration_due(), None);
-    }
-
-    // After a refusal is latched, `due` is `None` and
-    // `is_approver_registered` is `false` -- distinguishing "nothing to send"
-    // from "registered" is the whole point of splitting the two predicates.
-    #[test]
-    fn a_latched_refusal_leaves_due_none_and_registration_unsatisfied() {
-        let client = IpcClient::new();
-        assert!(client.mark_approver_refused(0));
-        assert_eq!(client.approver_registration_due(), None);
-        assert!(!client.is_approver_registered());
-    }
-
-    // A second refusal of the same generation is not a
-    // fresh latch, which is what keeps the refused-registration event from
-    // firing more than once per generation.
-    #[test]
-    fn mark_approver_refused_returns_false_on_a_second_call_for_the_same_generation() {
-        let client = IpcClient::new();
-        assert!(client.mark_approver_refused(0));
-        assert!(!client.mark_approver_refused(0));
-    }
-
-    // A reconnect (generation advances) reopens `due` even
-    // though the previous generation is still latched as refused.
-    #[test]
-    fn due_reopens_for_a_new_generation_after_a_previous_ones_refusal() {
-        let client = IpcClient::new();
-        assert!(client.mark_approver_refused(0));
-        client.generation.fetch_add(1, Ordering::SeqCst);
-        assert_eq!(client.approver_registration_due(), Some(1));
-    }
-
-    // A `compare_exchange` against the sentinel could only ever latch the
-    // first refused generation; `swap` latches
-    // every one, including a second refusal several generations later.
-    #[test]
-    fn a_second_generations_refusal_latches_and_reopens_due_afterward() {
-        let client = IpcClient::new();
-        assert!(client.mark_approver_refused(0));
-        client.generation.fetch_add(1, Ordering::SeqCst);
-        assert!(client.mark_approver_refused(1));
-        assert_eq!(client.approver_registration_due(), None);
-        client.generation.fetch_add(1, Ordering::SeqCst);
-        assert_eq!(client.approver_registration_due(), Some(2));
-    }
-
-    // Guards against an `is_approver_registered` that
-    // always returns `false`, which `approver_registration_due` clearing
-    // alone would not catch.
-    #[test]
-    fn is_approver_registered_is_true_once_the_current_generation_is_marked_registered() {
-        let client = IpcClient::new();
-        client.mark_approver_registered(0);
-        assert!(client.is_approver_registered());
-    }
-
     #[tokio::test]
     async fn is_connected_is_false_for_a_freshly_created_control_client() {
         let client = IpcClient::new();
@@ -2592,61 +2045,44 @@ mod tests {
         assert!(!client.is_connected().await);
     }
 
-    const ENDPOINT_PREFIX: &str = "yagura-test-gui-ipc-client";
-
-    type PeerConnection = <PlatformIpc as PeerAuth>::Connection;
-
-    /// A client whose write half reaches `PeerConnection` over a real
-    /// endpoint. The read half stands in for the reader task; replies are
-    /// delivered the way that task delivers them.
-    async fn wired_unsettled(
-        tag: &str,
-    ) -> (IpcClient, PeerConnection, tokio::io::ReadHalf<Connection>) {
-        let ipc = PlatformIpc::default();
-        let endpoint = yagura_test_support::ipc::unique_endpoint_name(ENDPOINT_PREFIX, tag);
-        let security = ipc.endpoint_security().expect("endpoint security");
-        let mut listener = ipc.bind(&endpoint, security).await.expect("bind");
-        let (accepted, connected) =
-            tokio::join!(ipc.accept(&mut listener), connect_once(&endpoint));
-        let (read, write) = tokio::io::split(connected.expect("connect"));
-        let client = IpcClient::new();
-        client.writer.lock().await.install(write);
-        (client, accepted.expect("accept"), read)
+    /// A control client open on a generation over an in-memory stream, with
+    /// the far end of that stream to play the daemon on. Answers are handed to
+    /// the generation the way its reader hands them over, so what a request
+    /// returns is measured apart from how frames are read.
+    fn wired() -> (
+        IpcClient,
+        Arc<Generation>,
+        tokio::io::DuplexStream,
+        impl Sized,
+    ) {
+        let (near, far) = tokio::io::duplex(1 << 20);
+        let (generation, reader) = Generation::wired(near);
+        let client = IpcClient::wired(Arc::clone(&generation));
+        (client, generation, far, reader)
     }
 
-    /// [`wired_unsettled`] with the current wire revision settled, so every
-    /// request can be carried.
-    async fn wired(tag: &str) -> (IpcClient, PeerConnection, tokio::io::ReadHalf<Connection>) {
-        let connected = wired_unsettled(tag).await;
-        connected.0.settled.store(
-            yagura_protocol::PROTOCOL_REVISION,
-            connected.0.generation.load(Ordering::SeqCst),
-        );
-        connected
-    }
-
-    async fn next_request(peer: &mut PeerConnection) -> ClientMessage {
+    /// The next request written to `peer`, with the correlation id it carries.
+    async fn next_request(peer: &mut tokio::io::DuplexStream) -> (Option<u64>, ClientMessage) {
         use tokio::io::AsyncReadExt;
         let mut length = [0u8; 4];
         peer.read_exact(&mut length).await.expect("frame length");
         let mut body = vec![0u8; u32::from_le_bytes(length) as usize];
         peer.read_exact(&mut body).await.expect("frame body");
-        yagura_protocol::decode_client_message(&body).expect("a client frame")
+        yagura_protocol::decode_correlated_client_message(&body).expect("a client frame")
     }
 
-    /// Plays the daemon for one round trip: reads the request, then settles it
-    /// under `kind` as the reader task does. Returns the request that arrived.
+    /// Plays the daemon for one round trip: reads the request, then hands
+    /// `outcome` to `generation` under the request's key and `kind`. Returns
+    /// the request that arrived.
     async fn answer(
-        client: &IpcClient,
-        peer: &mut PeerConnection,
+        generation: &Generation,
+        peer: &mut tokio::io::DuplexStream,
         kind: PendingKind,
         outcome: Result<Reply, IpcError>,
     ) -> ClientMessage {
-        let request = yagura_test_support::ipc::reply_within("request", next_request(peer)).await;
-        match outcome {
-            Ok(reply) => client.complete_pending(kind, reply).await,
-            Err(error) => client.fail_pending(error).await,
-        }
+        let (key, request) =
+            yagura_test_support::ipc::reply_within("request", next_request(peer)).await;
+        generation.settle(key, kind, outcome);
         request
     }
 
@@ -2699,52 +2135,46 @@ mod tests {
         }
     }
 
-    #[test]
-    fn only_an_attach_times_out_as_an_attach_failure() {
-        assert!(matches!(
-            PendingKind::Attach.timeout_error(),
-            IpcError::AttachTimeout
-        ));
-        assert!(matches!(
-            PendingKind::ListWindows.timeout_error(),
-            IpcError::RequestTimeout
-        ));
-    }
-
+    // A daemon that returns keys answers under the key of the request; an
+    // answer under another key, or under none, answers nothing waiting here.
     #[tokio::test]
-    async fn a_reply_answers_only_the_request_of_its_own_kind() {
-        let client = IpcClient::new();
-        let (sender, mut receiver) = oneshot::channel();
-        *client.pending.lock().await = Some(Pending {
-            kind: PendingKind::ListWindows,
-            sender,
-        });
-        client
-            .complete_pending(PendingKind::PlanList, Reply::PlanList(Vec::new()))
-            .await;
-        assert_eq!(client.pending_kind().await, Some(PendingKind::ListWindows));
-        assert!(receiver.try_recv().is_err());
+    async fn an_answer_meets_the_request_only_under_the_key_the_request_carried() {
+        let (client, generation, mut peer, _reader) = wired();
 
-        client
-            .complete_pending(PendingKind::ListWindows, Reply::WindowList(Vec::new()))
-            .await;
-        assert_eq!(client.pending_kind().await, None);
-        let delivered = receiver.try_recv();
-        assert!(
-            matches!(&delivered, Ok(Ok(Reply::WindowList(windows))) if windows.is_empty()),
-            "got {delivered:?}"
-        );
+        let (listed, ()) = tokio::join!(client.list_windows(), async {
+            let (key, request) =
+                yagura_test_support::ipc::reply_within("request", next_request(&mut peer)).await;
+            assert_eq!(request, ClientMessage::ListWindows);
+            let key = key.expect("a request carries a correlation id");
+            generation.settle(
+                Some(key.wrapping_add(1)),
+                PendingKind::ListWindows,
+                Ok(Reply::WindowList(vec![window_info("other")])),
+            );
+            generation.settle(
+                None,
+                PendingKind::ListWindows,
+                Ok(Reply::WindowList(vec![window_info("unkeyed")])),
+            );
+            generation.settle(
+                Some(key),
+                PendingKind::ListWindows,
+                Ok(Reply::WindowList(vec![window_info("w1")])),
+            );
+        });
+
+        assert_eq!(listed.expect("list_windows"), vec![window_info("w1")]);
     }
 
     #[tokio::test]
     async fn window_requests_hand_back_what_the_daemon_answered() {
-        let (client, mut peer, _read) = wired("window-requests").await;
+        let (client, generation, mut peer, _reader) = wired();
         let host = FakeHost::new("window-requests");
 
         let (windows, sent) = tokio::join!(
             client.list_windows(),
             answer(
-                &client,
+                &generation,
                 &mut peer,
                 PendingKind::ListWindows,
                 Ok(Reply::WindowList(vec![window_info("w1")]))
@@ -2756,7 +2186,7 @@ mod tests {
         let (detections, sent) = tokio::join!(
             client.list_detections(),
             answer(
-                &client,
+                &generation,
                 &mut peer,
                 PendingKind::ListDetections,
                 Ok(Reply::DetectionList(DetectionListReply {
@@ -2771,7 +2201,7 @@ mod tests {
         let (profiles, sent) = tokio::join!(
             client.list_profiles(),
             answer(
-                &client,
+                &generation,
                 &mut peer,
                 PendingKind::ListProfiles,
                 Ok(Reply::ProfileList(ProfileListReply {
@@ -2796,7 +2226,7 @@ mod tests {
                 Some("vendor-a".to_owned()),
             ),
             answer(
-                &client,
+                &generation,
                 &mut peer,
                 PendingKind::OpenWindow,
                 Ok(Reply::WindowOpened(OpenWindowReply {
@@ -2829,7 +2259,7 @@ mod tests {
                 None,
             ),
             answer(
-                &client,
+                &generation,
                 &mut peer,
                 PendingKind::OpenWindow,
                 Ok(Reply::WindowOpened(OpenWindowReply {
@@ -2856,7 +2286,7 @@ mod tests {
         let (renamed, sent) = tokio::join!(
             client.rename_window("w1", "build"),
             answer(
-                &client,
+                &generation,
                 &mut peer,
                 PendingKind::RenameWindow,
                 Ok(Reply::WindowRenamed("build (2)".to_owned()))
@@ -2874,7 +2304,7 @@ mod tests {
         let (candidates, sent) = tokio::join!(
             client.list_restore_candidates(),
             answer(
-                &client,
+                &generation,
                 &mut peer,
                 PendingKind::ListRestoreCandidates,
                 Ok(Reply::RestoreCandidateList(RestoreCandidateListReply {
@@ -2894,7 +2324,7 @@ mod tests {
         let (health, sent) = tokio::join!(
             client.get_daemon_health(&host),
             answer(
-                &client,
+                &generation,
                 &mut peer,
                 PendingKind::GetDaemonHealth,
                 Ok(Reply::DaemonHealth(DaemonHealthReply {
@@ -2911,7 +2341,7 @@ mod tests {
         let (older, sent) = tokio::join!(
             client.get_daemon_health(&host),
             answer(
-                &client,
+                &generation,
                 &mut peer,
                 PendingKind::GetDaemonHealth,
                 Err(rejected(ERROR_CODE_UNKNOWN_TYPE))
@@ -2928,7 +2358,7 @@ mod tests {
         let (updated, sent) = tokio::join!(
             client.update_window_layout("w1", "{}".to_owned()),
             answer(
-                &client,
+                &generation,
                 &mut peer,
                 PendingKind::UpdateWindowLayout,
                 Ok(Reply::WindowLayoutUpdated(UpdateWindowLayoutReply {
@@ -2948,12 +2378,12 @@ mod tests {
 
     #[tokio::test]
     async fn destructive_requests_succeed_when_the_daemon_is_done() {
-        let (client, mut peer, _read) = wired("destructive-done").await;
+        let (client, generation, mut peer, _reader) = wired();
 
         let (closed, sent) = tokio::join!(
             client.close_window("w1", Some(true)),
             answer(
-                &client,
+                &generation,
                 &mut peer,
                 PendingKind::CloseWindow,
                 Ok(Reply::Done)
@@ -2971,7 +2401,7 @@ mod tests {
         let (interrupted, sent) = tokio::join!(
             client.interrupt_window("w1"),
             answer(
-                &client,
+                &generation,
                 &mut peer,
                 PendingKind::InterruptWindow,
                 Ok(Reply::Done)
@@ -2988,7 +2418,7 @@ mod tests {
         let (decided, sent) = tokio::join!(
             client.decide_approval("r1", false),
             answer(
-                &client,
+                &generation,
                 &mut peer,
                 PendingKind::DecideApproval,
                 Ok(Reply::Done)
@@ -3006,12 +2436,12 @@ mod tests {
 
     #[tokio::test]
     async fn destructive_requests_report_the_daemons_rejection() {
-        let (client, mut peer, _read) = wired("destructive-rejected").await;
+        let (client, generation, mut peer, _reader) = wired();
 
         let (closed, _) = tokio::join!(
             client.close_window("w1", None),
             answer(
-                &client,
+                &generation,
                 &mut peer,
                 PendingKind::CloseWindow,
                 Err(rejected("window_not_found"))
@@ -3022,7 +2452,7 @@ mod tests {
         let (interrupted, _) = tokio::join!(
             client.interrupt_window("w1"),
             answer(
-                &client,
+                &generation,
                 &mut peer,
                 PendingKind::InterruptWindow,
                 Err(rejected("invalid_state"))
@@ -3036,7 +2466,7 @@ mod tests {
         let (decided, _) = tokio::join!(
             client.decide_approval("r1", true),
             answer(
-                &client,
+                &generation,
                 &mut peer,
                 PendingKind::DecideApproval,
                 Err(rejected("approval_not_pending"))
@@ -3047,7 +2477,7 @@ mod tests {
 
     #[tokio::test]
     async fn chat_requests_hand_back_what_the_daemon_answered() {
-        let (client, mut peer, _read) = wired("chat-requests").await;
+        let (client, generation, mut peer, _reader) = wired();
         let posted = |seq| ChatPostedReply {
             room_id: "r1".to_owned(),
             seq,
@@ -3060,7 +2490,7 @@ mod tests {
         let (sent_chat, sent) = tokio::join!(
             client.send_chat(Some("r1".to_owned()), "hi".to_owned()),
             answer(
-                &client,
+                &generation,
                 &mut peer,
                 PendingKind::SendChat,
                 Ok(Reply::ChatPosted(posted(3)))
@@ -3078,7 +2508,7 @@ mod tests {
         let (broadcast, sent) = tokio::join!(
             client.broadcast_chat(None, "all".to_owned()),
             answer(
-                &client,
+                &generation,
                 &mut peer,
                 PendingKind::SendChat,
                 Ok(Reply::ChatPosted(posted(4)))
@@ -3096,7 +2526,7 @@ mod tests {
         let (page, sent) = tokio::join!(
             client.read_chat(Some("r1".to_owned()), Some(2), Some(10)),
             answer(
-                &client,
+                &generation,
                 &mut peer,
                 PendingKind::ReadChat,
                 Ok(Reply::ChatMessages(ChatMessagesReply {
@@ -3122,7 +2552,7 @@ mod tests {
         let (rooms, sent) = tokio::join!(
             client.list_chat_rooms(),
             answer(
-                &client,
+                &generation,
                 &mut peer,
                 PendingKind::ListChatRooms,
                 Ok(Reply::ChatRoomList(ChatRoomListReply { rooms: Vec::new() }))
@@ -3134,7 +2564,7 @@ mod tests {
 
     #[tokio::test]
     async fn plan_and_role_requests_hand_back_what_the_daemon_answered() {
-        let (client, mut peer, _read) = wired("plan-requests").await;
+        let (client, generation, mut peer, _reader) = wired();
         let summary = PlanSummary {
             plan_id: "p1".to_owned(),
             title: "release".to_owned(),
@@ -3159,7 +2589,7 @@ mod tests {
         let (plans, sent) = tokio::join!(
             client.list_plans(),
             answer(
-                &client,
+                &generation,
                 &mut peer,
                 PendingKind::PlanList,
                 Ok(Reply::PlanList(vec![summary.clone()]))
@@ -3171,7 +2601,7 @@ mod tests {
         let (detail, sent) = tokio::join!(
             client.get_plan("p1".to_owned()),
             answer(
-                &client,
+                &generation,
                 &mut peer,
                 PendingKind::PlanDetail,
                 Ok(Reply::PlanDetail(plan.clone()))
@@ -3188,7 +2618,7 @@ mod tests {
         let (deleted, sent) = tokio::join!(
             client.delete_plan("p1".to_owned()),
             answer(
-                &client,
+                &generation,
                 &mut peer,
                 PendingKind::PlanDeleted,
                 Ok(Reply::PlanDeleted("p1".to_owned()))
@@ -3205,7 +2635,7 @@ mod tests {
         let (roles, sent) = tokio::join!(
             client.list_roles(),
             answer(
-                &client,
+                &generation,
                 &mut peer,
                 PendingKind::RoleList,
                 Ok(Reply::RoleList(RoleListReply {
@@ -3223,7 +2653,7 @@ mod tests {
 
     #[tokio::test]
     async fn profile_requests_hand_back_what_the_daemon_answered() {
-        let (client, mut peer, _read) = wired("profile-requests").await;
+        let (client, generation, mut peer, _reader) = wired();
         let alias = LaunchOptionAlias {
             alias: "fast".to_owned(),
             value: "model-fast".to_owned(),
@@ -3232,7 +2662,7 @@ mod tests {
         let (choices, sent) = tokio::join!(
             client.list_model_choices("shell".to_owned(), 5),
             answer(
-                &client,
+                &generation,
                 &mut peer,
                 PendingKind::ListModelChoices,
                 Ok(Reply::ModelChoicesRequested(ModelChoicesRequestedReply {
@@ -3253,7 +2683,7 @@ mod tests {
         let (saved, sent) = tokio::join!(
             client.save_model_aliases("shell".to_owned(), vec![alias.clone()]),
             answer(
-                &client,
+                &generation,
                 &mut peer,
                 PendingKind::SaveModelAliases,
                 Ok(Reply::ModelAliasesSaved(ModelAliasesSavedReply {
@@ -3274,7 +2704,7 @@ mod tests {
         let (listed, sent) = tokio::join!(
             client.list_mcp_registrations(6),
             answer(
-                &client,
+                &generation,
                 &mut peer,
                 PendingKind::ListMcpRegistrations,
                 Ok(Reply::McpRegistrationsListed(McpRegistrationsListedReply {
@@ -3290,7 +2720,7 @@ mod tests {
         let (requested, sent) = tokio::join!(
             client.run_mcp_registration("shell".to_owned(), McpRegistrationAction::Register, 7),
             answer(
-                &client,
+                &generation,
                 &mut peer,
                 PendingKind::RunMcpRegistration,
                 Ok(Reply::McpRegistrationRequested(
@@ -3315,7 +2745,7 @@ mod tests {
         let (enabled, sent) = tokio::join!(
             client.set_profile_enabled("shell".to_owned(), false),
             answer(
-                &client,
+                &generation,
                 &mut peer,
                 PendingKind::SetProfileEnabled,
                 Ok(Reply::ProfileEnabledSet(ProfileEnabledSetReply {
@@ -3336,7 +2766,7 @@ mod tests {
         let (detail, sent) = tokio::join!(
             client.get_profile_detail("shell".to_owned()),
             answer(
-                &client,
+                &generation,
                 &mut peer,
                 PendingKind::GetProfileDetail,
                 Ok(Reply::ProfileDetail(ProfileDetailReply {
@@ -3358,7 +2788,7 @@ mod tests {
         let (command_set, sent) = tokio::join!(
             client.set_profile_command("shell".to_owned(), Some(vec!["sh".to_owned()])),
             answer(
-                &client,
+                &generation,
                 &mut peer,
                 PendingKind::SetProfileCommand,
                 Ok(Reply::ProfileCommandSet(ProfileCommandSetReply {
@@ -3382,12 +2812,12 @@ mod tests {
 
     #[tokio::test]
     async fn approval_settings_requests_hand_back_what_the_daemon_answered() {
-        let (client, mut peer, _read) = wired("approval-settings").await;
+        let (client, generation, mut peer, _reader) = wired();
 
         let (settings, sent) = tokio::join!(
             client.get_approval_settings(),
             answer(
-                &client,
+                &generation,
                 &mut peer,
                 PendingKind::GetApprovalSettings,
                 Ok(Reply::ApprovalSettings(approval_settings(false)))
@@ -3402,7 +2832,7 @@ mod tests {
         let (settings, sent) = tokio::join!(
             client.set_auto_approve("close_window".to_owned(), true),
             answer(
-                &client,
+                &generation,
                 &mut peer,
                 PendingKind::SetAutoApprove,
                 Ok(Reply::AutoApproveSet(approval_settings(false)))
@@ -3423,7 +2853,7 @@ mod tests {
         let (settings, sent) = tokio::join!(
             client.set_plan_approval_required(true),
             answer(
-                &client,
+                &generation,
                 &mut peer,
                 PendingKind::SetPlanApprovalRequired,
                 Ok(Reply::PlanApprovalRequiredSet(approval_settings(true)))
@@ -3441,12 +2871,12 @@ mod tests {
 
     #[tokio::test]
     async fn copy_selection_hands_back_the_selected_text_or_none() {
-        let (client, mut peer, _read) = wired("copy-selection").await;
+        let (client, generation, mut peer, _reader) = wired();
 
         let (selected, sent) = tokio::join!(
             client.copy_selection(),
             answer(
-                &client,
+                &generation,
                 &mut peer,
                 PendingKind::CopySelection,
                 Ok(Reply::SelectionText(Some("picked".to_owned())))
@@ -3458,7 +2888,7 @@ mod tests {
         let (selected, _) = tokio::join!(
             client.copy_selection(),
             answer(
-                &client,
+                &generation,
                 &mut peer,
                 PendingKind::CopySelection,
                 Ok(Reply::SelectionText(None))
@@ -3469,14 +2899,14 @@ mod tests {
 
     #[tokio::test]
     async fn an_attached_client_reports_the_window_it_attached_to() {
-        let (client, mut peer, _read) = wired("attach").await;
+        let (client, generation, mut peer, _reader) = wired();
         let host = FakeHost::new("attach");
         let size = Some(TerminalSize { cols: 80, rows: 24 });
 
         let (attached, sent) = tokio::join!(
             client.request_attach(&host, "w1", size),
             answer(
-                &client,
+                &generation,
                 &mut peer,
                 PendingKind::Attach,
                 Ok(Reply::Attached(AttachResponse {
@@ -3496,183 +2926,71 @@ mod tests {
         assert_eq!(client.window_id().await.as_deref(), Some("w1"));
     }
 
+    // A request written before the disconnect may have been carried out, so
+    // it ends as lost rather than as never sent.
     #[tokio::test]
     async fn disconnect_releases_the_connection_and_fails_the_request_in_flight() {
-        let (client, mut peer, _read) = wired("disconnect").await;
+        use crate::host::fake::{Reaction, ScriptedDaemon};
+        use tokio::sync::Notify;
+
+        let reached = Arc::new(Notify::new());
+        let daemon = ScriptedDaemon::new({
+            let reached = Arc::clone(&reached);
+            move |request| match request {
+                ClientMessage::ListWindows => Reaction::replies_after(
+                    Arc::clone(&reached),
+                    Arc::new(Notify::new()),
+                    Vec::new(),
+                ),
+                _ => None,
+            }
+        });
+        let host = FakeHost::served_by("disconnect", &daemon).await;
+        let client = Arc::new(IpcClient::new());
+        client.connect(&host).await.expect("connect");
         assert!(client.is_connected().await);
 
         let (listed, ()) = tokio::join!(client.list_windows(), async {
-            yagura_test_support::ipc::reply_within("request", next_request(&mut peer)).await;
+            yagura_test_support::ipc::reply_within("the held list", reached.notified()).await;
             client.disconnect().await;
         });
         assert!(
-            matches!(listed, Err(IpcError::NotConnected)),
+            matches!(listed, Err(IpcError::ConnectionLost)),
             "got {listed:?}"
         );
         assert!(!client.is_connected().await);
     }
 
-    /// Runs `ensure_protocol_revision` against a daemon that settles the probe
-    /// with `outcome`.
-    async fn probe_settled_with(tag: &str, outcome: Result<Reply, IpcError>) -> IpcClient {
-        let (client, mut peer, _read) = wired_unsettled(tag).await;
-        let host = FakeHost::new(tag);
-        let ((), sent) = tokio::join!(
-            client.ensure_protocol_revision(&host),
-            answer(
-                &client,
-                &mut peer,
-                PendingKind::GetProtocolRevision,
-                outcome
-            )
-        );
-        assert_eq!(sent, ClientMessage::GetProtocolRevision);
-        client
+    #[test]
+    fn the_revision_the_daemon_answers_is_settled_for_the_current_generation() {
+        let outcome = revision_probe_outcome(&Ok(Reply::ProtocolRevision {
+            revision: 9,
+            boot: None,
+        }));
+        assert_eq!(outcome.map(|(revision, _)| revision), Some(9));
     }
 
-    #[tokio::test]
-    async fn health_settles_an_unsettled_revision_before_asking_instead_of_answering_empty() {
-        let (client, mut peer, _read) = wired_unsettled("health-unsettled").await;
-        let host = FakeHost::new("health-unsettled");
-        let (health, sent) = tokio::join!(client.get_daemon_health(&host), async {
-            let probe = answer(
-                &client,
-                &mut peer,
-                PendingKind::GetProtocolRevision,
-                Ok(Reply::ProtocolRevision {
-                    revision: yagura_protocol::PROTOCOL_REVISION,
-                    boot: None,
-                }),
-            )
-            .await;
-            assert_eq!(probe, ClientMessage::GetProtocolRevision);
-            answer(
-                &client,
-                &mut peer,
-                PendingKind::GetDaemonHealth,
-                Ok(Reply::DaemonHealth(DaemonHealthReply {
-                    problems: vec![yagura_protocol::DaemonProblem {
-                        kind: yagura_protocol::DaemonProblemKind::WindowsUnavailable,
-                        detail: "conpty.dll cannot be read".to_owned(),
-                    }],
-                })),
-            )
-            .await
-        });
-        assert_eq!(sent, ClientMessage::GetDaemonHealth);
+    #[test]
+    fn a_daemon_that_does_not_know_the_probe_is_credited_with_the_baseline() {
+        let outcome = revision_probe_outcome(&Err(rejected(ERROR_CODE_UNKNOWN_TYPE)));
         assert_eq!(
-            health.expect("get_daemon_health").problems.len(),
-            1,
-            "a connection still settling its revision must ask, not report no problems"
+            outcome.map(|(revision, _)| revision),
+            Some(PROTOCOL_REVISION_BASELINE)
         );
     }
 
-    #[tokio::test]
-    async fn the_revision_the_daemon_answers_is_settled_for_the_current_generation() {
-        let client = probe_settled_with(
-            "probe-answered",
-            Ok(Reply::ProtocolRevision {
-                revision: 9,
-                boot: None,
-            }),
-        )
-        .await;
-        assert_eq!(client.protocol_revision(), Some(9));
-    }
-
-    #[tokio::test]
-    async fn a_daemon_that_does_not_know_the_probe_is_credited_with_the_baseline() {
-        let client =
-            probe_settled_with("probe-unknown-type", Err(rejected(ERROR_CODE_UNKNOWN_TYPE))).await;
-        assert_eq!(client.protocol_revision(), Some(PROTOCOL_REVISION_BASELINE));
-    }
-
-    #[tokio::test]
-    async fn a_probe_refused_for_another_reason_settles_nothing() {
-        let client = probe_settled_with("probe-internal", Err(rejected(ERROR_CODE_INTERNAL))).await;
-        assert_eq!(client.protocol_revision(), None);
-        assert_eq!(client.protocol_revision_settle_due(), Some(0));
-    }
-
     #[test]
-    fn a_revision_probe_is_owed_once_per_generation() {
-        let client = IpcClient::new();
-        assert_eq!(client.protocol_revision_settle_due(), Some(0));
-        client.settled.store(PROTOCOL_REVISION_BASELINE, 0);
-        assert_eq!(client.protocol_revision_settle_due(), None);
-        client.generation.fetch_add(1, Ordering::SeqCst);
-        assert_eq!(client.protocol_revision_settle_due(), Some(1));
-    }
-
-    #[test]
-    fn only_the_current_generations_settled_revision_is_reported() {
-        let client = IpcClient::new();
-        assert_eq!(client.protocol_revision(), None);
-        client.settled.store(9, 0);
-        assert_eq!(client.protocol_revision(), Some(9));
-        client.generation.fetch_add(1, Ordering::SeqCst);
-        assert_eq!(client.protocol_revision(), None);
+    fn a_probe_refused_for_another_reason_settles_nothing() {
+        let outcome = revision_probe_outcome(&Err(rejected(ERROR_CODE_INTERNAL)));
+        assert_eq!(outcome.map(|(revision, _)| revision), None);
     }
 
     #[tokio::test]
     async fn a_refused_frame_names_the_request_it_refused() {
-        let (outcome, _) =
-            send_and_collect(&frame_gated_message(), &wire::SettledRevision::new()).await;
+        let (outcome, _) = send_and_collect(&frame_gated_message(), None).await;
         assert!(
             matches!(&outcome, Err(IpcError::Unsupported { request_type }) if request_type == "set_visible"),
             "got {outcome:?}"
         );
-    }
-
-    async fn listening(
-        tag: &str,
-    ) -> (PlatformIpc, <PlatformIpc as IpcTransport>::Listener, String) {
-        let ipc = PlatformIpc::default();
-        let endpoint = yagura_test_support::ipc::unique_endpoint_name(ENDPOINT_PREFIX, tag);
-        let security = ipc.endpoint_security().expect("endpoint security");
-        let listener = ipc.bind(&endpoint, security).await.expect("bind");
-        (ipc, listener, endpoint)
-    }
-
-    #[tokio::test]
-    async fn every_connect_form_reaches_a_listening_endpoint() {
-        let (ipc, mut listener, endpoint) = listening("connect-once").await;
-        let (accepted, reached) = tokio::join!(ipc.accept(&mut listener), connect_once(&endpoint));
-        assert!(accepted.is_ok() && reached.is_some(), "connect_once");
-
-        let (ipc, mut listener, endpoint) = listening("connect-limited").await;
-        let (accepted, reached) = tokio::join!(
-            ipc.accept(&mut listener),
-            connect_retrying_with_limit(&endpoint, 1)
-        );
-        assert!(
-            accepted.is_ok() && reached.is_some(),
-            "connect_retrying_with_limit"
-        );
-
-        let (ipc, mut listener, endpoint) = listening("connect-retrying").await;
-        let (accepted, reached) =
-            tokio::join!(ipc.accept(&mut listener), connect_retrying(&endpoint));
-        assert!(accepted.is_ok() && reached.is_some(), "connect_retrying");
-    }
-
-    // The paused clock moves only when the retry loop sleeps, and only to that
-    // sleep's deadline, so the elapsed time counts the sleeps exactly: one
-    // interval between each pair of attempts and none before the first.
-    #[tokio::test(start_paused = true)]
-    async fn a_refused_endpoint_is_retried_an_interval_apart() {
-        let endpoint = yagura_test_support::ipc::unique_endpoint_name(ENDPOINT_PREFIX, "nobody");
-
-        let started = tokio::time::Instant::now();
-        assert!(connect_retrying_with_limit(&endpoint, 1).await.is_none());
-        assert_eq!(
-            started.elapsed(),
-            std::time::Duration::ZERO,
-            "a single attempt waits"
-        );
-
-        let started = tokio::time::Instant::now();
-        assert!(connect_retrying_with_limit(&endpoint, 3).await.is_none());
-        assert_eq!(started.elapsed(), CONNECT_RETRY_INTERVAL * 2);
     }
 }

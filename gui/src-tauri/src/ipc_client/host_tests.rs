@@ -7,7 +7,7 @@ use serde_json::json;
 use tokio::sync::Notify;
 use yagura_protocol::{
     ApprovalRequester, ApprovalRequesterKind, ApprovalTarget, DaemonMessage, MAX_PASTE_BYTES,
-    StatusBoot, WindowStatus,
+    Palette, StatusBoot, WindowStatus,
 };
 use yagura_test_support::ipc::reply_within;
 
@@ -15,8 +15,9 @@ use super::*;
 use crate::connection_pool::ConnectionPool;
 use crate::events::{EVENT_DAEMON_CONNECTED, EVENT_WINDOW_LINK};
 use crate::host::fake::{
-    FakeHost, Link, Reaction, RecordedEvent, ScriptedDaemon, announced, attach_pane, attached,
-    brief, connected, error_frame, probes_answered_in, protocol_revision, sample_palette, text,
+    FakeHost, Link, Reaction, RecordedEvent, ScriptedDaemon, SentFrame, announced, attach_pane,
+    attached, brief, connected, error_frame, probes_answered_in, protocol_revision, sample_palette,
+    text,
 };
 
 const BOOT_A: StatusBoot = StatusBoot { origin: 7, seq: 1 };
@@ -60,6 +61,15 @@ fn connection(received: &[ClientMessage], nth: usize) -> &[ClientMessage] {
     let start = *probes.get(nth).expect("that connection was made");
     let end = probes.get(nth + 1).copied().unwrap_or(received.len());
     &received[start..end]
+}
+
+/// How many revision probes, and so how many connections, the daemon heard.
+fn probes(daemon: &ScriptedDaemon) -> usize {
+    daemon
+        .received()
+        .iter()
+        .filter(|request| matches!(request, ClientMessage::GetProtocolRevision))
+        .count()
 }
 
 /// The next link report about `window_id`, with every event emitted before
@@ -112,13 +122,66 @@ fn refused_with(outcome: &Result<Vec<ApprovalRequest>, IpcError>, wanted: &str) 
     matches!(outcome, Err(IpcError::Rejected { code, .. }) if code == wanted)
 }
 
+/// Default palettes whose app palette is all `shade`, so two values differ.
+fn default_palettes(shade: u8) -> DefaultPalettes {
+    let color: yagura_protocol::Rgb = [shade, shade, shade];
+    DefaultPalettes {
+        app: Palette {
+            foreground: color,
+            background: color,
+            cursor: color,
+            ansi: vec![color; 16],
+        },
+        vendors: Default::default(),
+    }
+}
+
 #[tokio::test]
 async fn connecting_a_control_client_registers_it_and_settles_the_revision() {
-    let daemon = ScriptedDaemon::quiet();
+    let reached = Arc::new(Notify::new());
+    let gate = Arc::new(Notify::new());
+    let daemon = ScriptedDaemon::new({
+        let reached = Arc::clone(&reached);
+        let gate = Arc::clone(&gate);
+        move |request| match request {
+            ClientMessage::RegisterApprover => Reaction::replies_after(
+                Arc::clone(&reached),
+                Arc::clone(&gate),
+                vec![DaemonMessage::ApproverRegistered {
+                    pending: Vec::new(),
+                }],
+            ),
+            _ => None,
+        }
+    });
     let host = FakeHost::served_by("connect", &daemon).await;
     let client = Arc::new(IpcClient::new());
+    let connecting = tokio::spawn({
+        let client = Arc::clone(&client);
+        let host = host.clone();
+        async move { client.connect(&host).await }
+    });
+    let shown = ClientMessage::SetVisible { visible: true };
 
-    client.connect(&host).await.expect("connect");
+    // Until the generation opens, a request and a send are refused unwritten,
+    // and the connect is not answered.
+    reply_within("the held registration", reached.notified()).await;
+    let listed = reply_within("a request while opening", client.list_windows()).await;
+    let sent = reply_within("a send while opening", client.send(&shown)).await;
+    assert!(
+        matches!(listed, Err(IpcError::NotConnected)),
+        "got {listed:?}"
+    );
+    assert!(matches!(sent, Err(IpcError::NotConnected)), "got {sent:?}");
+    assert!(
+        !connecting.is_finished(),
+        "a connect is answered once the generation opens"
+    );
+    gate.notify_one();
+    reply_within("the connect", connecting)
+        .await
+        .expect("task")
+        .expect("connect");
 
     assert!(client.is_connected().await);
     assert!(client.is_approver_registered());
@@ -129,12 +192,21 @@ async fn connecting_a_control_client_registers_it_and_settles_the_revision() {
     assert_eq!(
         daemon.received(),
         [
-            ClientMessage::RegisterApprover,
-            ClientMessage::GetProtocolRevision
+            ClientMessage::GetProtocolRevision,
+            ClientMessage::RegisterApprover
         ]
     );
     assert_eq!(host.spawn_count(), 0);
     assert_eq!(announced(&host.take_events()), [connected(None, None)]);
+    client.send(&shown).await.expect("a send once open");
+    assert_eq!(
+        daemon.recorded_at_least(3).await,
+        [
+            ClientMessage::GetProtocolRevision,
+            ClientMessage::RegisterApprover,
+            shown
+        ]
+    );
 }
 
 #[tokio::test]
@@ -163,21 +235,40 @@ async fn a_daemon_that_is_not_running_is_started_by_connecting_and_a_failed_star
         "got {outcome:?}"
     );
     assert_eq!(host.spawn_count(), 1);
+
+    // Each failure reaches the caller as itself: its text is what the
+    // WebView shows.
+    host.fails_spawns_with(|| IpcError::DaemonNotFound);
+    let outcome = client.connect(&host).await;
+    assert!(
+        matches!(outcome, Err(IpcError::DaemonNotFound)),
+        "got {outcome:?}"
+    );
+    assert_eq!(host.spawn_count(), 2);
+
+    host.fails_endpoint_with(|| {
+        IpcError::EndpointName(yagura_os::OsError::Security("no user id".to_owned()))
+    });
+    let outcome = client.connect(&host).await;
+    assert!(
+        matches!(outcome, Err(IpcError::EndpointName(_))),
+        "got {outcome:?}"
+    );
+    assert_eq!(host.spawn_count(), 2, "no endpoint, no start");
 }
 
 #[tokio::test]
 async fn connecting_reaches_the_daemon_it_started() {
-    let answer = Arc::new(std::sync::Mutex::new(protocol_revision(None)));
-    let daemon = ScriptedDaemon::new({
-        let answer = Arc::clone(&answer);
-        move |request| match request {
-            ClientMessage::GetProtocolRevision => {
-                Reaction::reply(answer.lock().expect("probe answer").clone())
-            }
-            _ => None,
-        }
+    let probe_count = AtomicUsize::new(0);
+    let daemon = ScriptedDaemon::new(move |request| match request {
+        ClientMessage::GetProtocolRevision => match probe_count.fetch_add(1, Ordering::SeqCst) {
+            // The third connection's probe fails, so that generation never opens.
+            2 => Reaction::reply(error_frame(ERROR_CODE_INTERNAL)),
+            0 | 1 | 3 => Reaction::reply(protocol_revision(None)),
+            _ => Reaction::reply(protocol_revision(Some(BOOT_B))),
+        },
+        _ => None,
     });
-    let answer_with = |message| *answer.lock().expect("probe answer") = message;
     let host = FakeHost::new("spawned");
     host.starts_daemon_with_warning(&daemon, WEAK_START);
     let client = Arc::new(IpcClient::new());
@@ -194,19 +285,16 @@ async fn connecting_reaches_the_daemon_it_started() {
     daemon.hang_up();
     assert_eq!(host.next_event(EVENT_DAEMON_CONNECTED).await, weak);
 
-    // The reconnect's own probe fails; two callers then settle that
-    // generation together, and it is announced once.
-    answer_with(error_frame(ERROR_CODE_INTERNAL));
+    // A generation that cannot open announces nothing; the next one that
+    // opens announces once.
     daemon.hang_up();
-    daemon.received_at_least(6).await;
-    answer_with(protocol_revision(None));
-    tokio::join!(
-        client.ensure_protocol_revision(&host),
-        client.ensure_protocol_revision(&host)
-    );
+    daemon.received_at_least(5).await;
+    client
+        .connect(&host)
+        .await
+        .expect("the next generation opens");
     assert_eq!(announced(&host.take_events()), [weak]);
 
-    answer_with(protocol_revision(Some(BOOT_B)));
     daemon.hang_up();
     assert_eq!(
         host.next_event(EVENT_DAEMON_CONNECTED).await,
@@ -237,6 +325,191 @@ async fn a_connection_the_daemon_hangs_up_is_reported_as_disconnected_when_it_ca
     );
     assert!(!client.is_connected().await);
     assert_eq!(client.window_id().await, None);
+    assert_eq!(client.protocol_revision(), None);
+}
+
+#[tokio::test]
+async fn a_request_held_when_its_generation_ends_ends_as_lost_however_the_generation_ends() {
+    // The daemon hangs up: the reconnect opens a generation of its own.
+    {
+        let reached = Arc::new(Notify::new());
+        let lists = AtomicUsize::new(0);
+        let daemon = ScriptedDaemon::new({
+            let reached = Arc::clone(&reached);
+            move |request| match request {
+                ClientMessage::ListWindows => match lists.fetch_add(1, Ordering::SeqCst) {
+                    0 => Reaction::replies_after(
+                        Arc::clone(&reached),
+                        Arc::new(Notify::new()),
+                        Vec::new(),
+                    ),
+                    _ => Reaction::reply(DaemonMessage::WindowList {
+                        windows: Vec::new(),
+                    }),
+                },
+                _ => None,
+            }
+        });
+        let host = FakeHost::served_by("lost-hang-up", &daemon).await;
+        let client = Arc::new(IpcClient::new());
+        client.connect(&host).await.expect("connect");
+        let held = tokio::spawn({
+            let client = Arc::clone(&client);
+            async move { client.list_windows().await }
+        });
+        reply_within("the held list", reached.notified()).await;
+
+        daemon.hang_up();
+
+        let outcome = reply_within("the held list", held).await.expect("task");
+        assert!(
+            matches!(outcome, Err(IpcError::ConnectionLost)),
+            "hang-up: got {outcome:?}"
+        );
+        client
+            .connect_existing(&host)
+            .await
+            .expect("the reconnect opens");
+        assert_eq!(
+            client.list_windows().await.expect("the next request"),
+            Vec::new()
+        );
+        assert_eq!(probes(&daemon), 2, "hang-up: one reconnect");
+    }
+
+    // A frame under the request's key that reads as no answer: the daemon
+    // broke the contract, so the generation is lost the same way.
+    {
+        let lists = AtomicUsize::new(0);
+        let daemon = ScriptedDaemon::new(move |request| match request {
+            ClientMessage::ListWindows => match lists.fetch_add(1, Ordering::SeqCst) {
+                0 => Reaction::sends(vec![SentFrame::UnreadableAnswer("window_list")]),
+                _ => Reaction::reply(DaemonMessage::WindowList {
+                    windows: Vec::new(),
+                }),
+            },
+            _ => None,
+        });
+        let host = FakeHost::served_by("lost-unreadable", &daemon).await;
+        let client = Arc::new(IpcClient::new());
+        client.connect(&host).await.expect("connect");
+
+        let outcome = reply_within("the unreadable answer", client.list_windows()).await;
+
+        assert!(
+            matches!(outcome, Err(IpcError::ConnectionLost)),
+            "unreadable answer: got {outcome:?}"
+        );
+        client
+            .connect_existing(&host)
+            .await
+            .expect("the reconnect opens");
+        assert_eq!(
+            client.list_windows().await.expect("the next request"),
+            Vec::new()
+        );
+        assert_eq!(probes(&daemon), 2, "unreadable answer: one reconnect");
+    }
+
+    // Another GUI takes the daemon over: nothing reconnects until asked.
+    {
+        let reached = Arc::new(Notify::new());
+        let probe_count = AtomicUsize::new(0);
+        let lists = AtomicUsize::new(0);
+        let daemon = ScriptedDaemon::new({
+            let reached = Arc::clone(&reached);
+            move |request| match request {
+                // The first connection made after the takeover cannot open,
+                // so whichever makes it fails: a reconnect started by the
+                // takeover itself would take that failure, and the caller's
+                // own connection would open.
+                ClientMessage::GetProtocolRevision => {
+                    match probe_count.fetch_add(1, Ordering::SeqCst) {
+                        1 => Reaction::reply(error_frame(ERROR_CODE_INTERNAL)),
+                        _ => Reaction::reply(protocol_revision(None)),
+                    }
+                }
+                ClientMessage::ListWindows => match lists.fetch_add(1, Ordering::SeqCst) {
+                    0 => Reaction::replies_after(
+                        Arc::clone(&reached),
+                        Arc::new(Notify::new()),
+                        Vec::new(),
+                    ),
+                    _ => Reaction::reply(DaemonMessage::WindowList {
+                        windows: Vec::new(),
+                    }),
+                },
+                _ => None,
+            }
+        });
+        let host = FakeHost::served_by("lost-superseded", &daemon).await;
+        let client = Arc::new(IpcClient::new());
+        client.connect(&host).await.expect("connect");
+        let held = tokio::spawn({
+            let client = Arc::clone(&client);
+            async move { client.list_windows().await }
+        });
+        reply_within("the held list", reached.notified()).await;
+
+        daemon.supersede();
+
+        let outcome = reply_within("the held list", held).await.expect("task");
+        assert!(
+            matches!(outcome, Err(IpcError::ConnectionLost)),
+            "superseded: got {outcome:?}"
+        );
+        assert_eq!(daemon.received().len(), 3, "superseded: nothing more yet");
+        let first = client.connect(&host).await;
+        assert!(
+            matches!(first, Err(IpcError::NotConnected)),
+            "the first connection after the takeover is the caller's: got {first:?}"
+        );
+        client.connect(&host).await.expect("asked again, it opens");
+        assert_eq!(
+            client.list_windows().await.expect("the next request"),
+            Vec::new()
+        );
+        assert_eq!(probes(&daemon), 3, "superseded: only what was asked for");
+        assert_eq!(host.spawn_count(), 0);
+    }
+
+    // The pool lets the window go: nothing opens again.
+    {
+        let reached = Arc::new(Notify::new());
+        let daemon = ScriptedDaemon::new({
+            let reached = Arc::clone(&reached);
+            move |request| match request {
+                ClientMessage::AttachView { .. } => Reaction::reply(attached(false)),
+                ClientMessage::CopySelection => Reaction::replies_after(
+                    Arc::clone(&reached),
+                    Arc::new(Notify::new()),
+                    Vec::new(),
+                ),
+                _ => None,
+            }
+        });
+        let (host, _pool, client) = attached_window(&daemon, "lost-retired").await;
+        assert_eq!(host.next_link("w1").await.state, "attached");
+        let held = tokio::spawn({
+            let client = Arc::clone(&client);
+            async move { client.copy_selection().await }
+        });
+        reply_within("the held copy", reached.notified()).await;
+
+        client.disconnect().await;
+
+        let outcome = reply_within("the held copy", held).await.expect("task");
+        assert!(
+            matches!(outcome, Err(IpcError::ConnectionLost)),
+            "retired: got {outcome:?}"
+        );
+        let again = client.attach_window(&host, "w1", None).await;
+        assert!(
+            matches!(again, Err(IpcError::NotConnected)),
+            "retired: got {again:?}"
+        );
+        assert_eq!(probes(&daemon), 1, "retired: no other connection");
+    }
 }
 
 #[tokio::test]
@@ -344,36 +617,17 @@ async fn reattaching_to_a_child_that_exited_without_a_code_reports_the_code_as_u
 }
 
 #[tokio::test]
-async fn a_stale_readers_disconnect_leaves_the_current_connection_alone() {
-    let daemon = attaching_daemon();
-    let (host, _pool, client) = attached_window(&daemon, "stale").await;
-    assert_eq!(host.next_link("w1").await.state, "attached");
-    let stale = client.generation.load(Ordering::SeqCst) - 1;
-
-    client.on_disconnect(&host, false, stale).await;
-
-    assert!(client.is_connected().await);
-    assert_eq!(client.window_id().await.as_deref(), Some("w1"));
-    assert!(host.take_events().is_empty());
-}
-
-#[tokio::test]
 async fn a_superseded_window_is_reported_and_never_reconnects() {
     let daemon = attaching_daemon();
     let (host, _pool, client) = attached_window(&daemon, "superseded").await;
     assert_eq!(host.next_link("w1").await.state, "attached");
-    let generation = client.generation.load(Ordering::SeqCst);
 
-    client.on_disconnect(&host, true, generation).await;
+    daemon.supersede();
 
     assert_eq!(host.next_link("w1").await.state, "superseded");
     assert!(!client.is_connected().await);
     assert_eq!(
-        daemon
-            .received()
-            .iter()
-            .filter(|request| matches!(request, ClientMessage::GetProtocolRevision))
-            .count(),
+        probes(&daemon),
         1,
         "a reconnect would have made a second connection ask again"
     );
@@ -580,11 +834,14 @@ async fn each_registration_the_daemon_accepts_hands_the_pending_requests_to_the_
     assert_eq!(client.sync_approvals(&host).await.expect("sync"), pending);
     assert!(host.take_events().is_empty(), "a pull emits nothing");
 
-    // The second connection reaches the same boot; the pull is a round trip
-    // behind its revision probe, so the probe has settled before the next
-    // hang-up.
+    // The second connection reaches the same boot; the pull waits for that
+    // connection to open, so its probe has settled before the next hang-up.
     daemon.hang_up();
     daemon.received_at_least(5).await;
+    client
+        .connect_existing(&host)
+        .await
+        .expect("the second connection opens");
     assert_eq!(client.sync_approvals(&host).await.expect("sync"), pending);
     daemon.hang_up();
     let through_third = host.events_through(EVENT_DAEMON_CONNECTED).await;
@@ -610,6 +867,11 @@ async fn a_refused_registration_is_reported_once_per_generation() {
     });
     let host = FakeHost::served_by("refused", &daemon).await;
     let client = Arc::new(IpcClient::new());
+    let palettes = default_palettes(1);
+    client
+        .set_default_palettes(&host, palettes.clone())
+        .await
+        .expect("palettes are remembered while not connected");
 
     client.connect(&host).await.expect("connect");
     let first = client.sync_approvals(&host).await;
@@ -617,15 +879,36 @@ async fn a_refused_registration_is_reported_once_per_generation() {
 
     assert!(refused_with(&first, "auth_failed"), "got {first:?}");
     assert!(refused_with(&second, "auth_failed"), "got {second:?}");
-    let refusals: Vec<_> = host
-        .take_events()
-        .into_iter()
+    let events = host.take_events();
+    let refusals: Vec<_> = events
+        .iter()
         .filter(|event| event.name == EVENT_APPROVAL_REGISTRATION_REFUSED)
         .collect();
     assert_eq!(refusals.len(), 1);
     assert_eq!(refusals[0].payload, json!({}));
-    assert_eq!(client.approver_registration_due(), None);
     assert!(!client.is_approver_registered());
+    // A refused generation still opens: the refusal comes first, then the
+    // start is announced and the palettes are sent again.
+    let told: Vec<&str> = events
+        .iter()
+        .map(|event| event.name.as_str())
+        .filter(|name| [EVENT_APPROVAL_REGISTRATION_REFUSED, EVENT_DAEMON_CONNECTED].contains(name))
+        .collect();
+    assert_eq!(
+        told,
+        [EVENT_APPROVAL_REGISTRATION_REFUSED, EVENT_DAEMON_CONNECTED]
+    );
+    assert_eq!(announced(&events), [connected(None, None)]);
+    assert_eq!(
+        daemon.received(),
+        [
+            ClientMessage::GetProtocolRevision,
+            ClientMessage::RegisterApprover,
+            ClientMessage::SetDefaultPalettes(palettes),
+            ClientMessage::RegisterApprover,
+            ClientMessage::RegisterApprover,
+        ]
+    );
 }
 
 #[tokio::test]
@@ -637,68 +920,121 @@ async fn a_registration_refused_for_another_reason_stays_owed_and_is_not_reporte
     let host = FakeHost::served_by("internal", &daemon).await;
     let client = Arc::new(IpcClient::new());
 
-    client.connect(&host).await.expect("connect");
-    let pulled = client.sync_approvals(&host).await;
+    let outcome = client.connect(&host).await;
 
-    assert!(refused_with(&pulled, ERROR_CODE_INTERNAL), "got {pulled:?}");
+    assert!(
+        matches!(outcome, Err(IpcError::NotConnected)),
+        "a generation whose registration fails does not open: got {outcome:?}"
+    );
     let reported: Vec<String> = host
         .take_events()
         .into_iter()
         .map(|event| event.name)
         .collect();
-    assert_eq!(
-        reported,
-        [EVENT_DAEMON_CONNECTED],
-        "the refusal reports nothing of its own"
+    assert!(
+        reported.is_empty(),
+        "the refusal reports nothing of its own: {reported:?}"
     );
-    assert_eq!(client.approver_registration_due(), Some(1));
+    assert!(!client.is_approver_registered());
+    assert!(
+        client.is_connected().await,
+        "a daemon that answered is still seen as running"
+    );
 }
 
 #[tokio::test]
 async fn a_spawned_connection_whose_revision_settles_later_announces_its_boot_and_warning_and_sends_the_palettes_then()
  {
-    let probes = AtomicUsize::new(0);
-    let daemon = ScriptedDaemon::new(move |request| match request {
-        ClientMessage::GetProtocolRevision => match probes.fetch_add(1, Ordering::SeqCst) {
-            0 => Reaction::reply(error_frame(ERROR_CODE_INTERNAL)),
-            _ => Reaction::reply(protocol_revision(Some(BOOT_A))),
-        },
-        _ => None,
+    let reached = Arc::new(Notify::new());
+    let gate = Arc::new(Notify::new());
+    let probe_count = AtomicUsize::new(0);
+    let daemon = ScriptedDaemon::new({
+        let reached = Arc::clone(&reached);
+        let gate = Arc::clone(&gate);
+        move |request| match request {
+            ClientMessage::GetProtocolRevision => {
+                match probe_count.fetch_add(1, Ordering::SeqCst) {
+                    0 => Reaction::reply(error_frame(ERROR_CODE_INTERNAL)),
+                    1 => Reaction::reply(protocol_revision(Some(BOOT_A)))
+                        .map(|reaction| reaction.held(Arc::clone(&reached), Arc::clone(&gate))),
+                    _ => Reaction::reply(protocol_revision(Some(BOOT_A))),
+                }
+            }
+            ClientMessage::CopySelection => {
+                Reaction::reply(DaemonMessage::SelectionText { text: None })
+            }
+            _ => None,
+        }
     });
     let host = FakeHost::new("unsettled");
     host.starts_daemon_with_warning(&daemon, WEAK_START);
     let client = Arc::new(IpcClient::new());
-    let palettes = DefaultPalettes {
-        app: sample_palette(),
-        vendors: Default::default(),
-    };
     client
-        .set_default_palettes(&host, palettes.clone())
+        .set_default_palettes(&host, default_palettes(1))
         .await
         .expect("palettes are remembered while not connected");
 
-    client.connect(&host).await.expect("connect");
+    let refused = client.connect(&host).await;
 
+    assert!(
+        matches!(refused, Err(IpcError::NotConnected)),
+        "a generation whose revision probe fails does not open: got {refused:?}"
+    );
     assert_eq!(client.protocol_revision(), None);
     assert!(announced(&host.take_events()).is_empty());
 
-    client.ensure_protocol_revision(&host).await;
+    // Palettes asked for while the next generation opens go out as it opens,
+    // and its revision is probed once.
+    let opening = tokio::spawn({
+        let client = Arc::clone(&client);
+        let host = host.clone();
+        async move { client.connect(&host).await }
+    });
+    reply_within("the second probe", reached.notified()).await;
+    reply_within(
+        "palettes while opening",
+        client.set_default_palettes(&host, default_palettes(2)),
+    )
+    .await
+    .expect("palettes are remembered while opening");
+    gate.notify_one();
+    reply_within("the second connect", opening)
+        .await
+        .expect("task")
+        .expect("connect");
     assert_eq!(
         announced(&host.take_events()),
         [connected(Some(BOOT_A), Some(WEAK_START))]
     );
-    client.ensure_protocol_revision(&host).await;
+    client.connect(&host).await.expect("connected");
     assert!(
         announced(&host.take_events()).is_empty(),
         "a generation is announced once"
     );
+
+    // Once open, a new value goes out on the same generation, and the same
+    // value again does not.
+    client
+        .set_default_palettes(&host, default_palettes(3))
+        .await
+        .expect("palettes once open");
+    client
+        .set_default_palettes(&host, default_palettes(3))
+        .await
+        .expect("the same palettes again");
+    client
+        .copy_selection()
+        .await
+        .expect("a round trip behind the palettes");
     assert_eq!(
-        daemon.received_at_least(4).await,
+        daemon.received(),
         [
+            ClientMessage::GetProtocolRevision,
+            ClientMessage::GetProtocolRevision,
             ClientMessage::RegisterApprover,
-            ClientMessage::GetProtocolRevision,
-            ClientMessage::GetProtocolRevision,
-            ClientMessage::SetDefaultPalettes(palettes),
+            ClientMessage::SetDefaultPalettes(default_palettes(2)),
+            ClientMessage::SetDefaultPalettes(default_palettes(3)),
+            ClientMessage::CopySelection,
         ]
     );
     assert_eq!(host.spawn_count(), 1);

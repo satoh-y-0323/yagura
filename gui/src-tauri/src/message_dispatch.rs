@@ -1,5 +1,5 @@
 //! Turns daemon messages into a completed request on the
-//! [`crate::ipc_client::IpcClient`] awaiting it, a Tauri event delivered to
+//! [`crate::ipc_client::Generation`] awaiting it, a Tauri event delivered to
 //! the WebView, or (frames) a part queued in the [`crate::frame_mailbox::FrameMailbox`].
 //!
 //! Separated from the connection machinery itself so the daemon protocol's
@@ -8,10 +8,10 @@
 
 use std::sync::Arc;
 
-use tokio::io::{AsyncReadExt, ReadHalf};
-use tokio::sync::oneshot;
+use tokio::io::AsyncReadExt;
 use yagura_protocol::{
-    ApprovalSettingsInfo, DaemonMessage, Frame, PlaybookState, decode_daemon_message,
+    ApprovalSettingsInfo, DaemonMessage, Frame, FrameLabel, PlaybookState,
+    decode_correlated_daemon_message, read_frame_label,
 };
 
 use crate::commands::{
@@ -33,8 +33,12 @@ use crate::events::{
     PlanChangedPayload, StatusPayload, TicketChangedPayload,
 };
 use crate::host::GuiHost;
+// The host tests drive what the reader dispatches through a client.
+#[cfg(test)]
+use crate::ipc_client::IpcClient;
 use crate::ipc_client::{
-    Connection, ERROR_CODE_INTERNAL, ERROR_CODE_SUPERSEDED, IpcClient, IpcError, PendingKind, Reply,
+    BoxedRead, ERROR_CODE_INTERNAL, ERROR_CODE_SUPERSEDED, EndKind, Generation, Interrupt,
+    IpcError, PendingKind, ReaderLink, Reply, Settled, answers_carry_correlation_ids,
 };
 
 /// Window-scoped event to be emitted to the WebView. Separated from dispatch
@@ -64,140 +68,238 @@ fn window_event_for(
     }
 }
 
-/// Reads frames off `reader` until the connection ends or `cancel` fires,
-/// dispatching each decoded message to the WebView or to the pending request
-/// it answers.
+/// A frame body as a message and the correlation id it carries, or, when
+/// this build cannot read it as one, what the body says about itself.
+fn read_body(body: &[u8]) -> Result<(Option<u64>, DaemonMessage), FrameLabel> {
+    decode_correlated_daemon_message(body).map_err(|_| read_frame_label(body))
+}
+
+/// Reads frames off `reader` until the connection ends or the owner ends the
+/// generation, dispatching each message to the WebView or to the request it
+/// answers, and tells the owner how the generation ended.
+///
+/// Told to stop by a write that failed in a way that does not say the daemon
+/// closed, it first takes in the bytes already delivered to this end, so a
+/// frame the daemon sent before it closed still decides how the connection
+/// ended; with none deciding, it ends as [`EndKind::WriteFailed`].
 pub(crate) async fn read_loop<H: GuiHost>(
-    mut reader: ReadHalf<Connection>,
+    mut reader: BoxedRead,
     app: H,
-    client: Arc<IpcClient>,
-    generation: u64,
-    mut cancel: oneshot::Receiver<()>,
+    generation: Arc<Generation>,
+    mut link: ReaderLink,
 ) {
     let mut buffer: Vec<u8> = Vec::new();
     let mut chunk = [0u8; READ_CHUNK_LEN];
-    let mut superseded = false;
-    let mut cancelled = false;
 
-    'read: loop {
+    let end = loop {
+        // Biased so that, with several ready, one way is always taken; with
+        // the delivered bytes read on a stop, the end is the same either way.
         let read = tokio::select! {
-            // `read` is cancel-safe, and the loop exits on the other branch
-            // anyway, so no byte is lost by losing this race.
+            biased;
+            interrupt = link.interrupted() => match interrupt {
+                // The owner ended it, so there is nothing to tell the owner.
+                Interrupt::Cancelled => return,
+                Interrupt::Stopped => {
+                    // What it read before an error is in `buffer`; the error
+                    // itself says nothing of how the connection ended.
+                    let _ = reader.read_delivered(&mut buffer);
+                    break dispatch_frames(&app, &generation, &mut buffer)
+                        .await
+                        .unwrap_or(EndKind::WriteFailed);
+                }
+            },
+            // `read` is cancel-safe, so no byte is lost by losing this race.
             read = reader.read(&mut chunk) => match read {
-                Ok(0) | Err(_) => break,
+                Ok(0) => break EndKind::Eof,
+                Err(_) => break EndKind::ReadError,
                 Ok(read) => read,
             },
-            _ = &mut cancel => {
-                cancelled = true;
-                break;
-            }
         };
         buffer.extend_from_slice(&chunk[..read]);
+        if let Some(end) = dispatch_frames(&app, &generation, &mut buffer).await {
+            break end;
+        }
+    };
+    link.report(end);
+}
 
-        loop {
-            let (message, consumed) = match yagura_protocol::frame_decode(&buffer) {
-                Ok(Some((body, consumed))) => (decode_daemon_message(body), consumed),
-                Ok(None) => break,
-                // A frame larger than the protocol allows can only come from a
-                // peer that is not the daemon; drop the connection.
-                Err(_) => break 'read,
-            };
-            buffer.drain(..consumed);
-            let Ok(message) = message else {
-                continue;
-            };
-            let window_id = client.window_id().await;
-            if dispatch(&app, &client, message, window_id).await {
-                superseded = true;
-                break 'read;
+/// Dispatches every whole frame at the front of `buffer`, leaving a partial
+/// one, and returns how the generation must end when a frame says so.
+async fn dispatch_frames<H: GuiHost>(
+    app: &H,
+    generation: &Generation,
+    buffer: &mut Vec<u8>,
+) -> Option<EndKind> {
+    loop {
+        let (frame, consumed) = match yagura_protocol::frame_decode(buffer) {
+            Ok(Some((body, consumed))) => (read_body(body), consumed),
+            Ok(None) => return None,
+            // A frame larger than the protocol allows can only come from a
+            // peer that is not the daemon; drop the connection.
+            Err(_) => return Some(EndKind::FrameTooLarge),
+        };
+        buffer.drain(..consumed);
+        match frame {
+            Ok((correlation_id, message)) => {
+                let superseded = is_superseded(&message);
+                if dispatch(
+                    app,
+                    generation,
+                    correlation_id,
+                    message,
+                    generation.window_id(),
+                )
+                .await
+                {
+                    if superseded {
+                        return Some(EndKind::Superseded);
+                    }
+                    eprintln!(
+                        "warning: the daemon answered a request with a reply of another kind; reconnecting"
+                    );
+                    return Some(EndKind::UnreadableAnswer);
+                }
+            }
+            Err(label) => {
+                if settle_unreadable(generation, &label) {
+                    eprintln!(
+                        "warning: the daemon answered a request with a frame this build cannot read ({}); reconnecting",
+                        label.tag.as_deref().unwrap_or("no type")
+                    );
+                    return Some(EndKind::UnreadableAnswer);
+                }
             }
         }
-    }
-
-    // A cancelled reader was retired by `disconnect`, which already reset the
-    // client; reporting the disconnect it caused would be noise.
-    if !cancelled {
-        client.on_disconnect(&app, superseded, generation).await;
     }
 }
 
-/// The request a daemon message answers, if it answers one at all.
+fn is_superseded(message: &DaemonMessage) -> bool {
+    matches!(message, DaemonMessage::Error { code, .. } if code == ERROR_CODE_SUPERSEDED)
+}
+
+/// Weighs a frame this build cannot read as a message against the request
+/// waiting. Returns whether the generation must end: the frame came under
+/// that request's key.
 ///
-/// Matched exhaustively on purpose: a new protocol message must force a
-/// decision about whether it completes a request.
-fn reply_for(message: DaemonMessage) -> Option<(PendingKind, Reply)> {
-    match message {
-        DaemonMessage::Attached {
+/// From a daemon that returns no correlation id, a frame whose tag is the
+/// kind of the answer awaited still ends the request: as success when the
+/// answer carries nothing this client reads, as [`IpcError::UnexpectedReply`]
+/// otherwise. Every other unreadable frame is dropped, as a push of a newer
+/// daemon is.
+fn settle_unreadable(generation: &Generation, label: &FrameLabel) -> bool {
+    let Some(awaiting) = generation.awaiting() else {
+        return false;
+    };
+    match label.correlation_id {
+        Some(key) => key == awaiting.correlation_id,
+        None if answers_carry_correlation_ids(generation.revision()) => false,
+        None => {
+            let Some((kind, carries)) = label.tag.as_deref().and_then(answer_kind) else {
+                return false;
+            };
+            if kind != awaiting.kind {
+                return false;
+            }
+            let result = if carries {
+                eprintln!(
+                    "warning: the daemon answered with a {} this build cannot read",
+                    label.tag.as_deref().unwrap_or_default()
+                );
+                Err(IpcError::UnexpectedReply)
+            } else {
+                Ok(Reply::Done)
+            };
+            generation.settle(None, kind, result);
+            false
+        }
+    }
+}
+
+/// Whether `tag` is the wire tag of the `DaemonMessage` variant named
+/// `variant`, by the rule its `#[serde(rename_all = "snake_case")]` applies.
+fn is_wire_tag(variant: &str, tag: &str) -> bool {
+    let mut snake = String::with_capacity(tag.len());
+    for (index, letter) in variant.char_indices() {
+        if index > 0 && letter.is_uppercase() {
+            snake.push('_');
+        }
+        snake.push(letter.to_ascii_lowercase());
+    }
+    snake == tag
+}
+
+/// Writes the one table of the messages that answer a request: from it come
+/// both [`reply_for`], which reads a message, and [`answer_kind`], which
+/// reads only a tag. `bare` answers carry nothing this client reads.
+macro_rules! answer_table {
+    (
+        bare { $( $bare:ident => $bare_kind:ident, )* }
+        valued { $( $valued:ident $fields:tt => $valued_kind:ident : $reply:expr, )* }
+        none { $( $none:pat ),* $(,)? }
+    ) => {
+        /// The request a daemon message answers, if it answers one at all.
+        ///
+        /// Matched exhaustively on purpose: a new protocol message must force a
+        /// decision about whether it completes a request.
+        fn reply_for(message: DaemonMessage) -> Option<(PendingKind, Reply)> {
+            match message {
+                $( DaemonMessage::$bare { .. } => Some((PendingKind::$bare_kind, Reply::Done)), )*
+                $( DaemonMessage::$valued $fields => Some((PendingKind::$valued_kind, $reply)), )*
+                $( $none )|* => None,
+            }
+        }
+
+        /// The request an answer tagged `tag` belongs to, and whether this
+        /// client reads anything it carries.
+        fn answer_kind(tag: &str) -> Option<(PendingKind, bool)> {
+            $(
+                if is_wire_tag(stringify!($bare), tag) {
+                    return Some((PendingKind::$bare_kind, false));
+                }
+            )*
+            $(
+                if is_wire_tag(stringify!($valued), tag) {
+                    return Some((PendingKind::$valued_kind, true));
+                }
+            )*
+            None
+        }
+    };
+}
+
+answer_table! {
+    bare {
+        WindowClosed => CloseWindow,
+        WindowInterrupted => InterruptWindow,
+        ApprovalResolved => DecideApproval,
+    }
+    valued {
+        Attached { child_exited, exit_code } => Attach: Reply::Attached(AttachResponse {
             child_exited,
             exit_code,
-        } => Some((
-            PendingKind::Attach,
-            Reply::Attached(AttachResponse {
-                child_exited,
-                exit_code,
-            }),
-        )),
-        DaemonMessage::WindowList { windows } => {
-            Some((PendingKind::ListWindows, Reply::WindowList(windows)))
-        }
-        DaemonMessage::SelectionText { text } => {
-            Some((PendingKind::CopySelection, Reply::SelectionText(text)))
-        }
-        DaemonMessage::WindowOpened {
-            window_id,
-            detection_warning,
-            name,
-        } => Some((
-            PendingKind::OpenWindow,
+        }),
+        WindowList { windows } => ListWindows: Reply::WindowList(windows),
+        SelectionText { text } => CopySelection: Reply::SelectionText(text),
+        WindowOpened { window_id, detection_warning, name } => OpenWindow:
             Reply::WindowOpened(OpenWindowReply {
                 window_id,
                 name,
                 detection_warning,
             }),
-        )),
-        DaemonMessage::DetectionList { names, warning, .. } => Some((
-            PendingKind::ListDetections,
+        DetectionList { names, warning, .. } => ListDetections:
             Reply::DetectionList(DetectionListReply { names, warning }),
-        )),
-        DaemonMessage::ProfileList { profiles, warnings } => Some((
-            PendingKind::ListProfiles,
+        ProfileList { profiles, warnings } => ListProfiles:
             Reply::ProfileList(ProfileListReply { profiles, warnings }),
-        )),
-        DaemonMessage::WindowRenamed { name, .. } => {
-            Some((PendingKind::RenameWindow, Reply::WindowRenamed(name)))
-        }
-        DaemonMessage::WindowClosed { .. } => Some((PendingKind::CloseWindow, Reply::Done)),
-        DaemonMessage::WindowInterrupted { .. } => {
-            Some((PendingKind::InterruptWindow, Reply::Done))
-        }
-        DaemonMessage::RestoreCandidateList {
-            windows,
-            taken_at_epoch_s,
-        } => Some((
-            PendingKind::ListRestoreCandidates,
+        WindowRenamed { name, .. } => RenameWindow: Reply::WindowRenamed(name),
+        RestoreCandidateList { windows, taken_at_epoch_s } => ListRestoreCandidates:
             Reply::RestoreCandidateList(RestoreCandidateListReply {
                 windows,
                 taken_at_epoch_s,
             }),
-        )),
-        DaemonMessage::WindowLayoutUpdated { window_id } => Some((
-            PendingKind::UpdateWindowLayout,
+        WindowLayoutUpdated { window_id } => UpdateWindowLayout:
             Reply::WindowLayoutUpdated(UpdateWindowLayoutReply { window_id }),
-        )),
-        DaemonMessage::ApproverRegistered { pending } => Some((
-            PendingKind::RegisterApprover,
-            Reply::ApproverRegistered(pending),
-        )),
-        DaemonMessage::ApprovalResolved { .. } => Some((PendingKind::DecideApproval, Reply::Done)),
-        DaemonMessage::ChatPosted {
-            room_id,
-            seq,
-            targets,
-            user,
-            unresolved,
-            halted,
-        } => Some((
-            PendingKind::SendChat,
+        ApproverRegistered { pending } => RegisterApprover: Reply::ApproverRegistered(pending),
+        ChatPosted { room_id, seq, targets, user, unresolved, halted } => SendChat:
             Reply::ChatPosted(ChatPostedReply {
                 room_id,
                 seq,
@@ -206,16 +308,7 @@ fn reply_for(message: DaemonMessage) -> Option<(PendingKind, Reply)> {
                 unresolved,
                 halted,
             }),
-        )),
-        DaemonMessage::ChatMessages {
-            room_id,
-            messages,
-            next_after_seq,
-            halted,
-            needs_user,
-            roster,
-        } => Some((
-            PendingKind::ReadChat,
+        ChatMessages { room_id, messages, next_after_seq, halted, needs_user, roster } => ReadChat:
             Reply::ChatMessages(ChatMessagesReply {
                 room_id,
                 messages,
@@ -224,140 +317,66 @@ fn reply_for(message: DaemonMessage) -> Option<(PendingKind, Reply)> {
                 needs_user,
                 roster,
             }),
-        )),
-        DaemonMessage::ChatRooms { rooms } => Some((
-            PendingKind::ListChatRooms,
-            Reply::ChatRoomList(ChatRoomListReply { rooms }),
-        )),
-        DaemonMessage::ChatRoomCleared { room_id } => {
-            Some((PendingKind::ClearChatRoom, Reply::ChatRoomCleared(room_id)))
-        }
-        DaemonMessage::ChatRoomDeleted { room_id } => {
-            Some((PendingKind::DeleteChatRoom, Reply::ChatRoomDeleted(room_id)))
-        }
-        DaemonMessage::ProtocolRevision { revision, boot } => Some((
-            PendingKind::GetProtocolRevision,
+        ChatRooms { rooms } => ListChatRooms: Reply::ChatRoomList(ChatRoomListReply { rooms }),
+        ChatRoomCleared { room_id } => ClearChatRoom: Reply::ChatRoomCleared(room_id),
+        ChatRoomDeleted { room_id } => DeleteChatRoom: Reply::ChatRoomDeleted(room_id),
+        ProtocolRevision { revision, boot } => GetProtocolRevision:
             Reply::ProtocolRevision { revision, boot },
-        )),
-        DaemonMessage::DaemonHealth { problems } => Some((
-            PendingKind::GetDaemonHealth,
+        DaemonHealth { problems } => GetDaemonHealth:
             Reply::DaemonHealth(DaemonHealthReply { problems }),
-        )),
-        DaemonMessage::PlanDetail { plan } => Some((PendingKind::PlanDetail, Reply::PlanDetail(plan))),
-        DaemonMessage::PlanList { plans } => Some((PendingKind::PlanList, Reply::PlanList(plans))),
-        DaemonMessage::PlanDeleted { plan_id } => {
-            Some((PendingKind::PlanDeleted, Reply::PlanDeleted(plan_id)))
-        }
-        DaemonMessage::RoleList {
+        PlanDetail { plan } => PlanDetail: Reply::PlanDetail(plan),
+        PlanList { plans } => PlanList: Reply::PlanList(plans),
+        PlanDeleted { plan_id } => PlanDeleted: Reply::PlanDeleted(plan_id),
+        RoleList { roles, default_role } => RoleList: Reply::RoleList(RoleListReply {
             roles,
             default_role,
-        } => Some((
-            PendingKind::RoleList,
-            Reply::RoleList(RoleListReply {
-                roles,
-                default_role,
-            }),
-        )),
-        DaemonMessage::TaskWindowOpened {
-            plan_id,
-            task_id,
-            window_id,
-            assignment,
-            ..
-        } => Some((
-            PendingKind::TaskWindowOpened,
+        }),
+        TaskWindowOpened { plan_id, task_id, window_id, assignment, .. } => TaskWindowOpened:
             Reply::TaskWindowOpened(TaskWindowOpenedReply {
                 plan_id,
                 task_id,
                 window_id,
                 assignment,
             }),
-        )),
-        DaemonMessage::ModelChoicesRequested {
-            request_id,
-            profile,
-        } => Some((
-            PendingKind::ListModelChoices,
+        ModelChoicesRequested { request_id, profile } => ListModelChoices:
             Reply::ModelChoicesRequested(ModelChoicesRequestedReply {
                 request_id,
                 profile,
             }),
-        )),
-        DaemonMessage::ModelAliasesSaved { profile, aliases } => Some((
-            PendingKind::SaveModelAliases,
+        ModelAliasesSaved { profile, aliases } => SaveModelAliases:
             Reply::ModelAliasesSaved(ModelAliasesSavedReply { profile, aliases }),
-        )),
-        DaemonMessage::ProfileEnabledSet { profile, enabled } => Some((
-            PendingKind::SetProfileEnabled,
+        ProfileEnabledSet { profile, enabled } => SetProfileEnabled:
             Reply::ProfileEnabledSet(ProfileEnabledSetReply { profile, enabled }),
-        )),
-        DaemonMessage::ProfileDetail {
-            profile,
-            shipped_base,
-            command,
-            entries,
-        } => Some((
-            PendingKind::GetProfileDetail,
+        ProfileDetail { profile, shipped_base, command, entries } => GetProfileDetail:
             Reply::ProfileDetail(ProfileDetailReply {
                 profile,
                 shipped_base,
                 command,
                 entries,
             }),
-        )),
-        DaemonMessage::ProfileCommandSet { profile, command } => Some((
-            PendingKind::SetProfileCommand,
+        ProfileCommandSet { profile, command } => SetProfileCommand:
             Reply::ProfileCommandSet(ProfileCommandSetReply { profile, command }),
-        )),
-        DaemonMessage::ApprovalSettings { settings } => Some((
-            PendingKind::GetApprovalSettings,
+        ApprovalSettings { settings } => GetApprovalSettings:
             Reply::ApprovalSettings(approval_settings_reply(settings)),
-        )),
-        DaemonMessage::AutoApproveSet { settings } => Some((
-            PendingKind::SetAutoApprove,
+        AutoApproveSet { settings } => SetAutoApprove:
             Reply::AutoApproveSet(approval_settings_reply(settings)),
-        )),
-        DaemonMessage::PlanApprovalRequiredSet { settings } => Some((
-            PendingKind::SetPlanApprovalRequired,
+        PlanApprovalRequiredSet { settings } => SetPlanApprovalRequired:
             Reply::PlanApprovalRequiredSet(approval_settings_reply(settings)),
-        )),
-        DaemonMessage::McpRegistrationsListed {
-            request_id,
-            bridge,
-            rows,
-        } => Some((
-            PendingKind::ListMcpRegistrations,
+        McpRegistrationsListed { request_id, bridge, rows } => ListMcpRegistrations:
             Reply::McpRegistrationsListed(McpRegistrationsListedReply {
                 request_id,
                 bridge,
                 rows,
             }),
-        )),
-        DaemonMessage::McpRegistrationRequested {
-            request_id,
-            profile,
-            action,
-        } => Some((
-            PendingKind::RunMcpRegistration,
+        McpRegistrationRequested { request_id, profile, action } => RunMcpRegistration:
             Reply::McpRegistrationRequested(McpRegistrationRequestedReply {
                 request_id,
                 profile,
                 action: mcp_registration_action_str(action).to_owned(),
             }),
-        )),
-        DaemonMessage::TicketWorkspaceList { workspaces } => Some((
-            PendingKind::TicketWorkspaceList,
+        TicketWorkspaceList { workspaces } => TicketWorkspaceList:
             Reply::TicketWorkspaceList(workspaces),
-        )),
-        DaemonMessage::TicketList {
-            workspace_id,
-            config,
-            config_error,
-            milestones,
-            tickets,
-            truncated,
-        } => Some((
-            PendingKind::TicketList,
+        TicketList { workspace_id, config, config_error, milestones, tickets, truncated } => TicketList:
             Reply::TicketList(TicketListReply {
                 workspace_id,
                 config,
@@ -366,57 +385,56 @@ fn reply_for(message: DaemonMessage) -> Option<(PendingKind, Reply)> {
                 tickets,
                 truncated,
             }),
-        )),
-        DaemonMessage::TicketDetail { ticket } => {
-            Some((PendingKind::TicketDetail, Reply::TicketDetail(ticket)))
-        }
+        TicketDetail { ticket } => TicketDetail: Reply::TicketDetail(ticket),
+    }
+    none {
         // Identified, HandoffSent and MessageWithdrawn are never received:
         // this client sends none of `identify`, `send_handoff` and
         // `withdraw_message`.
         // ApprovalRequested / ApprovalWithdrawn are unsolicited event-class
         // messages `dispatch` handles directly rather than as a reply. The
         // rest stream to the WebView as events elsewhere, or answer nothing.
-        DaemonMessage::Frame(_)
-        | DaemonMessage::StatusChanged { .. }
-        | DaemonMessage::Error { .. }
-        | DaemonMessage::Pong
-        | DaemonMessage::WindowStatus { .. }
-        | DaemonMessage::TextSent { .. }
-        | DaemonMessage::WaitResult { .. }
-        | DaemonMessage::WindowOutput { .. }
-        | DaemonMessage::Identified { .. }
-        | DaemonMessage::ApprovalRequested { .. }
-        | DaemonMessage::ApprovalWithdrawn { .. }
-        | DaemonMessage::HandoffSent { .. }
-        | DaemonMessage::MessageWithdrawn { .. }
+        DaemonMessage::Frame(_),
+        DaemonMessage::StatusChanged { .. },
+        DaemonMessage::Error { .. },
+        DaemonMessage::Pong,
+        DaemonMessage::WindowStatus { .. },
+        DaemonMessage::TextSent { .. },
+        DaemonMessage::WaitResult { .. },
+        DaemonMessage::WindowOutput { .. },
+        DaemonMessage::Identified { .. },
+        DaemonMessage::ApprovalRequested { .. },
+        DaemonMessage::ApprovalWithdrawn { .. },
+        DaemonMessage::HandoffSent { .. },
+        DaemonMessage::MessageWithdrawn { .. },
         // ChatChanged, PlanChanged, TicketChanged, ModelChoices and the two
         // MCP registration pushes are turned into events by `dispatch`; the
         // ones answering a request follow its acknowledgement rather than
         // answering it.
-        | DaemonMessage::ChatChanged { .. }
-        | DaemonMessage::ChatParticipantsChanged
-        | DaemonMessage::ChatHistoryCleared { .. }
-        | DaemonMessage::PlanChanged { .. }
-        | DaemonMessage::TicketChanged { .. }
-        | DaemonMessage::ModelChoices { .. }
-        | DaemonMessage::McpRegistrationStatus { .. }
-        | DaemonMessage::McpRegistrationResult { .. }
+        DaemonMessage::ChatChanged { .. },
+        DaemonMessage::ChatParticipantsChanged,
+        DaemonMessage::ChatHistoryCleared { .. },
+        DaemonMessage::PlanChanged { .. },
+        DaemonMessage::TicketChanged { .. },
+        DaemonMessage::ModelChoices { .. },
+        DaemonMessage::McpRegistrationStatus { .. },
+        DaemonMessage::McpRegistrationResult { .. },
         // ReportSent and Reports are never received: this client sends
         // neither `send_report` nor `wait_for_report`.
-        | DaemonMessage::ReportSent { .. }
-        | DaemonMessage::Reports { .. }
+        DaemonMessage::ReportSent { .. },
+        DaemonMessage::Reports { .. },
         // Delivery, DeliverConfirmed and SessionRecorded answer the doors a
         // CLI's hook reads a window's inbox through; this client never sends
         // those.
-        | DaemonMessage::Delivery { .. }
-        | DaemonMessage::DeliverConfirmed { .. }
-        | DaemonMessage::SessionRecorded { .. }
+        DaemonMessage::Delivery { .. },
+        DaemonMessage::DeliverConfirmed { .. },
+        DaemonMessage::SessionRecorded { .. },
         // MilestoneSet is never received: the GUI only reads tickets.
-        | DaemonMessage::MilestoneSet { .. }
+        DaemonMessage::MilestoneSet { .. },
         // HookInputWanted answers a hook's request, which the GUI never sends.
-        | DaemonMessage::HookInputWanted { .. }
+        DaemonMessage::HookInputWanted { .. },
         // LaunchOverlay answers a window's overlay door, which the GUI is not.
-        | DaemonMessage::LaunchOverlay { .. } => None,
+        DaemonMessage::LaunchOverlay { .. },
     }
 }
 
@@ -474,29 +492,48 @@ pub fn rejection_for(frame: DaemonMessage) -> Result<IpcError, Box<DaemonMessage
     }
 }
 
-/// Fails the request in flight with `rejection` when the error frame can be
-/// attributed to it. Returns whether the session was superseded.
-async fn settle_rejection(client: &IpcClient, rejection: IpcError) -> bool {
+/// Fails the request in flight with `rejection` when the error frame is its
+/// answer. Returns whether the session was superseded.
+///
+/// A `superseded` frame ends the connection and answers no request, under
+/// any key and from any revision; the request waiting ends with the
+/// generation.
+async fn settle_rejection(
+    generation: &Generation,
+    correlation_id: Option<u64>,
+    rejection: IpcError,
+) -> bool {
     let has_code =
         |wanted: &str| matches!(&rejection, IpcError::Rejected { code, .. } if code == wanted);
-    let superseded = has_code(ERROR_CODE_SUPERSEDED);
-    let attributable = match client.pending_kind().await {
+    if has_code(ERROR_CODE_SUPERSEDED) {
+        return true;
+    }
+    let Some(awaiting) = generation.awaiting() else {
+        return false;
+    };
+    let attributable = match (correlation_id, generation.revision()) {
+        // The key names the request; `settle` compares it.
+        (Some(_), _) => true,
+        // Such a daemon names every answer, so an error under no key answers
+        // nothing waiting: a refused send.
+        (None, revision) if answers_carry_correlation_ids(revision) => false,
+        // Still probing: the probe is the only frame written.
+        (None, None) => true,
         // Input, frame acknowledgements and `resize` are fire-and-forget on a
         // window connection, so an error frame there may answer one of them
         // rather than the request in flight; only the codes that request
         // itself can produce are attributed to it.
-        Some(PendingKind::Attach | PendingKind::CopySelection) => {
-            superseded || has_code(ERROR_CODE_INTERNAL)
-        }
-        // Nothing but the outstanding request is in flight on a control
-        // connection, so the error can only answer it.
-        Some(_) => true,
-        None => false,
+        (None, Some(_)) => match awaiting.kind {
+            PendingKind::Attach | PendingKind::CopySelection => has_code(ERROR_CODE_INTERNAL),
+            // Nothing but the outstanding request is in flight on a control
+            // connection, so the error can only answer it.
+            _ => true,
+        },
     };
     if attributable {
-        client.fail_pending(rejection).await;
+        generation.settle(correlation_id, awaiting.kind, Err(rejection));
     }
-    superseded
+    false
 }
 
 /// A WebView event carrying an MCP registration push. Serializes as its
@@ -558,12 +595,16 @@ fn emit_window_event(app: &impl GuiHost, event: WindowEvent) {
     }
 }
 
-/// Handles one daemon message. Returns whether the session was superseded.
-/// `window_id` comes from the attached connection; events from a window-specific
-/// connection include the window ID; control connections (attach-less) use None.
+/// Handles one daemon message that arrived under `correlation_id`. Returns
+/// whether the generation must end: the session was superseded, or the
+/// daemon answered the request waiting, under its key, with an answer of
+/// another kind. `window_id` comes from the attached connection; events from
+/// a window-specific connection include the window ID; control connections
+/// (attach-less) use None.
 async fn dispatch(
     app: &impl GuiHost,
-    client: &Arc<IpcClient>,
+    generation: &Generation,
+    correlation_id: Option<u64>,
     message: DaemonMessage,
     window_id: Option<String>,
 ) -> bool {
@@ -576,7 +617,7 @@ async fn dispatch(
     };
 
     let message = match rejection_for(message) {
-        Ok(rejection) => return settle_rejection(client, rejection).await,
+        Ok(rejection) => return settle_rejection(generation, correlation_id, rejection).await,
         Err(message) => *message,
     };
 
@@ -681,12 +722,9 @@ async fn dispatch(
             }
             false
         }
-        other => {
-            if let Some((kind, reply)) = reply_for(other) {
-                client.complete_pending(kind, reply).await;
-            }
-            false
-        }
+        other => reply_for(other).is_some_and(|(kind, reply)| {
+            generation.settle(correlation_id, kind, Ok(reply)) == Settled::Broken
+        }),
     }
 }
 
@@ -891,16 +929,37 @@ mod tests {
         }
     }
 
+    /// A generation over an in-memory stream that nobody answers on, with the
+    /// far end and the reader's ticket kept alive beside it.
+    fn idle_generation() -> (
+        Arc<crate::ipc_client::Generation>,
+        tokio::io::DuplexStream,
+        impl Sized,
+    ) {
+        let (near, far) = tokio::io::duplex(64 * 1024);
+        let (generation, reader) = crate::ipc_client::Generation::wired(near);
+        (generation, far, reader)
+    }
+
     #[tokio::test]
     async fn a_superseded_error_frame_ends_the_session() {
-        let client = IpcClient::new();
-        assert!(settle_rejection(&client, rejection_with_code(ERROR_CODE_SUPERSEDED)).await);
+        let (generation, _peer, _reader) = idle_generation();
+        assert!(
+            settle_rejection(
+                &generation,
+                None,
+                rejection_with_code(ERROR_CODE_SUPERSEDED)
+            )
+            .await
+        );
     }
 
     #[tokio::test]
     async fn any_other_error_frame_leaves_the_session_open() {
-        let client = IpcClient::new();
-        assert!(!settle_rejection(&client, rejection_with_code(ERROR_CODE_INTERNAL)).await);
+        let (generation, _peer, _reader) = idle_generation();
+        assert!(
+            !settle_rejection(&generation, None, rejection_with_code(ERROR_CODE_INTERNAL)).await
+        );
     }
 
     #[test]

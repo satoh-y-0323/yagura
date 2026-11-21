@@ -324,21 +324,23 @@ impl ConnectionPool {
     /// Returns [`IpcError`] when the daemon cannot be reached.
     pub async fn list_windows(&self, app: &impl GuiHost) -> Result<Vec<WindowInfo>, IpcError> {
         self.control(app).await?;
-        self.listed_windows().await
+        let (windows, _revision) = self.listed_windows().await?;
+        Ok(windows)
     }
 
     /// Asks the control connection, as it stands, for the daemon's window
     /// list and applies it to the records before handing it out, so every
     /// window the list names has a record by the time anyone sees the list.
-    /// The caller establishes the control connection first.
+    /// The caller establishes the control connection first. Comes with the
+    /// wire revision of the connection that answered the list.
     ///
     /// # Errors
     /// Returns [`IpcError`] when the round trip fails.
-    pub(crate) async fn listed_windows(&self) -> Result<Vec<WindowInfo>, IpcError> {
+    pub(crate) async fn listed_windows(&self) -> Result<(Vec<WindowInfo>, Option<u32>), IpcError> {
         let _listing = self.listing.lock().await;
-        let windows = self.control.list_windows().await?;
+        let (windows, revision) = self.control.list_windows_with_revision().await?;
         self.track(&windows).await;
-        Ok(windows)
+        Ok((windows, revision))
     }
 
     /// Applies `windows` to the records the way a list from the daemon is.
@@ -766,7 +768,7 @@ impl ConnectionPool {
     /// Gives the daemon the palettes a window it opens from now on answers
     /// color queries with, through the control connection. Neither connects
     /// nor starts a daemon: the control connection sends them once its next
-    /// connection settles its revision.
+    /// connection opens.
     ///
     /// # Errors
     /// Returns [`IpcError`] when a connected daemon could not be written to.
@@ -1077,29 +1079,25 @@ impl ConnectionPool {
         map_sync_approvals_result(self.control.sync_approvals(app).await)
     }
 
-    /// The control connection, with its approver registration confirmed
-    /// current: [`ConnectionPool::control_connected()`]'s single hook-free
-    /// connect is deliberately not where this lives (the approver gate is
-    /// specific to the destructive operations, not every control-connection
-    /// request).
+    /// The control connection, open and registered as the approver: the gate
+    /// of the destructive operations, which the daemon lets through without
+    /// asking a human once this connection is the approver.
     ///
     /// `connect` follows the caller's intent: an operation on a live window
     /// starts a daemon when none runs, whereas tidying the view up does not.
     ///
     /// # Errors
-    /// Returns [`IpcError`] when the daemon cannot be reached or the
-    /// connection's registration attempt has not succeeded yet.
+    /// Returns [`IpcError`] when the daemon cannot be reached, and
+    /// [`IpcError::ApproverNotRegistered`] when the open connection's
+    /// registration was refused.
     async fn require_approver_registered(
         &self,
         app: &impl GuiHost,
         connect: ControlConnect,
     ) -> Result<&Arc<IpcClient>, IpcError> {
         let control = self.control_connected(app, connect).await?;
-        control.ensure_approver_registered(app).await;
-        control.ensure_protocol_revision(app).await;
-        // Not `approver_registration_due().is_some()`: a refused generation
-        // makes `due` `None` too (the refusal latch), which would
-        // otherwise let a destructive operation through unregistered.
+        // Opening settles the registration, so a connection that opened with
+        // it refused stays unregistered until another generation opens.
         if !control.is_approver_registered() {
             return Err(IpcError::ApproverNotRegistered);
         }
@@ -1277,8 +1275,9 @@ impl ConnectionPool {
         Ok(&self.control)
     }
 
-    /// Brings a daemon up when none is running, by establishing the control
-    /// connection the spawning way.
+    /// Brings a daemon up when none is running, returning once one accepts
+    /// the control connection, before that connection opens: whether a
+    /// daemon runs is all the recovery supervisor asks.
     ///
     /// This is the entry point the application takes on its own initiative;
     /// every other start follows a user action. A caller that only wants to
@@ -1289,11 +1288,12 @@ impl ConnectionPool {
     /// Returns [`IpcError`] when the daemon can neither be reached nor
     /// started.
     pub(crate) async fn ensure_daemon_running(&self, app: &impl GuiHost) -> Result<(), IpcError> {
-        self.control_connected(app, ControlConnect::Spawn).await?;
-        Ok(())
+        self.control.reach_daemon(app).await
     }
 
-    /// Whether the control connection is established right now.
+    /// Whether the daemon answers the control connection right now: it
+    /// accepted it, the connection is open, or the daemon answered while it
+    /// was opening.
     ///
     /// Side-effect free, unlike [`Self::control_connected`], which
     /// establishes the connection before handing it out: an observation must
@@ -1303,9 +1303,8 @@ impl ConnectionPool {
     }
 
     /// The control connection as it stands, without connecting it or
-    /// starting a daemon. A read-only accessor over the private field, kept
-    /// for [`crate::window_list_poll::run_window_list_poll`], which reports on
-    /// a daemon that is already running rather than bringing one up.
+    /// starting a daemon.
+    #[cfg(test)]
     pub(crate) fn control_connection(&self) -> &Arc<IpcClient> {
         &self.control
     }

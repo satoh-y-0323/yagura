@@ -161,11 +161,13 @@ fn reply_for_classifies_ticket_changed_as_answering_no_request_of_this_client() 
 #[tokio::test]
 async fn a_ticket_changed_push_becomes_the_event_naming_its_workspace() {
     let host = FakeHost::new("dispatch-ticket-changed");
-    let client = Arc::new(IpcClient::new());
+    let (near, _peer) = tokio::io::duplex(64 * 1024);
+    let (generation, _reader) = crate::ipc_client::Generation::wired(near);
 
     let superseded = dispatch(
         &host,
-        &client,
+        &generation,
+        None,
         DaemonMessage::TicketChanged { workspace_id: 4 },
         None,
     )
