@@ -2085,15 +2085,7 @@
     approvals = approvalQueue.markInFlight(approvals, requestId);
     void invokeDecideApproval(requestId, approved)
       .then((outcome) => {
-        // Both settle the request from this queue's point of view: 'decided'
-        // is this decision taking effect, 'not_pending' is it losing a race
-        // with one that already did (or a timeout) -- neither is a failure.
-        switch (outcome) {
-          case 'decided':
-          case 'not_pending':
-            approvals = approvalQueue.resolve(approvals, requestId);
-            break;
-        }
+        approvals = approvalQueue.settleDecision(approvals, requestId, outcome);
       })
       .catch((error: unknown) => {
         console.error('failed to decide approval:', error);
@@ -2769,7 +2761,7 @@
   // Initialize: subscribe to events, load the window list, then pull the
   // pending approvals. The subscription comes first so that nothing the core
   // emits while the list is loading is missed, and the pull comes last so a
-  // daemon that has to be waited out (ATTACH_TIMEOUT) cannot delay it.
+  // daemon that is slow to answer cannot delay it.
   async function initialize(): Promise<void> {
     // Set by the first announcement heard: from then on the events carry every
     // later start, so the start-up read of the last one must not overwrite them.

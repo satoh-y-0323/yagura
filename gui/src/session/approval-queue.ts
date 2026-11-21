@@ -7,7 +7,7 @@
  * `isWithinGuard` takes `now` from its caller, so the guard is decided by
  * whoever owns the clock rather than by this module.
  */
-import type { ApprovalRequest } from '../ipc/session-boundary';
+import type { ApprovalRequest, DecideApprovalOutcome } from '../ipc/session-boundary';
 
 /**
  * How long after the dialog opens a click on either decision does nothing, so
@@ -186,6 +186,29 @@ export function markInFlight(state: ApprovalQueueState, requestId: string): Appr
   const inFlightIds = new Set(state.inFlightIds);
   inFlightIds.add(requestId);
   return { ...state, inFlightIds };
+}
+
+/**
+ * Applies the daemon's answer to a decision that was sent. `'decided'` and
+ * `'not_pending'` settle the request. `'unconfirmed'` leaves it in flight: the
+ * decision may have been applied, so offering it again could answer twice;
+ * the next pending list (`reset`) or a withdrawal says which way it went.
+ * @param state the current queue
+ * @param requestId the request whose decision was sent
+ * @param outcome the daemon's answer
+ */
+export function settleDecision(
+  state: ApprovalQueueState,
+  requestId: string,
+  outcome: DecideApprovalOutcome
+): ApprovalQueueState {
+  switch (outcome) {
+    case 'decided':
+    case 'not_pending':
+      return resolve(state, requestId);
+    case 'unconfirmed':
+      return state;
+  }
 }
 
 /**

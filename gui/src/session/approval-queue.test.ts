@@ -26,6 +26,7 @@ import {
   isWithinGuard,
   markInFlight,
   failDecision,
+  settleDecision,
   decisionFailed,
   windowsAwaitingPermission,
   type ApprovalQueueState,
@@ -350,6 +351,69 @@ describe('markInFlight / failDecision: head() and size()', () => {
     expect(head(state)?.request_id).toBe('req-b');
     state = failDecision(state, 'req-b');
     expect(head(state)?.request_id).toBe('req-b');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// `settleDecision` applies the answer to a decision that reached the daemon.
+// 'unconfirmed' means it was written and the connection ended before the
+// daemon answered, so it may have been applied: it is neither offered again
+// nor marked failed until the daemon's pending list (`reset`) or a withdrawal
+// settles it.
+// ---------------------------------------------------------------------------
+
+describe('settleDecision: the answer to a decision that was sent', () => {
+  const from = (windowId: string) => ({
+    requester: { kind: 'window' as const, window_id: windowId, name: null },
+  });
+
+  /** A (from w-1) and B (from w-2) pending, A's decision in flight. */
+  function sendingA(): ApprovalQueueState {
+    const state = enqueue(
+      enqueue(emptyQueue(), makeRequest('req-a', from('w-1'))),
+      makeRequest('req-b', from('w-2'))
+    );
+    return markInFlight(state, 'req-a');
+  }
+
+  it.each(['decided', 'not_pending'] as const)('removes the request on %s', (outcome) => {
+    const state = settleDecision(sendingA(), 'req-a', outcome);
+
+    expect(state.items.map((entry) => entry.request_id)).toEqual(['req-b']);
+    expect(state.inFlightIds.has('req-a')).toBe(false);
+    expect(decisionFailed(state, 'req-a')).toBe(false);
+    expect([...windowsAwaitingPermission(state)]).toEqual(['w-2']);
+  });
+
+  it('keeps an unconfirmed decision in flight: not offered again, no failure note, its window still marked', () => {
+    const state = settleDecision(sendingA(), 'req-a', 'unconfirmed');
+
+    expect(size(state)).toBe(2);
+    expect(head(state)?.request_id).toBe('req-b');
+    expect(decisionFailed(state, 'req-a')).toBe(false);
+    expect([...windowsAwaitingPermission(state)].sort()).toEqual(['w-1', 'w-2']);
+
+    const alone = markInFlight(enqueue(emptyQueue(), makeRequest('req-a')), 'req-a');
+    expect(head(settleDecision(alone, 'req-a', 'unconfirmed'))).toBeNull();
+  });
+
+  it('leaves an unconfirmed decision to the daemon: a pending list without it or a withdrawal closes it, a list with it offers it again', () => {
+    const unconfirmed = settleDecision(sendingA(), 'req-a', 'unconfirmed');
+
+    const absent = reset(unconfirmed, [makeRequest('req-b', from('w-2'))]);
+    expect(holds(absent, 'req-a')).toBe(false);
+    expect([...windowsAwaitingPermission(absent)]).toEqual(['w-2']);
+
+    const present = reset(unconfirmed, [
+      makeRequest('req-a', from('w-1')),
+      makeRequest('req-b', from('w-2')),
+    ]);
+    expect(head(present)?.request_id).toBe('req-a');
+    expect(decisionFailed(present, 'req-a')).toBe(false);
+
+    const withdrawn = withdraw(unconfirmed, 'req-a');
+    expect(holds(withdrawn, 'req-a')).toBe(false);
+    expect([...windowsAwaitingPermission(withdrawn)]).toEqual(['w-2']);
   });
 });
 

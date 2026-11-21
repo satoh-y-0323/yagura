@@ -433,7 +433,7 @@ export interface ApprovalResetPayload {
  * an unrecognized value is a contract violation, not a forward-compatible
  * fallback (unlike the fail-safe normalization above).
  */
-export type DecideApprovalOutcome = 'decided' | 'not_pending';
+export type DecideApprovalOutcome = 'decided' | 'not_pending' | 'unconfirmed';
 
 /**
  * What the daemon does when a window name is already carried by a live
@@ -1263,7 +1263,7 @@ export function narrowApprovalWithdrawnPayload(value: unknown): ApprovalWithdraw
  * @throws {BoundaryError} when the value is not a recognized outcome.
  */
 export function narrowDecideApprovalOutcome(value: unknown): DecideApprovalOutcome {
-  if (value === 'decided' || value === 'not_pending') {
+  if (value === 'decided' || value === 'not_pending' || value === 'unconfirmed') {
     return value;
   }
   throw new BoundaryError(`decide_approval: unrecognized outcome (${JSON.stringify(value)})`);

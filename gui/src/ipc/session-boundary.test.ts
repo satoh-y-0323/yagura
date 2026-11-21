@@ -1394,6 +1394,10 @@ describe('narrowDecideApprovalOutcome', () => {
     expect(narrowDecideApprovalOutcome('not_pending')).toBe('not_pending');
   });
 
+  it('accepts "unconfirmed", the name the Rust outcome serializes to', () => {
+    expect(narrowDecideApprovalOutcome('unconfirmed')).toBe('unconfirmed');
+  });
+
   it('rejects an unrecognized string', () => {
     expect(() => narrowDecideApprovalOutcome('approved')).toThrow(BoundaryError);
   });
