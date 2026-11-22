@@ -1713,18 +1713,42 @@ fn the_holder_fallback_endpoint_fits_sun_path_for_the_longest_parts() {
 
 /// A call running on its own thread, so a test can look at it while it blocks.
 struct Pending<R> {
-    started: mpsc::Receiver<()>,
+    started: mpsc::Receiver<Started>,
+    thread: std::cell::OnceCell<Started>,
     done: mpsc::Receiver<R>,
+}
+
+/// What the call's thread reports once it runs: on Linux its thread id, which
+/// names its `/proc/self/task/<tid>/` directory; elsewhere nothing.
+#[cfg(target_os = "linux")]
+type Started = libc::pid_t;
+#[cfg(not(target_os = "linux"))]
+#[derive(Clone, Copy)]
+struct Started;
+
+#[cfg(target_os = "linux")]
+fn started_here() -> Started {
+    // SAFETY: `gettid` takes no arguments and cannot fail.
+    unsafe { libc::gettid() }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn started_here() -> Started {
+    Started
 }
 
 fn in_thread<R: Send + 'static>(call: impl FnOnce() -> R + Send + 'static) -> Pending<R> {
     let (started_tx, started) = mpsc::channel();
     let (done_tx, done) = mpsc::channel();
     std::thread::spawn(move || {
-        let _ = started_tx.send(());
+        let _ = started_tx.send(started_here());
         let _ = done_tx.send(call());
     });
-    Pending { started, done }
+    Pending {
+        started,
+        thread: std::cell::OnceCell::new(),
+        done,
+    }
 }
 
 /// The device and inode of the file at `path`.
@@ -1754,52 +1778,71 @@ fn descriptor_is_open_on(id: (u64, u64)) -> bool {
         .any(|fd| descriptor_file_id(fd) == Some(id))
 }
 
-/// Whether some `flock` request on the file with this inode is queued behind
-/// the lock holder. Only Linux reports waiters (`->` lines of `/proc/locks`).
+/// Whether thread `tid` of this process is asleep in `flock(2)` on the file
+/// `id` names. The thread's own `/proc/self/task/<tid>/syscall` is read, so the
+/// answer does not depend on how many locks the rest of the machine holds.
 ///
-/// `/proc/locks` is rebuilt on every `read(2)` while other tests add and drop
-/// locks, so the file is opened afresh and judged from one `read(2)` only. The
-/// buffer is smaller than what the kernel's page-sized staging buffer leaves
-/// room for after the largest record (a lock with its queued waiters), so a
-/// read that returns less than the buffer reached the end of the file, and a
-/// read that fills it may have been cut short and is refused.
+/// A thread that is running, outside a system call, in another system call, or
+/// asleep on another file is not waiting on `id`.
+///
+/// # Panics
+///
+/// Panics when the thread's `syscall` file cannot be read: there is then no way
+/// to observe the wait at all.
 #[cfg(target_os = "linux")]
-fn flock_waiter_is_queued(inode: u64) -> bool {
-    use std::io::Read;
+fn thread_is_in_flock_on(tid: libc::pid_t, id: (u64, u64)) -> bool {
+    use std::os::unix::fs::MetadataExt;
 
-    const SNAPSHOT_BUF: usize = 2048;
-    let mut buf = [0u8; SNAPSHOT_BUF];
-    let n = std::fs::File::open("/proc/locks")
-        .expect("open /proc/locks")
-        .read(&mut buf)
-        .expect("read /proc/locks");
-    assert!(
-        n < SNAPSHOT_BUF,
-        "/proc/locks filled the {SNAPSHOT_BUF}-byte snapshot buffer, so it may be cut short"
-    );
-    let locks = std::str::from_utf8(&buf[..n]).expect("/proc/locks is text");
-    locks.lines().any(|line| {
-        let fields: Vec<&str> = line.split_whitespace().collect();
-        fields.get(1) == Some(&"->")
-            && fields.contains(&"FLOCK")
-            && fields.iter().any(|field| {
-                let mut parts = field.split(':');
-                let (_major, _minor, ino) = (parts.next(), parts.next(), parts.next());
-                parts.next().is_none() && ino.and_then(|ino| ino.parse::<u64>().ok()) == Some(inode)
-            })
-    })
+    let syscall = std::fs::read_to_string(format!("/proc/self/task/{tid}/syscall"))
+        .expect("read the call thread's /proc syscall file");
+    let mut fields = syscall.split_whitespace();
+    let Some(Ok(number)) = fields.next().map(str::parse::<libc::c_long>) else {
+        return false;
+    };
+    if number != libc::SYS_flock {
+        return false;
+    }
+    let Some(fd) = fields
+        .next()
+        .and_then(|field| field.strip_prefix("0x"))
+        .and_then(|digits| u64::from_str_radix(digits, 16).ok())
+    else {
+        return false;
+    };
+    std::fs::metadata(format!("/proc/self/fd/{fd}"))
+        .is_ok_and(|meta| (meta.dev(), meta.ino()) == id)
+}
+
+/// Whether the call whose thread reported `thread` waits for the lock on the
+/// file `id` names. Linux sees the call asleep in `flock`; elsewhere only the
+/// open file is observable, so a call that returns early between its open and
+/// its lock request can go unnoticed there.
+#[cfg(target_os = "linux")]
+fn call_is_waiting_on(thread: Started, id: (u64, u64)) -> bool {
+    thread_is_in_flock_on(thread, id)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn call_is_waiting_on(_thread: Started, id: (u64, u64)) -> bool {
+    descriptor_is_open_on(id)
 }
 
 impl<R> Pending<R> {
-    /// Returns once the call has the lock file `id` names open and is not yet
-    /// done. Linux reports a request queued behind the holder, so the call is
-    /// known to be waiting. Elsewhere only the open file is observable, so a
-    /// call that returns early between its open and its lock request can go
-    /// unnoticed there; the file is open, though, before the holder changes it.
-    fn wait_until_blocked_on(&self, id: (u64, u64)) {
-        self.started
-            .recv_timeout(HANG_GUARD)
-            .expect("the call's thread must start");
+    /// The call thread's report, awaited on first use.
+    fn thread(&self) -> Started {
+        *self.thread.get_or_init(|| {
+            self.started
+                .recv_timeout(HANG_GUARD)
+                .expect("the call's thread must start")
+        })
+    }
+
+    /// Returns once the call is waiting for the lock on the file `id` names and
+    /// is not yet done, then checks that the same observation says no for a
+    /// file in `dir` the call never touches. The file is open, in any case,
+    /// before the holder changes it.
+    fn wait_until_blocked_on(&self, id: (u64, u64), dir: &std::path::Path) {
+        let thread = self.thread();
         let deadline = Instant::now() + HANG_GUARD;
         loop {
             match self.done.try_recv() {
@@ -1809,11 +1852,13 @@ impl<R> Pending<R> {
                 }
                 Err(mpsc::TryRecvError::Empty) => {}
             }
-            #[cfg(target_os = "linux")]
-            let waiting = flock_waiter_is_queued(id.1);
-            #[cfg(not(target_os = "linux"))]
-            let waiting = descriptor_is_open_on(id);
-            if waiting {
+            if call_is_waiting_on(thread, id) {
+                let decoy = dir.join("unrelated-file");
+                std::fs::write(&decoy, b"").expect("create the unrelated file");
+                assert!(
+                    !call_is_waiting_on(thread, file_id(&decoy)),
+                    "the observation reports a wait on a file the call never touches"
+                );
                 return;
             }
             assert!(
@@ -1831,8 +1876,8 @@ impl<R> Pending<R> {
         );
         #[cfg(target_os = "linux")]
         assert!(
-            flock_waiter_is_queued(id.1),
-            "the call left its wait while a process still held the lock"
+            call_is_waiting_on(self.thread(), id),
+            "the call was not asleep in flock on the lock file while a process still held the lock"
         );
         #[cfg(not(target_os = "linux"))]
         let _ = id;
@@ -1912,7 +1957,7 @@ fn the_blocking_endpoint_lock_returns_only_once_the_last_process_holding_it_has_
         let endpoint = endpoint.clone();
         move || yagura_os::platform_unix::lock_endpoint_blocking(&endpoint)
     });
-    acquiring.wait_until_blocked_on(id);
+    acquiring.wait_until_blocked_on(id, dir.path());
 
     end_lock_holder(&mut first);
     acquiring.assert_still_blocked_on(id);
@@ -1947,7 +1992,7 @@ fn blocking_lock_after_the_holder_ends(script: &str) {
         let endpoint = endpoint.clone();
         move || yagura_os::platform_unix::lock_endpoint_blocking(&endpoint)
     });
-    acquiring.wait_until_blocked_on(id);
+    acquiring.wait_until_blocked_on(id, dir.path());
     end_lock_holder(&mut holder);
 
     match acquiring.result() {
