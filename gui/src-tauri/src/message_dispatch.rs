@@ -100,12 +100,9 @@ pub(crate) async fn read_loop<H: GuiHost>(
                 // The owner ended it, so there is nothing to tell the owner.
                 Interrupt::Cancelled => return,
                 Interrupt::Stopped => {
-                    // What it read before an error is in `buffer`; the error
-                    // itself says nothing of how the connection ended.
-                    let _ = reader.read_delivered(&mut buffer);
-                    break dispatch_frames(&app, &generation, &mut buffer)
-                        .await
-                        .unwrap_or(EndKind::WriteFailed);
+                    let end =
+                        take_in_delivered(&mut reader, &app, &generation, &mut buffer, &mut chunk);
+                    break end.await.unwrap_or(EndKind::WriteFailed);
                 }
             },
             // `read` is cancel-safe, so no byte is lost by losing this race.
@@ -115,12 +112,49 @@ pub(crate) async fn read_loop<H: GuiHost>(
                 Ok(read) => read,
             },
         };
-        buffer.extend_from_slice(&chunk[..read]);
-        if let Some(end) = dispatch_frames(&app, &generation, &mut buffer).await {
+        if let Some(end) = take_in(&app, &generation, &mut buffer, &chunk[..read]).await {
             break end;
         }
     };
     link.report(end);
+}
+
+/// Reads, a chunk at a time and no more than were delivered on entry, the
+/// bytes already delivered to this end, taking each chunk in as a read does,
+/// and returns how the generation must end when a frame says so.
+async fn take_in_delivered<H: GuiHost>(
+    reader: &mut BoxedRead,
+    app: &H,
+    generation: &Generation,
+    buffer: &mut Vec<u8>,
+    chunk: &mut [u8],
+) -> Option<EndKind> {
+    // An error says nothing of how the connection ended; what was read before
+    // it has been taken in already.
+    let mut left = reader.delivered_len().unwrap_or(0);
+    while left > 0 {
+        let want = left.min(chunk.len());
+        let read = match reader.read_delivered(&mut chunk[..want]) {
+            Ok(0) | Err(_) => return None,
+            Ok(read) => read.min(want),
+        };
+        left -= read;
+        if let Some(end) = take_in(app, generation, buffer, &chunk[..read]).await {
+            return Some(end);
+        }
+    }
+    None
+}
+
+/// Appends `bytes` to `buffer` and dispatches the whole frames it then holds.
+async fn take_in<H: GuiHost>(
+    app: &H,
+    generation: &Generation,
+    buffer: &mut Vec<u8>,
+    bytes: &[u8],
+) -> Option<EndKind> {
+    buffer.extend_from_slice(bytes);
+    dispatch_frames(app, generation, buffer).await
 }
 
 /// Dispatches every whole frame at the front of `buffer`, leaving a partial

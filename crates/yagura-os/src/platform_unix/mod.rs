@@ -679,6 +679,9 @@ pub struct ClientReadHalf {
     half: tokio::io::ReadHalf<UnixStream>,
     /// The socket of the stream `half` holds: open for as long as `half` is.
     fd: std::os::fd::RawFd,
+    /// An error [`ClientReadHalf::read_delivered`] met after it had read
+    /// bytes, returned by its next call.
+    deferred: Option<io::Error>,
 }
 
 impl tokio::io::AsyncRead for ClientReadHalf {
@@ -692,34 +695,44 @@ impl tokio::io::AsyncRead for ClientReadHalf {
 }
 
 impl ClientReadHalf {
-    /// Appends to `into`, without waiting, the bytes the operating system
-    /// already delivered to this end that were not read yet, and returns how
-    /// many.
+    /// How many bytes the operating system already delivered to this end
+    /// that were not read yet (`FIONREAD`).
     ///
-    /// Reads straight from the socket, as the runtime returns only what it
-    /// was told is readable, and no more than the socket held when called
-    /// (`FIONREAD`), so a peer that keeps writing cannot keep it reading.
+    /// A reader bounds what it takes with [`ClientReadHalf::read_delivered`]
+    /// by this, so a peer that keeps writing cannot keep it reading.
     ///
     /// # Errors
     ///
-    /// The error of `ioctl` or `recv`, other than one saying a read would
-    /// wait. The bytes read before it stay appended to `into`.
-    pub fn read_delivered(&mut self, into: &mut Vec<u8>) -> io::Result<usize> {
+    /// The error of `ioctl`.
+    pub fn delivered_len(&self) -> io::Result<usize> {
         let mut queued: libc::c_int = 0;
         // SAFETY: `self.fd` is the socket of the stream `self.half` holds, so
         // it is open for this call; `FIONREAD` writes one `int` to `queued`.
         if unsafe { libc::ioctl(self.fd, libc::FIONREAD, &raw mut queued) } == -1 {
             return Err(io::Error::last_os_error());
         }
-        let wanted = usize::try_from(queued).unwrap_or(0);
-        let start = into.len();
-        into.resize(start + wanted, 0);
+        Ok(usize::try_from(queued).unwrap_or(0))
+    }
+
+    /// Reads into `into`, without waiting, up to `into.len()` of the bytes
+    /// the operating system already delivered to this end, and returns how
+    /// many. `Ok(0)` says none can be read without waiting, or the peer's end.
+    ///
+    /// Reads straight from the socket, as the runtime returns only what it
+    /// was told is readable. Allocates nothing.
+    ///
+    /// # Errors
+    ///
+    /// The error of `recv`, other than one saying a read would wait, met
+    /// before any byte was read. One met after some were read is not lost:
+    /// this call returns the bytes, and the next call returns the error.
+    pub fn read_delivered(&mut self, into: &mut [u8]) -> io::Result<usize> {
+        if let Some(error) = self.deferred.take() {
+            return Err(error);
+        }
         let mut read = 0;
-        let outcome = loop {
-            if read == wanted {
-                break Ok(());
-            }
-            let rest = &mut into[start + read..];
+        while read < into.len() {
+            let rest = &mut into[read..];
             // SAFETY: `self.fd` is open as above; `rest` is a writable buffer
             // of `rest.len()` bytes that outlives the call.
             let got = unsafe {
@@ -731,20 +744,23 @@ impl ClientReadHalf {
                 )
             };
             match usize::try_from(got) {
-                Ok(0) => break Ok(()),
+                Ok(0) => break,
                 Ok(count) => read += count,
                 Err(_) => {
                     let error = io::Error::last_os_error();
                     match error.kind() {
-                        io::ErrorKind::WouldBlock => break Ok(()),
+                        io::ErrorKind::WouldBlock => break,
                         io::ErrorKind::Interrupted => {}
-                        _ => break Err(error),
+                        _ if read == 0 => return Err(error),
+                        _ => {
+                            self.deferred = Some(error);
+                            break;
+                        }
                     }
                 }
             }
-        };
-        into.truncate(start + read);
-        outcome.map(|()| read)
+        }
+        Ok(read)
     }
 }
 
@@ -754,7 +770,14 @@ impl ClientReadHalf {
 pub fn split_client(connection: UnixStream) -> (ClientReadHalf, tokio::io::WriteHalf<UnixStream>) {
     let fd = connection.as_raw_fd();
     let (half, write) = tokio::io::split(connection);
-    (ClientReadHalf { half, fd }, write)
+    (
+        ClientReadHalf {
+            half,
+            fd,
+            deferred: None,
+        },
+        write,
+    )
 }
 
 /// Whether a write to a client connection that failed with `error` says the

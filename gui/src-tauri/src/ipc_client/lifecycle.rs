@@ -775,16 +775,28 @@ impl Lifecycle {
 
 /// The read half a generation's reader takes.
 pub(crate) trait GenerationRead: AsyncRead + Send + Unpin {
-    /// Appends to `into`, without waiting, the bytes already delivered to
-    /// this end that were not read yet, and returns how many.
+    /// How many bytes already delivered to this end were not read yet.
     ///
     /// # Errors
-    /// The error reading them met; the bytes read before it stay appended.
-    fn read_delivered(&mut self, into: &mut Vec<u8>) -> std::io::Result<usize>;
+    /// The error counting them met.
+    fn delivered_len(&mut self) -> std::io::Result<usize>;
+
+    /// Reads into `into`, without waiting, up to `into.len()` of the bytes
+    /// already delivered to this end, and returns how many; `Ok(0)` when
+    /// none can be read without waiting.
+    ///
+    /// # Errors
+    /// The error reading them met before any byte was read; one met after is
+    /// returned by the next call.
+    fn read_delivered(&mut self, into: &mut [u8]) -> std::io::Result<usize>;
 }
 
 impl GenerationRead for yagura_os::ClientReadHalf {
-    fn read_delivered(&mut self, into: &mut Vec<u8>) -> std::io::Result<usize> {
+    fn delivered_len(&mut self) -> std::io::Result<usize> {
+        yagura_os::ClientReadHalf::delivered_len(self)
+    }
+
+    fn read_delivered(&mut self, into: &mut [u8]) -> std::io::Result<usize> {
         yagura_os::ClientReadHalf::read_delivered(self, into)
     }
 }
@@ -815,7 +827,7 @@ impl GenerationStream for DaemonConnection {
 impl GenerationStream for tokio::io::DuplexStream {
     fn into_halves(self) -> (BoxedRead, BoxedWrite) {
         let (read, write) = tokio::io::split(self);
-        (Box::new(Polled(read)), Box::new(write))
+        (Box::new(Polled::new(read)), Box::new(write))
     }
 }
 
@@ -827,13 +839,37 @@ where
 {
     fn into_halves(self) -> (BoxedRead, BoxedWrite) {
         let (read, write) = self.into_inner();
-        (Box::new(Polled(read)), Box::new(write))
+        (Box::new(Polled::new(read)), Box::new(write))
     }
 }
 
-/// An in-memory read half: what one poll does not return was not delivered.
+/// An in-memory read half: what polling until it would wait does not return
+/// was not delivered. `delivered_len` takes the delivered bytes in, and they
+/// are read before anything polled after them.
 #[cfg(test)]
-struct Polled<R>(R);
+struct Polled<R> {
+    inner: R,
+    delivered: std::collections::VecDeque<u8>,
+}
+
+#[cfg(test)]
+impl<R> Polled<R> {
+    fn new(inner: R) -> Self {
+        Self {
+            inner,
+            delivered: std::collections::VecDeque::new(),
+        }
+    }
+
+    /// Moves up to `into.len()` of the bytes taken in to `into`.
+    fn hand_over(&mut self, into: &mut [u8]) -> usize {
+        let count = into.len().min(self.delivered.len());
+        for (slot, byte) in into.iter_mut().zip(self.delivered.drain(..count)) {
+            *slot = byte;
+        }
+        count
+    }
+}
 
 #[cfg(test)]
 impl<R: AsyncRead + Unpin> AsyncRead for Polled<R> {
@@ -842,35 +878,42 @@ impl<R: AsyncRead + Unpin> AsyncRead for Polled<R> {
         cx: &mut std::task::Context<'_>,
         buf: &mut tokio::io::ReadBuf<'_>,
     ) -> std::task::Poll<std::io::Result<()>> {
-        Pin::new(&mut self.0).poll_read(cx, buf)
+        if self.delivered.is_empty() {
+            return Pin::new(&mut self.inner).poll_read(cx, buf);
+        }
+        let count = self.hand_over(buf.initialize_unfilled());
+        buf.advance(count);
+        std::task::Poll::Ready(Ok(()))
     }
 }
 
 #[cfg(test)]
 impl<R: AsyncRead + Send + Unpin> GenerationRead for Polled<R> {
-    fn read_delivered(&mut self, into: &mut Vec<u8>) -> std::io::Result<usize> {
+    fn delivered_len(&mut self) -> std::io::Result<usize> {
         use std::task::{Context, Poll, Waker};
         let mut chunk = [0u8; 4096];
-        let mut added = 0;
         loop {
             let mut buf = tokio::io::ReadBuf::new(&mut chunk);
             // Outside the task's budget, so a spent budget hides no byte.
             let polled = {
                 let mut read =
                     std::pin::pin!(tokio::task::unconstrained(std::future::poll_fn(|cx| {
-                        Pin::new(&mut self.0).poll_read(cx, &mut buf)
+                        Pin::new(&mut self.inner).poll_read(cx, &mut buf)
                     })));
                 read.as_mut().poll(&mut Context::from_waker(Waker::noop()))
             };
             match polled {
                 Poll::Ready(Ok(())) if !buf.filled().is_empty() => {
-                    into.extend_from_slice(buf.filled());
-                    added += buf.filled().len();
+                    self.delivered.extend(buf.filled());
                 }
-                Poll::Ready(Ok(())) | Poll::Pending => return Ok(added),
+                Poll::Ready(Ok(())) | Poll::Pending => return Ok(self.delivered.len()),
                 Poll::Ready(Err(error)) => return Err(error),
             }
         }
+    }
+
+    fn read_delivered(&mut self, into: &mut [u8]) -> std::io::Result<usize> {
+        Ok(self.hand_over(into))
     }
 }
 
@@ -4432,6 +4475,15 @@ mod owner_tests {
                 !open.reader_ended().await,
                 "the reader ended before the daemon sent or closed anything",
             );
+            // Pushes that end nothing, together longer than one read chunk,
+            // so `superseded` lies beyond the first chunk the stopped reader takes.
+            let filler = "x".repeat(crate::constants::READ_CHUNK_LEN);
+            for plan in ["p1", "p2"] {
+                let plan_id = format!("{plan}{filler}");
+                open.peer
+                    .send(&DaemonMessage::PlanChanged { plan_id })
+                    .await;
+            }
             open.peer.send(&superseded_frame()).await;
             open.peer.make_writes_fail();
         }

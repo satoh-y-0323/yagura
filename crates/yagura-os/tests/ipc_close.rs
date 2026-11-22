@@ -82,6 +82,32 @@ async fn read_until_it_ends<R: AsyncRead + Unpin>(read: &mut R) -> Vec<u8> {
     .await
 }
 
+/// What the delivered bytes count on this platform once `SENT` arrived.
+fn delivered_after_sent() -> usize {
+    if cfg!(unix) { SENT.len() } else { 0 }
+}
+
+/// Takes the delivered bytes in pieces smaller than `SENT`, until a call
+/// returns none, and returns them in order.
+fn read_delivered_in_pieces(read: &mut yagura_os::ClientReadHalf) -> Vec<u8> {
+    let mut got = Vec::new();
+    let mut piece = [0u8; 16];
+    loop {
+        let count = read
+            .read_delivered(&mut piece)
+            .expect("the delivered bytes are read");
+        assert!(
+            count <= piece.len(),
+            "{count} bytes read into {}",
+            piece.len()
+        );
+        if count == 0 {
+            return got;
+        }
+        got.extend_from_slice(&piece[..count]);
+    }
+}
+
 #[tokio::test]
 async fn a_closed_peer_shows_in_the_write_error_and_what_it_sent_is_read_before_its_end() {
     let (accepted, client) = connected("closed").await;
@@ -98,11 +124,12 @@ async fn a_closed_peer_shows_in_the_write_error_and_what_it_sent_is_read_before_
     // Before any other read: the bytes the operating system already handed to
     // this end. A reader that stops on a write error reads them here; where
     // they cannot be read without waiting, none are returned.
-    let mut delivered = Vec::new();
-    let count = read
-        .read_delivered(&mut delivered)
-        .expect("the delivered bytes are read");
-    assert_eq!(count, delivered.len());
+    assert_eq!(
+        read.delivered_len()
+            .expect("the delivered bytes are counted"),
+        delivered_after_sent()
+    );
+    let delivered = read_delivered_in_pieces(&mut read);
     let rest = read_until_it_ends(&mut read).await;
     if cfg!(unix) {
         assert_eq!(delivered, SENT);
@@ -128,25 +155,23 @@ async fn a_closed_peer_shows_in_the_write_error_and_what_it_sent_is_read_before_
         .expect("the daemon writes");
     daemon_write.flush().await.expect("the daemon flushes");
     let (mut read, _write): (yagura_os::ClientReadHalf, _) = yagura_os::split_client(client);
-    let (first, first_count, second, second_count) = reply_within(
+    let (queued, first, second_count) = reply_within(
         "a read of the delivered bytes that must not wait",
         tokio::task::spawn_blocking(move || {
-            let mut first = Vec::new();
-            let first_count = read
-                .read_delivered(&mut first)
-                .expect("the delivered bytes are read");
-            let mut second = Vec::new();
+            let queued = read
+                .delivered_len()
+                .expect("the delivered bytes are counted");
+            let first = read_delivered_in_pieces(&mut read);
             let second_count = read
-                .read_delivered(&mut second)
+                .read_delivered(&mut [0u8; 16])
                 .expect("the next call returns");
-            (first, first_count, second, second_count)
+            (queued, first, second_count)
         }),
     )
     .await
     .expect("the blocking read ran");
-    assert_eq!(first_count, first.len());
+    assert_eq!(queued, delivered_after_sent());
     assert_eq!(second_count, 0);
-    assert!(second.is_empty(), "{second:?}");
     if cfg!(unix) {
         assert_eq!(first, SENT);
     } else {

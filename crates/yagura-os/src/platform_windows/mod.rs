@@ -425,9 +425,8 @@ impl tokio::io::AsyncRead for ClientReadHalf {
 }
 
 impl ClientReadHalf {
-    /// Appends to `into`, without waiting, the bytes the operating system
-    /// already delivered to this end that were not read yet, and returns how
-    /// many.
+    /// How many bytes the operating system already delivered to this end
+    /// that [`ClientReadHalf::read_delivered`] can read without waiting.
     ///
     /// Always `Ok(0)` on Windows: a pipe's bytes reach this end through the
     /// one overlapped read the runtime keeps outstanding, so taking any
@@ -436,7 +435,21 @@ impl ClientReadHalf {
     /// # Errors
     ///
     /// None on Windows.
-    pub fn read_delivered(&mut self, _into: &mut Vec<u8>) -> std::io::Result<usize> {
+    pub fn delivered_len(&self) -> std::io::Result<usize> {
+        Ok(0)
+    }
+
+    /// Reads into `into`, without waiting, up to `into.len()` of the bytes
+    /// the operating system already delivered to this end, and returns how
+    /// many. `Ok(0)` says none can be read without waiting.
+    ///
+    /// Always `Ok(0)` on Windows, for the reason
+    /// [`ClientReadHalf::delivered_len`] gives.
+    ///
+    /// # Errors
+    ///
+    /// None on Windows.
+    pub fn read_delivered(&mut self, _into: &mut [u8]) -> std::io::Result<usize> {
         Ok(0)
     }
 }
