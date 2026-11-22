@@ -472,8 +472,8 @@ impl<H: GuiHost> Owner<H> {
                 generation,
                 settled: Some((revision, boot)),
             } => {
-                if let Some(probed) = self.generations.get(&generation) {
-                    probed.record_revision(revision);
+                // The revision itself was recorded as the probe was settled.
+                if self.generations.contains_key(&generation) {
                     self.boots.insert(generation, boot);
                 }
                 self.feed(

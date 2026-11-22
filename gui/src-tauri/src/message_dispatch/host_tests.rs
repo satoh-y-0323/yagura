@@ -3,17 +3,18 @@
 //! is scripted.
 
 use serde_json::json;
+use tokio::sync::Notify;
 use yagura_protocol::{
-    ClientMessage, CursorShape, CursorState, PROTOCOL_REVISION, ViewState, WindowStatus,
-    WithdrawReason,
+    ApprovalRequest, ApprovalRequester, ApprovalRequesterKind, ClientMessage, CursorShape,
+    CursorState, PROTOCOL_REVISION, ViewState, WindowStatus, WithdrawReason,
 };
 use yagura_test_support::ipc::reply_within;
 
 use super::*;
 use crate::events::{EVENT_APPROVAL_RESET, EVENT_CHAT_HISTORY_CLEARED};
 use crate::host::fake::{
-    FakeHost, Reaction, ScriptedDaemon, SentFrame, announced, attached, error_frame,
-    protocol_revision_at,
+    FakeHost, Reaction, ScriptedDaemon, SentFrame, TaskPause, announced, attached, connection,
+    error_frame, protocol_revision, protocol_revision_at,
 };
 use crate::window_record::WindowRecord;
 
@@ -62,9 +63,9 @@ const OLDER_REVISION: u32 = PROTOCOL_REVISION - 1;
 /// daemon answers it: under no correlation id.
 fn older_housekeeping(request: &ClientMessage) -> Option<Reaction> {
     match request {
-        ClientMessage::GetProtocolRevision => Reaction::sends(vec![SentFrame::Unkeyed(
-            protocol_revision_at(OLDER_REVISION, None),
-        )]),
+        ClientMessage::GetProtocolRevision => Reaction::sends(followed_by_pushes(
+            SentFrame::Unkeyed(protocol_revision_at(OLDER_REVISION, None)),
+        )),
         ClientMessage::RegisterApprover => Reaction::sends(vec![SentFrame::Unkeyed(
             DaemonMessage::ApproverRegistered {
                 pending: Vec::new(),
@@ -433,10 +434,72 @@ async fn a_superseded_error_ends_the_window_session_and_it_does_not_reconnect() 
     );
 }
 
+/// The events the daemon's pushes become, as a WebView listens for them.
+const PUSH_EVENTS: [&str; 6] = [
+    EVENT_APPROVAL_REQUESTED,
+    EVENT_STATUS,
+    EVENT_CHAT_CHANGED,
+    EVENT_PLAN_CHANGED,
+    EVENT_TICKET_CHANGED,
+    EVENT_MODEL_CHOICES,
+];
+
+/// `answer`, then, under no correlation id, one of each push a daemon sends
+/// unasked and last the error frame of a takeover.
+fn followed_by_pushes(answer: SentFrame) -> Vec<SentFrame> {
+    let pushes = [
+        DaemonMessage::ApprovalRequested {
+            request: ApprovalRequest {
+                request_id: "r1".to_owned(),
+                tool: "close_window".to_owned(),
+                requester: ApprovalRequester {
+                    kind: ApprovalRequesterKind::External,
+                    window_id: None,
+                    name: None,
+                },
+                target: None,
+                text: None,
+                room: None,
+            },
+        },
+        DaemonMessage::StatusChanged {
+            window_id: "w1".to_owned(),
+            status: WindowStatus::Running,
+            unknown_reason: None,
+            status_rev: None,
+            status_boot: None,
+            task_report: None,
+            exit_code: None,
+        },
+        DaemonMessage::ChatChanged {
+            room_id: "r-1".to_owned(),
+            seq: 1,
+            needs_user: false,
+        },
+        DaemonMessage::PlanChanged {
+            plan_id: "p1".to_owned(),
+        },
+        DaemonMessage::TicketChanged { workspace_id: 1 },
+        DaemonMessage::ModelChoices {
+            request_id: 1,
+            profile: "p".to_owned(),
+            source: None,
+            choices: Vec::new(),
+            error: None,
+        },
+        DaemonMessage::Frame(frame(1)),
+        error_frame(ERROR_CODE_SUPERSEDED),
+    ];
+    std::iter::once(answer)
+        .chain(pushes.into_iter().map(SentFrame::Unkeyed))
+        .collect()
+}
+
 /// What a control client did against one daemon: whether its connect opened,
 /// the approval resets and the compatibility its announcements carried, whether
-/// a window list was refused unwritten, what the daemon heard, and whether a
-/// generation is still open at the end.
+/// a window list was refused unwritten, what the daemon heard, whether a
+/// generation is still open at the end, and the events the daemon's pushes
+/// became up to the end of the connection.
 #[derive(Debug, Clone, PartialEq)]
 struct ControlSeen {
     opened: bool,
@@ -445,10 +508,11 @@ struct ControlSeen {
     list_refused: bool,
     received: Vec<ClientMessage>,
     open_at_end: bool,
+    pushed: Vec<String>,
 }
 
-/// Connects a control client to `daemon`, asks it for the window list, and
-/// reports what happened.
+/// Connects a control client to `daemon`, asks it for the window list, ends
+/// the connection from the daemon's side, and reports what happened.
 async fn control_against(
     tag: &str,
     daemon: &ScriptedDaemon,
@@ -459,7 +523,20 @@ async fn control_against(
         .await
         .is_ok();
     let listed = reply_within("the window list", client.list_windows()).await;
-    let events = host.take_events();
+    let received = daemon.received();
+    let open_at_end = client.protocol_revision().is_some();
+    let mut events = host.take_events();
+    // The reader reads in order, so once it has ended every push before the
+    // end has been weighed.
+    daemon.hang_up();
+    host.wait_for_ended_tasks(1).await;
+    let pushed = events
+        .iter()
+        .chain(host.take_events().iter())
+        .filter(|event| PUSH_EVENTS.contains(&event.name.as_str()))
+        .map(|event| event.name.clone())
+        .collect();
+    events.retain(|event| !PUSH_EVENTS.contains(&event.name.as_str()));
     let seen = ControlSeen {
         opened,
         resets: events
@@ -472,17 +549,18 @@ async fn control_against(
             .map(|payload| payload["compatible"].clone())
             .collect(),
         list_refused: matches!(listed, Err(IpcError::Unsupported { .. })),
-        received: daemon.received(),
-        open_at_end: client.protocol_revision().is_some(),
+        received,
+        open_at_end,
+        pushed,
     };
     (host, client, seen)
 }
 
-/// A daemon that answers the revision probe with `answer` and lists no
-/// windows.
+/// A daemon that answers the revision probe with `answer`, followed by its
+/// pushes, and lists no windows.
 fn probe_answered_with(answer: SentFrame) -> ScriptedDaemon {
     ScriptedDaemon::new(move |request| match request {
-        ClientMessage::GetProtocolRevision => Reaction::sends(vec![answer.clone()]),
+        ClientMessage::GetProtocolRevision => Reaction::sends(followed_by_pushes(answer.clone())),
         ClientMessage::ListWindows => Reaction::reply(DaemonMessage::WindowList {
             windows: Vec::new(),
         }),
@@ -499,8 +577,9 @@ async fn a_control_connection_to_a_daemon_of_another_wire_revision_opens_writing
         }),
         _ => older_housekeeping(request),
     });
-    let (host, _client, older_seen) = control_against("incompatible-older", &older).await;
+    let (host, client, older_seen) = control_against("incompatible-older", &older).await;
     let mut seen = vec![("older, unkeyed", older_seen)];
+    let mut ends = vec![("older, unkeyed", older.clone(), client)];
     // A daemon that does not know the probe, or answers it in a shape this
     // build cannot read, is no more one this build can talk to.
     for (label, tag, answer) in [
@@ -532,8 +611,9 @@ async fn a_control_connection_to_a_daemon_of_another_wire_revision_opens_writing
         ),
     ] {
         let daemon = probe_answered_with(answer);
-        let (_host, _client, outcome) = control_against(tag, &daemon).await;
+        let (_host, client, outcome) = control_against(tag, &daemon).await;
         seen.push((label, outcome));
+        ends.push((label, daemon, client));
     }
 
     let incompatible = ControlSeen {
@@ -543,12 +623,23 @@ async fn a_control_connection_to_a_daemon_of_another_wire_revision_opens_writing
         list_refused: true,
         received: vec![ClientMessage::GetProtocolRevision],
         open_at_end: true,
+        pushed: Vec::new(),
     };
     let expected: Vec<_> = seen
         .iter()
         .map(|(label, _)| (*label, incompatible.clone()))
         .collect();
     assert_eq!(seen, expected);
+    // The takeover's error frame did not end the generation: its end was the
+    // connection's, after which the client reaches the daemon again.
+    for (label, daemon, _client) in &ends {
+        let received = daemon.received_at_least(2).await;
+        assert_eq!(
+            connection(&received, 1).first(),
+            Some(&ClientMessage::GetProtocolRevision),
+            "{label}"
+        );
+    }
 
     // With no daemon left on the endpoint, the end of that generation starts
     // one: a retry alone would find nothing to reach.
@@ -556,4 +647,53 @@ async fn a_control_connection_to_a_daemon_of_another_wire_revision_opens_writing
     older.hang_up();
     host.wait_for_spawns(1).await;
     assert_eq!(host.spawn_count(), 1);
+}
+
+#[tokio::test]
+async fn a_push_written_with_the_probe_answer_of_a_daemon_of_this_wire_reaches_the_webview() {
+    let reached = Arc::new(Notify::new());
+    let gate = Arc::new(Notify::new());
+    let daemon = ScriptedDaemon::new({
+        let (reached, gate) = (Arc::clone(&reached), Arc::clone(&gate));
+        move |request| match request {
+            ClientMessage::GetProtocolRevision => Reaction::sends(vec![
+                SentFrame::Answer(protocol_revision(None)),
+                SentFrame::Unkeyed(DaemonMessage::PlanChanged {
+                    plan_id: "p1".to_owned(),
+                }),
+            ])
+            .map(|reaction| {
+                reaction
+                    .in_one_write()
+                    .held(Arc::clone(&reached), Arc::clone(&gate))
+            }),
+            _ => None,
+        }
+    });
+    let host = FakeHost::served_by("push-with-probe-answer", &daemon).await;
+    let owner = TaskPause::default();
+    host.pauses_next_task(&owner);
+    let client = Arc::new(IpcClient::new());
+    let _connecting = tokio::spawn({
+        let (client, host) = (Arc::clone(&client), host.clone());
+        async move { client.connect(&host).await }
+    });
+    reply_within("the probe", reached.notified()).await;
+
+    // The owner hears of the probe's answer only after the reader has read
+    // the connection to its end, so the push is weighed before it.
+    owner.hold();
+    gate.notify_one();
+    daemon.received_at_least(1).await;
+    daemon.hang_up();
+    host.wait_for_ended_tasks(1).await;
+    let events = host.take_events();
+    owner.release();
+
+    let pushed: Vec<_> = events
+        .iter()
+        .filter(|event| event.name == EVENT_PLAN_CHANGED)
+        .map(|event| event.payload.clone())
+        .collect();
+    assert_eq!(pushed, [json!({ "plan_id": "p1" })]);
 }

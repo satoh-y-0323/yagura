@@ -81,6 +81,8 @@ pub(crate) struct Reaction {
     /// Whether a held answer is written from a task of its own while the
     /// connection goes on reading and answering.
     aside: bool,
+    /// Whether every frame goes out in one write, as one run of bytes.
+    together: bool,
 }
 
 impl Reaction {
@@ -100,7 +102,16 @@ impl Reaction {
             send: frames,
             hold: None,
             aside: false,
+            together: false,
         })
+    }
+
+    /// This reaction, its frames written in one write rather than one each.
+    pub(crate) fn in_one_write(self) -> Self {
+        Self {
+            together: true,
+            ..self
+        }
     }
 
     /// Answers with `messages` only once the test opens `gate`, after telling
@@ -508,7 +519,14 @@ async fn serve(
         };
         let reaction = (state.script)(&request).or_else(|| housekeeping(&request));
         if let Some(reaction) = reaction {
-            let bodies: Vec<Vec<u8>> = reaction.send.iter().map(|frame| frame.body(key)).collect();
+            let mut writes: Vec<Vec<u8>> = reaction
+                .send
+                .iter()
+                .map(|frame| frame_encode(&frame.body(key)))
+                .collect();
+            if reaction.together {
+                writes = vec![writes.concat()];
+            }
             match &reaction.hold {
                 Some((reached, gate)) if reaction.aside => {
                     reached.notify_one();
@@ -520,8 +538,8 @@ async fn serve(
                             _ = hang_up.changed() => return,
                         }
                         let mut writer = writer.lock().await;
-                        for body in bodies {
-                            if writer.write_all(&frame_encode(&body)).await.is_err() {
+                        for bytes in writes {
+                            if writer.write_all(&bytes).await.is_err() {
                                 return;
                             }
                         }
@@ -548,8 +566,8 @@ async fn serve(
                 None => {}
             }
             let mut writer = writer.lock().await;
-            for body in bodies {
-                if writer.write_all(&frame_encode(&body)).await.is_err() {
+            for bytes in writes {
+                if writer.write_all(&bytes).await.is_err() {
                     return;
                 }
             }
@@ -638,6 +656,10 @@ struct HostState {
     /// The warning a spawn that brings the daemon up hands back.
     spawn_warning: Mutex<Option<String>>,
     spawns: watch::Sender<usize>,
+    /// The pause the next task spawned on the host is run under.
+    pause_next: Mutex<Option<TaskPause>>,
+    /// How many tasks spawned on the host ran to their end.
+    tasks_ended: watch::Sender<usize>,
     events: mpsc::UnboundedSender<RecordedEvent>,
     recorded: tokio::sync::Mutex<mpsc::UnboundedReceiver<RecordedEvent>>,
     mailbox: Arc<FrameMailbox>,
@@ -663,6 +685,8 @@ impl FakeHost {
                 spawn_failure: Mutex::new(|| IpcError::DaemonSpawn),
                 spawn_warning: Mutex::new(None),
                 spawns: watch::channel(0).0,
+                pause_next: Mutex::new(None),
+                tasks_ended: watch::channel(0).0,
                 events,
                 recorded: tokio::sync::Mutex::new(recorded),
                 mailbox: Arc::new(FrameMailbox::new()),
@@ -729,6 +753,20 @@ impl FakeHost {
     pub(crate) async fn wait_for_spawns(&self, count: usize) {
         let mut spawns = self.state.spawns.subscribe();
         reply_within("daemon start", spawns.wait_for(|n| *n >= count))
+            .await
+            .expect("the host state outlives the wait");
+    }
+
+    /// Runs the next task spawned on the host under `pause`. A client's owner
+    /// is the first task its first ask for a connection spawns.
+    pub(crate) fn pauses_next_task(&self, pause: &TaskPause) {
+        *self.state.pause_next.lock().expect("pause") = Some(pause.clone());
+    }
+
+    /// Waits until `count` tasks spawned on the host have run to their end.
+    pub(crate) async fn wait_for_ended_tasks(&self, count: usize) {
+        let mut ended = self.state.tasks_ended.subscribe();
+        reply_within("tasks ended", ended.wait_for(|n| *n >= count))
             .await
             .expect("the host state outlives the wait");
     }
@@ -846,6 +884,55 @@ impl GuiHost for FakeHost {
     where
         F: Future<Output = ()> + Send + 'static,
     {
-        tokio::spawn(task);
+        let pause = self.state.pause_next.lock().expect("pause").take();
+        let state = Arc::clone(&self.state);
+        tokio::spawn(async move {
+            let mut task = std::pin::pin!(task);
+            std::future::poll_fn(|cx| match &pause {
+                Some(pause) if pause.holds(cx) => std::task::Poll::Pending,
+                _ => task.as_mut().poll(cx),
+            })
+            .await;
+            state.tasks_ended.send_modify(|count| *count += 1);
+        });
+    }
+}
+
+/// Stops a task spawned on a host from being polled while it is held: what
+/// woke the task meanwhile is acted on once the pause is released.
+#[derive(Clone, Default)]
+pub(crate) struct TaskPause(Arc<Mutex<PauseState>>);
+
+#[derive(Default)]
+struct PauseState {
+    held: bool,
+    /// The task woken while held, woken again on the release.
+    waker: Option<std::task::Waker>,
+}
+
+impl TaskPause {
+    pub(crate) fn hold(&self) {
+        self.0.lock().expect("pause").held = true;
+    }
+
+    pub(crate) fn release(&self) {
+        let waker = {
+            let mut state = self.0.lock().expect("pause");
+            state.held = false;
+            state.waker.take()
+        };
+        if let Some(waker) = waker {
+            waker.wake();
+        }
+    }
+
+    /// Whether the task must not be polled now; keeps `cx`'s waker for the
+    /// release when it must not.
+    fn holds(&self, cx: &std::task::Context<'_>) -> bool {
+        let mut state = self.0.lock().expect("pause");
+        if state.held {
+            state.waker = Some(cx.waker().clone());
+        }
+        state.held
     }
 }

@@ -35,7 +35,7 @@ use crate::events::{
 use crate::host::GuiHost;
 use crate::ipc_client::{
     BoxedRead, ERROR_CODE_SUPERSEDED, EndKind, Generation, Interrupt, IpcError, PendingKind,
-    ReaderLink, Reply, Settled,
+    ReaderLink, Reply, Settled, speaks_this_wire,
 };
 
 // The host tests drive what the reader dispatches through a client.
@@ -544,8 +544,8 @@ pub fn rejection_for(frame: DaemonMessage) -> Result<IpcError, Box<DaemonMessage
 /// superseded.
 ///
 /// A `superseded` frame ends the connection and answers no request, under
-/// any key and from any revision; the requests waiting end with the
-/// generation.
+/// any key; the requests waiting end with the generation. A generation not
+/// settled on this build's wire drops it before (see [`dispatch`]).
 async fn settle_rejection(
     generation: &Generation,
     correlation_id: Option<u64>,
@@ -625,6 +625,10 @@ fn emit_window_event(app: &impl GuiHost, event: WindowEvent) {
 /// another kind. `window_id` comes from the attached connection; events from
 /// a window-specific connection include the window ID; control connections
 /// (attach-less) use None.
+///
+/// Until the generation has settled on this build's wire, only the answer to
+/// a request waiting is read and every other frame is dropped: a daemon of
+/// another wire is not read through this build's message shapes.
 async fn dispatch(
     app: &impl GuiHost,
     generation: &Generation,
@@ -632,6 +636,9 @@ async fn dispatch(
     message: DaemonMessage,
     window_id: Option<String>,
 ) -> bool {
+    if !speaks_this_wire(generation.revision()) {
+        return settle_answer(generation, correlation_id, message).await;
+    }
     let message = match window_event_for(window_id.as_deref(), message) {
         Ok(event) => {
             emit_window_event(app, event);
@@ -746,10 +753,37 @@ async fn dispatch(
             }
             false
         }
-        other => reply_for(other).is_some_and(|(kind, reply)| {
-            generation.settle(correlation_id, kind, Ok(reply)) == Settled::Broken
-        }),
+        other => settle_reply(generation, correlation_id, other),
     }
+}
+
+/// Hands `message` to the request waiting it answers and drops it when it
+/// answers none; a `superseded` frame answers none. Returns whether the
+/// generation must end: the daemon broke its word (see [`settle_reply`]).
+async fn settle_answer(
+    generation: &Generation,
+    correlation_id: Option<u64>,
+    message: DaemonMessage,
+) -> bool {
+    if is_superseded(&message) {
+        return false;
+    }
+    match rejection_for(message) {
+        Ok(rejection) => settle_rejection(generation, correlation_id, rejection).await,
+        Err(message) => settle_reply(generation, correlation_id, *message),
+    }
+}
+
+/// Hands a reply to the request it answers. Returns whether the generation
+/// must end: it came under a waiting request's key but is of another kind.
+fn settle_reply(
+    generation: &Generation,
+    correlation_id: Option<u64>,
+    message: DaemonMessage,
+) -> bool {
+    reply_for(message).is_some_and(|(kind, reply)| {
+        generation.settle(correlation_id, kind, Ok(reply)) == Settled::Broken
+    })
 }
 
 #[cfg(test)]

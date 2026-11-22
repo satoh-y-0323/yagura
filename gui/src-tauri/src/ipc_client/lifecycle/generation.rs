@@ -247,15 +247,6 @@ struct Slots {
 }
 
 impl Slots {
-    /// Records a refusal an opening step met before its request was written,
-    /// read as the step reads any answer. Called while the generation has not
-    /// ended.
-    fn record_refusal(&mut self, take: Option<Take>, refusal: &IpcError) {
-        if let Some(take) = take {
-            self.taken = Some(take(&Err(refusal.duplicate())));
-        }
-    }
-
     /// The request a frame under `correlation_id` answers, with its key. A
     /// frame under no key answers the revision probe while the generation is
     /// `probing` -- the probe alone is written then, and a daemon that returns
@@ -401,9 +392,29 @@ impl Generation {
     }
 
     /// Records the wire revision opening settled; once one is recorded, a
-    /// later call changes nothing.
+    /// later call changes nothing. The probe's answer records it in the step
+    /// that settles the probe (see [`Generation::settle`]).
     pub(super) fn record_revision(&self, revision: u32) {
         let _ = self.revision.set(revision);
+    }
+
+    /// Keeps `taken` as the last answer an opening step took. A revision it
+    /// settles is recorded in the same step, so the reader weighs the very
+    /// next frame under it, as the wire orders them.
+    fn keep_taken(&self, slots: &mut Slots, taken: TakenAnswer) {
+        if let TakenAnswer::Revision(revision) = taken {
+            self.record_revision(revision);
+        }
+        slots.taken = Some(taken);
+    }
+
+    /// Records a refusal an opening step met before its request was written,
+    /// read as the step reads any answer. Called while the generation has not
+    /// ended.
+    fn record_refusal(&self, slots: &mut Slots, take: Option<Take>, refusal: &IpcError) {
+        if let Some(take) = take {
+            self.keep_taken(slots, take(&Err(refusal.duplicate())));
+        }
     }
 
     /// Whether the wire revision is still being probed.
@@ -472,7 +483,7 @@ impl Generation {
             let revision = self.revision();
             if let Err(refusal) = wire::gate(message, revision) {
                 let refusal = IpcError::from(refusal);
-                slots.record_refusal(take, &refusal);
+                self.record_refusal(&mut slots, take, &refusal);
                 return StepReply::Answered(Err(refusal));
             }
             slots
@@ -511,7 +522,7 @@ impl Generation {
             if slots.ended {
                 return StepReply::Unanswered(IpcError::NotConnected);
             }
-            slots.record_refusal(take, &refusal);
+            self.record_refusal(&mut slots, take, &refusal);
         }
         StepReply::Answered(refusal)
     }
@@ -579,7 +590,8 @@ impl Generation {
 
     /// Hands `result`, an answer of `kind`, to the request it answers: the
     /// one under `correlation_id`, or under none the revision probe while it
-    /// is probed (see [`Generation::awaiting`]).
+    /// is probed (see [`Generation::awaiting`]). The revision the probe's
+    /// answer settles on is recorded before this returns.
     pub(crate) fn settle(
         &self,
         correlation_id: Option<u64>,
@@ -601,7 +613,7 @@ impl Generation {
         }
         if let Some(pending) = slots.pending.remove(&key) {
             if let Some(take) = pending.take {
-                slots.taken = Some(take(&result));
+                self.keep_taken(&mut slots, take(&result));
             }
             let _ = pending.sender.send(result);
         }
