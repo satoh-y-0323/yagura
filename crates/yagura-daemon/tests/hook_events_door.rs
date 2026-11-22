@@ -1514,14 +1514,12 @@ async fn a_stops_status_is_decided_where_its_door_ends() {
     );
     // On the relay's connection, so the daemon has taken the door's notice before the mark.
     query_status(&mut relayed.upstream, &pressed).await;
+    // The answer only says the notice is queued for the detector; the block's running is
+    // evaluated against the live screen, so the mark waits until that running is published.
+    // Not published here means the block did not end the press's hold, which hangs this wait.
+    common::published_until(&mut published, WindowStatus::Running).await;
     common::views::entry_script_write(&entry, common::TURN_END_KEY_MARK).await;
-    let before_the_mark =
-        common::published_until(&mut published, WindowStatus::WaitingApproval).await;
-    assert!(
-        before_the_mark.contains(&WindowStatus::Running),
-        "a stop's block printed after a press of the turn-end key must end the press's \
-         hold, so the block continues the turn; published {before_the_mark:?}"
-    );
+    common::published_until(&mut published, WindowStatus::WaitingApproval).await;
 }
 
 /// A stop's block publishes no status before its door ends: the first status published
