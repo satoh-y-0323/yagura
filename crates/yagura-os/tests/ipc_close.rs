@@ -87,24 +87,28 @@ fn delivered_after_sent() -> usize {
     if cfg!(unix) { SENT.len() } else { 0 }
 }
 
-/// Takes the delivered bytes in pieces smaller than `SENT`, until a call
-/// returns none, and returns them in order.
-fn read_delivered_in_pieces(read: &mut yagura_os::ClientReadHalf) -> Vec<u8> {
+/// Takes the delivered bytes in pieces of `piece_len` bytes, until a call
+/// returns none or fails, and returns them in order with the failure, if any.
+fn read_delivered_in_pieces(
+    read: &mut yagura_os::ClientReadHalf,
+    piece_len: usize,
+) -> (Vec<u8>, Option<io::Error>) {
     let mut got = Vec::new();
-    let mut piece = [0u8; 16];
+    let mut piece = [0u8; 32];
+    let piece = &mut piece[..piece_len];
     loop {
-        let count = read
-            .read_delivered(&mut piece)
-            .expect("the delivered bytes are read");
-        assert!(
-            count <= piece.len(),
-            "{count} bytes read into {}",
-            piece.len()
-        );
-        if count == 0 {
-            return got;
+        match read.read_delivered(piece) {
+            Err(error) => return (got, Some(error)),
+            Ok(0) => return (got, None),
+            Ok(count) => {
+                assert!(
+                    count <= piece.len(),
+                    "{count} bytes read into {}",
+                    piece.len()
+                );
+                got.extend_from_slice(&piece[..count]);
+            }
         }
-        got.extend_from_slice(&piece[..count]);
     }
 }
 
@@ -129,7 +133,8 @@ async fn a_closed_peer_shows_in_the_write_error_and_what_it_sent_is_read_before_
             .expect("the delivered bytes are counted"),
         delivered_after_sent()
     );
-    let delivered = read_delivered_in_pieces(&mut read);
+    let (delivered, ended) = read_delivered_in_pieces(&mut read, 16);
+    assert!(ended.is_none(), "{ended:?} ends a read of a closed peer");
     let rest = read_until_it_ends(&mut read).await;
     if cfg!(unix) {
         assert_eq!(delivered, SENT);
@@ -161,7 +166,8 @@ async fn a_closed_peer_shows_in_the_write_error_and_what_it_sent_is_read_before_
             let queued = read
                 .delivered_len()
                 .expect("the delivered bytes are counted");
-            let first = read_delivered_in_pieces(&mut read);
+            let (first, ended) = read_delivered_in_pieces(&mut read, 16);
+            assert!(ended.is_none(), "{ended:?}");
             let second_count = read
                 .read_delivered(&mut [0u8; 16])
                 .expect("the next call returns");
@@ -176,5 +182,38 @@ async fn a_closed_peer_shows_in_the_write_error_and_what_it_sent_is_read_before_
         assert_eq!(first, SENT);
     } else {
         assert!(first.is_empty(), "{first:?}");
+    }
+
+    // A daemon that closes without reading what this end sent. Linux resets
+    // the connection then, and the reset follows the bytes it delivered. A
+    // piece that does not divide `SENT` makes one call read some of them
+    // before the reset is met, and that call must return them.
+    let (accepted, client) = connected("unread").await;
+    let (mut read, mut write): (yagura_os::ClientReadHalf, _) = yagura_os::split_client(client);
+    write.write_all(&[1u8]).await.expect("the client writes");
+    write.flush().await.expect("the client flushes");
+    daemon_writes_and_closes(accepted).await;
+    // Another test's forked child can hold the daemon's socket for a moment
+    // after the daemon let go of it, so wait until the close shows.
+    let error = write_until_it_fails(&mut write).await;
+    assert!(
+        yagura_os::write_error_shows_peer_closed(&error),
+        "{error:?}"
+    );
+    let (delivered, ended) = read_delivered_in_pieces(&mut read, 24);
+    let rest = read_until_it_ends(&mut read).await;
+    eprintln!(
+        "unread peer: {} delivered bytes, then {:?} (raw {:?}), {} bytes after",
+        delivered.len(),
+        ended.as_ref().map(io::Error::kind),
+        ended.as_ref().and_then(io::Error::raw_os_error),
+        rest.len()
+    );
+    let mut all = delivered;
+    all.extend_from_slice(&rest);
+    assert_eq!(all, SENT, "every byte the daemon sent before it closed");
+    if cfg!(target_os = "linux") {
+        let error = ended.expect("the reset follows the delivered bytes");
+        assert_eq!(error.kind(), io::ErrorKind::ConnectionReset, "{error:?}");
     }
 }
