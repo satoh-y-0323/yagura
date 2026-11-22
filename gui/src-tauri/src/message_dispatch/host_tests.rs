@@ -642,11 +642,20 @@ async fn a_control_connection_to_a_daemon_of_another_wire_revision_opens_writing
     }
 
     // With no daemon left on the endpoint, the end of that generation starts
-    // one: a retry alone would find nothing to reach.
+    // none: starting the daemon on the application's own initiative is the
+    // supervisor's, which reads the settings and the budget.
+    let older_client = &ends[0].2;
+    let reopened = reply_within("the reconnection", older_client.connect_existing(&host)).await;
+    assert!(reopened.is_ok(), "{reopened:?}");
+    let attempts_before = host.endpoint_calls();
     host.set_endpoint(Some(FakeHost::new("incompatible-gone").endpoint_name()));
     older.hang_up();
-    host.wait_for_spawns(1).await;
-    assert_eq!(host.spawn_count(), 1);
+    host.wait_for_endpoint_calls(attempts_before + 1).await;
+    // The chain's attempt covers a single-attempt want, so this answer comes
+    // once that attempt has failed.
+    let after_the_chain = reply_within("the chain", older_client.connect_existing(&host)).await;
+    assert!(after_the_chain.is_err(), "{after_the_chain:?}");
+    assert_eq!(host.spawn_count(), 0);
 }
 
 #[tokio::test]

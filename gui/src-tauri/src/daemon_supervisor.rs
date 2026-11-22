@@ -111,6 +111,9 @@ async fn observe(pool: &ConnectionPool) -> RecoveryObservation {
     RecoveryObservation {
         control_connected: pool.has_live_control_connection().await,
         holds_windows: !pool.window_ids().await.is_empty(),
+        last_daemon_unusable: pool
+            .daemon_connection()
+            .is_some_and(|start| !start.compatible),
     }
 }
 
@@ -160,9 +163,10 @@ mod tests {
 
     use super::*;
     use crate::events::EVENT_DAEMON_RECOVERY;
-    use yagura_protocol::WindowStatus;
+    use yagura_protocol::{PROTOCOL_REVISION, WindowStatus};
+    use yagura_test_support::ipc::reply_within;
 
-    use crate::host::fake::{FakeHost, window_info};
+    use crate::host::fake::{FakeHost, ScriptedDaemon, probes_answered_at, window_info};
     use crate::ipc_client::{IpcClient, IpcError};
 
     /// A recovery state that has already seen the daemon answer, as an earlier
@@ -175,6 +179,7 @@ mod tests {
         let _ = lock_state(&state).next_action(RecoveryObservation {
             control_connected: true,
             holds_windows: true,
+            last_daemon_unusable: false,
         });
         state
     }
@@ -211,6 +216,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_daemon_of_another_wire_that_went_away_is_started_again_by_the_supervisor() {
+        let host = FakeHost::new("recovery-unusable-gone");
+        let older = ScriptedDaemon::new(probes_answered_at(vec![PROTOCOL_REVISION - 1]));
+        older.listen(&host.endpoint_name()).await;
+        let pool = Arc::new(ConnectionPool::new());
+        let opened = reply_within("the connect", pool.control_connection().connect(&host)).await;
+        assert!(opened.is_ok(), "{opened:?}");
+        let state: RecoverySupervisorState = Arc::new(Mutex::new(RecoveryState::new(
+            client_config_without_base_dir(None),
+            None,
+        )));
+        let recovery = tokio::spawn(run_recovery_loop(host.clone(), Arc::clone(&pool), state));
+
+        host.set_endpoint(Some(
+            FakeHost::new("recovery-unusable-none").endpoint_name(),
+        ));
+        older.hang_up();
+        host.wait_for_spawns(1).await;
+        recovery.abort();
+
+        // The start is the supervisor's: it published the recovery before it.
+        let published: Vec<_> = host
+            .take_events()
+            .into_iter()
+            .filter(|event| event.name == EVENT_DAEMON_RECOVERY)
+            .map(|event| event.payload)
+            .collect();
+        assert_eq!(published, [json!({ "status": "retrying", "rev": 1 })]);
+    }
+
+    #[tokio::test]
     async fn a_manual_reconnect_puts_the_attempt_budget_back_and_starts_the_daemon() {
         let host = FakeHost::new("manual-reconnect");
         let pool = Arc::new(ConnectionPool::new());
@@ -218,6 +254,7 @@ mod tests {
         let outage = RecoveryObservation {
             control_connected: false,
             holds_windows: true,
+            last_daemon_unusable: false,
         };
         while lock_state(&state).next_action(outage).spawn {}
         assert!(!lock_state(&state).next_action(outage).spawn);

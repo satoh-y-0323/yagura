@@ -649,6 +649,8 @@ struct HostState {
     endpoint: Mutex<Option<String>>,
     /// The failure an unresolvable endpoint reports.
     endpoint_failure: Mutex<fn() -> IpcError>,
+    /// How many times the endpoint was asked for: once per connect attempt.
+    endpoint_calls: watch::Sender<usize>,
     /// The daemon a spawn brings up; `None` makes a spawn fail.
     daemon_on_spawn: Mutex<Option<ScriptedDaemon>>,
     /// The failure a spawn that brings no daemon up reports.
@@ -681,6 +683,7 @@ impl FakeHost {
             state: Arc::new(HostState {
                 endpoint: Mutex::new(Some(unique_endpoint_name(ENDPOINT_PREFIX, tag))),
                 endpoint_failure: Mutex::new(|| IpcError::NotConnected),
+                endpoint_calls: watch::channel(0).0,
                 daemon_on_spawn: Mutex::new(None),
                 spawn_failure: Mutex::new(|| IpcError::DaemonSpawn),
                 spawn_warning: Mutex::new(None),
@@ -742,6 +745,20 @@ impl FakeHost {
     pub(crate) fn starts_daemon_with_warning(&self, daemon: &ScriptedDaemon, warning: &str) {
         self.starts_daemon(daemon);
         *self.state.spawn_warning.lock().expect("spawn warning") = Some(warning.to_owned());
+    }
+
+    /// How many times the endpoint was asked for, which a connect attempt
+    /// does first.
+    pub(crate) fn endpoint_calls(&self) -> usize {
+        *self.state.endpoint_calls.borrow()
+    }
+
+    /// Waits until the endpoint has been asked for `count` times.
+    pub(crate) async fn wait_for_endpoint_calls(&self, count: usize) {
+        let mut calls = self.state.endpoint_calls.subscribe();
+        reply_within("the endpoint", calls.wait_for(|n| *n >= count))
+            .await
+            .expect("the host state outlives the wait");
     }
 
     /// How many times the daemon was asked to start.
@@ -836,6 +853,7 @@ impl FakeHost {
 
 impl GuiHost for FakeHost {
     fn endpoint(&self) -> Result<String, IpcError> {
+        self.state.endpoint_calls.send_modify(|count| *count += 1);
         self.state
             .endpoint
             .lock()

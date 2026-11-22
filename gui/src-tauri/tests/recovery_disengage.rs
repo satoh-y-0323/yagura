@@ -31,6 +31,7 @@ fn connected(holds_windows: bool) -> RecoveryObservation {
     RecoveryObservation {
         control_connected: true,
         holds_windows,
+        last_daemon_unusable: false,
     }
 }
 
@@ -38,6 +39,7 @@ fn disconnected(holds_windows: bool) -> RecoveryObservation {
     RecoveryObservation {
         control_connected: false,
         holds_windows,
+        last_daemon_unusable: false,
     }
 }
 

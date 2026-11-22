@@ -37,6 +37,7 @@ fn connected(holds_windows: bool) -> RecoveryObservation {
     RecoveryObservation {
         control_connected: true,
         holds_windows,
+        last_daemon_unusable: false,
     }
 }
 
@@ -44,7 +45,30 @@ fn disconnected(holds_windows: bool) -> RecoveryObservation {
     RecoveryObservation {
         control_connected: false,
         holds_windows,
+        last_daemon_unusable: false,
     }
+}
+
+/// Connected to a daemon that does not speak this build's wire.
+fn connected_to_unusable(holds_windows: bool) -> RecoveryObservation {
+    RecoveryObservation {
+        control_connected: true,
+        holds_windows,
+        last_daemon_unusable: true,
+    }
+}
+
+/// Disconnected, the last daemon announced being one this build cannot use.
+fn unusable_gone(holds_windows: bool) -> RecoveryObservation {
+    RecoveryObservation {
+        control_connected: false,
+        holds_windows,
+        last_daemon_unusable: true,
+    }
+}
+
+fn emitted(action: &yagura_gui::recovery_state::RecoveryAction) -> Option<RecoveryStatus> {
+    action.emit.map(|update| update.status)
 }
 
 /// The wait a spawning tick must return for its `attempt_number`-th attempt
@@ -249,20 +273,213 @@ fn idle_is_emitted_instead_of_exhausted_when_the_tick_after_the_limit_finds_a_co
 }
 
 // ---------------------------------------------------------------------
-// An explicitly disabled configuration never spawns, even when
-// both activation conditions hold.
+// Whether an outage is recovered follows `auto_respawn`: an explicitly
+// disabled configuration never spawns, even when both activation conditions
+// hold, and a daemon that was gone after being one this build cannot use is
+// recovered with no window held and no connection ever observed.
 // ---------------------------------------------------------------------
 
 #[test]
 fn disabled_auto_respawn_withholds_spawn_even_when_both_activation_conditions_hold() {
+    struct Row {
+        label: &'static str,
+        auto_respawn: bool,
+        before: Vec<RecoveryObservation>,
+        outage: RecoveryObservation,
+        spawn: bool,
+        emit: Option<RecoveryStatus>,
+        status: RecoveryStatus,
+    }
+    let rows = [
+        Row {
+            label: "disabled, connected before, windows held",
+            auto_respawn: false,
+            before: vec![connected(true)],
+            outage: disconnected(true),
+            spawn: false,
+            emit: None,
+            status: RecoveryStatus::Idle,
+        },
+        Row {
+            label: "enabled, an unusable daemon gone, connected to it before",
+            auto_respawn: true,
+            before: vec![connected_to_unusable(false)],
+            outage: unusable_gone(false),
+            spawn: true,
+            emit: Some(RecoveryStatus::Retrying),
+            status: RecoveryStatus::Retrying,
+        },
+        Row {
+            label: "enabled, an unusable daemon gone, never observed connected",
+            auto_respawn: true,
+            before: Vec::new(),
+            outage: unusable_gone(false),
+            spawn: true,
+            emit: Some(RecoveryStatus::Retrying),
+            status: RecoveryStatus::Retrying,
+        },
+        Row {
+            label: "disabled, an unusable daemon gone, connected to it before",
+            auto_respawn: false,
+            before: vec![connected_to_unusable(false)],
+            outage: unusable_gone(false),
+            spawn: false,
+            emit: None,
+            status: RecoveryStatus::Idle,
+        },
+        Row {
+            label: "disabled, an unusable daemon gone, never observed connected",
+            auto_respawn: false,
+            before: Vec::new(),
+            outage: unusable_gone(false),
+            spawn: false,
+            emit: None,
+            status: RecoveryStatus::Idle,
+        },
+        Row {
+            label: "enabled, a usable daemon gone, no window held",
+            auto_respawn: true,
+            before: vec![connected(false)],
+            outage: disconnected(false),
+            spawn: false,
+            emit: None,
+            status: RecoveryStatus::Idle,
+        },
+    ];
+    for row in rows {
+        let mut state = state_with(ReconnectConfig {
+            auto_respawn: row.auto_respawn,
+            ..ReconnectConfig::default()
+        });
+        for observation in &row.before {
+            state.next_action(*observation);
+        }
+        let action = state.next_action(row.outage);
+        assert_eq!(
+            (action.spawn, emitted(&action), state.snapshot().status),
+            (row.spawn, row.emit, row.status),
+            "{}",
+            row.label
+        );
+    }
+}
+
+#[test]
+fn recovering_an_unusable_daemon_spends_the_same_budget_and_gives_up() {
+    for (label, before) in [
+        ("connected to it before", vec![connected_to_unusable(false)]),
+        ("never observed connected", Vec::new()),
+    ] {
+        let mut state = state_with(ReconnectConfig {
+            attempt_limit: 2,
+            ..ReconnectConfig::default()
+        });
+        for observation in &before {
+            state.next_action(*observation);
+        }
+        let spawns: Vec<bool> = (0..2)
+            .map(|_| state.next_action(unusable_gone(false)).spawn)
+            .collect();
+        assert_eq!(spawns, [true, true], "{label}");
+        let confirming = state.next_action(unusable_gone(false));
+        assert_eq!(
+            (confirming.spawn, emitted(&confirming)),
+            (false, Some(RecoveryStatus::Exhausted)),
+            "{label}"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------
+// Reaching a daemon this build cannot use is not a recovery: the attempt
+// budget is put back only when a usable daemon is reached.
+// ---------------------------------------------------------------------
+
+#[test]
+fn connecting_to_an_unusable_daemon_leaves_the_attempt_budget_where_it_was() {
+    let reconnect = ReconnectConfig {
+        initial_delay_ms: 1000,
+        backoff_factor: 2,
+        attempt_limit: 3,
+        ..ReconnectConfig::default()
+    };
+    let mut state = state_with(reconnect);
+    state.next_action(connected(true)); // track record
+    state.next_action(disconnected(true)); // attempt 1
+    state.next_action(disconnected(true)); // attempt 2
+    assert_eq!(state.snapshot().status, RecoveryStatus::Retrying);
+
+    let reached = state.next_action(connected_to_unusable(true));
+    assert_eq!(
+        (reached.spawn, emitted(&reached)),
+        (false, Some(RecoveryStatus::Idle))
+    );
+
+    let next = state.next_action(unusable_gone(true));
+    assert!(next.spawn);
+    assert_eq!(next.wait, expected_attempt_wait(&reconnect, 3));
+    assert_eq!(emitted(&next), Some(RecoveryStatus::Retrying));
+}
+
+#[test]
+fn attempts_that_only_reach_unusable_daemons_run_out_and_a_usable_daemon_puts_the_budget_back() {
+    let reconnect = ReconnectConfig {
+        initial_delay_ms: 1000,
+        backoff_factor: 2,
+        attempt_limit: 3,
+        ..ReconnectConfig::default()
+    };
+    let mut state = state_with(reconnect);
+    state.next_action(connected(true)); // track record
+    for attempt in 1..=3 {
+        let action = state.next_action(unusable_gone(true));
+        assert!(action.spawn, "attempt {attempt}");
+        let reached = state.next_action(connected_to_unusable(true));
+        assert_eq!(
+            (reached.spawn, emitted(&reached)),
+            (false, Some(RecoveryStatus::Idle)),
+            "attempt {attempt}"
+        );
+    }
+
+    let gone = state.next_action(unusable_gone(true));
+    assert_eq!(
+        (gone.spawn, emitted(&gone)),
+        (false, Some(RecoveryStatus::Exhausted))
+    );
+
+    let usable = state.next_action(connected(true));
+    assert_eq!(
+        (usable.spawn, emitted(&usable)),
+        (false, Some(RecoveryStatus::Idle))
+    );
+    let fresh = state.next_action(disconnected(true));
+    assert!(fresh.spawn);
+    assert_eq!(fresh.wait, expected_attempt_wait(&reconnect, 1));
+}
+
+#[test]
+fn an_exhausted_recovery_that_reaches_an_unusable_daemon_goes_idle_with_its_budget_still_spent() {
     let mut state = state_with(ReconnectConfig {
-        auto_respawn: false,
+        attempt_limit: 1,
         ..ReconnectConfig::default()
     });
     state.next_action(connected(true)); // track record
-    let action = state.next_action(disconnected(true));
-    assert!(!action.spawn);
-    assert_eq!(state.snapshot().status, RecoveryStatus::Idle);
+    state.next_action(disconnected(true)); // attempt 1, the limit
+    state.next_action(disconnected(true)); // confirms the give-up
+    assert_eq!(state.snapshot().status, RecoveryStatus::Exhausted);
+
+    let reached = state.next_action(connected_to_unusable(true));
+    assert_eq!(
+        (reached.spawn, emitted(&reached)),
+        (false, Some(RecoveryStatus::Idle))
+    );
+
+    let gone = state.next_action(unusable_gone(true));
+    assert_eq!(
+        (gone.spawn, emitted(&gone)),
+        (false, Some(RecoveryStatus::Exhausted))
+    );
 }
 
 // ---------------------------------------------------------------------

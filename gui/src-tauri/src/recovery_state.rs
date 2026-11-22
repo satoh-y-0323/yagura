@@ -33,6 +33,12 @@ pub struct RecoveryObservation {
     pub control_connected: bool,
     /// Whether the pool still holds at least one window.
     pub holds_windows: bool,
+    /// Whether the daemon start the control connection last announced does
+    /// not speak this build's wire. While connected, it is a fact about the
+    /// daemon connected to. It stays set once that daemon is gone, because
+    /// nothing but the supervisor starts one this GUI can use without a user
+    /// action; only the start of a usable daemon clears it.
+    pub last_daemon_unusable: bool,
 }
 
 /// A status change to publish, carrying the generation that orders it
@@ -115,7 +121,7 @@ impl RecoveryState {
     /// give-up outcome rather than overflowing.
     pub fn next_action(&mut self, observation: RecoveryObservation) -> RecoveryAction {
         if observation.control_connected {
-            return self.observe_connection();
+            return self.observe_connection(observation);
         }
         if self.may_attempt(observation) {
             return self.make_attempt();
@@ -133,18 +139,21 @@ impl RecoveryState {
         }
     }
 
-    /// The daemon answers: stop trying and put the budget back, so a later
-    /// outage gets a full cycle of its own.
-    fn observe_connection(&mut self) -> RecoveryAction {
+    /// A daemon answers, so there is nothing to attempt while it holds the
+    /// endpoint. The budget goes back only when that daemon is usable, so a
+    /// later outage gets a full cycle of its own: reaching one that does not
+    /// speak this build's wire is no recovery, and putting the budget back
+    /// there would let start-and-fail cycles run without a limit.
+    fn observe_connection(&mut self, observation: RecoveryObservation) -> RecoveryAction {
         self.ever_connected = true;
+        if !observation.last_daemon_unusable {
+            self.attempts = 0;
+        }
         let was_recovering = matches!(
             self.status,
             RecoveryStatus::Retrying | RecoveryStatus::Exhausted
         );
-        let emit = was_recovering.then(|| {
-            self.attempts = 0;
-            self.publish(RecoveryStatus::Idle)
-        });
+        let emit = was_recovering.then(|| self.publish(RecoveryStatus::Idle));
         RecoveryAction {
             spawn: false,
             wait: TICK_INTERVAL,
@@ -170,11 +179,15 @@ impl RecoveryState {
     /// `Retrying` that can no longer attempt anything is not trying; it
     /// takes precedence over the second, which is where the give-up
     /// becomes final (the tick that spent the last attempt only started
-    /// it). `Exhausted` stands either way: it reports a cycle that ran.
+    /// it). The give-up is not only reached from `Retrying`: reaching a
+    /// daemon this build cannot use goes `Idle` with the budget left as it
+    /// was. `Exhausted` stands either way: it reports a cycle that ran.
     fn observe_continued_outage(&mut self, observation: RecoveryObservation) -> RecoveryAction {
-        let retrying = self.status == RecoveryStatus::Retrying;
-        let disengaged = retrying && !self.activation_holds(observation);
-        let budget_spent = retrying && self.attempts >= self.config.attempt_limit;
+        let activated = self.activation_holds(observation);
+        let disengaged = self.status == RecoveryStatus::Retrying && !activated;
+        let budget_spent = self.status != RecoveryStatus::Exhausted
+            && activated
+            && self.attempts >= self.config.attempt_limit;
         let emit = if disengaged {
             self.attempts = 0;
             Some(self.publish(RecoveryStatus::Idle))
@@ -189,9 +202,12 @@ impl RecoveryState {
     }
 
     /// Whether recovery has anything to act on: the settings allow it and
-    /// the two activation conditions hold.
+    /// either a daemon that was reached went away with windows open, or the
+    /// last daemon reached was one this build cannot use.
     fn activation_holds(&self, observation: RecoveryObservation) -> bool {
-        self.config.auto_respawn && self.ever_connected && observation.holds_windows
+        self.config.auto_respawn
+            && ((self.ever_connected && observation.holds_windows)
+                || observation.last_daemon_unusable)
     }
 
     /// Whether this tick may start the daemon: recovery is activated and

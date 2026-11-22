@@ -261,8 +261,6 @@ struct Chain {
     /// The lost generation's window, carried from its end event so that every
     /// attempt of the chain restores that window.
     restore: Option<String>,
-    /// The weakest form the chain's attempts take.
-    floor: ConnectMode,
 }
 
 #[derive(Debug)]
@@ -664,12 +662,6 @@ impl Lifecycle {
             return;
         }
 
-        // A daemon of another wire is one this GUI cannot use, so once it is
-        // gone the chain starts one of this build's when none answers.
-        let floor = match self.phase {
-            Phase::Open { revision, .. } if !speaks_this_wire(Some(revision)) => ConnectMode::Spawn,
-            _ => ConnectMode::Retry,
-        };
         out.push(Step::Do(Action::End { generation }));
         self.phase = Phase::Idle;
         let restore = match (self.kind, window_id) {
@@ -687,7 +679,6 @@ impl Lifecycle {
         self.chain = Some(Chain {
             attempts: 1,
             restore,
-            floor,
         });
         let mode = self.chain_mode();
         self.start(mode, out);
@@ -709,7 +700,6 @@ impl Lifecycle {
                 self.chain = Some(Chain {
                     attempts: chain.attempts + 1,
                     restore: chain.restore,
-                    floor: chain.floor,
                 });
                 let mode = self.chain_mode();
                 self.start(mode, out);
@@ -727,16 +717,13 @@ impl Lifecycle {
         }
     }
 
-    /// A chain takes its floor, and starts the daemon when a waiting want
-    /// asks for it.
+    /// A chain only reaches again; it starts the daemon only when a waiting
+    /// want asks for it, so the supervisor stays the one place that decides
+    /// on its own to start one.
     fn chain_mode(&self) -> ConnectMode {
-        let floor = self
-            .chain
-            .as_ref()
-            .map_or(ConnectMode::Retry, |chain| chain.floor);
         match self.strongest_want() {
-            Some(mode) if strength(mode) > strength(floor) => mode,
-            _ => floor,
+            Some(mode) if strength(mode) > strength(ConnectMode::Retry) => mode,
+            _ => ConnectMode::Retry,
         }
     }
 
