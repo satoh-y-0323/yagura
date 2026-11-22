@@ -74,15 +74,6 @@ fn older_housekeeping(request: &ClientMessage) -> Option<Reaction> {
     }
 }
 
-/// How many connections asked `daemon` for its revision.
-fn probes(daemon: &ScriptedDaemon) -> usize {
-    daemon
-        .received()
-        .iter()
-        .filter(|request| matches!(request, ClientMessage::GetProtocolRevision))
-        .count()
-}
-
 /// A daemon that answers every attach with `answer`.
 fn attaching_with(answer: Vec<DaemonMessage>) -> ScriptedDaemon {
     ScriptedDaemon::new(move |request| match request {
@@ -279,7 +270,10 @@ async fn a_reply_reaches_the_request_waiting_for_it_through_the_reader() {
                 plan_id: "unkeyed".to_owned(),
             }),
             // Unreadable, and under no key or another one: no answer at all.
-            SentFrame::Raw(br#"{"type":"plan_deleted"}"#.to_vec()),
+            SentFrame::Unreadable {
+                tag: "plan_deleted",
+                keyed: false,
+            },
             SentFrame::Raw(
                 br#"{"type":"plan_deleted","correlation_id":18446744073709551615}"#.to_vec(),
             ),
@@ -304,7 +298,7 @@ async fn a_reply_reaches_the_request_waiting_for_it_through_the_reader() {
     assert_eq!(deleted.expect("delete_plan"), "p9");
     assert_eq!(again.expect("the same connection answers again"), "p10");
     assert_eq!(
-        probes(&daemon),
+        daemon.probes(),
         1,
         "what answers nothing keeps the connection"
     );
@@ -318,7 +312,7 @@ async fn a_reply_reaches_the_request_waiting_for_it_through_the_reader() {
         .connect_existing(&host)
         .await
         .expect("the reconnect opens");
-    assert_eq!(probes(&daemon), 2, "one reconnect");
+    assert_eq!(daemon.probes(), 2, "one reconnect");
 }
 
 #[tokio::test]
@@ -488,12 +482,18 @@ async fn an_answer_an_older_daemon_sends_in_a_shape_this_build_cannot_read_ends_
     let daemon = ScriptedDaemon::new(move |request| match request {
         ClientMessage::InterruptWindow { .. } => Reaction::sends(vec![
             // Unreadable, and not the kind awaited: no answer at all.
-            SentFrame::Raw(br#"{"type":"plan_deleted"}"#.to_vec()),
+            SentFrame::Unreadable {
+                tag: "plan_deleted",
+                keyed: false,
+            },
             SentFrame::Raw(br#"{"type":"window_interrupted","window_id":"w1"}"#.to_vec()),
         ]),
         ClientMessage::ListWindows => match lists.fetch_add(1, Ordering::SeqCst) {
             // The list is what the caller reads, and it is missing.
-            0 => Reaction::sends(vec![SentFrame::Raw(br#"{"type":"window_list"}"#.to_vec())]),
+            0 => Reaction::sends(vec![SentFrame::Unreadable {
+                tag: "window_list",
+                keyed: false,
+            }]),
             _ => Reaction::sends(vec![SentFrame::Unkeyed(DaemonMessage::WindowList {
                 windows: Vec::new(),
             })]),
@@ -515,5 +515,5 @@ async fn an_answer_an_older_daemon_sends_in_a_shape_this_build_cannot_read_ends_
         "got {unreadable:?}"
     );
     assert_eq!(listed.expect("the same connection answers"), Vec::new());
-    assert_eq!(probes(&daemon), 1, "the connection goes on");
+    assert_eq!(daemon.probes(), 1, "the connection goes on");
 }

@@ -16,8 +16,8 @@ use crate::connection_pool::ConnectionPool;
 use crate::events::{EVENT_DAEMON_CONNECTED, EVENT_WINDOW_LINK};
 use crate::host::fake::{
     FakeHost, Link, Reaction, RecordedEvent, ScriptedDaemon, SentFrame, announced, attach_pane,
-    attached, brief, connected, error_frame, probes_answered_in, protocol_revision, sample_palette,
-    text,
+    attached, brief, connected, connection, error_frame, probes_answered_in, protocol_revision,
+    sample_palette, text,
 };
 
 const BOOT_A: StatusBoot = StatusBoot { origin: 7, seq: 1 };
@@ -47,29 +47,6 @@ async fn attached_window(
         .expect("attach");
     let client = pool.get_window("w1").await.expect("w1 is tracked");
     (host, pool, client)
-}
-
-/// The requests of the connection that began with the `nth` revision probe
-/// (counted from 0), up to the next connection's probe.
-fn connection(received: &[ClientMessage], nth: usize) -> &[ClientMessage] {
-    let probes: Vec<usize> = received
-        .iter()
-        .enumerate()
-        .filter(|(_, request)| matches!(request, ClientMessage::GetProtocolRevision))
-        .map(|(index, _)| index)
-        .collect();
-    let start = *probes.get(nth).expect("that connection was made");
-    let end = probes.get(nth + 1).copied().unwrap_or(received.len());
-    &received[start..end]
-}
-
-/// How many revision probes, and so how many connections, the daemon heard.
-fn probes(daemon: &ScriptedDaemon) -> usize {
-    daemon
-        .received()
-        .iter()
-        .filter(|request| matches!(request, ClientMessage::GetProtocolRevision))
-        .count()
 }
 
 /// The next link report about `window_id`, with every event emitted before
@@ -374,7 +351,7 @@ async fn a_request_held_when_its_generation_ends_ends_as_lost_however_the_genera
             client.list_windows().await.expect("the next request"),
             Vec::new()
         );
-        assert_eq!(probes(&daemon), 2, "hang-up: one reconnect");
+        assert_eq!(daemon.probes(), 2, "hang-up: one reconnect");
     }
 
     // A frame under the request's key that reads as no answer: the daemon
@@ -383,7 +360,10 @@ async fn a_request_held_when_its_generation_ends_ends_as_lost_however_the_genera
         let lists = AtomicUsize::new(0);
         let daemon = ScriptedDaemon::new(move |request| match request {
             ClientMessage::ListWindows => match lists.fetch_add(1, Ordering::SeqCst) {
-                0 => Reaction::sends(vec![SentFrame::UnreadableAnswer("window_list")]),
+                0 => Reaction::sends(vec![SentFrame::Unreadable {
+                    tag: "window_list",
+                    keyed: true,
+                }]),
                 _ => Reaction::reply(DaemonMessage::WindowList {
                     windows: Vec::new(),
                 }),
@@ -408,7 +388,7 @@ async fn a_request_held_when_its_generation_ends_ends_as_lost_however_the_genera
             client.list_windows().await.expect("the next request"),
             Vec::new()
         );
-        assert_eq!(probes(&daemon), 2, "unreadable answer: one reconnect");
+        assert_eq!(daemon.probes(), 2, "unreadable answer: one reconnect");
     }
 
     // Another GUI takes the daemon over: nothing reconnects until asked.
@@ -469,7 +449,7 @@ async fn a_request_held_when_its_generation_ends_ends_as_lost_however_the_genera
             client.list_windows().await.expect("the next request"),
             Vec::new()
         );
-        assert_eq!(probes(&daemon), 3, "superseded: only what was asked for");
+        assert_eq!(daemon.probes(), 3, "superseded: only what was asked for");
         assert_eq!(host.spawn_count(), 0);
     }
 
@@ -508,7 +488,7 @@ async fn a_request_held_when_its_generation_ends_ends_as_lost_however_the_genera
             matches!(again, Err(IpcError::NotConnected)),
             "retired: got {again:?}"
         );
-        assert_eq!(probes(&daemon), 1, "retired: no other connection");
+        assert_eq!(daemon.probes(), 1, "retired: no other connection");
     }
 }
 
@@ -627,7 +607,7 @@ async fn a_superseded_window_is_reported_and_never_reconnects() {
     assert_eq!(host.next_link("w1").await.state, "superseded");
     assert!(!client.is_connected().await);
     assert_eq!(
-        probes(&daemon),
+        daemon.probes(),
         1,
         "a reconnect would have made a second connection ask again"
     );

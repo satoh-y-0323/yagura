@@ -44,9 +44,10 @@ pub(crate) enum SentFrame {
     Unkeyed(DaemonMessage),
     /// The message under a correlation id that is not the request's.
     OtherKey(DaemonMessage),
-    /// A JSON object with the `type` tag and the request's correlation id and
-    /// nothing else, which reads as no message of that type.
-    UnreadableAnswer(&'static str),
+    /// A JSON object with the `type` tag and nothing else, which reads as no
+    /// message of that type; it carries the request's correlation id when
+    /// `keyed`, and no correlation id otherwise.
+    Unreadable { tag: &'static str, keyed: bool },
     /// These bytes as one frame body, as they are.
     Raw(Vec<u8>),
 }
@@ -60,9 +61,9 @@ impl SentFrame {
                 let other = key.map_or(u64::MAX, |key| key.wrapping_add(1));
                 encode_correlated_daemon_message(message, Some(other))
             }
-            Self::UnreadableAnswer(tag) => {
+            Self::Unreadable { tag, keyed } => {
                 let mut body = json!({ "type": tag });
-                if let Some(key) = key {
+                if let Some(key) = key.filter(|_| *keyed) {
                     body[CORRELATION_ID] = json!(key);
                 }
                 serde_json::to_vec(&body).expect("a JSON object serializes")
@@ -136,6 +137,25 @@ pub(crate) fn protocol_revision(boot: Option<StatusBoot>) -> DaemonMessage {
 /// The revision answer of a daemon that speaks `revision`, running in `boot`.
 pub(crate) fn protocol_revision_at(revision: u32, boot: Option<StatusBoot>) -> DaemonMessage {
     DaemonMessage::ProtocolRevision { revision, boot }
+}
+
+/// Whether `request` is the first thing a daemon hears on a new connection.
+fn begins_connection(request: &ClientMessage) -> bool {
+    matches!(request, ClientMessage::GetProtocolRevision)
+}
+
+/// The requests of the connection that began with the `nth` revision probe
+/// (counted from 0), up to the next connection's probe.
+pub(crate) fn connection(received: &[ClientMessage], nth: usize) -> &[ClientMessage] {
+    let starts: Vec<usize> = received
+        .iter()
+        .enumerate()
+        .filter(|(_, request)| begins_connection(request))
+        .map(|(index, _)| index)
+        .collect();
+    let start = *starts.get(nth).expect("that connection was made");
+    let end = starts.get(nth + 1).copied().unwrap_or(received.len());
+    &received[start..end]
 }
 
 /// A script part that answers the `n`th revision probe, counted across
@@ -331,6 +351,14 @@ impl ScriptedDaemon {
             .into_iter()
             .map(|(_, request)| request)
             .collect()
+    }
+
+    /// How many revision probes, and so how many connections, were heard.
+    pub(crate) fn probes(&self) -> usize {
+        self.received()
+            .iter()
+            .filter(|request| begins_connection(request))
+            .count()
     }
 
     /// Every request received so far with the correlation id it carried, in
