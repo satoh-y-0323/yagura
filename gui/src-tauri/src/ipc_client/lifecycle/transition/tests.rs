@@ -541,6 +541,34 @@ fn opening_settles_the_revision_then_registers_then_announces_then_resends_the_p
             Action::Open { generation },
         ]
     );
+
+    // A window of a daemon of another wire opens no generation: the
+    // attempt ends and its want fails at the round trip.
+    for other in [REVISION - 1, REVISION + 1] {
+        let mut run = Run::window();
+        let (id, attempt) = run.start(ConnectMode::Retry, Until::Open);
+        let (generation, _) = run.reach(attempt);
+        let probed = run.feed(Event::Probed {
+            generation,
+            revision: other,
+        });
+        assert!(
+            probed.contains(&Step::Do(Action::End { generation })),
+            "revision {other}: {probed:?}"
+        );
+        assert_eq!(
+            answer_to(&probed, id),
+            Some(Err(Failure::NotConnected)),
+            "revision {other}"
+        );
+        assert_eq!(opened_of(&probed, id), Some(None), "revision {other}");
+        assert_eq!(
+            opening(&probed),
+            Vec::new(),
+            "revision {other}: no generation opens"
+        );
+        assert!(!is_open(run.public()), "revision {other}");
+    }
 }
 
 #[test]
