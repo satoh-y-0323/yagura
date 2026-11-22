@@ -1042,10 +1042,11 @@ impl ConnectionPool {
     /// late to matter.
     ///
     /// # Errors
-    /// Returns [`IpcError`] only for a failure before the decision was written
-    /// to the daemon, or for a rejection other than `approval_not_pending`.
-    /// Losing the connection after the decision was written is not an error:
-    /// it returns `Ok(`[`DecideApprovalOutcome::Unconfirmed`]`)`, because the
+    /// Returns [`IpcError`] for a rejection other than `approval_not_pending`
+    /// and for a failure that is neither a failed write nor a lost connection.
+    /// A write that failed, or a connection lost before the daemon answered,
+    /// is not an error: it returns `Ok(`[`DecideApprovalOutcome::Unconfirmed`]`)`,
+    /// because a failed write can have sent part of the decision and the
     /// daemon may have applied it.
     pub async fn decide_approval(
         &self,

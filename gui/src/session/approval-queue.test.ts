@@ -356,7 +356,7 @@ describe('markInFlight / failDecision: head() and size()', () => {
 
 // ---------------------------------------------------------------------------
 // `settleDecision` applies the answer to a decision that reached the daemon.
-// 'unconfirmed' means it was written and the connection ended before the
+// 'unconfirmed' means the write failed or the connection ended before the
 // daemon answered, so it may have been applied: it is neither offered again
 // nor marked failed until the daemon's pending list (`reset`) or a withdrawal
 // settles it.

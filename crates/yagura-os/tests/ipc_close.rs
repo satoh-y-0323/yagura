@@ -202,8 +202,8 @@ async fn a_closed_peer_shows_in_the_write_error_and_what_it_sent_is_read_before_
     );
     let (delivered, ended) = read_delivered_in_pieces(&mut read, 24);
     let rest = read_until_it_ends(&mut read).await;
-    eprintln!(
-        "unread peer: {} delivered bytes, then {:?} (raw {:?}), {} bytes after",
+    let seen = format!(
+        "{} delivered bytes, then {:?} (raw {:?}), {} bytes after",
         delivered.len(),
         ended.as_ref().map(io::Error::kind),
         ended.as_ref().and_then(io::Error::raw_os_error),
@@ -211,9 +211,16 @@ async fn a_closed_peer_shows_in_the_write_error_and_what_it_sent_is_read_before_
     );
     let mut all = delivered;
     all.extend_from_slice(&rest);
-    assert_eq!(all, SENT, "every byte the daemon sent before it closed");
+    assert_eq!(
+        all, SENT,
+        "every byte the daemon sent before it closed: {seen}"
+    );
     if cfg!(target_os = "linux") {
         let error = ended.expect("the reset follows the delivered bytes");
-        assert_eq!(error.kind(), io::ErrorKind::ConnectionReset, "{error:?}");
+        assert_eq!(
+            error.kind(),
+            io::ErrorKind::ConnectionReset,
+            "{error:?}: {seen}"
+        );
     }
 }

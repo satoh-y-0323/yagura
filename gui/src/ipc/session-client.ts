@@ -998,9 +998,10 @@ export async function invokeInterruptWindow(windowId: string): Promise<void> {
  * Answers one pending approval request. The request is identified by the
  * opaque id the daemon issued; validating it is the daemon's job. A request
  * that is no longer pending (already decided elsewhere, or expired) is
- * reported as `'not_pending'`, not thrown. A decision written to a connection
- * that was lost before the daemon answered may or may not have been applied;
- * that is reported as `'unconfirmed'`, not thrown -- see [`DecideApprovalOutcome`].
+ * reported as `'not_pending'`, not thrown. A decision whose write failed, or
+ * whose connection was lost before the daemon answered, may or may not have
+ * been applied; that is reported as `'unconfirmed'`, not thrown -- see
+ * [`DecideApprovalOutcome`].
  *
  * @throws when the core rejects the request for any other reason.
  */

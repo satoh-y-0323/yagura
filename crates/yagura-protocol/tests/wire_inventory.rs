@@ -2092,10 +2092,7 @@ fn corpus_tag_set_matches_decoder_tag_table_for_daemon_messages() {
 
     // `error` is the one kind sent both ways: a connection error is pushed,
     // a request's error is its answer.
-    let push_tags: BTreeSet<String> = daemon_push_corpus()
-        .into_iter()
-        .map(|push| wire_tag(&DaemonMessage::from(push)))
-        .collect();
+    let push_tags = current_push_tags();
     let mut push_kind_tags: BTreeSet<String> = daemon_message_corpus()
         .iter()
         .filter(|message| message.is_push_kind())
@@ -2125,7 +2122,8 @@ fn current_revision_shapes_match_the_frozen_file() {
     );
     assert_eq!(
         current_ledger.push_tags, frozen_ledger.push_tags,
-        "the tags a push may carry no longer match revision {revision}'s frozen file; bump          PROTOCOL_REVISION and mint a new frozen file for an intentional wire change"
+        "the tags a push may carry no longer match revision {revision}'s frozen file; bump \
+         PROTOCOL_REVISION and mint a new frozen file for an intentional wire change"
     );
     let current = current_ledger.shapes;
     let frozen = frozen_ledger.shapes;

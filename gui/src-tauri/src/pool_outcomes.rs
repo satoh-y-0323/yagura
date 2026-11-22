@@ -58,9 +58,10 @@ pub enum DecideApprovalOutcome {
     Decided,
     /// The request was no longer pending when the decision arrived.
     NotPending,
-    /// The decision was written, and the connection was gone before the
-    /// daemon answered: it may have been applied. The next registration's
-    /// pending list says which.
+    /// The decision's write failed, or the connection was lost before the
+    /// daemon answered: a failed write can have sent part of the decision, so
+    /// it may have been applied. The next registration's pending list says
+    /// which.
     Unconfirmed,
 }
 
@@ -171,10 +172,6 @@ mod tests {
             map_decide_approval_result(Ok(())),
             Ok(DecideApprovalOutcome::Decided)
         ));
-        assert_eq!(
-            wire_tag(DecideApprovalOutcome::Decided),
-            serde_json::json!("decided")
-        );
     }
 
     #[test]
@@ -185,10 +182,6 @@ mod tests {
             rejected_argument: None,
         }));
         assert!(matches!(result, Ok(DecideApprovalOutcome::NotPending)));
-        assert_eq!(
-            wire_tag(DecideApprovalOutcome::NotPending),
-            serde_json::json!("not_pending")
-        );
     }
 
     #[test]
@@ -204,8 +197,9 @@ mod tests {
         ));
     }
 
-    // Once the decision is written the daemon may have applied it, so only a
-    // failure before writing is one the approver can simply decide again.
+    // A failed write can have sent part of the decision and a lost connection
+    // can follow a whole one, so the daemon may have applied either; any other
+    // error is returned as one.
     #[test]
     fn map_decide_approval_result_maps_a_decision_that_may_have_been_applied_to_unconfirmed() {
         for written in [IpcError::Write, IpcError::ConnectionLost] {
@@ -222,10 +216,17 @@ mod tests {
             map_decide_approval_result(Err(IpcError::NotConnected)),
             Err(IpcError::NotConnected)
         ));
-        assert_eq!(
-            wire_tag(DecideApprovalOutcome::Unconfirmed),
-            serde_json::json!("unconfirmed")
-        );
+    }
+
+    #[test]
+    fn decide_approval_outcome_serializes_to_the_strings_the_webview_narrows_by() {
+        for (outcome, tag) in [
+            (DecideApprovalOutcome::Decided, "decided"),
+            (DecideApprovalOutcome::NotPending, "not_pending"),
+            (DecideApprovalOutcome::Unconfirmed, "unconfirmed"),
+        ] {
+            assert_eq!(wire_tag(outcome), serde_json::json!(tag), "{outcome:?}");
+        }
     }
 
     #[test]
