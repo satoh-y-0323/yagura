@@ -6,8 +6,8 @@
 
 use serde_json::json;
 use yagura_protocol::{
-    ClientMessage, FRAME_MIN_REVISION, MessageError, client_message_wire_tags,
-    decode_client_message, encode_client_message, required_protocol_revision,
+    ClientMessage, MessageError, client_message_wire_tags, decode_client_message,
+    encode_client_message,
 };
 
 #[test]
@@ -32,12 +32,4 @@ fn set_visible_without_the_flag_is_invalid_json() {
 #[test]
 fn set_visible_is_a_known_client_message_type() {
     assert!(client_message_wire_tags().contains(&"set_visible"));
-}
-
-#[test]
-fn set_visible_needs_the_frame_revision() {
-    assert_eq!(
-        required_protocol_revision(&ClientMessage::SetVisible { visible: false }),
-        FRAME_MIN_REVISION
-    );
 }

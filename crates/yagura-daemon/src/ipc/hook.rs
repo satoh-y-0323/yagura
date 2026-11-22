@@ -37,7 +37,7 @@ struct Resolved {
 
 /// How a hook event's read ends.
 pub(super) enum HookRead<'a> {
-    /// A door that reads (from [`yagura_protocol::DOOR_READ_MIN_REVISION`]):
+    /// A door that reads ([`yagura_protocol::ClientMessage::DoorRead`]):
     /// what the read takes stays in the connection's slot for the door's
     /// `deliver_printed`.
     Door(&'a HeldSlot),

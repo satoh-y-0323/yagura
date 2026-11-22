@@ -10,17 +10,13 @@
 //! - every ticket message decodes from its snake_case `type` tag and encodes
 //!   back to the same frame, and an optional field left out stays out (it is
 //!   not written back as `null`);
-//! - `required_protocol_revision` asks for `TICKETS_MIN_REVISION` before any
-//!   ticket request or a `create_plan` that names a ticket, and leaves a
-//!   `create_plan` without one where it was;
 //! - an older peer's `create_plan` / `PlanInfo` frame without `ticket` still
 //!   decodes, as no ticket.
 
 use serde_json::{Value, json};
 use yagura_protocol::{
-    ClientMessage, DaemonMessage, PROTOCOL_REVISION_BASELINE, TASK_INSTRUCTION_MIN_REVISION,
-    TICKETS_MIN_REVISION, decode_client_message, decode_daemon_message, encode_client_message,
-    encode_daemon_message, required_protocol_revision,
+    ClientMessage, DaemonMessage, decode_client_message, decode_daemon_message,
+    encode_client_message, encode_daemon_message,
 };
 
 fn decode_client(frame: &Value) -> ClientMessage {
@@ -246,72 +242,6 @@ fn a_ticket_summary_carries_its_plan_count_and_required_field_values() {
         "truncated": false,
     });
     assert_daemon_round_trip(frame);
-}
-
-#[test]
-fn the_tickets_revision_is_twenty_nine() {
-    assert_eq!(TICKETS_MIN_REVISION, 29);
-}
-
-#[test]
-fn every_ticket_request_requires_the_tickets_revision() {
-    for frame in full_ticket_requests()
-        .into_iter()
-        .chain(minimal_ticket_requests())
-    {
-        let msg = decode_client(&frame);
-        assert_eq!(
-            required_protocol_revision(&msg),
-            TICKETS_MIN_REVISION,
-            "a ticket request must wait for a daemon that knows tickets: {frame}"
-        );
-    }
-}
-
-#[test]
-fn create_plan_requires_the_tickets_revision_only_when_it_names_a_ticket() {
-    let with_ticket = decode_client(&json!({
-        "type": "create_plan",
-        "title": "plan",
-        "tasks": [task_spec(None)],
-        "ticket": 12,
-    }));
-    assert_eq!(
-        required_protocol_revision(&with_ticket),
-        TICKETS_MIN_REVISION
-    );
-
-    let with_ticket_and_instruction = decode_client(&json!({
-        "type": "create_plan",
-        "title": "plan",
-        "tasks": [task_spec(Some("read the plan"))],
-        "ticket": 12,
-    }));
-    assert_eq!(
-        required_protocol_revision(&with_ticket_and_instruction),
-        TICKETS_MIN_REVISION,
-        "a plan naming a ticket needs the larger of the two thresholds"
-    );
-
-    let instruction_only = decode_client(&json!({
-        "type": "create_plan",
-        "title": "plan",
-        "tasks": [task_spec(Some("read the plan"))],
-    }));
-    assert_eq!(
-        required_protocol_revision(&instruction_only),
-        TASK_INSTRUCTION_MIN_REVISION
-    );
-
-    let plain = decode_client(&json!({
-        "type": "create_plan",
-        "title": "plan",
-        "tasks": [task_spec(None)],
-    }));
-    assert_eq!(
-        required_protocol_revision(&plain),
-        PROTOCOL_REVISION_BASELINE
-    );
 }
 
 #[test]

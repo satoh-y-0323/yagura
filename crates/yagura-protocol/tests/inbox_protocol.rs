@@ -7,13 +7,10 @@
 
 use serde_json::json;
 use yagura_protocol::{
-    ClientMessage, DELIVER_DONE_MIN_REVISION, DaemonMessage, DeliveryStream, MessageError,
-    PROTOCOL_REVISION, client_message_wire_tags, daemon_message_wire_tags, decode_client_message,
-    decode_daemon_message, encode_client_message, encode_daemon_message,
-    required_protocol_revision,
+    ClientMessage, DaemonMessage, DeliveryStream, MessageError, client_message_wire_tags,
+    daemon_message_wire_tags, decode_client_message, decode_daemon_message, encode_client_message,
+    encode_daemon_message,
 };
-
-const INBOX_REVISION: u32 = 22;
 
 fn client_wire(msg: &ClientMessage) -> serde_json::Value {
     let body = encode_client_message(msg);
@@ -216,35 +213,6 @@ fn the_new_messages_are_known_wire_tags() {
     }
 }
 
-#[test]
-fn the_inbox_reads_need_the_inbox_revision() {
-    const { assert!(PROTOCOL_REVISION >= INBOX_REVISION) };
-    for msg in [
-        ClientMessage::DeliverContext {
-            window_id: "w".into(),
-            token: "t".into(),
-            held: false,
-        },
-        ClientMessage::DeliverTake {
-            window_id: "w".into(),
-            token: "t".into(),
-            held: false,
-        },
-        ClientMessage::DeliverWait {
-            window_id: "w".into(),
-            token: "t".into(),
-            held: false,
-        },
-        ClientMessage::ReportSession {
-            window_id: "w".into(),
-            token: "t".into(),
-            session: "s".into(),
-        },
-    ] {
-        assert_eq!(required_protocol_revision(&msg), INBOX_REVISION);
-    }
-}
-
 fn the_three_inbox_reads(held: bool) -> [(ClientMessage, &'static str); 3] {
     let (window_id, token) = (String::from("w-1"), String::from("t"));
     [
@@ -309,25 +277,6 @@ fn deliver_done_carries_nothing_and_deliver_confirmed_says_whether_it_was_withdr
         );
     }
     assert!(daemon_message_wire_tags().contains(&"deliver_confirmed"));
-}
-
-#[test]
-fn a_held_read_and_deliver_done_need_the_confirmation_revision() {
-    assert_eq!(DELIVER_DONE_MIN_REVISION, 33);
-    assert_eq!(
-        required_protocol_revision(&ClientMessage::DeliverDone),
-        DELIVER_DONE_MIN_REVISION
-    );
-    for (msg, _) in the_three_inbox_reads(true) {
-        assert_eq!(
-            required_protocol_revision(&msg),
-            DELIVER_DONE_MIN_REVISION,
-            "{msg:?}"
-        );
-    }
-    for (msg, _) in the_three_inbox_reads(false) {
-        assert_eq!(required_protocol_revision(&msg), INBOX_REVISION, "{msg:?}");
-    }
 }
 
 #[test]

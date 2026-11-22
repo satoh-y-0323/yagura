@@ -9,8 +9,8 @@
 //!
 //! A read's parcels stay with the connection it was answered on until the door
 //! sends `deliver_printed` there; a connection that ends first gives them back.
-//! The reads and the confirmation of a door older than
-//! [`yagura_protocol::DOOR_READ_MIN_REVISION`] are answered with nothing to
+//! The reads and the confirmation of a door that predates
+//! [`yagura_protocol::ClientMessage::DoorRead`] are answered with nothing to
 //! print and take nothing: such a door prints after it took.
 
 use std::sync::{Arc, Mutex, PoisonError, Weak};
@@ -207,15 +207,14 @@ pub(super) async fn handle_printed(slot: &HeldSlot) {
     }
 }
 
-/// Answers a read of a door older than
-/// [`yagura_protocol::DOOR_READ_MIN_REVISION`]: it prints after it took, so
-/// letting it take would lose what it took.
+/// Answers a read of a door that predates [`yagura_protocol::ClientMessage::DoorRead`]:
+/// it prints after it took, so letting it take would lose what it took.
 pub(super) fn handle_older_read(outbound: &Outbound) {
     outbound.reply(&silence());
 }
 
-/// Answers the `deliver_done` of a door older than
-/// [`yagura_protocol::DOOR_READ_MIN_REVISION`] as withdrawn, which ends such a
+/// Answers the `deliver_done` of a door that predates
+/// [`yagura_protocol::ClientMessage::DoorRead`] as withdrawn, which ends such a
 /// door without printing.
 pub(super) fn handle_older_done(outbound: &Outbound) {
     outbound.reply(&DaemonMessage::DeliverConfirmed { withdrawn: true });

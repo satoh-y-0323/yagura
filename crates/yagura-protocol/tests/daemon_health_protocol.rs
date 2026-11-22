@@ -3,9 +3,8 @@
 //! Wire contract for `get_daemon_health` and its `daemon_health` answer.
 
 use yagura_protocol::{
-    ClientMessage, DAEMON_HEALTH_MIN_REVISION, DaemonMessage, DaemonProblem, DaemonProblemKind,
-    decode_client_message, decode_daemon_message, encode_client_message, encode_daemon_message,
-    required_protocol_revision,
+    ClientMessage, DaemonMessage, DaemonProblem, DaemonProblemKind, decode_client_message,
+    decode_daemon_message, encode_client_message, encode_daemon_message,
 };
 
 #[test]
@@ -16,10 +15,6 @@ fn get_daemon_health_round_trips_under_its_snake_case_tag() {
     assert_eq!(
         decode_client_message(&bytes).unwrap(),
         ClientMessage::GetDaemonHealth
-    );
-    assert_eq!(
-        required_protocol_revision(&ClientMessage::GetDaemonHealth),
-        DAEMON_HEALTH_MIN_REVISION
     );
 }
 

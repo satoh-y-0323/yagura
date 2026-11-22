@@ -12,11 +12,13 @@
 //!
 //! # How this wire may be extended
 //!
-//! The two sides of this wire are built and installed separately, so a client
-//! regularly meets a daemon older than itself, and a daemon regularly meets an
-//! older client. The three rules below are what keeps an extension from
-//! breaking such a meeting. They are stated here and nowhere else; anything
-//! that needs them points at this module instead of restating them.
+//! The GUI talks only to a daemon that reports its own wire revision. The
+//! doors a CLI runs, the CLI itself and a window's MCP relay are built and
+//! installed separately, so they regularly meet a daemon of another build, and
+//! a daemon regularly meets such a peer. The three rules below are what keeps
+//! an extension from breaking such a meeting. They are stated here and nowhere
+//! else; anything that needs them points at this module instead of restating
+//! them.
 //!
 //! ## R1: client to daemon
 //!
@@ -49,28 +51,25 @@
 //!
 //! # Wire revisions
 //!
-//! [`PROTOCOL_REVISION`] names the wire this build implements, and the
-//! protocol tests hold a frozen inventory of the wire for every revision ever
-//! minted. Changing anything a peer can observe means raising the revision and
-//! minting a new frozen inventory beside it.
+//! [`PROTOCOL_REVISION`] names the wire this build implements; the GUI talks
+//! only to a daemon that reports the same revision. The protocol tests hold a
+//! frozen inventory of the wire for every revision ever minted. Changing
+//! anything a peer can observe means raising the revision and minting a new
+//! frozen inventory beside it.
 //!
 //! Revision 10 adds the model-alias messages (`list_model_choices`,
-//! `save_model_aliases`, `add_model_choices` and their answers); a caller
-//! establishes [`MODEL_ALIASES_MIN_REVISION`] before sending any of them.
+//! `save_model_aliases`, `add_model_choices` and their answers).
 //!
 //! Revision 11 adds `set_profile_enabled` with its answer and the `enabled`
-//! field of [`ProfileInfo`]; a caller establishes
-//! [`PROFILE_ENABLED_MIN_REVISION`] before sending `set_profile_enabled`.
+//! field of [`ProfileInfo`].
 //!
 //! Revision 12 adds `get_approval_settings`, `set_auto_approve` and
 //! `set_plan_approval_required` with their answers, and the
 //! [`ApprovalSettingsInfo`] / [`ToolAutoApprove`] / [`PlaybookState`] types
-//! those answers carry; a caller establishes
-//! [`APPROVAL_SETTINGS_MIN_REVISION`] before sending any of the three.
+//! those answers carry.
 //!
 //! Revision 13 adds `list_mcp_registrations` and `run_mcp_registration` with
-//! their answers and pushes, and the `McpRegistration*` types they carry; a
-//! caller establishes [`MCP_REGISTRATION_MIN_REVISION`] before sending either.
+//! their answers and pushes, and the `McpRegistration*` types they carry.
 //!
 //! Revision 14 adds `status_reports_missing` to [`WindowInfo`] and
 //! `hook_entries` (of `McpRegistrationHookEntry`) to [`McpRegistrationRow`],
@@ -84,22 +83,19 @@
 //!
 //! Revision 16 adds `get_profile_detail` and `set_profile_command` with their
 //! answers, and the [`ProfileDetailEntry`] / [`ProfileCommandDetail`] types
-//! they carry; a caller establishes [`PROFILE_DETAIL_MIN_REVISION`] before
-//! sending either.
+//! they carry.
 //!
 //! Revision 17 replaces `attach` with `attach_at`, which carries the size the
 //! caller will draw the window at, and renames `scrollback_b64` to `screen_b64`
 //! in `attached` and `resync`: the daemon no longer replays raw output but
 //! sends the window's terminal model as escape sequences. The old request is
 //! a new `type` under R1, so a daemon built before this revision refuses
-//! `attach_at` by name and a caller establishes revision 17
-//! before sending it; the renamed answer fields are not readable by an older
+//! `attach_at` by name; the renamed answer fields are not readable by an older
 //! client, which is why the revision is raised.
 //!
 //! Revision 18 adds the structured input messages (`key`, `text`, `paste`,
 //! `pointer`, `wheel`, `focus`) and the types they carry: the daemon turns
-//! them into bytes with the window's terminal modes. A caller establishes
-//! [`STRUCTURED_INPUT_MIN_REVISION`] before sending any of them.
+//! them into bytes with the window's terminal modes.
 //!
 //! Revision 19 makes the daemon the window's only terminal: `attach_at` is
 //! renamed `attach_view`, `attached` loses `screen_b64`, and `output` and
@@ -108,14 +104,12 @@
 //! (`frame_ack`), sends its theme colors (`set_palette`), reports whether the
 //! window is on screen (`set_visible`), asks for the selected text
 //! (`copy_selection`, answered by `selection_text`), clears the selection
-//! (`clear_selection`) and scrolls the view (`scroll_view`). A caller establishes [`FRAME_MIN_REVISION`]
-//! before sending any of them; an older client's `attach_at` is refused by
+//! (`clear_selection`) and scrolls the view (`scroll_view`). An older client's `attach_at` is refused by
 //! name. Raw input bytes (`input`) are gone: a client sends input only as
 //! the structured messages of revision 18.
 //!
 //! Revision 20 adds `get_daemon_health`, answered with `daemon_health`: the
-//! problems that keep the daemon from opening windows. A caller establishes
-//! [`DAEMON_HEALTH_MIN_REVISION`] before asking.
+//! problems that keep the daemon from opening windows.
 //!
 //! Revision 21 drops `initial_window_failed` from [`DaemonProblemKind`]: the
 //! daemon starts with no window, so there is no start-up window to fail. A
@@ -124,8 +118,7 @@
 //!
 //! Revision 22 adds the doors a CLI's hook reads a window's inbox through:
 //! `deliver_context`, `deliver_take` and `deliver_wait`, answered with
-//! `delivery`, and `report_session`, answered with `session_recorded`. A
-//! caller establishes [`INBOX_MIN_REVISION`] before sending any of them.
+//! `delivery`, and `report_session`, answered with `session_recorded`.
 //!
 //! Revision 23 answers a handoff with `taken`, `undelivered_timeout` or
 //! `undelivered_no_delivery` in place of what a composer was seen to do, and
@@ -153,8 +146,7 @@
 //!
 //! Revision 27 adds `set_default_palettes` ([`DefaultPalettes`]): the colors
 //! the GUI would draw a new window with, which the daemon keeps and answers a
-//! window's color queries with until a view sends that window its own. A
-//! caller establishes [`DEFAULT_PALETTES_MIN_REVISION`] before sending it.
+//! window's color queries with until a view sends that window its own.
 //!
 //! Revision 28 lets a registration have no command of its own:
 //! [`McpRegistrationRow`]'s `add` and `remove` become optional and are left
@@ -176,8 +168,7 @@
 //! approvers, names the workspace whose tickets changed. `create_plan` may
 //! name the `ticket` the plan is made from, and [`PlanInfo`] carries it back.
 //! State, field and milestone names are opaque strings on the wire, since the
-//! user's settings define them. A caller establishes [`TICKETS_MIN_REVISION`]
-//! before sending any ticket request or a `create_plan` that names a ticket.
+//! user's settings define them.
 //!
 //! Revision 30 lets a registration row carry a `notice`, a sentence the
 //! profile wants its user to read before registering ([`McpRegistrationRow`]),
@@ -190,8 +181,7 @@
 //! Revision 31 adds `run_hook`, the one request a `--hook <profile-id> <Event>`
 //! door sends: the daemon looks the event up in the named profile's
 //! `[hook_events]` and answers with `delivery`, or with `hook_input_wanted`
-//! when the event reads values from the hook's input. A caller establishes
-//! [`HOOK_EVENTS_MIN_REVISION`] before sending it.
+//! when the event reads values from the hook's input.
 //!
 //! Revision 32 makes `pong` a point a client can sync on: for a connection
 //! attached to a window, it comes after the frames for everything that
@@ -202,8 +192,7 @@
 //! `deliver_take`, `deliver_wait` and `run_hook` gain `held`, and a held read's parcels
 //! stay the daemon's until the door sends `deliver_done` on the same
 //! connection, answered with `deliver_confirmed`. A read without `held` is
-//! settled before it is answered. A caller establishes
-//! [`DELIVER_DONE_MIN_REVISION`] before sending a held read or `deliver_done`.
+//! settled before it is answered.
 //!
 //! Revision 34 makes a door print before it says so. One request, `door_read`
 //! ([`ClientMessage::DoorRead`]), replaces the four held reads and names the
@@ -213,21 +202,17 @@
 //! answer, [`DaemonMessage::Delivery`], carries `hook_timeout_sec`: the time the
 //! CLI gives the hook, which the door measures its own end against. The reads of
 //! revision 33 and `deliver_done` are answered with nothing to print, for a door
-//! built before this revision. A caller establishes [`DOOR_READ_MIN_REVISION`]
-//! before sending `door_read` or `deliver_printed`.
+//! built before this revision.
 //! The same revision drops `send_keys` and its answer `keys_sent`: the daemon
 //! no longer writes into a window's input on an agent's behalf.
 //! It also adds `withdraw_message` ([`ClientMessage::WithdrawMessage`], answered
 //! with [`DaemonMessage::MessageWithdrawn`]), which takes back an envelope still
 //! waiting, and reports what waits in a window's inbox: `queued_count` in
-//! [`WindowInfo`] and `window_status`, and `queued_ids` in `window_status`. A
-//! caller establishes [`WITHDRAW_MESSAGE_MIN_REVISION`] before sending
-//! `withdraw_message`.
+//! [`WindowInfo`] and `window_status`, and `queued_ids` in `window_status`.
 //! It also adds `build_launch_overlay` ([`ClientMessage::BuildLaunchOverlay`],
 //! answered with [`DaemonMessage::LaunchOverlay`]): the overlay door of a
 //! window whose CLI runs in another environment asks for the window's launch
-//! overlay. A caller establishes [`LAUNCH_OVERLAY_MIN_REVISION`] before sending
-//! it.
+//! overlay.
 //!
 //! Revision 35 adds an optional `task_report` ([`TaskReportMark`]) to
 //! [`WindowInfo`] and `status_changed`: whether a plan task window's report to
@@ -243,8 +228,7 @@
 //! window that reports `exited`, or `None` when the code could not be
 //! determined. It removes the `exit` message, which no daemon sent. From this
 //! revision an `exit_code` of `-1` is a real code, not a stand-in for
-//! "unknown"; a caller establishes [`EXIT_CODE_ON_STATUS_MIN_REVISION`] before
-//! reading it that way. It also adds an optional `boot` to
+//! "unknown". It also adds an optional `boot` to
 //! `protocol_revision`: the daemon start that answered.
 //!
 //! Revision 38 adds an optional `correlation_id` (an unsigned 64-bit integer)
@@ -277,8 +261,8 @@ pub use screen_copy::{
 ///
 /// The value is a whole number that only ever increases, by one per change to
 /// anything a peer can observe on the wire. It is what a peer reports when
-/// asked which wire it speaks, and what a caller compares against before
-/// sending something an older peer would mishandle.
+/// asked which wire it speaks, and what the GUI compares against before it
+/// uses a daemon at all.
 pub const PROTOCOL_REVISION: u32 = 38;
 
 /// The largest column count, and the largest row count, a window takes.
@@ -306,170 +290,6 @@ pub const fn window_size_within_limit(cols: u16, rows: u16) -> bool {
         && rows >= MIN_WINDOW_ROWS
         && rows <= MAX_WINDOW_DIMENSION
 }
-
-/// The first wire revision that understands [`ClientMessage::ClearChatRoom`]
-/// and [`ClientMessage::DeleteChatRoom`].
-///
-/// An older daemon refuses both by name, so a caller establishes this
-/// revision before sending either.
-pub const CHAT_ROOM_REMOVAL_MIN_REVISION: u32 = 26;
-
-/// The wire revision attributed to a peer that reports none.
-///
-/// A peer built before revisions were reportable cannot name its own, so it is
-/// credited with the oldest wire anyone has shipped. Everything that wire
-/// could do keeps working against such a peer; only what a later revision
-/// introduced is withheld.
-pub const PROTOCOL_REVISION_BASELINE: u32 = 1;
-
-/// The first wire revision at which a daemon honoring the `model` and
-/// `effort` launch options can be *observed* to do so.
-///
-/// An older daemon may or may not read those fields, but it cannot say which,
-/// and a caller has no way to tell the two apart; so this is the revision from
-/// which honoring them becomes an observable fact rather than a guess.
-pub const LAUNCH_OPTIONS_MIN_REVISION: u32 = 2;
-
-/// The first wire revision at which a daemon storing and returning a plan
-/// task's `instruction` can be *observed* to do so.
-///
-/// Mirrors [`LAUNCH_OPTIONS_MIN_REVISION`]'s reasoning: an older daemon
-/// silently drops the field from `CreatePlan` / `UpdatePlan`, so a caller
-/// establishes this revision before sending a task that carries one.
-pub const TASK_INSTRUCTION_MIN_REVISION: u32 = 5;
-
-/// The first wire revision at which the plan review gate
-/// (`approve_plan` / `mark_plan_seen`, and a `save_roles` carrying a
-/// `default_role`) is understood.
-///
-/// An older daemon refuses `approve_plan` / `mark_plan_seen` by name, and
-/// silently drops a `default_role` it does not know from `save_roles`; so a
-/// caller establishes this revision before sending either.
-pub const PLAN_REVIEW_MIN_REVISION: u32 = 9;
-
-/// The first wire revision at which the model-alias messages
-/// (`list_model_choices`, `save_model_aliases`) are understood.
-///
-/// An older daemon refuses both by name, so a caller establishes this
-/// revision before sending any of them.
-pub const MODEL_ALIASES_MIN_REVISION: u32 = 10;
-
-/// The first wire revision at which `set_profile_enabled` is understood and
-/// [`ProfileInfo::enabled`] is carried.
-///
-/// An older daemon refuses `set_profile_enabled` by name, so a caller
-/// establishes this revision before sending it.
-pub const PROFILE_ENABLED_MIN_REVISION: u32 = 11;
-
-/// The first wire revision at which `get_approval_settings`,
-/// `set_auto_approve` and `set_plan_approval_required` are understood.
-///
-/// An older daemon refuses all three by name, so a caller establishes this
-/// revision before sending any of them.
-pub const APPROVAL_SETTINGS_MIN_REVISION: u32 = 12;
-
-/// The first wire revision at which `list_mcp_registrations` and
-/// `run_mcp_registration` are understood.
-///
-/// An older daemon refuses both by name, so a caller establishes this
-/// revision before sending either.
-pub const MCP_REGISTRATION_MIN_REVISION: u32 = 13;
-
-/// The first wire revision at which `get_profile_detail` and
-/// `set_profile_command` are understood.
-///
-/// An older daemon refuses both by name, so a caller establishes this
-/// revision before sending either.
-pub const PROFILE_DETAIL_MIN_REVISION: u32 = 16;
-
-/// The first wire revision at which the structured input messages (`key`,
-/// `text`, `paste`, `pointer`, `wheel`, `focus`) are understood.
-///
-/// An older daemon refuses them by name, so a caller establishes this
-/// revision before sending any of them.
-pub const STRUCTURED_INPUT_MIN_REVISION: u32 = 18;
-
-/// The first wire revision at which `attach_view`, `frame`, `frame_ack`,
-/// `set_palette`, `set_visible`, `copy_selection`, `clear_selection`,
-/// `selection_text` and `scroll_view` exist.
-///
-/// An older daemon refuses the client messages by name, so a caller
-/// establishes this revision before sending any of them.
-pub const FRAME_MIN_REVISION: u32 = 19;
-
-/// The first wire revision at which `get_daemon_health` is understood and
-/// answered with `daemon_health`.
-///
-/// An older daemon refuses the request by name, and that refusal means it has
-/// no problem to report, so a caller establishes this revision before asking.
-pub const DAEMON_HEALTH_MIN_REVISION: u32 = 20;
-
-/// The first wire revision that carries `deliver_context`, `deliver_take`,
-/// `deliver_wait` and `report_session`.
-///
-/// An older daemon refuses them by name, so a hook command built for this
-/// revision does nothing useful against it.
-pub const INBOX_MIN_REVISION: u32 = 22;
-
-/// The first wire revision that understands [`ClientMessage::SetDefaultPalettes`].
-///
-/// An older daemon refuses it by name, so a caller establishes this revision
-/// before sending it.
-pub const DEFAULT_PALETTES_MIN_REVISION: u32 = 27;
-
-/// The first wire revision that understands the ticket requests and a
-/// [`ClientMessage::CreatePlan`] that names a `ticket`.
-///
-/// An older daemon refuses the requests by name and silently drops a plan's
-/// `ticket`, so a caller establishes this revision before sending either.
-pub const TICKETS_MIN_REVISION: u32 = 29;
-
-/// The first wire revision that understands [`ClientMessage::RunHook`].
-///
-/// An older daemon refuses it by name, so a hook command built for this
-/// revision does nothing useful against it.
-pub const HOOK_EVENTS_MIN_REVISION: u32 = 31;
-
-/// The first wire revision that understands a held inbox read (`held: true`)
-/// and [`ClientMessage::DeliverDone`].
-///
-/// An older daemon ignores `held` and settles the read before answering, and
-/// refuses `deliver_done` by name, so a door establishes this revision before
-/// holding a read.
-pub const DELIVER_DONE_MIN_REVISION: u32 = 33;
-
-/// The first wire revision that understands [`ClientMessage::DoorRead`] and
-/// [`ClientMessage::DeliverPrinted`].
-///
-/// An older daemon refuses them by name and takes nothing, so a door that gets
-/// that refusal prints nothing and ends with success.
-pub const DOOR_READ_MIN_REVISION: u32 = 34;
-
-/// The first wire revision that understands [`ClientMessage::WithdrawMessage`].
-///
-/// An older daemon refuses it by name, so nothing is withdrawn.
-pub const WITHDRAW_MESSAGE_MIN_REVISION: u32 = 34;
-
-/// The first wire revision that understands [`ClientMessage::BuildLaunchOverlay`].
-///
-/// An older daemon refuses it by name, so the overlay door fails and the
-/// launch does not start the CLI.
-pub const LAUNCH_OVERLAY_MIN_REVISION: u32 = 34;
-
-/// The first wire revision whose `status_changed` carries the exit code of a
-/// window that reports `exited`.
-///
-/// From this revision an `exit_code` of `-1` is the code the child ended with.
-/// An older daemon sends `-1` when it could not determine the code, so a
-/// caller reads an older daemon's `-1` as unknown.
-pub const EXIT_CODE_ON_STATUS_MIN_REVISION: u32 = 37;
-
-/// The first wire revision whose daemon answers a request under the
-/// correlation id the request carried.
-///
-/// An older daemon answers without an id, so a caller matches its answers by
-/// kind instead.
-pub const CORRELATION_ID_MIN_REVISION: u32 = 38;
 
 /// How long a hook door waits for one answer of the daemon.
 pub const DOOR_ANSWER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
@@ -3151,8 +2971,7 @@ pub enum ClientMessage {
     },
     /// Asks which wire revision the daemon implements; answered with
     /// [`DaemonMessage::ProtocolRevision`]. A daemon built before this type
-    /// existed refuses it by name, and that refusal is itself an answer: such
-    /// a peer is credited with [`PROTOCOL_REVISION_BASELINE`].
+    /// existed refuses it by name.
     GetProtocolRevision,
     /// Asks what keeps this daemon from doing its job; answered with
     /// [`DaemonMessage::DaemonHealth`]. Needs no permission: the answer names
@@ -3639,119 +3458,6 @@ pub struct HookPointer {
     /// other kinds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub value: Option<serde_json::Value>,
-}
-
-/// The wire revision a peer must implement before `msg` may be sent to it.
-///
-/// The answer is derived from the message alone, so a caller never supplies
-/// it, cannot forget it at one call site, and no second copy of the rule can
-/// drift from this one. [`PROTOCOL_REVISION_BASELINE`] means "no
-/// constraint": every peer that speaks this wire at all can take the message.
-///
-/// # Examples
-///
-/// ```
-/// use yagura_protocol::{
-///     ClientMessage, LAUNCH_OPTIONS_MIN_REVISION, PROTOCOL_REVISION_BASELINE,
-///     required_protocol_revision,
-/// };
-///
-/// let plain = ClientMessage::OpenWindowFromProfile {
-///     profile: "claude".to_string(),
-///     cwd: None,
-///     name: None,
-///     model: None,
-///     effort: None,
-///     on_name_taken: Default::default(),
-/// };
-/// assert_eq!(required_protocol_revision(&plain), PROTOCOL_REVISION_BASELINE);
-///
-/// let with_model = ClientMessage::OpenWindowFromProfile {
-///     profile: "claude".to_string(),
-///     cwd: None,
-///     name: None,
-///     model: Some("opus".to_string()),
-///     effort: None,
-///     on_name_taken: Default::default(),
-/// };
-/// assert_eq!(required_protocol_revision(&with_model), LAUNCH_OPTIONS_MIN_REVISION);
-/// ```
-pub fn required_protocol_revision(msg: &ClientMessage) -> u32 {
-    match msg {
-        ClientMessage::AttachView { .. }
-        | ClientMessage::FrameAck { .. }
-        | ClientMessage::SetPalette(_)
-        | ClientMessage::SetVisible { .. }
-        | ClientMessage::CopySelection
-        | ClientMessage::ClearSelection
-        | ClientMessage::ScrollView { .. } => FRAME_MIN_REVISION,
-        ClientMessage::Key(_)
-        | ClientMessage::Text { .. }
-        | ClientMessage::Paste { .. }
-        | ClientMessage::Pointer(_)
-        | ClientMessage::Wheel(_)
-        | ClientMessage::Focus { .. } => STRUCTURED_INPUT_MIN_REVISION,
-        ClientMessage::ListTicketWorkspaces
-        | ClientMessage::ListTickets { .. }
-        | ClientMessage::GetTicket { .. }
-        | ClientMessage::CreateTicket { .. }
-        | ClientMessage::UpdateTicket { .. }
-        | ClientMessage::AddTicketResult { .. }
-        | ClientMessage::SetMilestone { .. }
-        | ClientMessage::CreatePlan {
-            ticket: Some(_), ..
-        } => TICKETS_MIN_REVISION,
-        ClientMessage::OpenWindowFromProfile { model, effort, .. }
-        | ClientMessage::SendHandoff { model, effort, .. }
-            if model.is_some() || effort.is_some() =>
-        {
-            LAUNCH_OPTIONS_MIN_REVISION
-        }
-        ClientMessage::CreatePlan { tasks, .. } | ClientMessage::UpdatePlan { tasks, .. }
-            if tasks.iter().any(|task| task.instruction.is_some()) =>
-        {
-            TASK_INSTRUCTION_MIN_REVISION
-        }
-        ClientMessage::ApprovePlan { .. } | ClientMessage::MarkPlanSeen { .. } => {
-            PLAN_REVIEW_MIN_REVISION
-        }
-        ClientMessage::SaveRoles {
-            default_role: Some(_),
-            ..
-        } => PLAN_REVIEW_MIN_REVISION,
-        ClientMessage::ListModelChoices { .. } | ClientMessage::SaveModelAliases { .. } => {
-            MODEL_ALIASES_MIN_REVISION
-        }
-        ClientMessage::SetProfileEnabled { .. } => PROFILE_ENABLED_MIN_REVISION,
-        ClientMessage::GetProfileDetail { .. } | ClientMessage::SetProfileCommand { .. } => {
-            PROFILE_DETAIL_MIN_REVISION
-        }
-        ClientMessage::GetApprovalSettings { .. }
-        | ClientMessage::SetAutoApprove { .. }
-        | ClientMessage::SetPlanApprovalRequired { .. } => APPROVAL_SETTINGS_MIN_REVISION,
-        ClientMessage::ListMcpRegistrations { .. } | ClientMessage::RunMcpRegistration { .. } => {
-            MCP_REGISTRATION_MIN_REVISION
-        }
-        ClientMessage::GetDaemonHealth => DAEMON_HEALTH_MIN_REVISION,
-        ClientMessage::ClearChatRoom { .. } | ClientMessage::DeleteChatRoom { .. } => {
-            CHAT_ROOM_REMOVAL_MIN_REVISION
-        }
-        ClientMessage::DeliverContext { held: true, .. }
-        | ClientMessage::DeliverTake { held: true, .. }
-        | ClientMessage::DeliverWait { held: true, .. }
-        | ClientMessage::RunHook { held: true, .. }
-        | ClientMessage::DeliverDone => DELIVER_DONE_MIN_REVISION,
-        ClientMessage::DeliverContext { .. }
-        | ClientMessage::DeliverTake { .. }
-        | ClientMessage::DeliverWait { .. }
-        | ClientMessage::ReportSession { .. } => INBOX_MIN_REVISION,
-        ClientMessage::SetDefaultPalettes(_) => DEFAULT_PALETTES_MIN_REVISION,
-        ClientMessage::RunHook { .. } => HOOK_EVENTS_MIN_REVISION,
-        ClientMessage::DoorRead { .. } | ClientMessage::DeliverPrinted => DOOR_READ_MIN_REVISION,
-        ClientMessage::WithdrawMessage { .. } => WITHDRAW_MESSAGE_MIN_REVISION,
-        ClientMessage::BuildLaunchOverlay { .. } => LAUNCH_OVERLAY_MIN_REVISION,
-        _ => PROTOCOL_REVISION_BASELINE,
-    }
 }
 
 /// A message sent from the daemon to the client (GUI).

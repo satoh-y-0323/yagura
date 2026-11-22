@@ -1124,7 +1124,7 @@ async fn finish_door(
             let _ = send_hook_request(client, &ClientMessage::DeliverPrinted).await;
             Ok(ExitCode::from(exit_code))
         }
-        // A daemon older than `DOOR_READ_MIN_REVISION` refuses the read by
+        // A daemon that predates `door_read` refuses the read by
         // name and takes nothing: there is nothing to print, and the text
         // waits for a newer one.
         Some(DaemonMessage::Error { code, .. }) if code == "unknown_type" => Ok(ExitCode::SUCCESS),

@@ -6,10 +6,8 @@
 
 use serde_json::{Value, json};
 use yagura_protocol::{
-    CellPosition, ClientMessage, FRAME_MIN_REVISION, Key, KeyInput, MessageError, Modifiers,
-    NamedKey, PROTOCOL_REVISION, PointerButton, PointerInput, PointerKind,
-    STRUCTURED_INPUT_MIN_REVISION, WheelInput, decode_client_message, encode_client_message,
-    required_protocol_revision,
+    CellPosition, ClientMessage, Key, KeyInput, MessageError, Modifiers, NamedKey, PointerButton,
+    PointerInput, PointerKind, WheelInput, decode_client_message, encode_client_message,
 };
 
 fn wire(msg: &ClientMessage) -> Value {
@@ -54,21 +52,6 @@ fn wheel_message() -> ClientMessage {
         cell: CellPosition { col: 0, row: 7 },
         mods: Modifiers::default(),
     })
-}
-
-fn every_structured_input() -> Vec<ClientMessage> {
-    vec![
-        key_message(),
-        ClientMessage::Text {
-            text: "a".to_string(),
-        },
-        ClientMessage::Paste {
-            text: "a\nb".to_string(),
-        },
-        pointer_message(),
-        wheel_message(),
-        ClientMessage::Focus { focused: true },
-    ]
 }
 
 #[test]
@@ -259,22 +242,4 @@ fn focus_carries_whether_the_window_gained_it() {
         assert_eq!(wire(&msg), json!({ "type": "focus", "focused": focused }));
         round_trips(&msg);
     }
-}
-
-#[test]
-fn every_structured_input_needs_the_structured_input_revision() {
-    for msg in every_structured_input() {
-        assert_eq!(
-            required_protocol_revision(&msg),
-            STRUCTURED_INPUT_MIN_REVISION,
-            "{msg:?}"
-        );
-    }
-}
-
-#[test]
-fn the_structured_input_revision_is_older_than_the_frame_revision_and_implemented_here() {
-    let required = required_protocol_revision(&key_message());
-    assert!(required < FRAME_MIN_REVISION, "{required}");
-    assert!(required <= PROTOCOL_REVISION, "{required}");
 }

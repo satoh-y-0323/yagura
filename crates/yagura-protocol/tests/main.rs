@@ -28,7 +28,6 @@ mod registration_notice_protocol;
 mod relay_frames;
 mod report_gap;
 mod report_protocol;
-mod required_revision;
 mod restore_protocol;
 mod status;
 mod status_rev;

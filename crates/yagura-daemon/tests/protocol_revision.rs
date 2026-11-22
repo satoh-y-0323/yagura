@@ -95,23 +95,3 @@ async fn connection_stays_usable_after_the_probe_responds() {
         other => panic!("expected pong on the same connection after the probe, got {other:?}"),
     }
 }
-
-// The relation being measured holds between three constants, so clippy sees
-// assertions whose value is decided at compile time. That is what this test is
-// for: it fails the build's own constants, not a runtime value.
-#[allow(clippy::assertions_on_constants)]
-#[test]
-fn revision_relationship_holds_without_pinning_a_literal() {
-    assert!(
-        yagura_protocol::PROTOCOL_REVISION_BASELINE < yagura_protocol::LAUNCH_OPTIONS_MIN_REVISION,
-        "the launch-option threshold must sit strictly above the baseline revision"
-    );
-    assert!(
-        yagura_protocol::LAUNCH_OPTIONS_MIN_REVISION <= yagura_protocol::PROTOCOL_REVISION,
-        "this build must implement at least the wire revision the launch-option threshold names"
-    );
-    assert!(
-        yagura_protocol::DELIVER_DONE_MIN_REVISION <= yagura_protocol::PROTOCOL_REVISION,
-        "this build must implement the wire revision a door checks before it holds a take"
-    );
-}

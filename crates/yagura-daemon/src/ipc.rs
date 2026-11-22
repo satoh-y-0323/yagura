@@ -1982,7 +1982,7 @@ impl IpcServer {
                 .await;
                 FrameOutcome::Continue
             }
-            // The reads of a door older than `DOOR_READ_MIN_REVISION` take
+            // The reads of a door that predates `door_read` take
             // nothing: it prints after it took, so what it took would be lost.
             Ok(
                 ClientMessage::DeliverContext {
