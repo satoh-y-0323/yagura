@@ -1613,6 +1613,7 @@
           kind: 'failed',
           failure: {
             kind: 'line',
+            // choicesFailureLine folds the reason, as it does for a pushed error.
             line: commandFailureLine(error, () =>
               choicesFailureLine({ kind: 'reported', reason: caughtValueText(error) })
             ),

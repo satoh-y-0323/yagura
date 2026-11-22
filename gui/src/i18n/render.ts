@@ -396,7 +396,6 @@ export function foldExternalText(text: string): string {
  * The one display line a caught value is told by: its text
  * (`caughtValueText`, `display/untrusted-text.ts`) folded and capped by
  * {@link foldExternalText}, since the reason may carry the daemon's words.
- * A line builder that takes a reason string instead folds it itself.
  *
  * @param error the value a failed operation threw or rejected with
  */
