@@ -27,7 +27,7 @@ use std::time::Duration;
 use tokio::sync::oneshot;
 use yagura_protocol::{
     CHAT_READ_LIMIT_MAX, ChatDeliveryInfo, ChatHalt, ChatMessage, ChatParticipant, ChatRoomInfo,
-    DaemonMessage, WindowStatus, is_valid_token, validate_chat_body,
+    DaemonMessage, DaemonPush, WindowStatus, is_valid_token, validate_chat_body,
 };
 
 use crate::approval::{ApprovalBroker, ApprovalDraft, ApprovalRoomRef, SubmitError};
@@ -280,7 +280,7 @@ impl ChatRuntime {
             // as needing the user.
             _ => true,
         };
-        broker.notify_approvers(&DaemonMessage::ChatChanged {
+        broker.notify_approvers(&DaemonPush::ChatChanged {
             room_id: room_id.to_string(),
             seq: u64::try_from(seq).unwrap_or(0),
             needs_user,
@@ -368,7 +368,7 @@ impl ChatRuntime {
             .with_store(move |store| note_silence(store, &room_id_for_store, seq, at_ms, &limits))
             .await;
         if matches!(result, Ok(Ok(true))) {
-            broker.notify_approvers(&DaemonMessage::ChatChanged {
+            broker.notify_approvers(&DaemonPush::ChatChanged {
                 room_id: room_id.to_string(),
                 seq: u64::try_from(seq).unwrap_or(0),
                 needs_user: true,
@@ -887,7 +887,7 @@ pub(super) fn spawn_participation_watch(
             };
             if last.as_ref() != Some(&now) {
                 last = Some(now);
-                broker.notify_approvers(&DaemonMessage::ChatParticipantsChanged);
+                broker.notify_approvers(&DaemonPush::ChatParticipantsChanged);
             }
         }
     });
@@ -1234,7 +1234,7 @@ async fn complete_post(
     // mention on a room that is not halted is announced even then.
     let announces_user = !is_user_post && !halted_now && mentions_user;
     if announces_user || targets.is_empty() {
-        broker.notify_approvers(&DaemonMessage::ChatChanged {
+        broker.notify_approvers(&DaemonPush::ChatChanged {
             room_id: room_id.clone(),
             seq: u64::try_from(seq).unwrap_or(0),
             needs_user: announces_user || needs_user_now,
@@ -1242,7 +1242,7 @@ async fn complete_post(
     }
     // The deliveries the post settled as it was written still announce.
     for _ in &settled {
-        broker.notify_approvers(&DaemonMessage::ChatChanged {
+        broker.notify_approvers(&DaemonPush::ChatChanged {
             room_id: room_id.clone(),
             seq: u64::try_from(seq).unwrap_or(0),
             needs_user: needs_user_now,
@@ -1923,7 +1923,7 @@ async fn handle_room_removal(
             room_id: room_id.clone(),
         },
     });
-    broker.notify_approvers(&DaemonMessage::ChatHistoryCleared { room_id });
+    broker.notify_approvers(&DaemonPush::ChatHistoryCleared { room_id });
     if removal == RoomRemoval::DeleteRoom {
         registry.announce_participation_change();
     }

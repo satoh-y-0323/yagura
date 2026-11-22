@@ -54,7 +54,8 @@ use lifecycle::{ClientKind, Registration, Shared, StepReply, Take, TakenAnswer, 
 pub(crate) type Connection = <PlatformIpc as IpcTransport>::ClientConnection;
 
 /// `error.code` telling this client that another GUI took the session over.
-pub(crate) const ERROR_CODE_SUPERSEDED: &str = "superseded";
+pub(crate) const ERROR_CODE_SUPERSEDED: &str =
+    yagura_protocol::ConnectionErrorCode::Superseded.as_str();
 
 /// `error.code` for internal daemon failures.
 pub(crate) const ERROR_CODE_INTERNAL: &str = "internal";

@@ -15,7 +15,7 @@ use std::sync::Arc;
 
 use tokio::sync::Semaphore;
 use yagura_protocol::{
-    DaemonMessage, MilestoneInfo, TicketConfigInfo, TicketFieldInfo, TicketStateInfo,
+    DaemonMessage, DaemonPush, MilestoneInfo, TicketConfigInfo, TicketFieldInfo, TicketStateInfo,
 };
 
 use crate::approval::ApprovalBroker;
@@ -124,7 +124,7 @@ impl TicketRuntime {
     {
         match self.store.with_store(f).await {
             Ok(Ok((workspace_id, reply))) => {
-                broker.notify_approvers(&DaemonMessage::TicketChanged { workspace_id });
+                broker.notify_approvers(&DaemonPush::TicketChanged { workspace_id });
                 outbound.reply(&reply);
             }
             Ok(Err(err)) => outbound.reply(&store_error_msg(err)),

@@ -20,7 +20,7 @@ use thiserror::Error;
 use tokio::sync::{Mutex as AsyncMutex, Notify, broadcast, mpsc, oneshot, watch};
 use yagura_os::program;
 use yagura_protocol::{
-    DaemonMessage, DefaultPalettes, DetectedStatus, INSTANCE_ENV, MCP_BRIDGE_ENV, OnNameTaken,
+    DaemonPush, DefaultPalettes, DetectedStatus, INSTANCE_ENV, MCP_BRIDGE_ENV, OnNameTaken,
     Palette, RoomRef, STATUS_TOKEN_ENV, StatusBoot, TaskReportMark, UnknownReason, WINDOW_ID_ENV,
     WINDOW_NAME_MAX_BYTES, WindowInfo, WindowNameError, WindowStatus, WithdrawOutcome,
     validate_window_name, validate_window_vendor,
@@ -1639,16 +1639,16 @@ impl WindowEntry {
         }
     }
 
-    /// The [`DaemonMessage::StatusChanged`] reporting `at`, a pair this
+    /// The [`DaemonPush::StatusChanged`] reporting `at`, a pair this
     /// window published.
     ///
     /// Built from `at` alone (never from the entry's current pair), so a push
     /// is never stamped with a generation newer than the change it reports.
     /// The task report fact is read as the push is built: it is ordered by
     /// its own `seq`, not by the status generation.
-    pub(crate) fn status_changed(&self, at: &StatusAt) -> DaemonMessage {
+    pub(crate) fn status_changed(&self, at: &StatusAt) -> DaemonPush {
         let exit_code = self.published_exit_code(at);
-        DaemonMessage::StatusChanged {
+        DaemonPush::StatusChanged {
             window_id: self.window_id.clone(),
             status: at.status.status(),
             unknown_reason: at.status.unknown_reason(),

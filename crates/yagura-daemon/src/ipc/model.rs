@@ -12,7 +12,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use tokio::sync::Semaphore;
-use yagura_protocol::{DaemonMessage, LaunchOptionAlias, ModelChoice, ModelChoiceSource};
+use yagura_protocol::{
+    DaemonMessage, DaemonPush, LaunchOptionAlias, ModelChoice, ModelChoiceSource,
+};
 
 use crate::config::DaemonConfig;
 use crate::control::RequestOrigin;
@@ -89,7 +91,7 @@ pub(super) async fn handle_list_model_choices(
     tokio::spawn(async move {
         let _permit = permit;
         let (source, choices, error) = list_choices(&config, &profile).await;
-        connection.push(&DaemonMessage::ModelChoices {
+        connection.push(DaemonPush::ModelChoices {
             request_id,
             profile,
             source,

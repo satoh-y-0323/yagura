@@ -33,8 +33,9 @@ use std::time::Duration;
 
 use tokio::sync::oneshot;
 use yagura_protocol::{
-    AwaitingWindow, DaemonMessage, DeliveryState, REPORT_PATH_MAX_BYTES, REPORT_SUMMARY_MAX_BYTES,
-    ReceivedReport, ReportOutcome, ReportTaskRef, WindowStatus, validate_handoff_text,
+    AwaitingWindow, DaemonMessage, DaemonPush, DeliveryState, REPORT_PATH_MAX_BYTES,
+    REPORT_SUMMARY_MAX_BYTES, ReceivedReport, ReportOutcome, ReportTaskRef, WindowStatus,
+    validate_handoff_text,
 };
 
 use crate::approval::ApprovalBroker;
@@ -1262,7 +1263,7 @@ async fn send_task_report(
 
     match decided {
         Ok(Ok((parent, landed))) => {
-            broker.notify_approvers(&DaemonMessage::PlanChanged {
+            broker.notify_approvers(&DaemonPush::PlanChanged {
                 plan_id: plan_id.clone(),
             });
             let (state, note) = report_state(registry, parent.as_deref(), landed);

@@ -3,7 +3,7 @@
 //!
 //! Independent of `ipc.rs` by design: this module knows nothing about
 //! connections, frames or the wire transport, only about [`ApproverSink`] (a
-//! place to push a [`DaemonMessage`]) and the requester's own [`oneshot`]
+//! place to push a [`DaemonPush`]) and the requester's own [`oneshot`]
 //! channel. Every public method is synchronous and takes a lock only for the
 //! duration of its own body, so none is ever held across an `.await`.
 
@@ -15,7 +15,7 @@ use thiserror::Error;
 use tokio::sync::oneshot;
 
 use crate::control::DestructiveTool;
-use yagura_protocol::{ApprovalRequest, ApprovalRequester, ApprovalTarget, DaemonMessage, RoomRef};
+use yagura_protocol::{ApprovalRequest, ApprovalRequester, ApprovalTarget, DaemonPush, RoomRef};
 
 // The ledger and the wire name the same reasons, so the protocol's type is
 // the only definition rather than a second one kept in step by hand.
@@ -29,7 +29,7 @@ pub trait ApproverSink: Send + Sync {
     /// Pushes `msg` to this approver. A refusal (a full outbound queue)
     /// evicts this sink from the ledger, so it is never asked about
     /// anything again until it re-registers.
-    fn push(&self, msg: &DaemonMessage) -> bool;
+    fn push(&self, msg: &DaemonPush) -> bool;
 }
 
 /// One request not yet submitted to the ledger: everything
@@ -153,7 +153,7 @@ impl Shared {
     /// Pushes `msg` to every currently registered approver, evicting any
     /// whose push refuses it. Returns whether at least one
     /// approver accepted it.
-    fn push_to_every_approver(&self, msg: &DaemonMessage) -> bool {
+    fn push_to_every_approver(&self, msg: &DaemonPush) -> bool {
         let mut approvers = lock(&self.approvers);
         let mut reached = false;
         approvers.retain(|_, sink| {
@@ -167,7 +167,7 @@ impl Shared {
     /// Pushes `msg` to every currently registered approver except `exclude`
     /// (the one who just decided, when there is one). A refusal still evicts
     /// the approver, same as [`Shared::push_to_every_approver`].
-    fn broadcast_except(&self, msg: &DaemonMessage, exclude: Option<u64>) {
+    fn broadcast_except(&self, msg: &DaemonPush, exclude: Option<u64>) {
         let mut approvers = lock(&self.approvers);
         approvers.retain(|conn, sink| Some(*conn) == exclude || sink.push(msg));
     }
@@ -180,7 +180,7 @@ impl Shared {
         if lock(&self.pending).remove(request_id).is_none() {
             return;
         }
-        let msg = DaemonMessage::ApprovalWithdrawn {
+        let msg = DaemonPush::ApprovalWithdrawn {
             request_id: request_id.to_string(),
             reason,
         };
@@ -261,9 +261,9 @@ impl ApprovalBroker {
     }
 
     /// Pushes an unsolicited message to every registered approver,
-    /// e.g. [`DaemonMessage::ChatChanged`]. An approver that refuses the push
+    /// e.g. [`DaemonPush::ChatChanged`]. An approver that refuses the push
     /// is evicted, as it is when it refuses a request.
-    pub fn notify_approvers(&self, msg: &DaemonMessage) {
+    pub fn notify_approvers(&self, msg: &DaemonPush) {
         self.shared.push_to_every_approver(msg);
     }
 
@@ -312,7 +312,7 @@ impl ApprovalBroker {
                 name: room.name,
             }),
         };
-        let msg = DaemonMessage::ApprovalRequested {
+        let msg = DaemonPush::ApprovalRequested {
             request: request.clone(),
         };
 
@@ -356,7 +356,7 @@ impl ApprovalBroker {
         // The requester may already be gone; a failed send just means
         // nobody is listening for a decision that no longer matters.
         let _ = entry.settle.send(approved);
-        let msg = DaemonMessage::ApprovalWithdrawn {
+        let msg = DaemonPush::ApprovalWithdrawn {
             request_id: request_id.to_string(),
             reason: WithdrawReason::Resolved,
         };

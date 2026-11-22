@@ -22,8 +22,8 @@ use yagura_daemon::approval::{
 };
 use yagura_daemon::control::DestructiveTool;
 use yagura_protocol::{
-    ApprovalRequest, ApprovalRequester, ApprovalRequesterKind, ApprovalTarget, DaemonMessage,
-    RoomRef, WindowStatus,
+    ApprovalRequest, ApprovalRequester, ApprovalRequesterKind, ApprovalTarget, DaemonPush, RoomRef,
+    WindowStatus,
 };
 
 /// The boot nonce every request id in these tests is minted against.
@@ -39,7 +39,7 @@ const ROOMY: ApprovalLimits = ApprovalLimits {
 /// refusing pushes, which is how a full outbound queue looks to the ledger.
 struct RecordingSink {
     accepts: AtomicBool,
-    pushed: Mutex<Vec<DaemonMessage>>,
+    pushed: Mutex<Vec<DaemonPush>>,
 }
 
 impl RecordingSink {
@@ -57,7 +57,7 @@ impl RecordingSink {
         })
     }
 
-    fn messages(&self) -> Vec<DaemonMessage> {
+    fn messages(&self) -> Vec<DaemonPush> {
         self.pushed
             .lock()
             .expect("the sink lock must not be poisoned")
@@ -69,7 +69,7 @@ impl RecordingSink {
         self.messages()
             .into_iter()
             .filter_map(|msg| match msg {
-                DaemonMessage::ApprovalRequested { request } => Some(request),
+                DaemonPush::ApprovalRequested { request } => Some(request),
                 _ => None,
             })
             .collect()
@@ -80,9 +80,7 @@ impl RecordingSink {
         self.messages()
             .into_iter()
             .filter_map(|msg| match msg {
-                DaemonMessage::ApprovalWithdrawn { request_id, reason } => {
-                    Some((request_id, reason))
-                }
+                DaemonPush::ApprovalWithdrawn { request_id, reason } => Some((request_id, reason)),
                 _ => None,
             })
             .collect()
@@ -90,7 +88,7 @@ impl RecordingSink {
 }
 
 impl ApproverSink for RecordingSink {
-    fn push(&self, msg: &DaemonMessage) -> bool {
+    fn push(&self, msg: &DaemonPush) -> bool {
         self.pushed
             .lock()
             .expect("the sink lock must not be poisoned")
@@ -756,8 +754,8 @@ fn request_ids_do_not_repeat_after_a_request_is_settled() {
 // Reaching the approvers
 // =============================================================================
 
-fn chat_changed() -> DaemonMessage {
-    DaemonMessage::ChatChanged {
+fn chat_changed() -> DaemonPush {
+    DaemonPush::ChatChanged {
         room_id: "r1".to_string(),
         seq: 1,
         needs_user: false,

@@ -7,7 +7,9 @@
 //! (`yagura_protocol::PROTOCOL_REVISION`):
 //!
 //! - **WL-1 (corpus completeness)**: the tag set built from the corpus below
-//!   matches the decoder's own tag table exactly, for both directions.
+//!   matches the decoder's own tag table exactly, for both directions; and
+//!   the tags of the `DaemonPush` corpus are the kinds
+//!   `DaemonMessage::is_push_kind` marks, plus the connection error.
 //! - **WL-2 (structure freeze)**: every wire value's structure -- reduced
 //!   recursively, object keys sorted, array element structure taken from one
 //!   element, scalars reduced to their JSON type name -- matches the frozen
@@ -23,8 +25,11 @@
 //! WL-2 also freezes the keys a frame carries beside its variant (the
 //! correlation key from revision 38): their names and JSON types, for a
 //! request and for an answer. A frozen file older than such a key has none.
-//! Whether a push carries the key is not a property of the encoding, so it is
-//! measured by the daemon's tests, not here.
+//! WL-2 also freezes the tags a push may carry (`push_tags`): a push goes out
+//! without the key, so moving a kind in or out of that set changes what a
+//! frame of that kind carries. A frozen file older than that section has
+//! none. Whether the daemon sends a push without the key is measured by the
+//! daemon's tests, not here.
 //!
 //! # The corpus is built exclusively through `wire_sample!`
 //!
@@ -84,12 +89,12 @@ use yagura_protocol::{
     ApprovalRequest, ApprovalRequester, ApprovalRequesterKind, ApprovalSettingsInfo,
     ApprovalTarget, AssignmentSource, AwaitingWindow, CellAttr, CellColor, CellFlag, CellPosition,
     ChatDeliveryInfo, ChatHalt, ChatMessage, ChatParticipant, ChatRoomInfo, ClientMessage,
-    ColorOverride, CursorShape, CursorState, DaemonMessage, DaemonProblem, DaemonProblemKind,
-    Declaration, DefaultPalettes, DeliveryState, DeliveryStream, Frame, FrameLine, FrameRun,
-    HookInputValue, HookPointer, HookPointerKind, InstructionNotice, InstructionNoticeState,
-    InterruptOutcome, Key, KeyInput, LaunchOptionAlias, LaunchOptionInfo, McpRegistrationAction,
-    McpRegistrationCommand, McpRegistrationEntry, McpRegistrationRow, McpRegistrationState,
-    McpRegistrationStatusInfo, McpRegistrationStep, McpRegistrationTomlSet,
+    ColorOverride, ConnectionErrorCode, CursorShape, CursorState, DaemonMessage, DaemonProblem,
+    DaemonProblemKind, DaemonPush, Declaration, DefaultPalettes, DeliveryState, DeliveryStream,
+    Frame, FrameLine, FrameRun, HookInputValue, HookPointer, HookPointerKind, InstructionNotice,
+    InstructionNoticeState, InterruptOutcome, Key, KeyInput, LaunchOptionAlias, LaunchOptionInfo,
+    McpRegistrationAction, McpRegistrationCommand, McpRegistrationEntry, McpRegistrationRow,
+    McpRegistrationState, McpRegistrationStatusInfo, McpRegistrationStep, McpRegistrationTomlSet,
     McpRegistrationTomlValue, MilestoneInfo, ModelChoice, ModelChoiceSource, Modifiers, NamedKey,
     OnNameTaken, Palette, PaletteSlot, PlanInfo, PlanReview, PlanSummary, PlanTaskInfo,
     PlanTaskSpec, PlaybookState, PointerButton, PointerInput, PointerKind, ProfileCapability,
@@ -240,6 +245,7 @@ macro_rules! wire_sample {
 // ---------------------------------------------------------------------
 
 wire_sample!(enum WireWindowStatus => Running);
+wire_sample!(enum ConnectionErrorCode => Superseded);
 wire_sample!(enum UnknownReason => NoDefinition);
 wire_sample!(enum ApprovalRequesterKind => External);
 wire_sample!(enum WithdrawReason => Resolved);
@@ -867,6 +873,50 @@ fn client_message_corpus() -> Vec<ClientMessage> {
             "env": { "sample": "sample" },
             "files": { "sample": "sample" },
         })),
+    ]
+}
+
+/// One `DaemonPush` per variant: the kinds a push path sends today.
+fn daemon_push_corpus() -> Vec<DaemonPush> {
+    vec![
+        DaemonPush::Frame(Frame::sample()),
+        wire_sample!(DaemonPush::StatusChanged {
+            window_id,
+            status,
+            unknown_reason,
+            status_rev,
+            status_boot,
+            task_report,
+            exit_code,
+        }),
+        wire_sample!(DaemonPush::ApprovalRequested { request }),
+        wire_sample!(DaemonPush::ApprovalWithdrawn { request_id, reason }),
+        wire_sample!(DaemonPush::ChatChanged {
+            room_id,
+            seq,
+            needs_user,
+        }),
+        wire_sample!(DaemonPush::ChatParticipantsChanged),
+        wire_sample!(DaemonPush::ChatHistoryCleared { room_id }),
+        wire_sample!(DaemonPush::PlanChanged { plan_id }),
+        wire_sample!(DaemonPush::TicketChanged { workspace_id }),
+        wire_sample!(DaemonPush::McpRegistrationStatus { request_id, status }),
+        wire_sample!(DaemonPush::McpRegistrationResult {
+            request_id,
+            profile,
+            action,
+            steps,
+            error,
+            status,
+        }),
+        wire_sample!(DaemonPush::ModelChoices {
+            request_id,
+            profile,
+            source,
+            choices,
+            error,
+        }),
+        wire_sample!(DaemonPush::ConnectionError { code, message }),
     ]
 }
 
@@ -1919,6 +1969,8 @@ struct WireLedger {
     enums: BTreeMap<String, BTreeSet<String>>,
     #[serde(default)]
     frame_keys: FrameKeys,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    push_tags: Option<BTreeSet<String>>,
 }
 
 fn current_ledger() -> WireLedger {
@@ -1930,7 +1982,17 @@ fn current_ledger() -> WireLedger {
         },
         enums: current_enum_wire_variants(),
         frame_keys: current_frame_keys(),
+        push_tags: Some(current_push_tags()),
     }
+}
+
+/// The tags a push may carry, as the `DaemonPush` corpus puts them on the
+/// wire.
+fn current_push_tags() -> BTreeSet<String> {
+    daemon_push_corpus()
+        .into_iter()
+        .map(|push| wire_tag(&DaemonMessage::from(push)))
+        .collect()
 }
 
 /// The top-level keys of one encoded message.
@@ -2027,6 +2089,23 @@ fn corpus_tag_set_matches_decoder_tag_table_for_daemon_messages() {
         corpus_tags, decoder_tags,
         "the DaemonMessage corpus must build exactly one value per tag the decoder accepts"
     );
+
+    // `error` is the one kind sent both ways: a connection error is pushed,
+    // a request's error is its answer.
+    let push_tags: BTreeSet<String> = daemon_push_corpus()
+        .into_iter()
+        .map(|push| wire_tag(&DaemonMessage::from(push)))
+        .collect();
+    let mut push_kind_tags: BTreeSet<String> = daemon_message_corpus()
+        .iter()
+        .filter(|message| message.is_push_kind())
+        .map(wire_tag)
+        .collect();
+    push_kind_tags.insert("error".to_string());
+    assert_eq!(
+        push_tags, push_kind_tags,
+        "DaemonPush must hold exactly the kinds is_push_kind marks, and the connection error"
+    );
 }
 
 // ---------------------------------------------------------------------
@@ -2043,6 +2122,10 @@ fn current_revision_shapes_match_the_frozen_file() {
         "the keys a frame carries beside its variant no longer match revision {revision}'s \
          frozen file; bump PROTOCOL_REVISION and mint a new frozen file for an intentional wire \
          change"
+    );
+    assert_eq!(
+        current_ledger.push_tags, frozen_ledger.push_tags,
+        "the tags a push may carry no longer match revision {revision}'s frozen file; bump          PROTOCOL_REVISION and mint a new frozen file for an intentional wire change"
     );
     let current = current_ledger.shapes;
     let frozen = frozen_ledger.shapes;

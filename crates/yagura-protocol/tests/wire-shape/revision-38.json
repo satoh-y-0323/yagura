@@ -1734,5 +1734,20 @@
     "answer": {
       "correlation_id": "number"
     }
-  }
+  },
+  "push_tags": [
+    "approval_requested",
+    "approval_withdrawn",
+    "chat_changed",
+    "chat_history_cleared",
+    "chat_participants_changed",
+    "error",
+    "frame",
+    "mcp_registration_result",
+    "mcp_registration_status",
+    "model_choices",
+    "plan_changed",
+    "status_changed",
+    "ticket_changed"
+  ]
 }

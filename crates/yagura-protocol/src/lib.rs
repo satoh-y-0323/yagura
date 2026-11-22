@@ -4463,6 +4463,295 @@ pub enum DaemonMessage {
     },
 }
 
+impl DaemonMessage {
+    /// Whether this kind is one no request asks for: it is sent without a
+    /// `correlation_id` whichever side sends it. Every such kind is also a
+    /// [`DaemonPush`] variant. [`DaemonMessage::Error`] is not one: an error
+    /// about the connection itself is made only as
+    /// [`DaemonPush::ConnectionError`].
+    #[must_use]
+    pub fn is_push_kind(&self) -> bool {
+        match self {
+            Self::Frame(_)
+            | Self::StatusChanged { .. }
+            | Self::ApprovalRequested { .. }
+            | Self::ApprovalWithdrawn { .. }
+            | Self::ChatChanged { .. }
+            | Self::ChatParticipantsChanged
+            | Self::ChatHistoryCleared { .. }
+            | Self::PlanChanged { .. }
+            | Self::TicketChanged { .. }
+            | Self::McpRegistrationStatus { .. }
+            | Self::McpRegistrationResult { .. }
+            | Self::ModelChoices { .. } => true,
+            Self::Attached { .. }
+            | Self::SelectionText { .. }
+            | Self::Pong
+            | Self::Error { .. }
+            | Self::WindowOpened { .. }
+            | Self::WindowList { .. }
+            | Self::WindowStatus { .. }
+            | Self::TextSent { .. }
+            | Self::MessageWithdrawn { .. }
+            | Self::WindowInterrupted { .. }
+            | Self::WindowClosed { .. }
+            | Self::WaitResult { .. }
+            | Self::WindowRenamed { .. }
+            | Self::WindowOutput { .. }
+            | Self::DetectionList { .. }
+            | Self::RestoreCandidateList { .. }
+            | Self::WindowLayoutUpdated { .. }
+            | Self::ProfileList { .. }
+            | Self::Identified { .. }
+            | Self::ApproverRegistered { .. }
+            | Self::ApprovalResolved { .. }
+            | Self::HandoffSent { .. }
+            | Self::ChatPosted { .. }
+            | Self::ChatMessages { .. }
+            | Self::ChatRoomCleared { .. }
+            | Self::ChatRoomDeleted { .. }
+            | Self::ChatRooms { .. }
+            | Self::ProtocolRevision { .. }
+            | Self::DaemonHealth { .. }
+            | Self::Delivery { .. }
+            | Self::DeliverConfirmed { .. }
+            | Self::LaunchOverlay { .. }
+            | Self::SessionRecorded { .. }
+            | Self::PlanDetail { .. }
+            | Self::PlanList { .. }
+            | Self::PlanDeleted { .. }
+            | Self::RoleList { .. }
+            | Self::TaskWindowOpened { .. }
+            | Self::ReportSent { .. }
+            | Self::Reports { .. }
+            | Self::ModelChoicesRequested { .. }
+            | Self::ModelAliasesSaved { .. }
+            | Self::ProfileEnabledSet { .. }
+            | Self::ProfileDetail { .. }
+            | Self::ProfileCommandSet { .. }
+            | Self::ApprovalSettings { .. }
+            | Self::AutoApproveSet { .. }
+            | Self::PlanApprovalRequiredSet { .. }
+            | Self::McpRegistrationsListed { .. }
+            | Self::McpRegistrationRequested { .. }
+            | Self::TicketWorkspaceList { .. }
+            | Self::TicketList { .. }
+            | Self::TicketDetail { .. }
+            | Self::MilestoneSet { .. }
+            | Self::HookInputWanted { .. } => false,
+        }
+    }
+}
+
+/// Why the daemon is ending a connection on its own: the code a
+/// [`DaemonPush::ConnectionError`] carries as the `code` of a
+/// [`DaemonMessage::Error`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConnectionErrorCode {
+    /// Another connection attached to the window this one viewed.
+    Superseded,
+    /// The peer sent a frame whose body exceeds the size the daemon reads.
+    FrameTooLarge,
+}
+
+impl ConnectionErrorCode {
+    /// The code as the wire spells it.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Superseded => "superseded",
+            Self::FrameTooLarge => "frame_too_large",
+        }
+    }
+}
+
+/// A frame the daemon sends that no request asked for. Each variant has the
+/// fields of the [`DaemonMessage`] variant of the same name, and is put on
+/// the wire as that variant ([`DaemonMessage::from`]), never with a
+/// `correlation_id`.
+#[derive(Debug, Clone, PartialEq)]
+pub enum DaemonPush {
+    /// See [`DaemonMessage::Frame`].
+    Frame(Frame),
+    /// See [`DaemonMessage::StatusChanged`].
+    StatusChanged {
+        /// See [`DaemonMessage::StatusChanged`].
+        window_id: String,
+        /// See [`DaemonMessage::StatusChanged`].
+        status: WindowStatus,
+        /// See [`DaemonMessage::StatusChanged`].
+        unknown_reason: Option<UnknownReason>,
+        /// See [`DaemonMessage::StatusChanged`].
+        status_rev: Option<u64>,
+        /// See [`DaemonMessage::StatusChanged`].
+        status_boot: Option<StatusBoot>,
+        /// See [`DaemonMessage::StatusChanged`].
+        task_report: Option<TaskReportMark>,
+        /// See [`DaemonMessage::StatusChanged`].
+        exit_code: Option<i32>,
+    },
+    /// See [`DaemonMessage::ApprovalRequested`].
+    ApprovalRequested {
+        /// See [`DaemonMessage::ApprovalRequested`].
+        request: ApprovalRequest,
+    },
+    /// See [`DaemonMessage::ApprovalWithdrawn`].
+    ApprovalWithdrawn {
+        /// See [`DaemonMessage::ApprovalWithdrawn`].
+        request_id: String,
+        /// See [`DaemonMessage::ApprovalWithdrawn`].
+        reason: WithdrawReason,
+    },
+    /// See [`DaemonMessage::ChatChanged`].
+    ChatChanged {
+        /// See [`DaemonMessage::ChatChanged`].
+        room_id: String,
+        /// See [`DaemonMessage::ChatChanged`].
+        seq: u64,
+        /// See [`DaemonMessage::ChatChanged`].
+        needs_user: bool,
+    },
+    /// See [`DaemonMessage::ChatParticipantsChanged`].
+    ChatParticipantsChanged,
+    /// See [`DaemonMessage::ChatHistoryCleared`].
+    ChatHistoryCleared {
+        /// See [`DaemonMessage::ChatHistoryCleared`].
+        room_id: String,
+    },
+    /// See [`DaemonMessage::PlanChanged`].
+    PlanChanged {
+        /// See [`DaemonMessage::PlanChanged`].
+        plan_id: String,
+    },
+    /// See [`DaemonMessage::TicketChanged`].
+    TicketChanged {
+        /// See [`DaemonMessage::TicketChanged`].
+        workspace_id: i64,
+    },
+    /// See [`DaemonMessage::McpRegistrationStatus`].
+    McpRegistrationStatus {
+        /// See [`DaemonMessage::McpRegistrationStatus`].
+        request_id: u64,
+        /// See [`DaemonMessage::McpRegistrationStatus`].
+        status: McpRegistrationStatusInfo,
+    },
+    /// See [`DaemonMessage::McpRegistrationResult`].
+    McpRegistrationResult {
+        /// See [`DaemonMessage::McpRegistrationResult`].
+        request_id: u64,
+        /// See [`DaemonMessage::McpRegistrationResult`].
+        profile: String,
+        /// See [`DaemonMessage::McpRegistrationResult`].
+        action: McpRegistrationAction,
+        /// See [`DaemonMessage::McpRegistrationResult`].
+        steps: Vec<McpRegistrationStep>,
+        /// See [`DaemonMessage::McpRegistrationResult`].
+        error: Option<String>,
+        /// See [`DaemonMessage::McpRegistrationResult`].
+        status: McpRegistrationStatusInfo,
+    },
+    /// See [`DaemonMessage::ModelChoices`].
+    ModelChoices {
+        /// See [`DaemonMessage::ModelChoices`].
+        request_id: u64,
+        /// See [`DaemonMessage::ModelChoices`].
+        profile: String,
+        /// See [`DaemonMessage::ModelChoices`].
+        source: Option<ModelChoiceSource>,
+        /// See [`DaemonMessage::ModelChoices`].
+        choices: Vec<ModelChoice>,
+        /// See [`DaemonMessage::ModelChoices`].
+        error: Option<String>,
+    },
+    /// An error about the connection itself, sent as [`DaemonMessage::Error`]
+    /// with the code's wire spelling and no `rejected_argument`.
+    ConnectionError {
+        /// Why the connection ends.
+        code: ConnectionErrorCode,
+        /// Human-readable, English message. Must never contain frame bodies
+        /// or raw PTY data.
+        message: String,
+    },
+}
+
+impl From<DaemonPush> for DaemonMessage {
+    fn from(push: DaemonPush) -> Self {
+        match push {
+            DaemonPush::Frame(frame) => Self::Frame(frame),
+            DaemonPush::StatusChanged {
+                window_id,
+                status,
+                unknown_reason,
+                status_rev,
+                status_boot,
+                task_report,
+                exit_code,
+            } => Self::StatusChanged {
+                window_id,
+                status,
+                unknown_reason,
+                status_rev,
+                status_boot,
+                task_report,
+                exit_code,
+            },
+            DaemonPush::ApprovalRequested { request } => Self::ApprovalRequested { request },
+            DaemonPush::ApprovalWithdrawn { request_id, reason } => {
+                Self::ApprovalWithdrawn { request_id, reason }
+            }
+            DaemonPush::ChatChanged {
+                room_id,
+                seq,
+                needs_user,
+            } => Self::ChatChanged {
+                room_id,
+                seq,
+                needs_user,
+            },
+            DaemonPush::ChatParticipantsChanged => Self::ChatParticipantsChanged,
+            DaemonPush::ChatHistoryCleared { room_id } => Self::ChatHistoryCleared { room_id },
+            DaemonPush::PlanChanged { plan_id } => Self::PlanChanged { plan_id },
+            DaemonPush::TicketChanged { workspace_id } => Self::TicketChanged { workspace_id },
+            DaemonPush::McpRegistrationStatus { request_id, status } => {
+                Self::McpRegistrationStatus { request_id, status }
+            }
+            DaemonPush::McpRegistrationResult {
+                request_id,
+                profile,
+                action,
+                steps,
+                error,
+                status,
+            } => Self::McpRegistrationResult {
+                request_id,
+                profile,
+                action,
+                steps,
+                error,
+                status,
+            },
+            DaemonPush::ModelChoices {
+                request_id,
+                profile,
+                source,
+                choices,
+                error,
+            } => Self::ModelChoices {
+                request_id,
+                profile,
+                source,
+                choices,
+                error,
+            },
+            DaemonPush::ConnectionError { code, message } => Self::Error {
+                code: code.as_str().to_owned(),
+                message,
+                rejected_argument: None,
+            },
+        }
+    }
+}
+
 /// One workspace in a [`DaemonMessage::TicketWorkspaceList`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TicketWorkspaceInfo {

@@ -24,14 +24,14 @@ use tokio::time::Instant;
 use yagura_os::{IpcTransport, OsError, PeerAuth, PlatformIpc};
 
 use yagura_protocol::{
-    ApprovalRequester, ApprovalRequesterKind, ClientMessage, DaemonMessage, DeliveryState, Frame,
-    FrameError, HANDOFF_NOTE_MAX_BYTES, HANDOFF_REFERENCE_MAX_BYTES, InstructionNoticeState,
-    InterruptOutcome, MessageError, OnNameTaken, PROTOCOL_REVISION, PointerButton, PointerInput,
-    PointerKind, ProfileInfo, RestoreCandidate, TerminalSize, WindowInfo, WindowStatus,
-    check_input_bounds, decode_correlated_client_message, encode_correlated_daemon_message,
-    encode_daemon_message, frame_decode, frame_encode, is_valid_source, read_frame_label,
-    validate_handoff_target, validate_handoff_text, validate_launch_option_value,
-    validate_message_text,
+    ApprovalRequester, ApprovalRequesterKind, ClientMessage, ConnectionErrorCode, DaemonMessage,
+    DaemonPush, DeliveryState, Frame, FrameError, HANDOFF_NOTE_MAX_BYTES,
+    HANDOFF_REFERENCE_MAX_BYTES, InstructionNoticeState, InterruptOutcome, MessageError,
+    OnNameTaken, PROTOCOL_REVISION, PointerButton, PointerInput, PointerKind, ProfileInfo,
+    RestoreCandidate, TerminalSize, WindowInfo, WindowStatus, check_input_bounds,
+    decode_correlated_client_message, encode_correlated_daemon_message, encode_daemon_message,
+    frame_decode, frame_encode, is_valid_source, read_frame_label, validate_handoff_target,
+    validate_handoff_text, validate_launch_option_value, validate_message_text,
 };
 
 mod approval_settings;
@@ -831,8 +831,8 @@ impl ConnectionOutbound {
 
     /// Queues a frame no request asked for, through the same non-droppable
     /// path as an answer.
-    fn push(&self, msg: &DaemonMessage) {
-        self.queue(encode_frame(msg));
+    fn push(&self, msg: DaemonPush) {
+        self.queue(encode_push(msg));
     }
 
     /// Queues an encoded frame. Failure to queue is terminal for the
@@ -845,8 +845,8 @@ impl ConnectionOutbound {
 
     /// Queues a streaming frame, reporting back-pressure to the caller
     /// instead of closing the connection.
-    fn stream(&self, msg: &DaemonMessage) -> StreamSend {
-        match self.tx.try_send(encode_frame(msg)) {
+    fn stream(&self, msg: DaemonPush) -> StreamSend {
+        match self.tx.try_send(encode_push(msg)) {
             Ok(()) => StreamSend::Queued,
             Err(mpsc::error::TrySendError::Full(_)) => StreamSend::Dropped,
             Err(mpsc::error::TrySendError::Closed(_)) => {
@@ -881,7 +881,7 @@ struct ViewFrames {
 
 impl FrameSink for ViewFrames {
     fn try_send(&self, frame: Frame, _key: &SendKey) -> FrameSend {
-        let failed = match self.tx.try_send(encode_frame(&DaemonMessage::Frame(frame))) {
+        let failed = match self.tx.try_send(encode_push(DaemonPush::Frame(frame))) {
             Ok(()) => return FrameSend::Sent,
             Err(mpsc::error::TrySendError::Full(_)) => FrameSend::Full,
             Err(mpsc::error::TrySendError::Closed(_)) => FrameSend::Closed,
@@ -940,7 +940,15 @@ impl Outbound {
 
     /// Queues an answer to the request. Failure to queue is terminal for the
     /// connection (see the back-pressure rules on [`ConnectionOutbound`]).
+    ///
+    /// A kind no request asks for ([`DaemonMessage::is_push_kind`]) is not
+    /// the request's answer: it goes out as a push, with no `correlation_id`,
+    /// and leaves the request's answer to come.
     fn reply(&self, msg: &DaemonMessage) {
+        if msg.is_push_kind() {
+            self.connection.queue(encode_frame(msg));
+            return;
+        }
         if let Some(answered) = &self.answered
             && answered.swap(true, Ordering::AcqRel)
         {
@@ -966,8 +974,8 @@ impl ApproverSink for ConnectionOutbound {
     /// worst failure this feature has. A queue that cannot take it therefore
     /// marks the connection broken, and reporting that back evicts this
     /// approver from the ledger.
-    fn push(&self, msg: &DaemonMessage) -> bool {
-        ConnectionOutbound::push(self, msg);
+    fn push(&self, msg: &DaemonPush) -> bool {
+        ConnectionOutbound::push(self, msg.clone());
         !self.is_broken()
     }
 }
@@ -1484,10 +1492,10 @@ impl IpcServer {
                     }
                     Ok(None) => break,
                     Err(FrameError::TooLarge) => {
-                        connection.push(&error_msg(
-                            "frame_too_large",
-                            "frame body exceeds maximum size",
-                        ));
+                        connection.push(DaemonPush::ConnectionError {
+                            code: ConnectionErrorCode::FrameTooLarge,
+                            message: "frame body exceeds maximum size".to_owned(),
+                        });
                         break 'conn;
                     }
                 }
@@ -1509,7 +1517,7 @@ impl IpcServer {
                             // A status change dropped by back pressure is
                             // handled like a skipped one below: the next change
                             // republishes the current status.
-                            if let StreamSend::Closed = connection.stream(&msg) {
+                            if let StreamSend::Closed = connection.stream(msg) {
                                 break 'conn;
                             }
                         }
@@ -1524,9 +1532,10 @@ impl IpcServer {
                 }
 
                 () = recv_kick(&mut state.kick_rx) => {
-                    connection.push(
-                        &error_msg("superseded", "another connection has attached to this window"),
-                    );
+                    connection.push(DaemonPush::ConnectionError {
+                        code: ConnectionErrorCode::Superseded,
+                        message: "another connection has attached to this window".to_owned(),
+                    });
                     break 'conn;
                 }
 
@@ -2695,7 +2704,7 @@ impl IpcServer {
         // One read of the published pair, so this snapshot's status, reason and
         // generation all describe the same transition.
         let at = entry.status_snapshot();
-        outbound.connection().push(&entry.status_changed(&at));
+        outbound.connection().push(entry.status_changed(&at));
     }
 
     /// Opens a new window through the registry, once the approval gate lets
@@ -4670,6 +4679,12 @@ fn encode_frame(msg: &DaemonMessage) -> Vec<u8> {
     frame_encode(&encode_daemon_message(msg))
 }
 
+/// A push's frame: the [`DaemonMessage`] of the same kind, with no
+/// `correlation_id`.
+fn encode_push(push: DaemonPush) -> Vec<u8> {
+    encode_frame(&DaemonMessage::from(push))
+}
+
 /// Whether `token` is `entry`'s, checked once the window's token is settled
 /// (a window being taken back has it only once its take-back ends); `None`
 /// when the peer closed the connection while the token was still to come.
@@ -5704,7 +5719,7 @@ async fn open_task_window(job: TaskWindowOpen, permit: Permit<OpenWindow>) {
                 )
                 .await;
             }
-            broker.notify_approvers(&DaemonMessage::PlanChanged {
+            broker.notify_approvers(&DaemonPush::PlanChanged {
                 plan_id: plan_id_for_bind.clone(),
             });
             outbound.reply(&DaemonMessage::TaskWindowOpened {
@@ -7049,7 +7064,7 @@ mod tests {
         assert!(
             matches!(
                 entry.status_changed(&at),
-                DaemonMessage::StatusChanged {
+                DaemonPush::StatusChanged {
                     exit_code: None,
                     ..
                 }
@@ -7076,5 +7091,33 @@ mod tests {
             }
             other => panic!("expected the status reply, got {other:?}"),
         }
+
+        // The kind decides how a frame is sent, not the side it is handed to:
+        // a push handed to a request's answer still carries no correlation id.
+        let push = DaemonMessage::ModelChoices {
+            request_id: 1,
+            profile: "played".to_owned(),
+            source: None,
+            choices: Vec::new(),
+            error: None,
+        };
+        let (tx, mut rx) = mpsc::channel(8);
+        let answer = Arc::new(ConnectionOutbound::new(tx)).answer_for(Some(7));
+        answer.reply(&DaemonMessage::Pong);
+        answer.reply(&push);
+        let mut sent = Vec::new();
+        while let Ok(frame) = rx.try_recv() {
+            let (body, _) = frame_decode(&frame)
+                .expect("a valid frame")
+                .expect("a whole frame");
+            sent.push(
+                yagura_protocol::decode_correlated_daemon_message(body).expect("a daemon message"),
+            );
+        }
+        assert_eq!(
+            sent,
+            [(Some(7), DaemonMessage::Pong), (None, push)],
+            "an answer carries the request's correlation id and a push carries none"
+        );
     }
 }

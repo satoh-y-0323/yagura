@@ -16,7 +16,7 @@ use serde_json::Value as JsonValue;
 use tokio::sync::Semaphore;
 use tokio::time::Instant;
 use yagura_protocol::{
-    DaemonMessage, McpRegistrationAction, McpRegistrationCommand, McpRegistrationEntry,
+    DaemonMessage, DaemonPush, McpRegistrationAction, McpRegistrationCommand, McpRegistrationEntry,
     McpRegistrationRow, McpRegistrationState, McpRegistrationStatusInfo, McpRegistrationStep,
     McpRegistrationTomlSet, McpRegistrationTomlValue,
 };
@@ -132,7 +132,7 @@ pub(super) async fn handle_list_mcp_registrations(
                     return;
                 };
                 let status = compute_status(&config, &source, &bridge, Some(&writes)).await;
-                connection.push(&DaemonMessage::McpRegistrationStatus { request_id, status });
+                connection.push(DaemonPush::McpRegistrationStatus { request_id, status });
             });
         }
         while tasks.join_next().await.is_some() {}
@@ -1698,7 +1698,7 @@ pub(super) async fn handle_run_mcp_registration(
         let status = compute_status(&config, &source, bridge, None).await;
         let error =
             error.or_else(|| unconfirmed_toml_set(&source, config.host_os, action, &status));
-        connection.push(&DaemonMessage::McpRegistrationResult {
+        connection.push(DaemonPush::McpRegistrationResult {
             request_id,
             profile: source.profile,
             action,

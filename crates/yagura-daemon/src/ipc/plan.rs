@@ -17,7 +17,7 @@ use std::sync::Arc;
 use tokio::sync::Semaphore;
 
 use yagura_protocol::{
-    DaemonMessage, PlanInfo, PlanTaskInfo, PlanTaskSpec, RoleEntry, TaskAssignment,
+    DaemonMessage, DaemonPush, PlanInfo, PlanTaskInfo, PlanTaskSpec, RoleEntry, TaskAssignment,
     validate_launch_option_value,
 };
 
@@ -266,7 +266,7 @@ pub(super) async fn handle_create_plan(
             let ticket_workspace_id = detail.ticket_workspace_id;
             let (roles, roles_warning) = split_roles_result(roles_result);
             let info = build_plan_info_from_detail(detail, roles.as_ref(), roles_warning);
-            broker.notify_approvers(&DaemonMessage::PlanChanged {
+            broker.notify_approvers(&DaemonPush::PlanChanged {
                 plan_id: info.plan_id.clone(),
             });
             notify_ticket_plans_changed(broker, ticket_workspace_id);
@@ -408,7 +408,7 @@ pub(super) async fn handle_update_plan(
         Ok(Ok(detail)) => {
             let (roles, roles_warning) = split_roles_result(roles_result);
             let info = build_plan_info_from_detail(detail, roles.as_ref(), roles_warning);
-            broker.notify_approvers(&DaemonMessage::PlanChanged {
+            broker.notify_approvers(&DaemonPush::PlanChanged {
                 plan_id: info.plan_id.clone(),
             });
             outbound.reply(&DaemonMessage::PlanDetail { plan: info });
@@ -638,7 +638,7 @@ pub(super) async fn record_task_notice(
         .await;
     match recorded {
         Ok(Ok(())) => {
-            broker.notify_approvers(&DaemonMessage::PlanChanged {
+            broker.notify_approvers(&DaemonPush::PlanChanged {
                 plan_id: plan_id.to_string(),
             });
         }
@@ -660,7 +660,7 @@ pub(super) async fn record_task_notice(
 /// deleting such a plan changes that ticket's workspace too.
 fn notify_ticket_plans_changed(broker: &ApprovalBroker, ticket_workspace_id: Option<i64>) {
     if let Some(workspace_id) = ticket_workspace_id {
-        broker.notify_approvers(&DaemonMessage::TicketChanged { workspace_id });
+        broker.notify_approvers(&DaemonPush::TicketChanged { workspace_id });
     }
 }
 
@@ -715,7 +715,7 @@ pub(super) async fn handle_delete_plan(
     match result {
         Ok(Ok(ticket_workspace_id)) => {
             ledger.locks().remove(&plan_id);
-            broker.notify_approvers(&DaemonMessage::PlanChanged {
+            broker.notify_approvers(&DaemonPush::PlanChanged {
                 plan_id: plan_id.clone(),
             });
             notify_ticket_plans_changed(broker, ticket_workspace_id);
@@ -754,7 +754,7 @@ async fn reply_with_changed_plan(
         Ok(Ok(detail)) => {
             let (roles, roles_warning) = split_roles_result(roles_result);
             let info = build_plan_info_from_detail(detail, roles.as_ref(), roles_warning);
-            broker.notify_approvers(&DaemonMessage::PlanChanged {
+            broker.notify_approvers(&DaemonPush::PlanChanged {
                 plan_id: info.plan_id.clone(),
             });
             outbound.reply(&DaemonMessage::PlanDetail { plan: info });
@@ -1140,7 +1140,7 @@ pub(super) async fn handle_approve_plan(
         })) => {
             let (roles, roles_warning) = split_roles_result(roles_result);
             let info = build_plan_info_from_detail(detail, roles.as_ref(), roles_warning);
-            broker.notify_approvers(&DaemonMessage::PlanChanged {
+            broker.notify_approvers(&DaemonPush::PlanChanged {
                 plan_id: info.plan_id.clone(),
             });
             if let Some(owner_window) = notify_owner
@@ -1274,7 +1274,7 @@ pub(super) async fn handle_mark_plan_seen(
         Ok(Ok((ClearOutcome::Cleared, detail))) => {
             let (roles, roles_warning) = split_roles_result(roles_result);
             let info = build_plan_info_from_detail(detail, roles.as_ref(), roles_warning);
-            broker.notify_approvers(&DaemonMessage::PlanChanged {
+            broker.notify_approvers(&DaemonPush::PlanChanged {
                 plan_id: info.plan_id.clone(),
             });
             outbound.reply(&DaemonMessage::PlanDetail { plan: info });
