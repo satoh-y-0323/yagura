@@ -37,10 +37,14 @@ The daemon outlives the GUI: closing the GUI leaves it running, still serving th
 started with. The GUI works only with a daemon that answers the GUI's own IPC wire revision. While
 a daemon of another wire revision runs -- typically one left running from before an upgrade -- the
 GUI shows no windows, reads nothing from it, and shows an alert asking you to restart it; an action
-you take meanwhile fails with the same sentence.
+you take meanwhile fails with the same sentence (one the GUI refuses on the spot, such as a window
+name with a forbidden character, fails with that reason instead). The alert goes away when that
+daemon ends.
 
 **After upgrading yagura, restart `yagura-daemon`**: run `yagura-daemon --shutdown`. The GUI can
-stay open: once the daemon has ended, the GUI starts the daemon of its own version. A GUI of an
+stay open: once the daemon has ended, the GUI starts the daemon of its own version (with
+`auto_respawn` on, the default; otherwise at your next action that needs a daemon, see
+[`client-config.md`](client-config.md)). A GUI of an
 earlier version that is still open starts the earlier daemon again as soon as it stops, so close
 such a GUI first. `--shutdown` returns once the daemon process has ended; when it cannot confirm
 the end, it says so and exits non-zero. Restarting the daemon closes every window it is currently

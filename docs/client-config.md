@@ -60,15 +60,20 @@ the rest.
 | `backoff_factor`     | integer | `2`     | 1–10            |
 | `attempt_limit`      | integer | `3`     | 1–10            |
 
-- **`auto_respawn`** — whether the supervisor may start the daemon on its own when the
-  connection to it is lost. This governs only the supervisor's own backoff loop: it does
-  not stop an explicit reconnect action, or a window operation (for example listing
-  windows) that starts the daemon on demand. Setting it to `false` does not prevent
-  yagura from starting the daemon through those other paths.
+- **`auto_respawn`** — whether the supervisor may start the daemon on its own: when the
+  connection to it is lost, and after a daemon of another IPC wire revision, which this
+  version cannot use, has ended. This governs only the supervisor's own backoff loop.
+  Setting it to `false` does not prevent yagura from starting the daemon when you take an
+  action that needs one (for example opening a window or the Settings panel); the
+  window list's refresh, closing a window and saving a window's layout never start it.
+  The **Reconnect** button appears only once the supervisor has used up its attempts, so
+  never when this is `false`.
 - **`initial_delay_ms`** — how long, in milliseconds, the supervisor waits before its
   first restart attempt.
 - **`backoff_factor`** — what the wait is multiplied by after each further attempt.
-- **`attempt_limit`** — how many attempts are made before the supervisor gives up.
+- **`attempt_limit`** — how many attempts are made before the supervisor gives up. An
+  attempt that only reached a daemon of another wire revision counts; the count starts
+  over once a daemon this version can use is reached.
 
 ## Resolution Order and Out-of-Range Values
 
