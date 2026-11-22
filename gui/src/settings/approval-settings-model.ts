@@ -5,7 +5,6 @@
  * behind. No IPC, no DOM: the component renders these values and hands the
  * switch back to its caller.
  */
-import { APPROVAL_SETTINGS_MIN_REVISION } from '../ipc/session-boundary';
 import type { ApprovalSettingsInfo } from '../ipc/session-client';
 import { settings } from '../ui-messages';
 
@@ -88,28 +87,10 @@ export function planReviewRow(info: ApprovalSettingsInfo): PlanReviewRow {
 }
 
 /**
- * Whether the connected daemon has settled on a wire revision that carries
- * the approval settings. An unreported revision is not unsupported: the
- * daemon's own refusal is the authority, so this is only ever a negative
- * signal (mirrors `isProfileSettingsReadOnly`'s discipline).
- */
-export function isApprovalSettingsSupported(protocolRevision: number | null): boolean {
-  return protocolRevision === null || protocolRevision >= APPROVAL_SETTINGS_MIN_REVISION;
-}
-
-/**
  * The one line explaining why the Approvals tab cannot be trusted or edited
- * right now, `null` when there is nothing to say. An unsupported daemon is
- * judged before `info`, since an old daemon's settings (if somehow present)
- * are not the live values this tab would otherwise show.
+ * right now, `null` when there is nothing to say.
  */
-export function approvalSettingsNotice(
-  info: ApprovalSettingsInfo | null,
-  protocolRevision: number | null
-): string | null {
-  if (!isApprovalSettingsSupported(protocolRevision)) {
-    return settings.approvalSettingsNeedNewerDaemon;
-  }
+export function approvalSettingsNotice(info: ApprovalSettingsInfo | null): string | null {
   if (info === null) {
     return null;
   }
@@ -126,13 +107,7 @@ export function approvalSettingsNotice(
 }
 
 /** Whether every switch on the Approvals tab must stay frozen. */
-export function isApprovalSettingsReadOnly(
-  info: ApprovalSettingsInfo | null,
-  protocolRevision: number | null
-): boolean {
-  if (!isApprovalSettingsSupported(protocolRevision)) {
-    return true;
-  }
+export function isApprovalSettingsReadOnly(info: ApprovalSettingsInfo | null): boolean {
   return info === null || info.playbook !== 'loaded';
 }
 

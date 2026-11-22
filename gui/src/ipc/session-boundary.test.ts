@@ -180,29 +180,39 @@ describe('narrowWindowLinkPayload', () => {
 });
 
 describe('narrowDaemonConnectedPayload', () => {
-  it('reads the boot and the spawn warning', () => {
+  it('reads the boot, the spawn warning and whether the daemon is compatible', () => {
     const payload = narrowDaemonConnectedPayload({
       status_boot: { origin: 7, seq: 3 },
       spawn_warning: 'Started without breakaway',
+      compatible: true,
     });
     expect(payload).toEqual({
       status_boot: { origin: 7, seq: 3 },
       spawn_warning: 'Started without breakaway',
+      compatible: true,
     });
   });
 
-  it('reads null for both keys when the daemon named no boot and nothing went wrong', () => {
-    expect(narrowDaemonConnectedPayload({ status_boot: null, spawn_warning: null })).toEqual({
+  it('reads null for both optional keys when the daemon named no boot and nothing went wrong', () => {
+    expect(
+      narrowDaemonConnectedPayload({ status_boot: null, spawn_warning: null, compatible: false })
+    ).toEqual({
       status_boot: null,
       spawn_warning: null,
+      compatible: false,
     });
   });
 
-  it('reads missing keys as null instead of refusing them', () => {
-    expect(narrowDaemonConnectedPayload({})).toEqual({ status_boot: null, spawn_warning: null });
-    expect(narrowDaemonConnectedPayload({ spawn_warning: 'w' })).toEqual({
+  it('reads missing optional keys as null instead of refusing them', () => {
+    expect(narrowDaemonConnectedPayload({ compatible: true })).toEqual({
+      status_boot: null,
+      spawn_warning: null,
+      compatible: true,
+    });
+    expect(narrowDaemonConnectedPayload({ spawn_warning: 'w', compatible: true })).toEqual({
       status_boot: null,
       spawn_warning: 'w',
+      compatible: true,
     });
   });
 
@@ -212,9 +222,12 @@ describe('narrowDaemonConnectedPayload', () => {
   ])('drops the boot alone for %s and keeps the spawn warning', (_label, status_boot) => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
     try {
-      expect(narrowDaemonConnectedPayload({ status_boot, spawn_warning: 'w' })).toEqual({
+      expect(
+        narrowDaemonConnectedPayload({ status_boot, spawn_warning: 'w', compatible: true })
+      ).toEqual({
         status_boot: null,
         spawn_warning: 'w',
+        compatible: true,
       });
     } finally {
       warn.mockRestore();
@@ -223,25 +236,47 @@ describe('narrowDaemonConnectedPayload', () => {
 
   it.each([
     ['a payload that is not a record', 5],
-    ['a boot that is not a record', { status_boot: 'boot', spawn_warning: null }],
-    ['a boot without an origin', { status_boot: { seq: 3 }, spawn_warning: null }],
-    ['a boot without a seq', { status_boot: { origin: 7 }, spawn_warning: null }],
-    ['a boot origin that is text', { status_boot: { origin: '7', seq: 3 }, spawn_warning: null }],
+    ['a boot that is not a record', { status_boot: 'boot', spawn_warning: null, compatible: true }],
+    [
+      'a boot without an origin',
+      { status_boot: { seq: 3 }, spawn_warning: null, compatible: true },
+    ],
+    ['a boot without a seq', { status_boot: { origin: 7 }, spawn_warning: null, compatible: true }],
+    [
+      'a boot origin that is text',
+      { status_boot: { origin: '7', seq: 3 }, spawn_warning: null, compatible: true },
+    ],
     [
       'a boot seq that is fractional',
-      { status_boot: { origin: 7, seq: 1.5 }, spawn_warning: null },
+      { status_boot: { origin: 7, seq: 1.5 }, spawn_warning: null, compatible: true },
     ],
-    ['a spawn warning that is a number', { status_boot: null, spawn_warning: 5 }],
-    ['a spawn warning that is a boolean', { status_boot: null, spawn_warning: true }],
-    ['a spawn warning that is a record', { status_boot: null, spawn_warning: { text: 'w' } }],
+    ['a spawn warning that is a number', { status_boot: null, spawn_warning: 5, compatible: true }],
+    [
+      'a spawn warning that is a boolean',
+      { status_boot: null, spawn_warning: true, compatible: true },
+    ],
+    [
+      'a spawn warning that is a record',
+      { status_boot: null, spawn_warning: { text: 'w' }, compatible: true },
+    ],
+    // Whether the daemon can be used is never guessed: a missing answer is refused.
+    ['a payload without compatible', { status_boot: null, spawn_warning: null }],
+    ['a compatible that is null', { status_boot: null, spawn_warning: null, compatible: null }],
+    ['a compatible that is text', { status_boot: null, spawn_warning: null, compatible: 'true' }],
+    ['a compatible that is a number', { status_boot: null, spawn_warning: null, compatible: 1 }],
   ])('rejects %s', (_label, value) => {
     expect(() => narrowDaemonConnectedPayload(value)).toThrow(BoundaryError);
   });
 
   it('ignores extra keys', () => {
     expect(
-      narrowDaemonConnectedPayload({ status_boot: null, spawn_warning: 'w', extra: 'ignored' })
-    ).toEqual({ status_boot: null, spawn_warning: 'w' });
+      narrowDaemonConnectedPayload({
+        status_boot: null,
+        spawn_warning: 'w',
+        compatible: true,
+        extra: 'ignored',
+      })
+    ).toEqual({ status_boot: null, spawn_warning: 'w', compatible: true });
   });
 });
 
@@ -1616,34 +1651,13 @@ describe('narrowWindowOpenFailure: the "unsupported" arm', () => {
 });
 
 describe('narrowWindowListPayload (session://window-list)', () => {
-  it('narrows the windows field the same way narrowWindowInfoList does', () => {
-    const result = narrowWindowListPayload({ windows: [windowInfoWire()], protocol_revision: 2 });
-    expect(result.windows).toEqual([ROOMLESS_WINDOW_INFO]);
-  });
-
-  it('reads the connection wire revision under protocol_revision', () => {
-    const result = narrowWindowListPayload({ windows: [], protocol_revision: 3 });
-    expect(result.protocol_revision).toBe(3);
-  });
-
-  it('reads an explicit null protocol_revision as null (not yet settled)', () => {
-    const result = narrowWindowListPayload({ windows: [], protocol_revision: null });
-    expect(result.protocol_revision).toBeNull();
-  });
-
-  it('reads an absent protocol_revision as null, the same as an explicit null', () => {
-    const result = narrowWindowListPayload({ windows: [] });
-    expect(result.protocol_revision).toBeNull();
-  });
-
-  it('rejects a protocol_revision that is present but not a number', () => {
-    expect(() => narrowWindowListPayload({ windows: [], protocol_revision: 'two' })).toThrow(
-      BoundaryError
-    );
+  it('narrows the windows field the same way narrowWindowInfoList does, and nothing else', () => {
+    const result = narrowWindowListPayload({ windows: [windowInfoWire()] });
+    expect(result).toEqual({ windows: [ROOMLESS_WINDOW_INFO] });
   });
 
   it('rejects a payload missing the windows field, the same as narrowWindowInfoList does', () => {
-    expect(() => narrowWindowListPayload({ protocol_revision: 1 })).toThrow(BoundaryError);
+    expect(() => narrowWindowListPayload({})).toThrow(BoundaryError);
   });
 
   it('rejects a payload that is not a record', () => {

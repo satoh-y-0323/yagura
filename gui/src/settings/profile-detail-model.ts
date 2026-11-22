@@ -119,17 +119,15 @@ export function canSaveCommand(edited: readonly string[], saved: readonly string
 
 /** What the Profiles tab needs to show one opened profile's details. */
 export interface ProfileDetailsState {
-  /** Whether the daemon answers profile-detail requests at all. */
-  isAvailable: boolean;
   /** The profile whose details are open, or null. */
   openId: string | null;
   /** The open profile's details, null while they are being read. */
   detail: ProfileDetail | null;
-  /** Why the open profile's details could not be read. */
+  /** The line shown when the open profile's details could not be read. */
   failure: string | null;
   /** Whether a command save or reset for the open profile is in flight. */
   isSavingCommand: boolean;
-  /** Why the last command save or reset failed. */
+  /** The line shown when the last command save or reset failed. */
   commandFailure: string | null;
   /** The host operating system's name, as the command heading says it. */
   platformName: string;

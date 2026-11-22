@@ -85,7 +85,6 @@
   import { startFramePull, type FramePull } from '../ipc/frame-pull';
   import { sanitizeForDisplay } from '../display/untrusted-text';
   import {
-    ATTACH_VIEW_MIN_REVISION,
     type ApprovalRequest,
     type ChatChanged,
     type ChatHistoryCleared,
@@ -165,7 +164,6 @@
     subscribeTicketChanged,
   } from '../ipc/ticket-client';
   import {
-    MODEL_ALIASES_MIN_REVISION,
     type LaunchOptionAlias,
     type ModelChoicesPayload,
     type ShippedModelProfiles,
@@ -175,7 +173,7 @@
     invokeSaveModelAliases,
     listenModelChoices,
   } from '../ipc/model-client';
-  import { PROFILE_DETAIL_MIN_REVISION, type ProfileDetail } from '../ipc/profile-detail-boundary';
+  import { type ProfileDetail } from '../ipc/profile-detail-boundary';
   import { invokeGetProfileDetail, invokeSetProfileCommand } from '../ipc/profile-detail-client';
   import { shippedAliasesOf } from '../profile/model-aliases-model';
   import {
@@ -219,6 +217,7 @@
   import {
     acceptsChoicesPush,
     CHOICES_FETCH_TIMEOUT_MS,
+    choicesFailureLine,
     isChoicesFetchOverdue,
     nextChoicesRequestId,
     type ModelChoicesEntry,
@@ -249,13 +248,9 @@
     approvalSettingsNotice,
     approvalUpdateFailure,
     isApprovalSettingsReadOnly,
-    isApprovalSettingsSupported,
     PLAN_REVIEW_GATE_ID,
   } from '../settings/approval-settings-model';
-  import {
-    integrationsNotice,
-    isIntegrationsSupported,
-  } from '../settings/integration-settings-model';
+  import { integrationsNotice } from '../settings/integration-settings-model';
   import {
     clampPanelSize,
     panelMaxSize,
@@ -263,7 +258,6 @@
     isResizedByUser,
     type PanelSize as SettingsPanelSize,
   } from '../settings/panel-size';
-  import { isProfileSettingsReadOnly } from '../settings/profile-settings-model';
   import { type SettingsTab } from '../settings/settings-tabs';
   import { startLayoutSync } from '../session/layout-sync';
   import { confirmCopy, type ConfirmOperation } from '../session/confirm-target';
@@ -468,7 +462,7 @@
     daemonRecovery: 'idle',
     daemonRecoveryRev: 0,
     clientConfigFailure: null,
-    isDaemonProtocolStale: false,
+    isDaemonIncompatible: false,
     startupEnvFailure: null,
     profilesNeedingNativeProgram: [],
     isProfileUnavailableDismissed: false,
@@ -477,6 +471,10 @@
     isReopenOfferDismissed: false,
     hasOpenWindows: false,
   };
+
+  // Whether the last announced daemon start speaks this build's wire revision,
+  // `null` until one is announced: the start's facts are read only once `true`.
+  let lastAnnouncedCompatible: boolean | null = null;
 
   // Things that happened, kept until the user dismisses them; `noticeMemory` numbers them.
   let eventLog: EventLog = [];
@@ -669,7 +667,7 @@
   // A command save belongs to the profile it was sent for, so another
   // profile's details opened meanwhile never show its state.
   let savingCommandProfileId: string | null = null;
-  let profileCommandFailure: { id: string; reason: string } | null = null;
+  let profileCommandFailure: { id: string; line: string } | null = null;
   // A request to show one profile in the Plans panel's Models tab.
   let requestedModelProfile: { id: string; seq: number } | null = null;
 
@@ -692,10 +690,6 @@
   let lastChoicesRequestId = 0;
   // How soon an overdue check that found its timer early looks again.
   const OVERDUE_RECHECK_MS = 250;
-  // Whether the connected daemon's last-pushed wire revision predates the
-  // model-alias requests. Only decides whether the tab offers editing; a
-  // request sent anyway is refused by the core and shown as a failure.
-  let isModelAliasesReadOnly = false;
   let unsubscribeModelChoices: (() => void) | null = null;
 
   // The Integrations tab: the listed rows and each row's status, read again
@@ -714,29 +708,20 @@
   let unsubscribeMcpRegistrationStatus: (() => void) | null = null;
   let unsubscribeMcpRegistrationResult: (() => void) | null = null;
 
-  // The connected daemon's last-pushed wire revision, `null` until the first
-  // `subscribe_session` push arrives. Kept under the wire field's own name:
-  // it is what `isDaemonProtocolStale`, `isModelAliasesReadOnly` and the
-  // Settings panel's read-only gate are all derived from.
-  let protocol_revision: number | null = null;
-  $: isSettingsReadOnly = isProfileSettingsReadOnly(protocol_revision);
   $: profileDetails = {
-    // An unreported revision still offers details: the daemon's own refusal
-    // is the authority, so they are only withheld on evidence.
-    isAvailable: protocol_revision === null || protocol_revision >= PROFILE_DETAIL_MIN_REVISION,
     openId: openProfileDetailId,
     detail: profileDetail,
     failure: profileDetailFailure,
     isSavingCommand: openProfileDetailId !== null && savingCommandProfileId === openProfileDetailId,
     commandFailure:
       profileCommandFailure !== null && profileCommandFailure.id === openProfileDetailId
-        ? profileCommandFailure.reason
+        ? profileCommandFailure.line
         : null,
     platformName: platformName(keyboardPlatform),
   } satisfies ProfileDetailsState;
-  $: isApprovalReadOnly = isApprovalSettingsReadOnly(approvalSettings, protocol_revision);
-  $: approvalNotice = approvalSettingsNotice(approvalSettings, protocol_revision);
-  $: integrationsNoticeLine = integrationsNotice(integrationsListed, protocol_revision);
+  $: isApprovalReadOnly = isApprovalSettingsReadOnly(approvalSettings);
+  $: approvalNotice = approvalSettingsNotice(approvalSettings);
+  $: integrationsNoticeLine = integrationsNotice(integrationsListed);
 
   // Approval queue: the requests the daemon asks this GUI to decide.
   // `approvalDisplayedId` is what the dialog is showing right now, which is
@@ -1211,7 +1196,10 @@
         : invokeDeleteChatRoom(room.room_id));
     } catch (error) {
       console.error(chat.panelTitle, error);
-      recordFailure('operation-failure', describeRoomRemovalFailure(error));
+      recordFailure(
+        'operation-failure',
+        failureLine(() => describeRoomRemovalFailure(error))
+      );
       void refreshChatRooms();
     }
   }
@@ -1334,14 +1322,10 @@
     // Neither list is pushed while the panel is closed, so opening it reads
     // both again.
     await Promise.all([loadProfiles(), readRoles()]);
-    // A daemon that predates the approval settings would refuse the
-    // request; the tab shows the "needs a newer daemon" notice instead.
-    if (isApprovalSettingsSupported(protocol_revision)) {
-      try {
-        approvalSettings = await invokeGetApprovalSettings();
-      } catch (error) {
-        console.error('failed to read approval settings:', error);
-      }
+    try {
+      approvalSettings = await invokeGetApprovalSettings();
+    } catch (error) {
+      console.error('failed to read approval settings:', error);
     }
     await readIntegrations();
   }
@@ -1352,16 +1336,11 @@
   }
 
   /**
-   * Reads the Integrations list, only while that tab is showing and only
-   * from a daemon that carries MCP registration. Every row reads as
-   * "checking" again until its own status push for this read arrives.
+   * Reads the Integrations list, only while that tab is showing. Every row
+   * reads as "checking" again until its own status push for this read arrives.
    */
   async function readIntegrations(): Promise<void> {
-    if (
-      !isSettingsOpen ||
-      settingsTab !== 'integrations' ||
-      !isIntegrationsSupported(protocol_revision)
-    ) {
+    if (!isSettingsOpen || settingsTab !== 'integrations') {
       return;
     }
     const requestId = nextChoicesRequestId(lastIntegrationsRequestId);
@@ -1376,7 +1355,9 @@
       }
     } catch (error) {
       if (integrationsListRequestId === requestId) {
-        integrationsFailure = describeOperationFailure(settings.integrationsListFailure, error);
+        integrationsFailure = failureLine(() =>
+          describeOperationFailure(settings.integrationsListFailure, error)
+        );
       }
     }
   }
@@ -1411,7 +1392,9 @@
         integrationRunning = null;
         const name =
           integrationsListed?.rows.find((row) => row.profile === profile)?.displayName ?? profile;
-        integrationsFailure = describeOperationFailure(settings.integrationRunFailure(name), error);
+        integrationsFailure = failureLine(() =>
+          describeOperationFailure(settings.integrationRunFailure(name), error)
+        );
       }
     }
   }
@@ -1444,7 +1427,9 @@
       );
       // The request asked for `autoApprove`; a refusal leaves the tool at
       // the opposite of that.
-      approvalSwitchFailure = approvalUpdateFailure(tool, reason, !autoApprove, 'tool');
+      approvalSwitchFailure = failureLine(() =>
+        approvalUpdateFailure(tool, reason, !autoApprove, 'tool')
+      );
     } finally {
       isApprovalSaving = false;
     }
@@ -1466,7 +1451,9 @@
       );
       // The request asked for `required`; a refusal leaves the gate at the
       // opposite of that.
-      approvalSwitchFailure = approvalUpdateFailure(PLAN_REVIEW_GATE_ID, reason, !required, 'plan');
+      approvalSwitchFailure = failureLine(() =>
+        approvalUpdateFailure(PLAN_REVIEW_GATE_ID, reason, !required, 'plan')
+      );
     } finally {
       isApprovalSaving = false;
     }
@@ -1489,7 +1476,7 @@
       );
       // The request asked for `enabled`; a refusal leaves the profile at the
       // opposite of that.
-      profileUpdateFailure = settings.profileUpdateFailed(id, reason, !enabled);
+      profileUpdateFailure = failureLine(() => settings.profileUpdateFailed(id, reason, !enabled));
     } finally {
       savingProfileId = null;
     }
@@ -1630,7 +1617,12 @@
       if (latestChoicesRequestIds.get(profile) === requestId) {
         modelChoices = withModelChoicesEntry(profile, {
           kind: 'failed',
-          failure: { kind: 'reported', reason: String(error) },
+          failure: {
+            kind: 'line',
+            line: failureLine(() =>
+              choicesFailureLine({ kind: 'reported', reason: String(error) })
+            ),
+          },
         });
       }
     }
@@ -1700,7 +1692,7 @@
       }
     } catch (error) {
       if (openProfileDetailId === id) {
-        profileDetailFailure = errorReason(error);
+        profileDetailFailure = failureLine(() => settings.profileDetailFailed(errorReason(error)));
       }
     }
   }
@@ -1726,7 +1718,10 @@
     try {
       await invokeSetProfileCommand(id, argv);
     } catch (error) {
-      profileCommandFailure = { id, reason: errorReason(error) };
+      profileCommandFailure = {
+        id,
+        line: failureLine(() => settings.profileCommandFailed(errorReason(error))),
+      };
     } finally {
       savingCommandProfileId = null;
     }
@@ -2078,8 +2073,10 @@
 
   /**
    * Sends the user's decision. The request is marked in flight rather than
-   * removed optimistically, so a failed round trip can offer it again
-   * instead of it vanishing from the queue while its fate is unknown.
+   * removed optimistically. A decision the daemon gave no answer to stays in
+   * flight whether or not it was written, until the next pending list says
+   * how it went; it is offered again only when the daemon could not be
+   * reached nor started, or refused it.
    */
   function decideApproval(requestId: string, approved: boolean): void {
     approvals = approvalQueue.markInFlight(approvals, requestId);
@@ -2090,7 +2087,10 @@
       .catch((error: unknown) => {
         console.error('failed to decide approval:', error);
         approvals = approvalQueue.failDecision(approvals, requestId);
-        recordFailure('operation-failure', banners.approvalDecisionFailed);
+        recordFailure(
+          'operation-failure',
+          failureLine(() => banners.approvalDecisionFailed)
+        );
       });
   }
 
@@ -2533,9 +2533,18 @@
   };
   const runShortcut = createShortcutRunner(runnerDeps);
 
-  /** The one way an action runs, from a key or from the picker; a failure shows as a notice. */
-  function runAction(action: ActionId): Promise<void> {
-    return reportIfFailed(errors.shortcutFailed, runShortcut(action));
+  /**
+   * The one way an action runs, from a key or from the picker; a failure shows
+   * as a notice. The daemon requests an action makes report their own failure,
+   * so a failure reaching here is never the daemon's and keeps its own line.
+   */
+  async function runAction(action: ActionId): Promise<void> {
+    try {
+      await runShortcut(action);
+    } catch (error) {
+      console.error(errors.shortcutFailed, error);
+      recordFailure('operation-failure', describeOperationFailure(errors.shortcutFailed, error));
+    }
   }
 
   /** Whether `action` would do anything now, judged from what the runner itself reads. */
@@ -2769,11 +2778,12 @@
     try {
       unsubscribeSession = await subscribeSession(registry.resolveWindowHandlers, {
         onStatus: (payload) => {
-          applyStatusPush(registry, protocol_revision, payload);
+          applyStatusPush(registry, payload);
         },
         onDaemonConnected: (payload) => {
           isDaemonConnectionHeard = true;
-          void rereadDaemonFacts(payload);
+          takeDaemonConnection(payload);
+          void rereadDaemonFacts();
         },
         onBoundaryError: (error) => {
           reportBoundaryNotice('sessionEvent', error);
@@ -2845,14 +2855,6 @@
 
     unsubscribeWindowList = await subscribeWindowList(
       (payload) => {
-        protocol_revision = payload.protocol_revision;
-        noticeState = {
-          ...noticeState,
-          isDaemonProtocolStale:
-            protocol_revision !== null && protocol_revision < ATTACH_VIEW_MIN_REVISION,
-        };
-        isModelAliasesReadOnly =
-          protocol_revision !== null && protocol_revision < MODEL_ALIASES_MIN_REVISION;
         void applyWindowList(payload.windows);
       },
       (error) => {
@@ -2925,16 +2927,20 @@
       console.error('failed to pull the pending approvals:', error);
     }
 
-    // Last, after every subscription: the start's warning may have been
-    // announced before the session subscription opened.
-    let connection: DaemonConnectedPayload | null = null;
+    // Last, after every subscription: the start may have been announced before
+    // the session subscription opened. With none announced yet, or one already
+    // heard, nothing is read here: the core announces the first start it
+    // settles on, and that announcement reads the facts.
+    let announced: DaemonConnectedPayload | null = null;
     try {
-      const announced = await invokeGetDaemonConnection();
-      connection = isDaemonConnectionHeard ? null : announced;
+      announced = await invokeGetDaemonConnection();
     } catch (error) {
       console.error('failed to pull the daemon connection:', error);
     }
-    await rereadDaemonFacts(connection);
+    if (announced !== null && !isDaemonConnectionHeard) {
+      takeDaemonConnection(announced);
+      await rereadDaemonFacts();
+    }
 
     // Unconditional: the core learns this shell's totals even when nothing
     // moved while starting.
@@ -3013,7 +3019,9 @@
       detectionNames = result.names;
     } catch (error) {
       logBoundaryFailure('detectionsList', error);
-      detectionListWarning = describeBoundaryNotice({ operation: 'detectionsList', detail: error });
+      detectionListWarning = failureLine(() =>
+        describeBoundaryNotice({ operation: 'detectionsList', detail: error })
+      );
     }
   }
 
@@ -3050,7 +3058,9 @@
         .sort((left, right) => left.displayName.localeCompare(right.displayName));
     } catch (error) {
       logBoundaryFailure('profilesList', error);
-      profileListWarning = describeBoundaryNotice({ operation: 'profilesList', detail: error });
+      profileListWarning = failureLine(() =>
+        describeBoundaryNotice({ operation: 'profilesList', detail: error })
+      );
     }
   }
 
@@ -3122,7 +3132,10 @@
    */
   function reportOperationFailure(summary: string, error: unknown): void {
     console.error(summary, error);
-    recordFailure('operation-failure', describeOperationFailure(summary, error));
+    recordFailure(
+      'operation-failure',
+      failureLine(() => describeOperationFailure(summary, error))
+    );
   }
 
   async function refreshWindowList(): Promise<void> {
@@ -3189,19 +3202,38 @@
   const rereadDaemonStart = serializeRefresh(rereadDaemonFactsOnce);
 
   /**
-   * Takes in one daemon start: its spawn warning replaces the last start's,
-   * and its facts are read again. `null` names no start, so the warning is
-   * left as it is.
+   * Takes in one announced daemon start: its spawn warning replaces the last
+   * start's, and whether this build can use the daemon raises or lowers the
+   * incompatible notice.
    */
-  function rereadDaemonFacts(connection: DaemonConnectedPayload | null): Promise<void> {
-    if (connection !== null) {
-      const warning = connection.spawn_warning;
-      noticeState = {
-        ...noticeState,
-        daemonSpawnNotice: warning === null ? null : foldExternalText(warning),
-      };
-    }
-    return rereadDaemonStart();
+  function takeDaemonConnection(connection: DaemonConnectedPayload): void {
+    const warning = connection.spawn_warning;
+    lastAnnouncedCompatible = connection.compatible;
+    noticeState = {
+      ...noticeState,
+      daemonSpawnNotice: warning === null ? null : foldExternalText(warning),
+      isDaemonIncompatible: !connection.compatible,
+    };
+  }
+
+  /**
+   * Reads the facts of the announced start again, only for a daemon known to
+   * be usable: an incompatible one refuses every read, and until a start is
+   * announced there is nothing to read them from.
+   */
+  function rereadDaemonFacts(): Promise<void> {
+    return lastAnnouncedCompatible === true ? rereadDaemonStart() : Promise.resolve();
+  }
+
+  /**
+   * The line a failed daemon request leaves behind. A daemon of another wire
+   * revision refuses every request for that one reason, so while it is the
+   * one connected every operation shows the same sentence instead of its own.
+   *
+   * @param describe the operation's own line, used only for a usable daemon
+   */
+  function failureLine(describe: () => string): string {
+    return noticeState.isDaemonIncompatible ? banners.daemonIncompatible : describe();
   }
 
   /**
@@ -3310,7 +3342,7 @@
   async function applyWindowList(windows: WindowInfo[]): Promise<void> {
     const liveWindows: WindowInfo[] = [];
     for (const info of windows) {
-      if (applyListedWindow(registry, protocol_revision, info)) {
+      if (applyListedWindow(registry, info)) {
         liveWindows.push(info);
       }
     }
@@ -4083,7 +4115,6 @@
     {shippedModels}
     {requestedModelProfile}
     {modelChoices}
-    {isModelAliasesReadOnly}
     onSelectModelProfile={selectModelProfile}
     onRefreshModelChoices={refreshModelChoices}
     onSaveModelAliases={(profile: string, aliases: LaunchOptionAlias[]) =>
@@ -4101,7 +4132,6 @@
     onClose={closeSettings}
     {profileOptions}
     {roles}
-    isReadOnly={isSettingsReadOnly}
     {savingProfileId}
     updateFailure={profileUpdateFailure}
     onSetProfileEnabled={handleSetProfileEnabled}
@@ -4214,6 +4244,7 @@
   onCancel={() => {
     // Dialog will close automatically
   }}
+  {failureLine}
 />
 
 <Tooltip />

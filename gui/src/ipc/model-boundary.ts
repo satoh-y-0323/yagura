@@ -22,15 +22,6 @@ import {
 
 export { BoundaryError };
 
-/**
- * The wire revision a daemon must have settled on before the model-alias
- * requests reach it (mirrors `MODEL_ALIASES_MIN_REVISION`, `yagura-protocol`).
- * Informational only: it decides whether the Models tab offers editing,
- * never what a request may send -- the core's own gate is the authority for
- * that.
- */
-export const MODEL_ALIASES_MIN_REVISION = 10;
-
 /** One alias of a profile's `model` launch option and the value it stands for. */
 export interface LaunchOptionAlias {
   alias: string;

@@ -13,12 +13,10 @@ import {
   approvalToolRows,
   approvalUpdateFailure,
   isApprovalSettingsReadOnly,
-  isApprovalSettingsSupported,
   planReviewRow,
   type ApprovalToolRow,
   type PlanReviewRow,
 } from './approval-settings-model';
-import { APPROVAL_SETTINGS_MIN_REVISION } from '../ipc/session-boundary';
 import type { ApprovalSettingsInfo, PlaybookState } from '../ipc/session-client';
 import { settings } from '../ui-messages';
 
@@ -224,85 +222,40 @@ describe('planReviewRow', () => {
   });
 });
 
-describe('isApprovalSettingsSupported', () => {
-  it('pins the first wire revision that carries the approval settings', () => {
-    expect(APPROVAL_SETTINGS_MIN_REVISION).toBe(12);
-  });
-
-  it('is supported before the daemon has reported a revision', () => {
-    expect(isApprovalSettingsSupported(null)).toBe(true);
-  });
-
-  it('is not supported one revision short', () => {
-    expect(isApprovalSettingsSupported(11)).toBe(false);
-  });
-
-  it('is supported from that revision onward', () => {
-    expect(isApprovalSettingsSupported(12)).toBe(true);
-    expect(isApprovalSettingsSupported(13)).toBe(true);
-  });
-});
-
 describe('approvalSettingsNotice', () => {
-  it('asks for a newer daemon when the daemon predates the settings', () => {
-    const notice: string | null = approvalSettingsNotice(null, 11);
-
-    expect(notice).toBe(text(settings.approvalSettingsNeedNewerDaemon));
-  });
-
-  it('asks for a newer daemon even if settings are somehow at hand', () => {
-    const notice: string | null = approvalSettingsNotice(info({ playbook: 'loaded' }), 11);
-
-    expect(notice).toBe(text(settings.approvalSettingsNeedNewerDaemon));
-  });
-
   it.each<[PlaybookState, () => string]>([
     ['failed', () => text(settings.approvalPlaybookFailed)],
     ['not_configured', () => text(settings.approvalPlaybookNotConfigured)],
     ['unknown', () => text(settings.approvalPlaybookUnknown)],
   ])('explains the %s playbook state', (playbook, expected) => {
-    const notice: string | null = approvalSettingsNotice(info({ playbook }), 12);
+    const notice: string | null = approvalSettingsNotice(info({ playbook }));
 
     expect(notice).toBe(expected());
   });
 
-  it('explains the playbook state when the revision is not reported', () => {
-    const notice: string | null = approvalSettingsNotice(info({ playbook: 'failed' }), null);
-
-    expect(notice).toBe(text(settings.approvalPlaybookFailed));
-  });
-
   it('shows nothing for a loaded playbook', () => {
-    expect(approvalSettingsNotice(info({ playbook: 'loaded' }), 12)).toBeNull();
-    expect(approvalSettingsNotice(info({ playbook: 'loaded' }), null)).toBeNull();
+    expect(approvalSettingsNotice(info({ playbook: 'loaded' }))).toBeNull();
   });
 
   it('shows nothing before the settings have been read', () => {
-    expect(approvalSettingsNotice(null, 12)).toBeNull();
-    expect(approvalSettingsNotice(null, null)).toBeNull();
+    expect(approvalSettingsNotice(null)).toBeNull();
   });
 });
 
 describe('isApprovalSettingsReadOnly', () => {
   it('is editable for a loaded playbook', () => {
-    expect(isApprovalSettingsReadOnly(info({ playbook: 'loaded' }), 12)).toBe(false);
-    expect(isApprovalSettingsReadOnly(info({ playbook: 'loaded' }), null)).toBe(false);
+    expect(isApprovalSettingsReadOnly(info({ playbook: 'loaded' }))).toBe(false);
   });
 
   it.each<PlaybookState>(['failed', 'not_configured', 'unknown'])(
     'is read-only for the %s playbook state',
     (playbook) => {
-      expect(isApprovalSettingsReadOnly(info({ playbook }), 12)).toBe(true);
+      expect(isApprovalSettingsReadOnly(info({ playbook }))).toBe(true);
     }
   );
 
-  it('is read-only for a daemon that predates the settings', () => {
-    expect(isApprovalSettingsReadOnly(info({ playbook: 'loaded' }), 11)).toBe(true);
-  });
-
   it('is read-only before the settings have been read', () => {
-    expect(isApprovalSettingsReadOnly(null, 12)).toBe(true);
-    expect(isApprovalSettingsReadOnly(null, null)).toBe(true);
+    expect(isApprovalSettingsReadOnly(null)).toBe(true);
   });
 });
 

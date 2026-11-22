@@ -40,7 +40,7 @@ function baseState(overrides: Partial<NoticeSourceState> = {}): NoticeSourceStat
     daemonRecovery: 'idle',
     daemonRecoveryRev: 0,
     clientConfigFailure: null,
-    isDaemonProtocolStale: false,
+    isDaemonIncompatible: false,
     startupEnvFailure: null,
     profilesNeedingNativeProgram: [],
     isProfileUnavailableDismissed: false,
@@ -124,9 +124,9 @@ const NOTICES: { label: string; on: Partial<NoticeSourceState>; notice: ShownNot
     },
   },
   {
-    label: 'daemon-protocol-stale',
-    on: { isDaemonProtocolStale: true },
-    notice: { key: 'daemon-protocol-stale', sentence: banners.daemonProtocolStale, action: null },
+    label: 'daemon-incompatible',
+    on: { isDaemonIncompatible: true },
+    notice: { key: 'daemon-incompatible', sentence: banners.daemonIncompatible, action: null },
   },
   {
     label: 'daemon-spawn',
@@ -203,7 +203,7 @@ const BLOCKING_LABELS = new Set([
   'daemon-recovery (exhausted)',
   'daemon-health',
   'approver-registration-refused',
-  'daemon-protocol-stale',
+  'daemon-incompatible',
 ]);
 
 /** One row per state notice key, so every key is switched on together. */
@@ -251,7 +251,7 @@ const CLASSES: Record<NoticeKey, readonly { facts: NoticeFacts; expected: Notice
       expected: { blocking: true, tone: 'warning', dismissible: false, category: null },
     },
   ],
-  'daemon-protocol-stale': [
+  'daemon-incompatible': [
     {
       facts: {},
       expected: { blocking: true, tone: 'warning', dismissible: false, category: null },
@@ -365,7 +365,7 @@ describe('buildNotices', () => {
         daemonRecovery,
         daemonHealthNotices: ['health-probe: first', 'health-probe: second'],
         approverRegistrationRefused: true,
-        isDaemonProtocolStale: true,
+        isDaemonIncompatible: true,
       });
 
       expect(buildNotices(state).map((draft) => draft.key)).toEqual([
@@ -374,7 +374,7 @@ describe('buildNotices', () => {
         'daemon-health',
         'daemon-health',
         'approver-registration-refused',
-        'daemon-protocol-stale',
+        'daemon-incompatible',
       ]);
     }
   );

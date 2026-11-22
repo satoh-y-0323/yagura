@@ -1,16 +1,10 @@
 /**
  * The pure model behind the Settings panel's Profiles tab: which roles still
- * point at a profile, what each row shows, and when the switches are frozen
- * because the daemon predates the enabled state.
+ * point at a profile and what each row shows.
  */
 import { describe, it, expect } from 'vitest';
 
-import {
-  isProfileSettingsReadOnly,
-  profileSettingsRows,
-  rolesUsingProfile,
-} from './profile-settings-model';
-import { PROFILE_ENABLED_MIN_REVISION } from '../ipc/session-boundary';
+import { profileSettingsRows, rolesUsingProfile } from './profile-settings-model';
 import type { ProfileOption } from '../components/add-window-dialog-types';
 import type { RoleEntry } from '../ipc/plan-boundary';
 import type { ProfileLimit } from '../ipc/session-client';
@@ -204,25 +198,6 @@ describe('profileSettingsRows', () => {
 
   it('is empty for no profiles', () => {
     expect(profileSettingsRows([], ROLES)).toEqual([]);
-  });
-});
-
-describe('isProfileSettingsReadOnly', () => {
-  it('pins the first wire revision that carries the enabled state', () => {
-    expect(PROFILE_ENABLED_MIN_REVISION).toBe(11);
-  });
-
-  it('is not read-only before the daemon has reported a revision', () => {
-    expect(isProfileSettingsReadOnly(null)).toBe(false);
-  });
-
-  it('is read-only for a daemon one revision short of the enabled state', () => {
-    expect(isProfileSettingsReadOnly(10)).toBe(true);
-  });
-
-  it('is editable from the revision that carries the enabled state onward', () => {
-    expect(isProfileSettingsReadOnly(11)).toBe(false);
-    expect(isProfileSettingsReadOnly(12)).toBe(false);
   });
 });
 

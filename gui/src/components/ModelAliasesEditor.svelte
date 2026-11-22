@@ -33,8 +33,6 @@
   export let shipped: ShippedModelProfiles;
   /** Each profile's model list, keyed by profile id. */
   export let choices: ReadonlyMap<string, ModelChoicesEntry>;
-  /** Whether the connected daemon is too old to take model-alias requests. */
-  export let readOnly: boolean;
   export let onSelectProfile: (profile: string) => void;
   export let onRefreshChoices: (profile: string) => void;
   export let onSave: (profile: string, aliases: LaunchOptionAlias[]) => void;
@@ -228,7 +226,6 @@
               {#if listedChoices.length > 0 && !row.valueMissingFromChoices && !typedAliases.includes(row.alias)}
                 <select
                   aria-label={plans.modelForAliasLabel(row.alias)}
-                  disabled={readOnly}
                   on:change={(event) => chooseValue(row.alias, event.currentTarget.value)}
                 >
                   {#each listedChoices as choice (choice.id)}
@@ -244,7 +241,6 @@
                 <input
                   value={row.value}
                   aria-label={plans.modelForAliasLabel(row.alias)}
-                  disabled={readOnly}
                   spellcheck="false"
                   on:input={(event) => editValue(row.alias, event.currentTarget.value)}
                 />
@@ -252,7 +248,7 @@
               <IconButton
                 class="model-aliases__icon"
                 label={plans.resetToShippedLabel}
-                disabled={!row.edited || readOnly}
+                disabled={!row.edited}
                 on:click={() => resetRow(row.alias)}
               >
                 <svg viewBox="0 0 24 24" aria-hidden="true"
@@ -271,7 +267,7 @@
     <button type="button" class="btn btn-secondary" disabled={!dirty} on:click={discard}
       >{plans.discardModelAliasesButton}</button
     >
-    <button type="button" class="btn btn-primary" disabled={!dirty || readOnly} on:click={save}
+    <button type="button" class="btn btn-primary" disabled={!dirty} on:click={save}
       >{plans.saveModelAliasesButton}</button
     >
   </div>

@@ -260,7 +260,7 @@ describe('notice feed: which notices come onto the lane', () => {
     const s = shell();
     s.drafts = [
       blocking('startup-env-failure', 'error', 'block-1'),
-      blocking('daemon-protocol-stale', 'warning', 'block-2'),
+      blocking('daemon-incompatible', 'warning', 'block-2'),
       setup('detection-warning', 'setup-a'),
     ];
     const out = run(s);

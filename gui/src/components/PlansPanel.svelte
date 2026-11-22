@@ -65,7 +65,6 @@
   export let profileOptions: BoardProps['profileOptions'];
   export let shippedModels: ModelEditorProps['shipped'];
   export let modelChoices: ModelEditorProps['choices'];
-  export let isModelAliasesReadOnly: ModelEditorProps['readOnly'];
   export let onSelectModelProfile: ModelEditorProps['onSelectProfile'];
   export let onRefreshModelChoices: ModelEditorProps['onRefreshChoices'];
   export let onSaveModelAliases: ModelEditorProps['onSave'];
@@ -155,7 +154,6 @@
         {profileOptions}
         shipped={shippedModels}
         choices={modelChoices}
-        readOnly={isModelAliasesReadOnly}
         onSelectProfile={onSelectModelProfile}
         onRefreshChoices={onRefreshModelChoices}
         onSave={onSaveModelAliases}

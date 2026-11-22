@@ -41,14 +41,13 @@ async fn poll_window_list(pool: &ConnectionPool, app: &impl GuiHost) {
     }
     // A failed round emits nothing, so no window disappears. The records follow
     // this list, though a later list may reach the WebView before it.
-    let Ok((windows, protocol_revision)) = pool.listed_windows().await else {
+    let Ok(windows) = pool.listed_windows().await else {
         return;
     };
     app.emit_event(
         EVENT_WINDOW_LIST,
         WindowListPayload {
             windows: windows.clone(),
-            protocol_revision,
         },
     );
     pool.reconcile(app, &windows).await;
@@ -112,7 +111,7 @@ mod tests {
 
         assert_eq!(
             host.next_event(EVENT_WINDOW_LIST).await,
-            json!({ "windows": listed_windows(), "protocol_revision": PROTOCOL_REVISION })
+            json!({ "windows": listed_windows() })
         );
         assert_eq!(pool.window_ids().await, ["w1"]);
     }

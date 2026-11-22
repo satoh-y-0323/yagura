@@ -356,12 +356,6 @@ export const messagesEn = {
      */
     boundaryDetailWithCount: (count: number, first: string): string =>
       `${count} problems, first: ${first}`,
-
-    // Shown by the add-window form when the connected
-    // daemon has not settled a wire revision the requested launch options
-    // need. Never names the wire tag of the refused request -- that value is
-    // machine-readable, not something to show the user.
-    launchOptionUnsupported: `This launch option needs a newer daemon. ${RESTART_CLOSES_ALL_WINDOWS}`,
   },
 
   banners: {
@@ -416,16 +410,15 @@ export const messagesEn = {
       daemonUnreachable: "Can't reach the daemon",
       daemonHealth: "Windows can't be opened",
       approverRegistrationRefused: 'Approvals are unavailable',
-      daemonProtocolStale: 'The daemon is too old to show windows',
+      daemonIncompatible: "The daemon can't be used with this version of yagura",
     },
     clientConfigLoadFailed:
       'Could not load the client settings. Falling back to the default reconnection settings.',
 
-    // The connected daemon has not settled a
-    // wire revision that can show a window (attach_at). Reported
-    // separately from approverRegistrationRefused because it is a fact about
-    // the wire revision, not about approver registration.
-    daemonProtocolStale: `This daemon is too old to show windows: restart it (yagura-daemon --shutdown). ${RESTART_CLOSES_ALL_WINDOWS}`,
+    // The connected daemon does not speak this build's wire revision, so
+    // nothing but the revision probe is sent to it. Says neither older nor
+    // newer: the GUI only knows the two revisions differ.
+    daemonIncompatible: `This daemon can't be used with this version of yagura: restart it (yagura-daemon --shutdown). ${RESTART_CLOSES_ALL_WINDOWS}`,
 
     /** Enabled profiles whose program is installed as a Windows .cmd / .bat file, which they cannot run through. */
     profileNeedsNativeProgram: (names: readonly string[]): string =>
@@ -889,7 +882,6 @@ export const messagesEn = {
         'model.choices': 'Model list',
         'effort.choices': 'Effort list',
       })[table] ?? table,
-    profileSettingsReadOnly: `Turning profiles on or off needs a newer daemon: restart it (yagura-daemon --shutdown). ${RESTART_CLOSES_ALL_WINDOWS}`,
 
     approvalsTab: 'Approvals',
     approvalsDescription:
@@ -950,7 +942,6 @@ export const messagesEn = {
     planRunsWithoutReview: 'Runs without review',
     planReviewOffRisk: 'Task windows of a new plan open as soon as an agent asks.',
 
-    approvalSettingsNeedNewerDaemon: `Approval settings need a newer daemon: restart it (yagura-daemon --shutdown). ${RESTART_CLOSES_ALL_WINDOWS}`,
     approvalPlaybookFailed:
       'The playbook could not be read when the daemon started, so agents cannot use these ' +
       'actions on other windows, chat is off, and new plans wait for review. Fix ' +
@@ -1018,7 +1009,6 @@ export const messagesEn = {
         : `Also adds ${names.length} entries to ${file} so the CLI reports its status.`,
     integrationsNoBridge:
       'yagura could not find its own MCP bridge, so no CLI can be registered from here.',
-    integrationsNeedNewerDaemon: `Registering a CLI needs a newer daemon: restart it (yagura-daemon --shutdown). ${RESTART_CLOSES_ALL_WINDOWS}`,
     integrationsFooter: (bridge: string): string =>
       `Bridge: ${bridge}. Restart a running CLI session to pick up a change.`,
     integrationsListFailure: 'Could not read the CLI registrations',

@@ -16,6 +16,7 @@ import {
   shouldDropRememberedCwd,
   windowOpenFailureOf,
 } from './window-open-failure-model';
+import { banners } from './ui-messages';
 
 /** Operation-specific wording the caller supplies; never read from `i18n/`. */
 const SUMMARY = 'Launch refused';
@@ -128,14 +129,13 @@ describe('describeWindowOpenFailure: a rejection that names no argument still re
 });
 
 /**
- * The daemon-side gate refused this
- * request because it has not settled a wire revision the request needs.
- * Unlike the other three shapes, this arm carries no `message` -- only the
- * wire tag of the request that was refused, which must never reach the
- * user -- so the display text comes from a fixed i18n line rather than the
- * summary/detail join the other shapes go through.
+ * The request was refused because the running daemon does not speak this
+ * build's wire revision. The arm carries no `message` -- only the wire tag of
+ * the refused request, which must never reach the user -- and the line is the
+ * one sentence every operation shows while the daemon cannot be used, so no
+ * operation summary goes in front of it.
  */
-describe('describeWindowOpenFailure: the daemon has not settled a wire revision this request needs', () => {
+describe('describeWindowOpenFailure: the daemon cannot be used with this build', () => {
   /** A value distinctive enough that only real leakage would produce it. */
   const REQUEST_TYPE = 'probe-wire-tag-open_window_from_profile';
 
@@ -143,18 +143,19 @@ describe('describeWindowOpenFailure: the daemon has not settled a wire revision 
     return { kind: 'unsupported', requestType: REQUEST_TYPE };
   }
 
-  // (i) and (ii) are gated on the same call, not split across two `it`
-  // blocks: today the failure falls all the way back to the bare summary
-  // (no dedicated branch exists yet), which would let a standalone "does not
-  // contain the wire tag" check pass for the wrong reason -- the summary
-  // never contained it either. Gating on (i) first keeps that check honest.
-  it('does not fall back to the generic summary, and never carries the wire tag the arm reports (i, ii)', () => {
+  it('is the incompatible-daemon sentence itself, with no summary in front and no wire tag', () => {
     const line = describeWindowOpenFailure(SUMMARY, unsupported());
-    expect(line).not.toBe(SUMMARY);
+    expect(line).toBe(banners.daemonIncompatible);
+    expect(
+      line.startsWith(
+        "This daemon can't be used with this version of yagura: restart it (yagura-daemon --shutdown)."
+      )
+    ).toBe(true);
+    expect(line).not.toContain(SUMMARY);
     expect(line).not.toContain(REQUEST_TYPE);
   });
 
-  it('carries the restart-consequence sentence shared with the approver-registration-refused notice (iii)', () => {
+  it('carries the restart-consequence sentence shared with the approver-registration-refused notice', () => {
     const RESTART_CLOSES_ALL_WINDOWS =
       'Restarting the daemon closes every window that is currently open.';
     expect(describeWindowOpenFailure(SUMMARY, unsupported())).toContain(RESTART_CLOSES_ALL_WINDOWS);

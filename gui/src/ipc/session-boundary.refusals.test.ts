@@ -545,9 +545,6 @@ describe('the window list', () => {
     expect(messageOf(() => narrowWindowInfoList({}))).toBe('list_windows: expected an array');
     expect(messageOf(() => narrowWindowInfoList([5]))).toMatch(/^list_windows: expected an object/);
     expect(messageOf(() => narrowWindowListPayload(5))).toMatch(/^session:\/\/window-list/);
-    expect(
-      messageOf(() => narrowWindowListPayload({ windows: [], protocol_revision: 'x' }))
-    ).toMatch(/session:\/\/window-list\.protocol_revision: expected an integer/);
   });
 });
 

@@ -13,12 +13,10 @@ import {
   displayCommand,
   integrationGroups,
   integrationsNotice,
-  isIntegrationsSupported,
   resultLines,
   type IntegrationGroup,
   type IntegrationRowView,
 } from './integration-settings-model';
-import { MCP_REGISTRATION_MIN_REVISION } from '../ipc/session-boundary';
 import type {
   McpRegistrationCommand,
   McpRegistrationResultPayload,
@@ -353,37 +351,16 @@ describe('displayCommand', () => {
   });
 });
 
-describe('isIntegrationsSupported', () => {
-  it('needs the revision that carries MCP registration', () => {
-    expect(MCP_REGISTRATION_MIN_REVISION).toBe(13);
-  });
-
-  it.each([
-    [null, true],
-    [12, false],
-    [13, true],
-  ] as const)('reads revision %s as supported: %s', (revision, supported) => {
-    expect(isIntegrationsSupported(revision)).toBe(supported);
-  });
-});
-
 describe('integrationsNotice', () => {
-  it('asks for a newer daemon when the revision is too old, before anything else', () => {
-    expect(integrationsNotice(listed([row('alpha')], null), 12)).toBe(
-      text(settings.integrationsNeedNewerDaemon)
-    );
-    expect(integrationsNotice(null, 12)).toBe(text(settings.integrationsNeedNewerDaemon));
-  });
-
   it('says the bridge is missing when the daemon found none', () => {
-    expect(integrationsNotice(listed([row('alpha')], null), 13)).toBe(
+    expect(integrationsNotice(listed([row('alpha')], null))).toBe(
       text(settings.integrationsNoBridge)
     );
   });
 
   it('has nothing to say while nothing is listed or when the bridge is known', () => {
-    expect(integrationsNotice(null, 13)).toBeNull();
-    expect(integrationsNotice(listed([row('alpha')]), null)).toBeNull();
+    expect(integrationsNotice(null)).toBeNull();
+    expect(integrationsNotice(listed([row('alpha')]))).toBeNull();
   });
 });
 

@@ -6,7 +6,6 @@
  * DOM: the component renders these values and hands the switch back to its
  * caller.
  */
-import { MCP_REGISTRATION_MIN_REVISION } from '../ipc/session-boundary';
 import type {
   McpRegistrationCommand,
   McpRegistrationEntry,
@@ -72,28 +71,10 @@ export interface IntegrationGroup {
 }
 
 /**
- * Whether the connected daemon has settled on a wire revision that carries
- * MCP registration. An unreported revision is not unsupported: the daemon's
- * own refusal is the authority, so this is only ever a negative signal
- * (mirrors `isApprovalSettingsSupported`'s discipline).
- */
-export function isIntegrationsSupported(protocolRevision: number | null): boolean {
-  return protocolRevision === null || protocolRevision >= MCP_REGISTRATION_MIN_REVISION;
-}
-
-/**
  * The one line explaining why the Integrations tab cannot act right now,
- * `null` when there is nothing to say. An unsupported daemon is judged
- * before `listed`, since an old daemon's rows (if somehow present) are not
- * the live list this tab would otherwise show.
+ * `null` when there is nothing to say.
  */
-export function integrationsNotice(
-  listed: McpRegistrationsListed | null,
-  protocolRevision: number | null
-): string | null {
-  if (!isIntegrationsSupported(protocolRevision)) {
-    return settings.integrationsNeedNewerDaemon;
-  }
+export function integrationsNotice(listed: McpRegistrationsListed | null): string | null {
   if (listed === null) {
     return null;
   }

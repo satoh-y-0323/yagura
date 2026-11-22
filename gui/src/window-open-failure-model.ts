@@ -14,10 +14,10 @@ import {
 } from './ipc/session-boundary';
 // The same folding and capping every other operation failure goes through:
 // the reason is external text of the same kind, so it gets the same
-// treatment rather than a second copy of it. `errors` is the fixed line for
-// the wire-revision gate's refusal; both are read through
-// the facade, never i18n/ directly.
-import { describeOperationFailure, errors } from './ui-messages';
+// treatment rather than a second copy of it. `banners` holds the one sentence
+// shown while the daemon cannot be used; all are read through the facade,
+// never i18n/ directly.
+import { banners, describeOperationFailure, errors } from './ui-messages';
 
 /** The argument name the core reports for a refused working directory. */
 const WORKING_DIRECTORY_ARGUMENT = 'cwd';
@@ -54,10 +54,10 @@ export function windowOpenFailureOf(error: unknown): WindowOpenFailure {
  */
 export function describeWindowOpenFailure(summary: string, failure: WindowOpenFailure): string {
   if (failure.kind === 'unsupported') {
-    // The wire tag this arm carries (`requestType`) is machine-readable, not
-    // for display, so the line comes from a fixed i18n string rather than
-    // the summary/detail join every other shape goes through.
-    return describeOperationFailure(summary, errors.launchOptionUnsupported);
+    // Only a daemon of another wire revision refuses this way, and every
+    // operation then shows the same sentence, so no summary goes in front.
+    // The wire tag the arm carries (`requestType`) is never for display.
+    return banners.daemonIncompatible;
   }
   const line = describeOperationFailure(summary, failure.message);
   if (failure.kind !== 'rejected') {

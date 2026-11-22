@@ -16,7 +16,6 @@
 
   export let profileOptions: readonly ProfileOption[];
   export let roles: readonly RoleEntry[];
-  export let isReadOnly: boolean;
   export let savingProfileId: string | null;
   export let updateFailure: string | null;
   export let onSetEnabled: (id: string, enabled: boolean) => void;
@@ -37,9 +36,6 @@
 
 <div class="profile-settings">
   <p class="profile-settings__description">{settings.profilesDescription}</p>
-  {#if isReadOnly}
-    <p class="profile-settings__read-only">{settings.profileSettingsReadOnly}</p>
-  {/if}
   {#if updateFailure}
     <p class="profile-settings__failure">{updateFailure}</p>
   {/if}
@@ -58,22 +54,20 @@
           {/if}
         </div>
         <div class="profile-settings__switch-slot">
-          {#if details.isAvailable}
-            <button
-              type="button"
-              class="profile-settings__details"
-              aria-expanded={details.openId === row.id}
-              on:click={() => detailActions.onToggle(row.id)}
-              >{details.openId === row.id
-                ? settings.profileHideDetails
-                : settings.profileShowDetails}</button
-            >
-          {/if}
+          <button
+            type="button"
+            class="profile-settings__details"
+            aria-expanded={details.openId === row.id}
+            on:click={() => detailActions.onToggle(row.id)}
+            >{details.openId === row.id
+              ? settings.profileHideDetails
+              : settings.profileShowDetails}</button
+          >
           <SettingsSwitch
             checked={row.enabled}
             label={settings.profileSwitchLabel(row.displayName)}
             text={row.enabled ? settings.profileEnabled : settings.profileDisabled}
-            disabled={isReadOnly || savingProfileId === row.id}
+            disabled={savingProfileId === row.id}
             onToggle={() => onSetEnabled(row.id, !row.enabled)}
           />
         </div>
@@ -158,7 +152,6 @@
     font-size: var(--font-size-sm);
   }
 
-  .profile-settings__read-only,
   .profile-settings__failure {
     margin: 0;
     padding: var(--space-xs) var(--space-sm);

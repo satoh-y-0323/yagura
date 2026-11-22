@@ -43,7 +43,7 @@
 
 <div class="profile-detail">
   {#if failure !== null}
-    <p class="profile-detail__failure">{settings.profileDetailFailed(failure)}</p>
+    <p class="profile-detail__failure">{failure}</p>
   {:else if detail === null || sections === null}
     <p class="profile-detail__hint">{settings.profileDetailLoading}</p>
   {:else}
@@ -111,7 +111,7 @@
         {/if}
       </div>
       {#if commandFailure !== null}
-        <p class="profile-detail__failure">{settings.profileCommandFailed(commandFailure)}</p>
+        <p class="profile-detail__failure">{commandFailure}</p>
       {/if}
     </section>
 

@@ -39,7 +39,6 @@
   export let onClose: () => void;
   export let profileOptions: readonly ProfileOption[];
   export let roles: readonly RoleEntry[];
-  export let isReadOnly: boolean;
   export let savingProfileId: string | null;
   export let updateFailure: string | null;
   export let onSetProfileEnabled: (id: string, enabled: boolean) => void;
@@ -114,7 +113,6 @@
       <ProfileSettings
         {profileOptions}
         {roles}
-        {isReadOnly}
         {savingProfileId}
         {updateFailure}
         onSetEnabled={onSetProfileEnabled}

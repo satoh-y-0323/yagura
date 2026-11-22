@@ -326,30 +326,28 @@ impl ConnectionPool {
     /// Returns [`IpcError`] when the daemon cannot be reached.
     pub async fn list_windows(&self, app: &impl GuiHost) -> Result<Vec<WindowInfo>, IpcError> {
         self.control(app).await?;
-        let (windows, _revision) = self.listed_windows().await?;
-        Ok(windows)
+        self.listed_windows().await
     }
 
     /// Asks the control connection, as it stands, for the daemon's window
     /// list and applies it to the records before handing it out, so every
     /// window the list names has a record by the time anyone sees the list.
-    /// The caller establishes the control connection first. Comes with the
-    /// wire revision of the connection that answered the list.
+    /// The caller establishes the control connection first.
     ///
     /// A daemon of another wire revision is written nothing, so none of its
-    /// windows can be shown: its refusal is read as an empty list, with no
-    /// revision, and every record goes.
+    /// windows can be shown: its refusal is read as an empty list, and every
+    /// record goes.
     ///
     /// # Errors
     /// Returns [`IpcError`] when the round trip fails.
-    pub(crate) async fn listed_windows(&self) -> Result<(Vec<WindowInfo>, Option<u32>), IpcError> {
+    pub(crate) async fn listed_windows(&self) -> Result<Vec<WindowInfo>, IpcError> {
         let _listing = self.listing.lock().await;
-        let (windows, revision) = match self.control.list_windows_with_revision().await {
-            Err(IpcError::Unsupported { .. }) => (Vec::new(), None),
+        let windows = match self.control.list_windows().await {
+            Err(IpcError::Unsupported { .. }) => Vec::new(),
             listed => listed?,
         };
         self.track(&windows).await;
-        Ok((windows, revision))
+        Ok(windows)
     }
 
     /// Applies `windows` to the records the way a list from the daemon is.

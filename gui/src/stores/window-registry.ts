@@ -15,7 +15,6 @@ import { tileRects } from '../layout/tile-layout';
 import { formatPathForDisplay, sanitizeForDisplay } from '../display/untrusted-text';
 import { reorderTabs } from '../sidebar/row-order';
 import {
-  EXIT_CODE_ON_STATUS_MIN_REVISION,
   type DetectedStatusView,
   type ReportState,
   type StatusBoot,
@@ -406,24 +405,11 @@ export function createWindowRegistry(): WindowRegistry {
 }
 
 /**
- * Whether the daemon's `status_changed` carries the exit code of an ended
- * window. While the revision is not known yet the older daemon is assumed, so
- * no window is retired without its code and no `-1` is taken for a fact.
+ * The retirement an `exited` status push asks for, `null` when the status is
+ * not `exited`. The push carries the window's exit code.
  */
-function carriesExitCodeOnStatus(protocolRevision: number | null): boolean {
-  return protocolRevision !== null && protocolRevision >= EXIT_CODE_ON_STATUS_MIN_REVISION;
-}
-
-/**
- * The retirement an `exited` status push asks for, `null` when it asks for
- * none: the status is not `exited`, or the daemon sends no code on the push,
- * so the push only records the status and the window list retires the window.
- */
-export function retirementFromStatus(
-  protocolRevision: number | null,
-  payload: StatusPayload
-): Retirement | null {
-  if (payload.detected.status !== 'exited' || !carriesExitCodeOnStatus(protocolRevision)) {
+export function retirementFromStatus(payload: StatusPayload): Retirement | null {
+  if (payload.detected.status !== 'exited') {
     return null;
   }
   return { exitCode: payload.exit_code };
@@ -431,33 +417,23 @@ export function retirementFromStatus(
 
 /**
  * The retirement a window-list entry asks for, `null` when the window has not
- * exited. An older daemon's `-1` is read as unknown: it also stands for a code
- * that daemon could not determine.
+ * exited. A `-1` is the window's real exit code.
  */
-export function retirementFromList(
-  protocolRevision: number | null,
-  info: WindowInfo
-): Retirement | null {
+export function retirementFromList(info: WindowInfo): Retirement | null {
   if (info.detected.status !== 'exited') {
     return null;
   }
-  const unknownAsMinusOne = !carriesExitCodeOnStatus(protocolRevision);
-  return { exitCode: unknownAsMinusOne && info.exit_code === -1 ? null : info.exit_code };
+  return { exitCode: info.exit_code };
 }
 
 /**
- * Hands one status push to `registry`: an `exited` push that carries the code
- * retires the window, any other push records the status.
+ * Hands one status push to `registry`: an `exited` push retires the window,
+ * any other push records the status.
  * @param registry the windows the push is about
- * @param protocolRevision the daemon's protocol revision, `null` while not known
  * @param payload the push
  */
-export function applyStatusPush(
-  registry: WindowRegistry,
-  protocolRevision: number | null,
-  payload: StatusPayload
-): void {
-  const retirement = retirementFromStatus(protocolRevision, payload);
+export function applyStatusPush(registry: WindowRegistry, payload: StatusPayload): void {
+  const retirement = retirementFromStatus(payload);
   if (retirement !== null) {
     registry.retireWindow(payload.window_id, retirement.exitCode);
     return;
@@ -476,16 +452,11 @@ export function applyStatusPush(
  * never opened, since the daemon lists it until it is evicted; any other is
  * opened or refreshed.
  * @param registry the windows the list is about
- * @param protocolRevision the daemon's protocol revision, `null` while not known
  * @param info the entry
  * @returns whether the window is still live
  */
-export function applyListedWindow(
-  registry: WindowRegistry,
-  protocolRevision: number | null,
-  info: WindowInfo
-): boolean {
-  const retirement = retirementFromList(protocolRevision, info);
+export function applyListedWindow(registry: WindowRegistry, info: WindowInfo): boolean {
+  const retirement = retirementFromList(info);
   if (retirement !== null) {
     registry.retireWindow(info.window_id, retirement.exitCode);
     return false;

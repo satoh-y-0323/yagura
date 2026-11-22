@@ -148,8 +148,6 @@ export const dummyMessages: Messages = {
     boundaryProfilesList: 'DUMMY_boundaryProfilesList',
     boundaryDetailWithCount: (count: number, first: string) =>
       `DUMMY_boundaryDetailWithCount(${count},${first})`,
-    // The launch-option-unsupported add-window-form message.
-    launchOptionUnsupported: 'DUMMY_launchOptionUnsupported',
   },
   banners: {
     connectionFailed: 'DUMMY_connectionFailed',
@@ -182,11 +180,11 @@ export const dummyMessages: Messages = {
       daemonUnreachable: 'DUMMY_titleDaemonUnreachable',
       daemonHealth: 'DUMMY_titleDaemonHealth',
       approverRegistrationRefused: 'DUMMY_titleApproverRegistrationRefused',
-      daemonProtocolStale: 'DUMMY_titleDaemonProtocolStale',
+      daemonIncompatible: 'DUMMY_titleDaemonIncompatible',
     },
     clientConfigLoadFailed: 'DUMMY_clientConfigLoadFailed',
-    // The daemon needs a restart before launch options work.
-    daemonProtocolStale: 'DUMMY_daemonProtocolStale',
+    // The daemon does not speak this build's wire revision.
+    daemonIncompatible: 'DUMMY_daemonIncompatible',
     profileNeedsNativeProgram: (names: readonly string[]) =>
       `DUMMY_profileNeedsNativeProgram(${names.join(',')})`,
     // The two reasons start-up could not resolve
@@ -365,7 +363,6 @@ export const dummyMessages: Messages = {
     profileProvidedHeading: 'DUMMY_settings_profileProvidedHeading',
     profileProvidedIncluded: 'DUMMY_settings_profileProvidedIncluded',
     profileProvidedLabel: (table: string) => `DUMMY_settings_profileProvidedLabel(${table})`,
-    profileSettingsReadOnly: 'DUMMY_settings_profileSettingsReadOnly',
 
     approvalsTab: 'DUMMY_settings_approvalsTab',
     approvalsDescription: 'DUMMY_settings_approvalsDescription',
@@ -416,7 +413,6 @@ export const dummyMessages: Messages = {
     planReviewFirst: 'DUMMY_settings_planReviewFirst',
     planRunsWithoutReview: 'DUMMY_settings_planRunsWithoutReview',
     planReviewOffRisk: 'DUMMY_settings_planReviewOffRisk',
-    approvalSettingsNeedNewerDaemon: 'DUMMY_settings_approvalSettingsNeedNewerDaemon',
     approvalPlaybookFailed: 'DUMMY_settings_approvalPlaybookFailed',
     approvalPlaybookNotConfigured: 'DUMMY_settings_approvalPlaybookNotConfigured',
     approvalPlaybookUnknown: 'DUMMY_settings_approvalPlaybookUnknown',
@@ -452,7 +448,6 @@ export const dummyMessages: Messages = {
     integrationHookEntriesNote: (file: string, names: readonly string[]) =>
       `DUMMY_settings_integrationHookEntriesNote(${file},${names.join(',')})`,
     integrationsNoBridge: 'DUMMY_settings_integrationsNoBridge',
-    integrationsNeedNewerDaemon: 'DUMMY_settings_integrationsNeedNewerDaemon',
     integrationsFooter: (bridge: string) => `DUMMY_settings_integrationsFooter(${bridge})`,
     integrationsListFailure: 'DUMMY_settings_integrationsListFailure',
     integrationRunFailure: (name: string) => `DUMMY_settings_integrationRunFailure(${name})`,

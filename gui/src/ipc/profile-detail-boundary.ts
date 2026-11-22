@@ -20,14 +20,6 @@ import {
 
 export { BoundaryError };
 
-/**
- * The wire revision a daemon must have settled on before the profile-detail
- * requests reach it (mirrors `PROFILE_DETAIL_MIN_REVISION`, `yagura-protocol`).
- * Informational only: it decides whether the Profiles tab offers details,
- * never what a request may send.
- */
-export const PROFILE_DETAIL_MIN_REVISION = 16;
-
 /** The argv a profile launches on the daemon's host, with its layer. */
 export interface ProfileCommandDetail {
   argv: string[];

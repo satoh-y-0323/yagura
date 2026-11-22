@@ -4,7 +4,6 @@
  */
 import type { ProfileOption } from '../components/add-window-dialog-types';
 import type { ProfileGuidance } from '../ipc/session-client';
-import { PROFILE_ENABLED_MIN_REVISION } from '../ipc/session-boundary';
 import type { RoleEntry } from '../ipc/plan-boundary';
 import {
   limitGuidance,
@@ -93,13 +92,4 @@ export function profileSettingsRows(
     rolesUsing: profile.enabled ? [] : rolesUsingProfile(roles, profile.id),
     limitNote: limitNoteOf(profile),
   }));
-}
-
-/**
- * Whether the switches must stay frozen because the daemon predates the
- * enabled state. An unreported revision is not frozen: the daemon's own
- * refusal is the authority, so the switches are only locked on evidence.
- */
-export function isProfileSettingsReadOnly(protocolRevision: number | null): boolean {
-  return protocolRevision !== null && protocolRevision < PROFILE_ENABLED_MIN_REVISION;
 }

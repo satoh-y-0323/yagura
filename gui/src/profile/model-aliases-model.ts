@@ -30,7 +30,9 @@ export type ChoicesFailure =
   /** A reason given by the daemon or the core, shown as it was given. */
   | { kind: 'reported'; reason: string }
   /** The requested list did not arrive within {@link CHOICES_FETCH_TIMEOUT_MS}. */
-  | { kind: 'overdue' };
+  | { kind: 'overdue' }
+  /** A whole line chosen when the request failed, shown in place of the list as it is. */
+  | { kind: 'line'; line: string };
 
 /** Where one profile's model list stands. */
 export type ModelChoicesEntry =
@@ -142,6 +144,9 @@ export function isChoicesFetchOverdue(startedAtMs: number, nowMs: number): boole
 
 /** The line shown in place of the model list when none could be read. */
 export function choicesFailureLine(failure: ChoicesFailure): string {
+  if (failure.kind === 'line') {
+    return failure.line;
+  }
   const reason = failure.kind === 'reported' ? failure.reason : plans.modelChoicesOverdueReason;
   return plans.modelChoicesFailed(reason);
 }

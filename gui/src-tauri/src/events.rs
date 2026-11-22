@@ -211,13 +211,6 @@ pub struct StatusPayload {
 pub struct WindowListPayload {
     /// Every window the daemon reported on this poll.
     pub windows: Vec<WindowInfo>,
-    /// The wire revision the connected daemon settled on, `None` while this
-    /// connection has not settled one yet for its current generation.
-    /// Information for the banner shown to the user, not
-    /// a gate: [`crate::ipc_client::IpcClient::send`] is the sole authority
-    /// on what may go out.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub protocol_revision: Option<u32>,
 }
 
 /// Payload of [`EVENT_APPROVAL_RESET`].

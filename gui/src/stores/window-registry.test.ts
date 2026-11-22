@@ -892,51 +892,40 @@ describe('createWindowRegistry: which message retires an ended window', () => {
   type Message = 'push' | 'list';
 
   /** Hands one exited message about `w-a` to the registry through the shell's routing. */
-  function deliver(
-    registry: WindowRegistry,
-    revision: number | null,
-    message: Message,
-    exitCode: number | null
-  ): void {
+  function deliver(registry: WindowRegistry, message: Message, exitCode: number | null): void {
     if (message === 'push') {
       const payload: StatusPayload = {
         window_id: 'w-a',
         detected: { status: 'exited' },
         exit_code: exitCode,
       };
-      applyStatusPush(registry, revision, payload);
+      applyStatusPush(registry, payload);
       return;
     }
-    // An ended window never counts as live, whichever revision retires it.
+    // An ended window never counts as live.
     expect(
       applyListedWindow(
         registry,
-        revision,
         makeWindowInfo({ window_id: 'w-a', detected: { status: 'exited' }, exit_code: exitCode })
       )
     ).toBe(false);
   }
 
-  it.each([36, 37, null])(
-    'at revision %s, counts a listed window that still runs as live',
-    (revision) => {
-      const registry = createWindowRegistry();
-      const live = applyListedWindow(
-        registry,
-        revision,
-        makeWindowInfo({ window_id: 'w-a', detected: { status: 'running' } })
-      );
-      expect(live).toBe(true);
-      expect(get(registry).windows.map((entry) => entry.windowId)).toEqual(['w-a']);
-    }
-  );
+  it('counts a listed window that still runs as live', () => {
+    const registry = createWindowRegistry();
+    const live = applyListedWindow(
+      registry,
+      makeWindowInfo({ window_id: 'w-a', detected: { status: 'running' } })
+    );
+    expect(live).toBe(true);
+    expect(get(registry).windows.map((entry) => entry.windowId)).toEqual(['w-a']);
+  });
 
   /**
    * The code each update that took `w-a` off the list retired it with, for
    * `messages` delivered in order; `'absent'` when such an update names no code.
    */
   function retiredCodesOf(
-    revision: number | null,
     messages: readonly Message[],
     exitCode: number | null
   ): (number | null | 'absent')[] {
@@ -945,7 +934,7 @@ describe('createWindowRegistry: which message retires an ended window', () => {
     registry.openWindow(makeWindowInfo({ window_id: 'w-b' }));
     const states = publishedStates(registry);
     for (const message of messages) {
-      deliver(registry, revision, message, exitCode);
+      deliver(registry, message, exitCode);
     }
     expect(entryOf(registry, 'w-a')).toBeUndefined();
     expect(entryOf(registry, 'w-b')).toBeDefined();
@@ -962,84 +951,44 @@ describe('createWindowRegistry: which message retires an ended window', () => {
     return codes;
   }
 
-  it.each<[number | null, Message[]]>([
-    [37, ['push', 'list']],
-    [37, ['list', 'push']],
-    [36, ['push', 'list']],
-    [36, ['list', 'push']],
-    [null, ['push', 'list']],
-    [null, ['list', 'push']],
-  ])(
-    'at revision %s, retires the window once with its code whichever of %j comes first',
-    (revision, messages) => {
-      expect(retiredCodesOf(revision, messages, 3)).toEqual([3]);
+  it.each<[Message[]]>([[['push', 'list']], [['list', 'push']]])(
+    'retires the window once with its code whichever of %j comes first',
+    (messages) => {
+      expect(retiredCodesOf(messages, 3)).toEqual([3]);
     }
   );
 
-  it.each<number>([37, 38])(
-    'at revision %s, the exited push alone retires the window, with the code it carries',
-    (revision) => {
-      const registry = createWindowRegistry();
-      registry.openWindow(makeWindowInfo({ window_id: 'w-a' }));
-      const states = publishedStates(registry);
+  it('the exited push alone retires the window, with the code it carries', () => {
+    const registry = createWindowRegistry();
+    registry.openWindow(makeWindowInfo({ window_id: 'w-a' }));
+    const states = publishedStates(registry);
 
-      deliver(registry, revision, 'push', 3);
+    deliver(registry, 'push', 3);
 
-      expect(states).toHaveLength(1);
-      expect(states[0]?.windows).toEqual([]);
-      expect(states[0]?.retired).toEqual([{ windowId: 'w-a', exitCode: 3 }]);
-    }
-  );
-
-  it.each<number | null>([36, null])(
-    'at revision %s, the exited push leaves the window listed as exited until the list retires it',
-    (revision) => {
-      const registry = createWindowRegistry();
-      registry.openWindow(makeWindowInfo({ window_id: 'w-a' }));
-      const states = publishedStates(registry);
-
-      deliver(registry, revision, 'push', null);
-
-      expect(entryOf(registry, 'w-a')?.detected).toEqual({ status: 'exited' });
-      expect(get(registry).tabOrder).toEqual(['w-a']);
-      expect(states.flatMap((state) => state.retired)).toEqual([]);
-
-      deliver(registry, revision, 'list', 5);
-
-      expect(entryOf(registry, 'w-a')).toBeUndefined();
-      expect(get(registry).retired).toEqual([{ windowId: 'w-a', exitCode: 5 }]);
-    }
-  );
-
-  it.each<[number | null, Message, number | null]>([
-    // Before revision 37 the daemon sent -1 for a code it could not determine, so -1 is no fact there.
-    [36, 'list', null],
-    [19, 'list', null],
-    // A revision not yet known is read as the older one.
-    [null, 'list', null],
-    [37, 'list', -1],
-    [37, 'push', -1],
-  ])('at revision %s, a -1 the %s carries is retired as %s', (revision, message, expected) => {
-    expect(retiredCodesOf(revision, [message], -1)).toEqual([expected]);
+    expect(states).toHaveLength(1);
+    expect(states[0]?.windows).toEqual([]);
+    expect(states[0]?.retired).toEqual([{ windowId: 'w-a', exitCode: 3 }]);
   });
 
-  it('at revision 37, an exited push whose code could not be determined retires the window with none', () => {
-    expect(retiredCodesOf(37, ['push'], null)).toEqual([null]);
+  // -1 is a real exit code, never a stand-in for one that could not be determined.
+  it.each<[Message]>([['list'], ['push']])('a -1 the %s carries is retired as -1', (message) => {
+    expect(retiredCodesOf([message], -1)).toEqual([-1]);
   });
 
-  it.each<number | null>([37, 36, null])(
-    'at revision %s, a status other than exited retires nothing',
-    (revision) => {
-      const running: StatusPayload = {
-        window_id: 'w-a',
-        detected: { status: 'running' },
-        exit_code: null,
-      };
+  it('an exited push whose code could not be determined retires the window with none', () => {
+    expect(retiredCodesOf(['push'], null)).toEqual([null]);
+  });
 
-      expect(retirementFromStatus(revision, running)).toBeNull();
-      expect(retirementFromList(revision, makeWindowInfo({ window_id: 'w-a' }))).toBeNull();
-    }
-  );
+  it('a status other than exited retires nothing', () => {
+    const running: StatusPayload = {
+      window_id: 'w-a',
+      detected: { status: 'running' },
+      exit_code: null,
+    };
+
+    expect(retirementFromStatus(running)).toBeNull();
+    expect(retirementFromList(makeWindowInfo({ window_id: 'w-a' }))).toBeNull();
+  });
 });
 
 describe('createWindowRegistry: an entry never holds a reason without the unknown status', () => {

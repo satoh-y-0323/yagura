@@ -144,12 +144,13 @@ describe('the thin window commands', () => {
     invokeMock.mockResolvedValueOnce(null);
     await expect(invokeGetDaemonConnection()).resolves.toBeNull();
     expect(invokeMock).toHaveBeenLastCalledWith('get_daemon_connection');
-    invokeMock.mockResolvedValueOnce({ status_boot: { origin: 2, seq: 1 } });
+    invokeMock.mockResolvedValueOnce({ status_boot: { origin: 2, seq: 1 }, compatible: true });
     await expect(invokeGetDaemonConnection()).resolves.toEqual({
       status_boot: { origin: 2, seq: 1 },
       spawn_warning: null,
+      compatible: true,
     });
-    invokeMock.mockResolvedValueOnce({ status_boot: null, spawn_warning: 5 });
+    invokeMock.mockResolvedValueOnce({ status_boot: null, spawn_warning: 5, compatible: true });
     await expect(invokeGetDaemonConnection()).rejects.toThrow(BoundaryError);
   });
 
@@ -628,10 +629,11 @@ describe('subscribeSession routing', () => {
     });
     await subscribeSession(() => undefined, app);
 
-    push(SESSION_EVENT.daemonConnected, { status_boot: { origin: 7, seq: 3 } });
+    push(SESSION_EVENT.daemonConnected, { status_boot: { origin: 7, seq: 3 }, compatible: true });
     expect(app.onDaemonConnected).toHaveBeenCalledWith({
       status_boot: { origin: 7, seq: 3 },
       spawn_warning: null,
+      compatible: true,
     });
     push(SESSION_EVENT.status, { window_id: 'w', status: 'idle' });
     expect(app.onStatus).toHaveBeenCalledWith({
@@ -677,7 +679,7 @@ describe('subscribeSession routing', () => {
     await subscribeSession(() => undefined, app);
     push(SESSION_EVENT.status, { status: 'idle' });
     push(SESSION_EVENT.daemonRecovery, 5);
-    push(SESSION_EVENT.daemonConnected, { status_boot: null, spawn_warning: 5 });
+    push(SESSION_EVENT.daemonConnected, { status_boot: null, spawn_warning: 5, compatible: true });
     expect(app.onStatus).not.toHaveBeenCalled();
     expect(app.onDaemonRecovery).not.toHaveBeenCalled();
     expect(app.onDaemonConnected).not.toHaveBeenCalled();
@@ -731,8 +733,8 @@ describe('subscribeWindowList', () => {
     await subscribeWindowList(onList, onBoundaryError);
     const handler = handlersByEvent.get('session://window-list');
     expect(handler).toBeDefined();
-    handler?.({ payload: { windows: [], protocol_revision: 16 } });
-    expect(onList).toHaveBeenCalledWith({ windows: [], protocol_revision: 16 });
+    handler?.({ payload: { windows: [] } });
+    expect(onList).toHaveBeenCalledWith({ windows: [] });
     handler?.({ payload: 5 });
     expect(onBoundaryError).toHaveBeenCalledTimes(1);
     expect(onList).toHaveBeenCalledTimes(1);

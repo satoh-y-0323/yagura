@@ -49,46 +49,6 @@ export const MIN_PTY_ROWS = 1;
 /** Largest PTY dimension the core accepts: the same value as Rust's `yagura_protocol::MAX_WINDOW_DIMENSION`. */
 export const MAX_PTY_DIMENSION = 1000;
 
-/**
- * The wire revision a daemon must have settled on before `attach_view` reaches
- * it (mirrors `FRAME_MIN_REVISION`, `yagura-protocol`): below it no window
- * can be shown. Informational only: it decides what the
- * `daemon-protocol-stale` notice shows, never what a request may send --
- * the core's own gate is the authority for that.
- */
-export const ATTACH_VIEW_MIN_REVISION = 19;
-
-/**
- * The first wire revision whose daemon reports and stores a profile's
- * enabled state (mirrors the daemon's protocol revision). A daemon below it
- * cannot switch a profile on or off.
- */
-export const PROFILE_ENABLED_MIN_REVISION = 11;
-
-/**
- * The first wire revision whose daemon reports and switches the approval
- * settings (`GetApprovalSettings` / `SetAutoApprove` /
- * `SetPlanApprovalRequired`, mirrors the daemon's protocol revision). A
- * daemon below it cannot answer any of the three.
- */
-export const APPROVAL_SETTINGS_MIN_REVISION = 12;
-
-/**
- * The first wire revision whose daemon lists and drives MCP registration
- * (`list_mcp_registrations` / `run_mcp_registration`, mirrors
- * `MCP_REGISTRATION_MIN_REVISION`, `yagura-protocol`). A daemon below it
- * cannot register the bridge with a CLI.
- */
-export const MCP_REGISTRATION_MIN_REVISION = 13;
-
-/**
- * The first wire revision whose `status_changed` carries the exit code of a
- * window that reports `exited` (mirrors `EXIT_CODE_ON_STATUS_MIN_REVISION`,
- * `yagura-protocol`). A daemon below it sends no code on that push and sends
- * `-1` in the window list for a code it could not determine.
- */
-export const EXIT_CODE_ON_STATUS_MIN_REVISION = 37;
-
 /** The `error.code` a daemon answers with when a live window already carries the name. */
 export const NAME_TAKEN_CODE = 'name_taken';
 
@@ -228,6 +188,11 @@ export interface DaemonConnectedPayload {
    * with the weaker detachment; `null` for any other start.
    */
   spawn_warning: string | null;
+  /**
+   * Whether the daemon answered this build's own wire revision. When it did
+   * not, nothing but the revision probe is ever sent to it.
+   */
+  compatible: boolean;
 }
 
 /**
@@ -1138,12 +1103,14 @@ export function narrowWindowLinkPayload(value: unknown): WindowLinkPayload {
 
 /**
  * Validates a `session://daemon-connected` payload or a non-null
- * `get_daemon_connection` reply. A missing key reads as `null`, and a
- * negative boot part drops the boot alone: the reader only reads the start's
- * facts again, so the warning is never lost to a boot it cannot keep.
+ * `get_daemon_connection` reply. A missing optional key reads as `null`, and
+ * a negative boot part drops the boot alone: the reader only reads the
+ * start's facts again, so the warning is never lost to a boot it cannot keep.
+ * `compatible` is required: whether the daemon can be used is never guessed.
  *
  * @throws {BoundaryError} when the payload is not a record, the boot is
- * malformed other than by a negative part, or the warning is not a string.
+ * malformed other than by a negative part, the warning is not a string, or
+ * `compatible` is missing or not a boolean.
  */
 export function narrowDaemonConnectedPayload(value: unknown): DaemonConnectedPayload {
   const context = SESSION_EVENT.daemonConnected;
@@ -1151,6 +1118,7 @@ export function narrowDaemonConnectedPayload(value: unknown): DaemonConnectedPay
   return {
     status_boot: readOptionalStatusBoot(record, context, 'drop'),
     spawn_warning: readOptionalString(record, 'spawn_warning', context),
+    compatible: requireBoolean(record, 'compatible', context),
   };
 }
 
@@ -1701,11 +1669,6 @@ export function narrowWindowInfoList(value: unknown): WindowInfo[] {
 export interface WindowListPayload {
   /** Every window the daemon reported on this poll. */
   windows: WindowInfo[];
-  /**
-   * The wire revision the connected daemon settled on, `null` while this
-   * connection has not settled one yet.
-   */
-  protocol_revision: number | null;
 }
 
 /**
@@ -1718,7 +1681,6 @@ export function narrowWindowListPayload(value: unknown): WindowListPayload {
   const record = requireRecord(value, context);
   return {
     windows: narrowWindowInfoList(readOwnField(record, 'windows')),
-    protocol_revision: readOptionalInteger(record, 'protocol_revision', context),
   };
 }
 

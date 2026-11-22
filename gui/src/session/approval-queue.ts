@@ -190,9 +190,10 @@ export function markInFlight(state: ApprovalQueueState, requestId: string): Appr
 
 /**
  * Applies the daemon's answer to a decision that was sent. `'decided'` and
- * `'not_pending'` settle the request. `'unconfirmed'` leaves it in flight: the
- * decision may have been applied, so offering it again could answer twice;
- * the next pending list (`reset`) or a withdrawal says which way it went.
+ * `'not_pending'` settle the request. `'unconfirmed'` -- the daemon gave no
+ * answer, whether or not the decision was written -- leaves it in flight: it
+ * may have been applied, so offering it again could answer twice; the next
+ * pending list (`reset`) or a withdrawal says which way it went.
  * @param state the current queue
  * @param requestId the request whose decision was sent
  * @param outcome the daemon's answer
@@ -212,8 +213,9 @@ export function settleDecision(
 }
 
 /**
- * Records that a request's decision failed to reach the daemon: the request is
- * offered again and remembered as failed. An id that is not in flight is
+ * Records that a request's decision certainly did not take effect: the daemon
+ * could not be reached nor started, or it refused the decision. The request
+ * is offered again and remembered as failed. An id that is not in flight is
  * ignored, so a failure landing after the request was decided or withdrawn
  * cannot mark a later request that reuses the id.
  * @param state the current queue

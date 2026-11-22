@@ -1549,26 +1549,6 @@ impl IpcClient {
         }
     }
 
-    /// Lists the windows, with the wire revision of the connection that
-    /// answered: the two are one fact, where a revision read afterwards may
-    /// be another connection's.
-    ///
-    /// # Errors
-    /// As [`Self::list_windows`]: [`IpcError::Unsupported`] from a daemon of
-    /// another wire revision, which is written nothing.
-    pub(crate) async fn list_windows_with_revision(
-        &self,
-    ) -> Result<(Vec<WindowInfo>, Option<u32>), IpcError> {
-        let generation = self.shared.open()?;
-        match generation
-            .request(&ClientMessage::ListWindows, PendingKind::ListWindows)
-            .await?
-        {
-            Reply::WindowList(windows) => Ok((windows, generation.revision())),
-            _ => Err(IpcError::UnexpectedReply),
-        }
-    }
-
     /// The daemon start this client last announced, `None` before the first.
     pub(crate) fn daemon_connection(&self) -> Option<DaemonConnectedPayload> {
         self.shared.daemon_connection()

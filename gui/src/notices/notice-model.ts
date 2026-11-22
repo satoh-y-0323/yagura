@@ -21,7 +21,7 @@ export type StateNoticeKey =
   | 'themes-issues'
   | 'approval-expired-unseen'
   | 'approver-registration-refused'
-  | 'daemon-protocol-stale'
+  | 'daemon-incompatible'
   | 'profile-unavailable'
   | 'reopen-offer';
 
@@ -154,13 +154,11 @@ export type NoticeSourceState = {
   /** Why the client settings could not be loaded, `null` when they were. */
   clientConfigFailure: ClientConfigFailure | null;
   /**
-   * Whether the connected daemon is known to have settled on a wire revision
-   * older than what showing a window needs.
-   * Informational: `false` both while nothing has been reported yet and once
-   * a new-enough revision has settled, since the WebView cannot tell those
-   * apart from the pushed revision alone.
+   * Whether the connected daemon was announced as not speaking this build's
+   * wire revision; `false` both before any announcement and once a compatible
+   * daemon has been announced.
    */
-  isDaemonProtocolStale: boolean;
+  isDaemonIncompatible: boolean;
   /**
    * Why start-up could not resolve which instance this process belongs to,
    * `null` when it could. Carries the reason code
@@ -215,7 +213,7 @@ const CLASSIFIERS: Record<NoticeKey, (facts: NoticeFacts) => NoticeClass> = {
   }),
   'daemon-health': () => BLOCKING_ERROR,
   'approver-registration-refused': () => BLOCKING_WARNING,
-  'daemon-protocol-stale': () => BLOCKING_WARNING,
+  'daemon-incompatible': () => BLOCKING_WARNING,
   'daemon-spawn': () => SETUP_PROBLEM,
   'client-config-failure': () => SETUP_PROBLEM,
   'detection-warning': () => SETUP_PROBLEM,
@@ -338,12 +336,12 @@ export function buildNotices(state: NoticeSourceState): NoticeDraft[] {
       )
     );
   }
-  if (state.isDaemonProtocolStale) {
+  if (state.isDaemonIncompatible) {
     drafts.push(
       draftOf(
-        'daemon-protocol-stale',
+        'daemon-incompatible',
         {},
-        blockingText(titles.daemonProtocolStale, banners.daemonProtocolStale)
+        blockingText(titles.daemonIncompatible, banners.daemonIncompatible)
       )
     );
   }
@@ -451,7 +449,7 @@ export function dismissNotice(state: NoticeSourceState, key: StateNoticeKey): No
     case 'daemon-recovery':
     case 'daemon-health':
     case 'approver-registration-refused':
-    case 'daemon-protocol-stale':
+    case 'daemon-incompatible':
       return state;
   }
 }
