@@ -1042,8 +1042,11 @@ impl ConnectionPool {
     /// late to matter.
     ///
     /// # Errors
-    /// Returns [`IpcError`] when the daemon cannot be reached or rejects the
-    /// request for any other reason.
+    /// Returns [`IpcError`] only for a failure before the decision was written
+    /// to the daemon, or for a rejection other than `approval_not_pending`.
+    /// Losing the connection after the decision was written is not an error:
+    /// it returns `Ok(`[`DecideApprovalOutcome::Unconfirmed`]`)`, because the
+    /// daemon may have applied it.
     pub async fn decide_approval(
         &self,
         app: &impl GuiHost,

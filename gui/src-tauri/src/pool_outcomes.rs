@@ -160,12 +160,21 @@ pub(crate) fn map_close_result(result: Result<(), IpcError>) -> Result<CloseOutc
 mod tests {
     use super::*;
 
+    // The WebView narrows the answer by these exact strings.
+    fn wire_tag(outcome: DecideApprovalOutcome) -> serde_json::Value {
+        serde_json::to_value(outcome).expect("DecideApprovalOutcome must serialize")
+    }
+
     #[test]
     fn map_decide_approval_result_maps_ok_to_decided() {
         assert!(matches!(
             map_decide_approval_result(Ok(())),
             Ok(DecideApprovalOutcome::Decided)
         ));
+        assert_eq!(
+            wire_tag(DecideApprovalOutcome::Decided),
+            serde_json::json!("decided")
+        );
     }
 
     #[test]
@@ -176,6 +185,10 @@ mod tests {
             rejected_argument: None,
         }));
         assert!(matches!(result, Ok(DecideApprovalOutcome::NotPending)));
+        assert_eq!(
+            wire_tag(DecideApprovalOutcome::NotPending),
+            serde_json::json!("not_pending")
+        );
     }
 
     #[test]
@@ -209,6 +222,10 @@ mod tests {
             map_decide_approval_result(Err(IpcError::NotConnected)),
             Err(IpcError::NotConnected)
         ));
+        assert_eq!(
+            wire_tag(DecideApprovalOutcome::Unconfirmed),
+            serde_json::json!("unconfirmed")
+        );
     }
 
     #[test]
