@@ -1041,4 +1041,35 @@ mod tests {
         let msg = DaemonMessage::Pong;
         assert_eq!(window_event_for(Some("window-a"), msg).ok(), None);
     }
+
+    #[test]
+    fn a_frame_label_tag_reaches_the_log_name_only_when_the_protocol_knows_it() {
+        fn label(tag: Option<&str>) -> FrameLabel {
+            FrameLabel {
+                correlation_id: None,
+                tag: tag.map(str::to_owned),
+            }
+        }
+
+        for &tag in daemon_message_wire_tags() {
+            let known = label(Some(tag));
+            let named: &str = known_tag_name(&known);
+            assert_eq!(named, tag, "a tag this build decodes keeps its spelling");
+        }
+
+        let unknown = ["evil\u{1b}[31m\ntag", "another-unknown-tag"];
+        let labels = [
+            label(Some(unknown[0])),
+            label(Some(unknown[1])),
+            label(None),
+        ];
+        let named: Vec<&str> = labels.iter().map(known_tag_name).collect();
+        for (named, tag) in named.iter().zip(unknown) {
+            assert!(!named.contains(tag), "`{tag}` reached the name `{named}`");
+        }
+        assert!(
+            named.windows(2).all(|pair| pair[0] == pair[1]),
+            "every tag this build does not know is named alike: {named:?}"
+        );
+    }
 }
