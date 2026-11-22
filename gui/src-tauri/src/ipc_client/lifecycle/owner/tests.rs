@@ -765,7 +765,7 @@ async fn refused_then_superseded(order: usize) -> Observed {
     rig.observe(count, Vec::new())
 }
 
-/// (g) The step's write failed on this side while the daemon is alive.
+/// (f) The step's write failed on this side while the daemon is alive.
 async fn failed_write_with_a_live_peer(order: usize) -> Observed {
     let (mut rig, mut restoring, stage) = chain_restoring(true).await;
     restoring.peer.make_writes_fail();
@@ -799,12 +799,12 @@ async fn failed_write_with_a_live_peer(order: usize) -> Observed {
 /// Where the daemon's `superseded` frame is when an input write fails.
 #[derive(Clone, Copy, PartialEq)]
 enum SupersededFrame {
-    /// (h) The peer closed; the frame follows, then the end of the stream.
+    /// (g) The peer closed; the frame follows, then the end of the stream.
     AfterAClosedPeer,
-    /// (i) The write failed here and the frame was delivered before it,
+    /// (h) The write failed here and the frame was delivered before it,
     /// beyond the first chunk the stopped reader takes.
     AlreadyDelivered,
-    /// (j) The write failed here; the frame reaches this end only after the
+    /// (i) The write failed here; the frame reaches this end only after the
     /// stopped reader has counted what was delivered, so it is not read.
     AfterTheStoppedReadBegan,
 }
@@ -1020,11 +1020,11 @@ async fn the_owner_settles_a_generation_the_same_whichever_news_of_it_arrives_fi
             across_orders(refused_then_superseded, lost_to_a_failed_reconnect).await,
         ),
         (
-            "(g) failed write with a live peer",
+            "(f) failed write with a live peer",
             across_orders(failed_write_with_a_live_peer, lost_to_a_failed_reconnect).await,
         ),
         (
-            "(h) input failed, peer closed, then superseded",
+            "(g) input failed, peer closed, then superseded",
             across_orders(
                 |order| input_failed_then_superseded(order, SupersededFrame::AfterAClosedPeer),
                 superseded_without_a_chain,
@@ -1032,7 +1032,7 @@ async fn the_owner_settles_a_generation_the_same_whichever_news_of_it_arrives_fi
             .await,
         ),
         (
-            "(i) input failed here, superseded already sent",
+            "(h) input failed here, superseded already sent",
             across_orders(
                 |order| input_failed_then_superseded(order, SupersededFrame::AlreadyDelivered),
                 superseded_without_a_chain,
@@ -1040,7 +1040,7 @@ async fn the_owner_settles_a_generation_the_same_whichever_news_of_it_arrives_fi
             .await,
         ),
         (
-            "(j) input failed here, superseded reaching this end only after the stopped read began",
+            "(i) input failed here, superseded reaching this end only after the stopped read began",
             across_orders(
                 |order| {
                     input_failed_then_superseded(order, SupersededFrame::AfterTheStoppedReadBegan)

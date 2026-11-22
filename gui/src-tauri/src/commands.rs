@@ -171,8 +171,8 @@ pub struct RestoreCandidateListReply {
 }
 
 /// The reply of [`get_daemon_health`]: the problems the daemon lists, empty
-/// when it has none (or predates the request).
-#[derive(Debug, Default, serde::Serialize)]
+/// when it has none.
+#[derive(Debug, serde::Serialize)]
 pub struct DaemonHealthReply {
     /// Each problem's `kind` and `detail`, as the daemon states them.
     pub problems: Vec<yagura_protocol::DaemonProblem>,

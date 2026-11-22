@@ -1133,11 +1133,11 @@ export async function invokeGetDaemonConnection(): Promise<DaemonConnectedPayloa
 }
 
 /**
- * Asks the daemon what keeps it from opening windows. A daemon that predates
- * the request answers with no problems.
+ * Asks the daemon what keeps it from opening windows.
  *
  * @throws {BoundaryError} when the reply does not match the contract.
- * @throws when the core rejects the request (the daemon is unreachable).
+ * @throws when the core rejects the request: the daemon is unreachable, or
+ * speaks another wire revision, which the core writes nothing to.
  */
 export async function invokeGetDaemonHealth(): Promise<DaemonProblem[]> {
   return narrowDaemonHealth(await invoke<unknown>('get_daemon_health'));

@@ -104,9 +104,9 @@
 //! (`frame_ack`), sends its theme colors (`set_palette`), reports whether the
 //! window is on screen (`set_visible`), asks for the selected text
 //! (`copy_selection`, answered by `selection_text`), clears the selection
-//! (`clear_selection`) and scrolls the view (`scroll_view`). An older client's `attach_at` is refused by
-//! name. Raw input bytes (`input`) are gone: a client sends input only as
-//! the structured messages of revision 18.
+//! (`clear_selection`) and scrolls the view (`scroll_view`). An older
+//! client's `attach_at` is refused by name. Raw input bytes (`input`) are
+//! gone: a client sends input only as the structured messages of revision 18.
 //!
 //! Revision 20 adds `get_daemon_health`, answered with `daemon_health`: the
 //! problems that keep the daemon from opening windows.

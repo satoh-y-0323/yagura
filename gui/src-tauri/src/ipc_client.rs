@@ -675,33 +675,19 @@ impl IpcClient {
         }
     }
 
-    /// Closes a window, terminating its process tree.
+    /// Writes a destructive request and waits for the daemon to be done.
     ///
     /// # Errors
     /// Returns [`IpcError`] when the daemon cannot be reached, the window
     /// does not exist, or the daemon otherwise rejects the request. This
     /// method always sends: it is the caller's job to gate the send on
-    /// approver registration ([`crate::connection_pool::ConnectionPool::close_window`]
-    /// is what does that).
-    pub async fn close_window(&self, window_id: &str, force: Option<bool>) -> Result<(), IpcError> {
-        let message = close_window_message(window_id, force);
-        match self.request(&message, PendingKind::CloseWindow).await? {
-            Reply::Done => Ok(()),
-            _ => Err(IpcError::UnexpectedReply),
-        }
-    }
-
-    /// Sends an interrupt signal to a window's child process.
-    ///
-    /// # Errors
-    /// Returns [`IpcError`] when the daemon cannot be reached, the window
-    /// does not exist, or the daemon otherwise rejects the request. This
-    /// method always sends: it is the caller's job to gate the send on
-    /// approver registration ([`crate::connection_pool::ConnectionPool::interrupt_window`]
-    /// is what does that).
-    pub async fn interrupt_window(&self, window_id: &str) -> Result<(), IpcError> {
-        let message = interrupt_window_message(window_id);
-        match self.request(&message, PendingKind::InterruptWindow).await? {
+    /// approver registration ([`crate::connection_pool::ConnectionPool`]'s
+    /// `close_window` and `interrupt_window` do that, weighing this very request).
+    pub(crate) async fn send_destructive(
+        &self,
+        request: &DestructiveRequest,
+    ) -> Result<(), IpcError> {
+        match self.request(&request.message, request.kind).await? {
             Reply::Done => Ok(()),
             _ => Err(IpcError::UnexpectedReply),
         }
@@ -1584,18 +1570,40 @@ impl IpcClient {
     }
 }
 
-/// The request [`IpcClient::close_window`] writes.
-pub(crate) fn close_window_message(window_id: &str, force: Option<bool>) -> ClientMessage {
-    ClientMessage::CloseWindow {
-        window_id: window_id.to_owned(),
-        force,
-    }
+/// A request the approver gate weighs before [`IpcClient::send_destructive`]
+/// writes it. Built once, so the gate weighs the very message that goes out;
+/// only the constructors pair a message with the pending kind its answer settles.
+#[derive(Debug)]
+pub(crate) struct DestructiveRequest {
+    message: ClientMessage,
+    kind: PendingKind,
 }
 
-/// The request [`IpcClient::interrupt_window`] writes.
-pub(crate) fn interrupt_window_message(window_id: &str) -> ClientMessage {
-    ClientMessage::InterruptWindow {
-        window_id: window_id.to_owned(),
+impl DestructiveRequest {
+    /// Closes a window, terminating its process tree.
+    pub(crate) fn close_window(window_id: &str, force: Option<bool>) -> Self {
+        Self {
+            message: ClientMessage::CloseWindow {
+                window_id: window_id.to_owned(),
+                force,
+            },
+            kind: PendingKind::CloseWindow,
+        }
+    }
+
+    /// Sends an interrupt signal to a window's child process.
+    pub(crate) fn interrupt_window(window_id: &str) -> Self {
+        Self {
+            message: ClientMessage::InterruptWindow {
+                window_id: window_id.to_owned(),
+            },
+            kind: PendingKind::InterruptWindow,
+        }
+    }
+
+    /// The message the request writes.
+    pub(crate) fn message(&self) -> &ClientMessage {
+        &self.message
     }
 }
 
@@ -1995,8 +2003,9 @@ mod tests {
     use crate::host::fake::FakeHost;
     use crate::window_record::WindowRecord;
 
-    /// A message a window connection writes once it is open.
-    fn frame_gated_message() -> ClientMessage {
+    /// A message other than the revision probe, which a window connection
+    /// writes once it is open.
+    fn a_message_past_the_probe() -> ClientMessage {
         ClientMessage::SetVisible { visible: true }
     }
 
@@ -2022,10 +2031,10 @@ mod tests {
     // Before the revision is settled only the probe goes out; after it, only a
     // daemon of this build's own wire revision is written anything else.
     #[tokio::test]
-    async fn a_frame_the_settled_revision_cannot_carry_is_refused_before_any_byte_is_written() {
+    async fn nothing_but_the_probe_is_written_unless_the_settled_revision_is_this_wire() {
         let messages = [
             ClientMessage::ListWindows,
-            frame_gated_message(),
+            a_message_past_the_probe(),
             ClientMessage::ClearChatRoom {
                 room_id: "main".to_owned(),
             },
@@ -2066,9 +2075,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_frame_is_written_once_the_current_generation_settled_a_revision_that_carries_it() {
+    async fn a_message_is_written_once_the_settled_revision_is_this_wire() {
         let settled = Some(yagura_protocol::PROTOCOL_REVISION);
-        let message = frame_gated_message();
+        let message = a_message_past_the_probe();
         let (outcome, written) = send_and_collect(&message, settled).await;
         assert!(outcome.is_ok(), "got {outcome:?}");
         assert_eq!(
@@ -2424,8 +2433,9 @@ mod tests {
     async fn destructive_requests_succeed_when_the_daemon_is_done() {
         let (client, generation, mut peer, _reader) = wired();
 
+        let close = DestructiveRequest::close_window("w1", Some(true));
         let (closed, sent) = tokio::join!(
-            client.close_window("w1", Some(true)),
+            client.send_destructive(&close),
             answer(
                 &generation,
                 &mut peer,
@@ -2442,8 +2452,9 @@ mod tests {
         );
         assert!(closed.is_ok(), "got {closed:?}");
 
+        let interrupt = DestructiveRequest::interrupt_window("w1");
         let (interrupted, sent) = tokio::join!(
-            client.interrupt_window("w1"),
+            client.send_destructive(&interrupt),
             answer(
                 &generation,
                 &mut peer,
@@ -2483,8 +2494,9 @@ mod tests {
     async fn destructive_requests_report_the_daemons_rejection() {
         let (client, generation, mut peer, _reader) = wired();
 
+        let close = DestructiveRequest::close_window("w1", None);
         let (closed, _) = tokio::join!(
-            client.close_window("w1", None),
+            client.send_destructive(&close),
             answer(
                 &generation,
                 &mut peer,
@@ -2494,8 +2506,9 @@ mod tests {
         );
         assert!(refused(&closed, "window_not_found"), "got {closed:?}");
 
+        let interrupt = DestructiveRequest::interrupt_window("w1");
         let (interrupted, _) = tokio::join!(
-            client.interrupt_window("w1"),
+            client.send_destructive(&interrupt),
             answer(
                 &generation,
                 &mut peer,

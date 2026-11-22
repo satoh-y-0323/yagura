@@ -33,9 +33,7 @@ use crate::commands::{
 use crate::events::DaemonConnectedPayload;
 use crate::frame_mailbox::FrameMailbox;
 use crate::host::GuiHost;
-use crate::ipc_client::{
-    ERROR_CODE_SUPERSEDED, IpcClient, IpcError, close_window_message, interrupt_window_message,
-};
+use crate::ipc_client::{DestructiveRequest, ERROR_CODE_SUPERSEDED, IpcClient, IpcError};
 use crate::pool_outcomes::{
     ApprovalSyncOutcome, CloseOutcome, DecideApprovalOutcome, map_close_result,
     map_decide_approval_result, map_sync_approvals_result,
@@ -982,11 +980,12 @@ impl ConnectionPool {
         window_id: &str,
         force: Option<bool>,
     ) -> Result<(), IpcError> {
-        let request = close_window_message(window_id, force);
-        self.require_approver_registered(app, ControlConnect::Existing, &request)
-            .await?
-            .close_window(window_id, force)
-            .await
+        self.send_destructive(
+            app,
+            ControlConnect::Existing,
+            &DestructiveRequest::close_window(window_id, force),
+        )
+        .await
     }
 
     /// Closes a window, terminating its process tree, and lets go of its
@@ -1037,11 +1036,12 @@ impl ConnectionPool {
         app: &impl GuiHost,
         window_id: &str,
     ) -> Result<(), IpcError> {
-        let request = interrupt_window_message(window_id);
-        self.require_approver_registered(app, ControlConnect::Spawn, &request)
-            .await?
-            .interrupt_window(window_id)
-            .await
+        self.send_destructive(
+            app,
+            ControlConnect::Spawn,
+            &DestructiveRequest::interrupt_window(window_id),
+        )
+        .await
     }
 
     /// Settles one pending approval request.
@@ -1094,9 +1094,10 @@ impl ConnectionPool {
         map_sync_approvals_result(self.control.sync_approvals(app).await)
     }
 
-    /// The control connection, open and registered as the approver: the gate
-    /// of the destructive operations, which the daemon lets through without
-    /// asking a human once this connection is the approver.
+    /// Writes `request` on the control connection only once it is open and
+    /// registered as the approver: the gate of the destructive operations,
+    /// which the daemon lets through without asking a human once this
+    /// connection is the approver. The gate weighs the request it writes.
     ///
     /// `connect` follows the caller's intent: an operation on a live window
     /// starts a daemon when none runs, whereas tidying the view up does not.
@@ -1104,25 +1105,25 @@ impl ConnectionPool {
     /// # Errors
     /// Returns [`IpcError`] when the daemon cannot be reached,
     /// [`IpcError::Unsupported`] when it speaks another wire revision, which
-    /// `request` would never be written to, and
+    /// `request` is never written to,
     /// [`IpcError::ApproverNotRegistered`] when the open connection's
-    /// registration was refused.
-    async fn require_approver_registered(
+    /// registration was refused, and as [`IpcClient::send_destructive`].
+    async fn send_destructive(
         &self,
         app: &impl GuiHost,
         connect: ControlConnect,
-        request: &ClientMessage,
-    ) -> Result<&Arc<IpcClient>, IpcError> {
+        request: &DestructiveRequest,
+    ) -> Result<(), IpcError> {
         let control = self.control_connected(app, connect).await?;
         // Such a daemon was never asked to register, so its refusal is the
         // wire's, not the registration's.
-        control.weigh(request)?;
+        control.weigh(request.message())?;
         // Opening settles the registration, so a connection that opened with
         // it refused stays unregistered until another generation opens.
         if !control.is_approver_registered() {
             return Err(IpcError::ApproverNotRegistered);
         }
-        Ok(control)
+        control.send_destructive(request).await
     }
 
     /// Renames a window and returns the name as the daemon stored it.
