@@ -11,7 +11,7 @@ use std::sync::Arc;
 use tokio::io::AsyncReadExt;
 use yagura_protocol::{
     ApprovalSettingsInfo, DaemonMessage, Frame, FrameLabel, PlaybookState,
-    decode_correlated_daemon_message, read_frame_label,
+    daemon_message_wire_tags, decode_correlated_daemon_message, read_frame_label,
 };
 
 use crate::commands::{
@@ -164,7 +164,7 @@ async fn dispatch_frames<H: GuiHost>(
                 if settle_unreadable(generation, &label) {
                     eprintln!(
                         "warning: the daemon answered a request with a frame this build cannot read ({}); reconnecting",
-                        label.tag.as_deref().unwrap_or("no type")
+                        known_tag_name(&label)
                     );
                     return Some(EndKind::UnreadableAnswer);
                 }
@@ -203,7 +203,7 @@ fn settle_unreadable(generation: &Generation, label: &FrameLabel) -> bool {
             let result = if carries {
                 eprintln!(
                     "warning: the daemon answered with a {} this build cannot read",
-                    label.tag.as_deref().unwrap_or_default()
+                    known_tag_name(label)
                 );
                 Err(IpcError::UnexpectedReply)
             } else {
@@ -215,17 +215,20 @@ fn settle_unreadable(generation: &Generation, label: &FrameLabel) -> bool {
     }
 }
 
-/// Whether `tag` is the wire tag of the `DaemonMessage` variant named
-/// `variant`, by the rule its `#[serde(rename_all = "snake_case")]` applies.
-fn is_wire_tag(variant: &str, tag: &str) -> bool {
-    let mut snake = String::with_capacity(tag.len());
-    for (index, letter) in variant.char_indices() {
-        if index > 0 && letter.is_uppercase() {
-            snake.push('_');
-        }
-        snake.push(letter.to_ascii_lowercase());
-    }
-    snake == tag
+/// The name this build gives the `type` tag of a frame it could not read:
+/// the protocol's own spelling when the tag is one it decodes, so a peer's
+/// arbitrary string never reaches a log line.
+fn known_tag_name(label: &FrameLabel) -> &'static str {
+    label
+        .tag
+        .as_deref()
+        .and_then(|tag| {
+            daemon_message_wire_tags()
+                .iter()
+                .copied()
+                .find(|known| *known == tag)
+        })
+        .unwrap_or("a type this build does not know")
 }
 
 /// Writes the one table of the messages that answer a request: from it come
@@ -237,6 +240,29 @@ macro_rules! answer_table {
         valued { $( $valued:ident $fields:tt => $valued_kind:ident : $reply:expr, )* }
         none { $( $none:pat ),* $(,)? }
     ) => {
+        /// The `type` tag of each answer, named after its `DaemonMessage`
+        /// variant and spelled by serde under the same `rename_all` as
+        /// `DaemonMessage`, so no copy of the naming rule is kept here.
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
+        #[cfg_attr(test, derive(serde::Serialize))]
+        #[serde(rename_all = "snake_case")]
+        enum AnswerTag {
+            $( $bare, )*
+            $( $valued, )*
+        }
+
+        impl AnswerTag {
+            #[cfg(test)]
+            const ALL: &[Self] = &[ $( Self::$bare, )* $( Self::$valued, )* ];
+
+            fn answer(self) -> (PendingKind, bool) {
+                match self {
+                    $( Self::$bare => (PendingKind::$bare_kind, false), )*
+                    $( Self::$valued => (PendingKind::$valued_kind, true), )*
+                }
+            }
+        }
+
         /// The request a daemon message answers, if it answers one at all.
         ///
         /// Matched exhaustively on purpose: a new protocol message must force a
@@ -252,17 +278,10 @@ macro_rules! answer_table {
         /// The request an answer tagged `tag` belongs to, and whether this
         /// client reads anything it carries.
         fn answer_kind(tag: &str) -> Option<(PendingKind, bool)> {
-            $(
-                if is_wire_tag(stringify!($bare), tag) {
-                    return Some((PendingKind::$bare_kind, false));
-                }
-            )*
-            $(
-                if is_wire_tag(stringify!($valued), tag) {
-                    return Some((PendingKind::$valued_kind, true));
-                }
-            )*
-            None
+            use serde::de::{Deserialize, IntoDeserializer, value::Error};
+            AnswerTag::deserialize(IntoDeserializer::<Error>::into_deserializer(tag))
+                .ok()
+                .map(AnswerTag::answer)
         }
     };
 }
@@ -960,6 +979,27 @@ mod tests {
         assert!(
             !settle_rejection(&generation, None, rejection_with_code(ERROR_CODE_INTERNAL)).await
         );
+    }
+
+    #[test]
+    fn every_answer_tag_is_a_distinct_decoder_tag_and_no_other_tag_answers() {
+        let wire = daemon_message_wire_tags();
+        let mut answers = std::collections::BTreeSet::new();
+        for &item in AnswerTag::ALL {
+            let tag = match serde_json::to_value(item) {
+                Ok(serde_json::Value::String(tag)) => tag,
+                other => panic!("{item:?} did not serialize as a tag: {other:?}"),
+            };
+            assert!(
+                wire.contains(&tag.as_str()),
+                "{item:?} reads `{tag}`, which the decoder does not accept"
+            );
+            assert_eq!(answer_kind(&tag), Some(item.answer()), "{item:?}");
+            assert!(answers.insert(tag), "{item:?} shares its tag");
+        }
+        for &tag in wire.iter().filter(|tag| !answers.contains(**tag)) {
+            assert_eq!(answer_kind(tag), None, "`{tag}` answers no request");
+        }
     }
 
     #[test]
