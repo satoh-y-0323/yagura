@@ -954,8 +954,7 @@ nothing is written when no value changed. **Discard** drops the unsaved
 edits.
 
 A saved value applies from the next window opened from that profile; a
-window already open keeps what it was started with. Against a daemon whose
-wire revision is older than `10`, the tab is read-only.
+window already open keeps what it was started with.
 
 ## Credentials
 

@@ -64,7 +64,9 @@ takes no arguments.
 
 **The daemon outlives the GUI** (see [mcp-setup.md](mcp-setup.md#starting-the-daemon)), and a dev
 run follows the same rule: the GUI starts a daemon only when none is running for its instance, and
-otherwise connects to the one that is, whatever build it is. Three things follow:
+otherwise connects to the one that is, whatever build it is. A daemon that answers another IPC wire
+revision than the GUI's is not used: the GUI shows no windows and asks you to restart it. Three
+things follow:
 
 1. **Run the dev build as an instance of its own** (`YAGURA_INSTANCE=dev`). In the default
    instance, a dev run connects to the daemon of the yagura you use every day when it is running,
