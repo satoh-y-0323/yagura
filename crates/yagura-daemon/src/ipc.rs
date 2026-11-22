@@ -7091,9 +7091,10 @@ mod tests {
             }
             other => panic!("expected the status reply, got {other:?}"),
         }
+    }
 
-        // The kind decides how a frame is sent, not the side it is handed to:
-        // a push handed to a request's answer still carries no correlation id.
+    #[tokio::test]
+    async fn a_push_handed_to_a_request_answer_carries_no_correlation_id_and_spends_no_answer() {
         let push = DaemonMessage::ModelChoices {
             request_id: 1,
             profile: "played".to_owned(),
@@ -7102,22 +7103,35 @@ mod tests {
             error: None,
         };
         let (tx, mut rx) = mpsc::channel(8);
-        let answer = Arc::new(ConnectionOutbound::new(tx)).answer_for(Some(7));
-        answer.reply(&DaemonMessage::Pong);
-        answer.reply(&push);
-        let mut sent = Vec::new();
-        while let Ok(frame) = rx.try_recv() {
-            let (body, _) = frame_decode(&frame)
-                .expect("a valid frame")
-                .expect("a whole frame");
-            sent.push(
-                yagura_protocol::decode_correlated_daemon_message(body).expect("a daemon message"),
+        let connection = Arc::new(ConnectionOutbound::new(tx));
+        let handles = [
+            (
+                "a handle that is not racing",
+                connection.answer_for(Some(7)),
+            ),
+            (
+                "a handle racing for one answer",
+                connection.answer_for(Some(7)).for_one_answer(),
+            ),
+        ];
+        for (which, handle) in handles {
+            handle.reply(&push);
+            handle.reply(&DaemonMessage::Pong);
+            let mut sent = Vec::new();
+            while let Ok(frame) = rx.try_recv() {
+                let (body, _) = frame_decode(&frame)
+                    .expect("a valid frame")
+                    .expect("a whole frame");
+                sent.push(
+                    yagura_protocol::decode_correlated_daemon_message(body)
+                        .expect("a daemon message"),
+                );
+            }
+            assert_eq!(
+                sent,
+                [(None, push.clone()), (Some(7), DaemonMessage::Pong)],
+                "{which}: a push carries no correlation id and the answer after it still carries the request's"
             );
         }
-        assert_eq!(
-            sent,
-            [(Some(7), DaemonMessage::Pong), (None, push)],
-            "an answer carries the request's correlation id and a push carries none"
-        );
     }
 }
