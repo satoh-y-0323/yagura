@@ -162,7 +162,8 @@ pub struct DaemonConnectedPayload {
     /// (`DetachedSpawn::used_fallback`), so it names the consequence. On Unix
     /// `setsid` detachment has no such fallback, so it is never set there.
     pub spawn_warning: Option<String>,
-    /// Whether the daemon speaks the wire revision this build speaks.
+    /// Whether the daemon speaks the wire revision this build speaks. When it
+    /// does not, the GUI writes it nothing but the revision probe.
     pub compatible: bool,
 }
 

@@ -5,46 +5,9 @@
 //! and tested, without a live connection.
 
 use serde::Serialize;
-use yagura_protocol::{ApprovalRequest, PROTOCOL_REVISION_BASELINE};
+use yagura_protocol::ApprovalRequest;
 
 use crate::ipc_client::{IpcError, StepReply};
-
-/// Whether a frame that needs `required_revision` may be written to a
-/// connection whose peer settled on `settled_revision`.
-///
-/// A message that needs nothing beyond [`PROTOCOL_REVISION_BASELINE`] always
-/// carries: every peer that speaks this wire at all implements the baseline,
-/// including one that has not answered the revision probe yet -- which is
-/// what lets that probe itself go out over an unsettled connection.
-///
-/// The revision is the one the connection being written to settled: each
-/// connection carries its own, so a value learned from another connection
-/// never reaches this judgement.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ProtocolRevisionGate {
-    /// The connection's peer is known to carry the requirement, or the
-    /// message needs nothing beyond the baseline.
-    Carried,
-    /// The connection's peer has not settled a revision, or settled on one
-    /// below the requirement.
-    Refused,
-}
-
-/// The pure judgement behind [`ProtocolRevisionGate`], held apart from the
-/// connection that supplies the settled revision so the decision itself is
-/// unit-testable without one.
-pub fn protocol_revision_gate(
-    settled_revision: Option<u32>,
-    required_revision: u32,
-) -> ProtocolRevisionGate {
-    if required_revision <= PROTOCOL_REVISION_BASELINE {
-        return ProtocolRevisionGate::Carried;
-    }
-    match settled_revision {
-        Some(revision) if revision >= required_revision => ProtocolRevisionGate::Carried,
-        _ => ProtocolRevisionGate::Refused,
-    }
-}
 
 /// Outcome of settling one pending approval request
 /// ([`crate::connection_pool::ConnectionPool::decide_approval`]). A distinct

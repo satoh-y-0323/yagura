@@ -24,8 +24,6 @@ use crate::ipc_client::{ERROR_CODE_SUPERSEDED, Reply};
 const PIPE: usize = 64 * 1024;
 /// A daemon of the current wire revision.
 const REVISION: u32 = yagura_protocol::PROTOCOL_REVISION;
-/// Older than the first revision that carries frames.
-const BEFORE_FRAMES: u32 = 18;
 const WINDOW: &str = "w1";
 
 type Outcome = <Stage as Future>::Output;
@@ -548,7 +546,7 @@ where
 /// A window client whose generation 0 was open on window `w1` and ended
 /// on its reader, and whose chain's generation 1 is restoring: the step
 /// that attaches it again is returned, not yet run.
-async fn chain_restoring(real_reader: bool, revision: u32) -> (Rig, Conn, Stage) {
+async fn chain_restoring(real_reader: bool) -> (Rig, Conn, Stage) {
     let mut rig = Rig::new(ClientKind::Window);
     rig.want(ConnectMode::Retry, Until::Open);
     let attempt = rig.next_attempt();
@@ -562,7 +560,7 @@ async fn chain_restoring(real_reader: bool, revision: u32) -> (Rig, Conn, Stage)
     assert!(held.is_empty());
 
     let mut restoring = rig.begin(attempt, real_reader);
-    rig.probe(&mut restoring, revision).await;
+    rig.probe(&mut restoring, REVISION).await;
     let mut held = rig.carry_out().await;
     let step = held.pop().expect("the restoring attach");
     assert!(held.is_empty());
@@ -602,7 +600,7 @@ fn attached_reply() -> Result<Reply, IpcError> {
 
 /// (a) The attach was answered before the connection ended.
 async fn answered_before_the_end() -> Observed {
-    let (mut rig, mut restoring, stage) = chain_restoring(false, REVISION).await;
+    let (mut rig, mut restoring, stage) = chain_restoring(false).await;
     let (outcome, ()) = tokio::join!(
         stage,
         answer_next(
@@ -621,7 +619,7 @@ async fn answered_before_the_end() -> Observed {
 /// (b) An answer to a request that is not the step does not count, and the
 /// connection ended before the step was answered.
 async fn ended_before_the_step_was_answered() -> (Observed, bool) {
-    let (mut rig, mut restoring, mut stage) = chain_restoring(false, REVISION).await;
+    let (mut rig, mut restoring, mut stage) = chain_restoring(false).await;
     let attach = ClientMessage::AttachView {
         window_id: WINDOW.to_owned(),
         size: None,
@@ -698,7 +696,7 @@ async fn registered_before_the_end() -> Observed {
 /// had sent `superseded` before it closed. With `earlier_write`, an input
 /// that is not the step failed first.
 async fn closed_peer_then_superseded(order: usize, earlier_write: bool) -> Observed {
-    let (mut rig, mut restoring, stage) = chain_restoring(true, REVISION).await;
+    let (mut rig, mut restoring, stage) = chain_restoring(true).await;
     restoring.peer.stop_reading();
     if earlier_write {
         let write = restoring
@@ -741,30 +739,23 @@ async fn closed_peer_then_superseded(order: usize, earlier_write: bool) -> Obser
     rig.observe(count, notes)
 }
 
-/// (e)/(f) The step was refused (by the daemon, or by the revision's
-/// gate) and the connection was taken over.
-async fn refused_then_superseded(order: usize, gate: bool) -> Observed {
-    let revision = if gate { BEFORE_FRAMES } else { REVISION };
-    let (mut rig, mut restoring, stage) = chain_restoring(false, revision).await;
-    let outcome = if gate {
-        stage.await
-    } else {
-        let refusal = Err(IpcError::Rejected {
-            code: "window_not_found".to_owned(),
-            message: String::new(),
-            rejected_argument: None,
-        });
-        let (outcome, ()) = tokio::join!(
-            stage,
-            answer_next(
-                &restoring.generation,
-                &mut restoring.peer,
-                PendingKind::Attach,
-                refusal
-            )
-        );
-        outcome
-    };
+/// (e) The daemon refused the step and the connection was taken over.
+async fn refused_then_superseded(order: usize) -> Observed {
+    let (mut rig, mut restoring, stage) = chain_restoring(false).await;
+    let refusal = Err(IpcError::Rejected {
+        code: "window_not_found".to_owned(),
+        message: String::new(),
+        rejected_argument: None,
+    });
+    let (outcome, ()) = tokio::join!(
+        stage,
+        answer_next(
+            &restoring.generation,
+            &mut restoring.peer,
+            PendingKind::Attach,
+            refusal
+        )
+    );
     restoring.report(EndKind::Superseded);
     rig.collect();
     let mut items: Vec<Item> = vec![Item::Result(outcome)];
@@ -774,18 +765,9 @@ async fn refused_then_superseded(order: usize, gate: bool) -> Observed {
     rig.observe(count, Vec::new())
 }
 
-/// (f) alone: the revision gate's refusal is the step's answer, so the
-/// attach fails on it with no news of the connection's end.
-async fn refused_by_the_gate_and_never_ended() -> Observed {
-    let (mut rig, _restoring, stage) = chain_restoring(false, BEFORE_FRAMES).await;
-    let outcome = stage.await;
-    rig.deliver(vec![Item::Result(outcome)]);
-    rig.observe(1, Vec::new())
-}
-
 /// (g) The step's write failed on this side while the daemon is alive.
 async fn failed_write_with_a_live_peer(order: usize) -> Observed {
-    let (mut rig, mut restoring, stage) = chain_restoring(true, REVISION).await;
+    let (mut rig, mut restoring, stage) = chain_restoring(true).await;
     restoring.peer.make_writes_fail();
     let outcome = stage.await;
     let mut notes = Vec::new();
@@ -1035,22 +1017,7 @@ async fn the_owner_settles_a_generation_the_same_whichever_news_of_it_arrives_fi
         ),
         (
             "(e) refused by the daemon, then superseded",
-            across_orders(
-                |order| refused_then_superseded(order, false),
-                lost_to_a_failed_reconnect,
-            )
-            .await,
-        ),
-        (
-            "(f) refused by the revision gate, then superseded",
-            all(vec![
-                across_orders(
-                    |order| refused_then_superseded(order, true),
-                    lost_to_a_failed_reconnect,
-                )
-                .await,
-                lost_to_a_failed_reconnect(&refused_by_the_gate_and_never_ended().await),
-            ]),
+            across_orders(refused_then_superseded, lost_to_a_failed_reconnect).await,
         ),
         (
             "(g) failed write with a live peer",

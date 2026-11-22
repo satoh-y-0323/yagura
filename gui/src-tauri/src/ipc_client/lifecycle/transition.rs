@@ -1,7 +1,7 @@
 //! The pure transition function of a client's connection lifetime: no I/O,
 //! no lock, no clock and no task.
 
-use super::super::ConnectMode;
+use super::super::{ConnectMode, speaks_this_wire};
 use crate::constants::RECONNECT_ATTEMPT_LIMIT;
 use crate::events::LinkLostReason;
 use crate::window_record::LinkState;
@@ -35,7 +35,8 @@ pub(crate) enum Registration {
     Accepted,
     /// The daemon refused it with `auth_failed`; the generation opens anyway.
     Refused,
-    /// No registration: a window connection never registers.
+    /// No registration: a window connection never registers, and a control
+    /// connection to a daemon of another wire revision is not let register.
     Unregistered,
 }
 
@@ -77,7 +78,7 @@ impl EndKind {
     }
 }
 
-/// An answer the daemon, or the revision gate, gave an opening step before
+/// An answer the daemon, or the wire gate, gave an opening step before
 /// the generation ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum TakenAnswer {
@@ -111,7 +112,7 @@ pub(crate) enum Event {
         generation: u64,
         registration: Registration,
     },
-    /// The daemon, or the revision gate, answered the step in flight in a way
+    /// The daemon, or the wire gate, answered the step in flight in a way
     /// that does not let the attempt go on.
     StepFailed { generation: u64 },
     /// A window chain's attach was answered before the generation ended.
@@ -260,6 +261,8 @@ struct Chain {
     /// The lost generation's window, carried from its end event so that every
     /// attempt of the chain restores that window.
     restore: Option<String>,
+    /// The weakest form the chain's attempts take.
+    floor: ConnectMode,
 }
 
 #[derive(Debug)]
@@ -510,6 +513,11 @@ impl Lifecycle {
                 };
                 out.push(Step::Do(Action::Register { generation }));
             }
+            // A window of a daemon of another wire is not opened: nothing
+            // but the probe may be written to it.
+            ClientKind::Window if !speaks_this_wire(Some(revision)) => {
+                self.failed_to_open(mode, generation, out);
+            }
             ClientKind::Window => {
                 self.finish_opening(mode, generation, revision, Registration::Unregistered, out);
             }
@@ -656,6 +664,12 @@ impl Lifecycle {
             return;
         }
 
+        // A daemon of another wire is one this GUI cannot use, so once it is
+        // gone the chain starts one of this build's when none answers.
+        let floor = match self.phase {
+            Phase::Open { revision, .. } if !speaks_this_wire(Some(revision)) => ConnectMode::Spawn,
+            _ => ConnectMode::Retry,
+        };
         out.push(Step::Do(Action::End { generation }));
         self.phase = Phase::Idle;
         let restore = match (self.kind, window_id) {
@@ -673,6 +687,7 @@ impl Lifecycle {
         self.chain = Some(Chain {
             attempts: 1,
             restore,
+            floor,
         });
         let mode = self.chain_mode();
         self.start(mode, out);
@@ -694,6 +709,7 @@ impl Lifecycle {
                 self.chain = Some(Chain {
                     attempts: chain.attempts + 1,
                     restore: chain.restore,
+                    floor: chain.floor,
                 });
                 let mode = self.chain_mode();
                 self.start(mode, out);
@@ -711,11 +727,16 @@ impl Lifecycle {
         }
     }
 
-    /// A chain retries, and starts the daemon when a waiting want asks for it.
+    /// A chain takes its floor, and starts the daemon when a waiting want
+    /// asks for it.
     fn chain_mode(&self) -> ConnectMode {
+        let floor = self
+            .chain
+            .as_ref()
+            .map_or(ConnectMode::Retry, |chain| chain.floor);
         match self.strongest_want() {
-            Some(mode) if strength(mode) > strength(ConnectMode::Retry) => mode,
-            _ => ConnectMode::Retry,
+            Some(mode) if strength(mode) > strength(floor) => mode,
+            _ => floor,
         }
     }
 

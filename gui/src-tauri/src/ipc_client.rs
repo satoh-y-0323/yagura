@@ -24,8 +24,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use yagura_os::{IpcTransport, OsError, PeerAuth, PlatformIpc, default_endpoint};
 use yagura_protocol::{
     ApprovalRequest, ClientMessage, DefaultPalettes, LaunchOptionAlias, McpRegistrationAction,
-    OnNameTaken, PROTOCOL_REVISION_BASELINE, PlanInfo, PlanSummary, RoleEntry, StatusBoot,
-    TaskAssignment, TerminalSize, TicketInfo, TicketWorkspaceInfo, WindowInfo,
+    OnNameTaken, PlanInfo, PlanSummary, RoleEntry, StatusBoot, TaskAssignment, TerminalSize,
+    TicketInfo, TicketWorkspaceInfo, WindowInfo,
 };
 
 use crate::commands::{
@@ -64,8 +64,20 @@ pub(crate) const ERROR_CODE_INTERNAL: &str = "internal";
 
 /// `error.code` a daemon built before a message type existed answers it
 /// with. Settles a generation's revision probe the same as a genuine answer
-/// would: the refusal itself says which wire the peer speaks.
+/// would: the refusal itself says the peer speaks another wire.
 const ERROR_CODE_UNKNOWN_TYPE: &str = "unknown_type";
+
+/// The revision a probe settles on for a daemon that does not know the probe
+/// or answers it in a shape this build cannot read. No daemon names it, so it
+/// is never this build's.
+const UNNAMED_REVISION: u32 = 0;
+
+/// Whether a connection that settled `revision` -- `None` before it did --
+/// speaks this build's wire: the one judgement of which daemon this GUI talks
+/// to. Any other is written nothing but the revision probe.
+pub(crate) fn speaks_this_wire(revision: Option<u32>) -> bool {
+    revision == Some(yagura_protocol::PROTOCOL_REVISION)
+}
 
 /// Whether a daemon of `revision` names the request each answer belongs to.
 /// `None` -- a generation still probing -- does not: the probe's answer is
@@ -147,12 +159,10 @@ pub enum IpcError {
     /// here rather than sent unchecked.
     #[error("not yet registered as an approver with the daemon")]
     ApproverNotRegistered,
-    /// The connected daemon has not settled on a wire revision this request
-    /// needs, so the frame was refused rather than risk one an older daemon
-    /// cannot parse.
-    #[error(
-        "this request needs a wire revision the connected daemon does not speak: {request_type}"
-    )]
+    /// The connected daemon speaks another wire revision than this build, or
+    /// has not told which yet, so the request was not sent: no byte of it was
+    /// written.
+    #[error("not sent, as the connected daemon speaks another wire revision: {request_type}")]
     Unsupported {
         /// The wire tag of the request that was refused, one of
         /// [`yagura_protocol::client_message_wire_tags`].
@@ -680,10 +690,7 @@ impl IpcClient {
     /// approver registration ([`crate::connection_pool::ConnectionPool::close_window`]
     /// is what does that).
     pub async fn close_window(&self, window_id: &str, force: Option<bool>) -> Result<(), IpcError> {
-        let message = ClientMessage::CloseWindow {
-            window_id: window_id.to_owned(),
-            force,
-        };
+        let message = close_window_message(window_id, force);
         match self.request(&message, PendingKind::CloseWindow).await? {
             Reply::Done => Ok(()),
             _ => Err(IpcError::UnexpectedReply),
@@ -699,9 +706,7 @@ impl IpcClient {
     /// approver registration ([`crate::connection_pool::ConnectionPool::interrupt_window`]
     /// is what does that).
     pub async fn interrupt_window(&self, window_id: &str) -> Result<(), IpcError> {
-        let message = ClientMessage::InterruptWindow {
-            window_id: window_id.to_owned(),
-        };
+        let message = interrupt_window_message(window_id);
         match self.request(&message, PendingKind::InterruptWindow).await? {
             Reply::Done => Ok(()),
             _ => Err(IpcError::UnexpectedReply),
@@ -760,32 +765,24 @@ impl IpcClient {
         }
     }
 
-    /// Asks the daemon what keeps it from opening windows. A daemon that
-    /// predates the request has no problem to report, so a refusal as
-    /// unsupported or as an unknown type answers with an empty list.
+    /// Asks the daemon what keeps it from opening windows.
     ///
     /// # Errors
-    /// Returns [`IpcError`] when the daemon cannot be reached.
+    /// Returns [`IpcError`] when the daemon cannot be reached, speaks another
+    /// wire revision ([`IpcError::Unsupported`]) or rejects the request.
     pub async fn get_daemon_health(
         &self,
         _app: &impl GuiHost,
     ) -> Result<DaemonHealthReply, IpcError> {
-        // An open connection has settled its revision, so `Unsupported` here
-        // is an older daemon's, never one not yet probed.
         match self
             .request(
                 &ClientMessage::GetDaemonHealth,
                 PendingKind::GetDaemonHealth,
             )
-            .await
+            .await?
         {
-            Ok(Reply::DaemonHealth(reply)) => Ok(reply),
-            Ok(_) => Err(IpcError::UnexpectedReply),
-            Err(IpcError::Unsupported { .. }) => Ok(DaemonHealthReply::default()),
-            Err(IpcError::Rejected { code, .. }) if code == ERROR_CODE_UNKNOWN_TYPE => {
-                Ok(DaemonHealthReply::default())
-            }
-            Err(error) => Err(error),
+            Reply::DaemonHealth(reply) => Ok(reply),
+            _ => Err(IpcError::UnexpectedReply),
         }
     }
 
@@ -895,8 +892,8 @@ impl IpcClient {
     /// cleared. Approver-only on the daemon side.
     ///
     /// # Errors
-    /// Returns [`IpcError`] when the daemon cannot be reached, predates this
-    /// request, or rejects it (an unknown room included).
+    /// Returns [`IpcError`] when the daemon cannot be reached, speaks another
+    /// wire revision, or rejects it (an unknown room included).
     pub async fn clear_chat_room(&self, room_id: String) -> Result<String, IpcError> {
         match self
             .request(
@@ -914,8 +911,8 @@ impl IpcClient {
     /// Approver-only on the daemon side.
     ///
     /// # Errors
-    /// Returns [`IpcError`] when the daemon cannot be reached, predates this
-    /// request, or rejects it (`room_in_use` when a window is open in the
+    /// Returns [`IpcError`] when the daemon cannot be reached, speaks another
+    /// wire revision, or rejects it (`room_in_use` when a window is open in the
     /// room).
     pub async fn delete_chat_room(&self, room_id: String) -> Result<String, IpcError> {
         match self
@@ -933,8 +930,8 @@ impl IpcClient {
     /// Lists the plans the daemon lets this connection see.
     ///
     /// # Errors
-    /// Returns [`IpcError`] when the daemon cannot be reached, predates the
-    /// plan ledger, or rejects the request.
+    /// Returns [`IpcError`] when the daemon cannot be reached, speaks another
+    /// wire revision, or rejects the request.
     pub async fn list_plans(&self) -> Result<Vec<PlanSummary>, IpcError> {
         match self
             .request(&ClientMessage::ListPlans, PendingKind::PlanList)
@@ -1024,8 +1021,8 @@ impl IpcClient {
     /// plan's current version.
     ///
     /// # Errors
-    /// Returns [`IpcError`] when the daemon cannot be reached, predates the
-    /// plan review, or rejects the request (a stale `version` included).
+    /// Returns [`IpcError`] when the daemon cannot be reached, speaks another
+    /// wire revision, or rejects the request (a stale `version` included).
     pub async fn approve_plan(&self, plan_id: String, version: u64) -> Result<PlanInfo, IpcError> {
         self.request_plan_detail(&ClientMessage::ApprovePlan { plan_id, version })
             .await
@@ -1035,8 +1032,8 @@ impl IpcClient {
     /// plan's current version.
     ///
     /// # Errors
-    /// Returns [`IpcError`] when the daemon cannot be reached, predates the
-    /// plan review, or rejects the request (a stale `version` included).
+    /// Returns [`IpcError`] when the daemon cannot be reached, speaks another
+    /// wire revision, or rejects the request (a stale `version` included).
     pub async fn mark_plan_seen(
         &self,
         plan_id: String,
@@ -1049,8 +1046,8 @@ impl IpcClient {
     /// Reads the role-to-assignment table.
     ///
     /// # Errors
-    /// Returns [`IpcError`] when the daemon cannot be reached, predates the
-    /// plan ledger, or rejects the request.
+    /// Returns [`IpcError`] when the daemon cannot be reached, speaks another
+    /// wire revision, or rejects the request.
     pub async fn list_roles(&self) -> Result<RoleListReply, IpcError> {
         self.request_role_list(&ClientMessage::ListRoles).await
     }
@@ -1059,8 +1056,8 @@ impl IpcClient {
     /// and returns it as stored.
     ///
     /// # Errors
-    /// Returns [`IpcError`] when the daemon cannot be reached, predates the
-    /// plan review while `default_role` is set, or rejects the table.
+    /// Returns [`IpcError`] when the daemon cannot be reached, speaks another
+    /// wire revision, or rejects the table.
     pub async fn save_roles(
         &self,
         roles: Vec<RoleEntry>,
@@ -1078,8 +1075,8 @@ impl IpcClient {
     /// carrying the same `request_id`.
     ///
     /// # Errors
-    /// Returns [`IpcError`] when the daemon cannot be reached, predates model
-    /// aliases, or rejects the request.
+    /// Returns [`IpcError`] when the daemon cannot be reached, speaks another
+    /// wire revision, or rejects the request.
     pub async fn list_model_choices(
         &self,
         profile: String,
@@ -1104,8 +1101,8 @@ impl IpcClient {
     /// stored.
     ///
     /// # Errors
-    /// Returns [`IpcError`] when the daemon cannot be reached, predates model
-    /// aliases, or rejects the aliases.
+    /// Returns [`IpcError`] when the daemon cannot be reached, speaks another
+    /// wire revision, or rejects the aliases.
     pub async fn save_model_aliases(
         &self,
         profile: String,
@@ -1128,8 +1125,8 @@ impl IpcClient {
     /// `request_id`.
     ///
     /// # Errors
-    /// Returns [`IpcError`] when the daemon cannot be reached, predates MCP
-    /// registration, or rejects the request.
+    /// Returns [`IpcError`] when the daemon cannot be reached, speaks another
+    /// wire revision, or rejects the request.
     pub async fn list_mcp_registrations(
         &self,
         request_id: u64,
@@ -1151,8 +1148,8 @@ impl IpcClient {
     /// push carrying the same `request_id`.
     ///
     /// # Errors
-    /// Returns [`IpcError`] when the daemon cannot be reached, predates MCP
-    /// registration, or rejects the request.
+    /// Returns [`IpcError`] when the daemon cannot be reached, speaks another
+    /// wire revision, or rejects the request.
     pub async fn run_mcp_registration(
         &self,
         profile: String,
@@ -1179,8 +1176,8 @@ impl IpcClient {
     /// daemon stored it.
     ///
     /// # Errors
-    /// Returns [`IpcError`] when the daemon cannot be reached, predates the
-    /// setting, or rejects the request.
+    /// Returns [`IpcError`] when the daemon cannot be reached, speaks another
+    /// wire revision, or rejects the request.
     pub async fn set_profile_enabled(
         &self,
         profile: String,
@@ -1201,8 +1198,8 @@ impl IpcClient {
     /// Reads every value a profile uses, with the layer each comes from.
     ///
     /// # Errors
-    /// Returns [`IpcError`] when the daemon cannot be reached, predates
-    /// profile details, or rejects the request.
+    /// Returns [`IpcError`] when the daemon cannot be reached, speaks another
+    /// wire revision, or rejects the request.
     pub async fn get_profile_detail(
         &self,
         profile: String,
@@ -1222,8 +1219,8 @@ impl IpcClient {
     /// Sets or puts back a profile's argv on the daemon's host.
     ///
     /// # Errors
-    /// Returns [`IpcError`] when the daemon cannot be reached, predates
-    /// profile details, or rejects the request.
+    /// Returns [`IpcError`] when the daemon cannot be reached, speaks another
+    /// wire revision, or rejects the request.
     pub async fn set_profile_command(
         &self,
         profile: String,
@@ -1244,8 +1241,8 @@ impl IpcClient {
     /// Reads the daemon's current approval settings.
     ///
     /// # Errors
-    /// Returns [`IpcError`] when the daemon cannot be reached, predates
-    /// approval settings, or this connection is not a registered approver.
+    /// Returns [`IpcError`] when the daemon cannot be reached, speaks another
+    /// wire revision, or this connection is not a registered approver.
     pub async fn get_approval_settings(&self) -> Result<ApprovalSettingsReply, IpcError> {
         match self
             .request(
@@ -1263,8 +1260,8 @@ impl IpcClient {
     /// the settings after the change.
     ///
     /// # Errors
-    /// Returns [`IpcError`] when the daemon cannot be reached, predates
-    /// approval settings, or rejects the request (an unrecognized tool name
+    /// Returns [`IpcError`] when the daemon cannot be reached, speaks another
+    /// wire revision, or rejects the request (an unrecognized tool name
     /// included).
     pub async fn set_auto_approve(
         &self,
@@ -1287,8 +1284,8 @@ impl IpcClient {
     /// the change.
     ///
     /// # Errors
-    /// Returns [`IpcError`] when the daemon cannot be reached, predates
-    /// approval settings, or rejects the request.
+    /// Returns [`IpcError`] when the daemon cannot be reached, speaks another
+    /// wire revision, or rejects the request.
     pub async fn set_plan_approval_required(
         &self,
         required: bool,
@@ -1308,8 +1305,8 @@ impl IpcClient {
     /// Lists every workspace that has tickets.
     ///
     /// # Errors
-    /// Returns [`IpcError`] when the daemon cannot be reached, predates the
-    /// ticket board, or rejects the request.
+    /// Returns [`IpcError`] when the daemon cannot be reached, speaks another
+    /// wire revision, or rejects the request.
     pub async fn list_ticket_workspaces(&self) -> Result<Vec<TicketWorkspaceInfo>, IpcError> {
         match self
             .request(
@@ -1327,8 +1324,8 @@ impl IpcClient {
     /// the tickets that match `state` and `milestone`, at most `limit` of them.
     ///
     /// # Errors
-    /// Returns [`IpcError`] when the daemon cannot be reached, predates the
-    /// ticket board, or rejects the request.
+    /// Returns [`IpcError`] when the daemon cannot be reached, speaks another
+    /// wire revision, or rejects the request.
     pub async fn list_tickets(
         &self,
         workspace_id: i64,
@@ -1351,8 +1348,8 @@ impl IpcClient {
     /// Reads one ticket of a workspace in full.
     ///
     /// # Errors
-    /// Returns [`IpcError`] when the daemon cannot be reached, predates the
-    /// ticket board, or rejects the request (an unknown ticket included).
+    /// Returns [`IpcError`] when the daemon cannot be reached, speaks another
+    /// wire revision, or rejects the request (an unknown ticket included).
     pub async fn get_ticket(&self, workspace_id: i64, ticket: u32) -> Result<TicketInfo, IpcError> {
         let message = ClientMessage::GetTicket {
             workspace_id: Some(workspace_id),
@@ -1387,7 +1384,8 @@ impl IpcClient {
     ///
     /// # Errors
     /// Returns [`IpcError`] when the open connection could not be written to.
-    /// A daemon too old to take them is not sent them, which is not an error.
+    /// A daemon of another wire revision is not sent them, which is not an
+    /// error: the next connection that opens to one of this build's is.
     pub async fn set_default_palettes(
         &self,
         _app: &impl GuiHost,
@@ -1537,10 +1535,24 @@ impl IpcClient {
 
     /// The wire revision the open connection settled on, `None` when none
     /// is open. Never a gate: the open generation's write is the only body
-    /// that weighs [`crate::pool_outcomes::protocol_revision_gate`].
+    /// that weighs [`speaks_this_wire`].
     #[cfg(test)]
     pub(crate) fn protocol_revision(&self) -> Option<u32> {
         self.shared.published().public().protocol_revision()
+    }
+
+    /// Refuses `message` as the open connection's write would, before anything
+    /// else is weighed: a daemon of another wire revision is written nothing.
+    /// With none open there is nothing to weigh against.
+    ///
+    /// # Errors
+    /// [`IpcError::Unsupported`] when the open connection's daemon speaks
+    /// another wire revision.
+    pub(crate) fn weigh(&self, message: &ClientMessage) -> Result<(), IpcError> {
+        match self.shared.open() {
+            Ok(generation) => wire::gate(message, generation.revision()).map_err(IpcError::from),
+            Err(_) => Ok(()),
+        }
     }
 
     /// Lists the windows, with the wire revision of the connection that
@@ -1548,7 +1560,8 @@ impl IpcClient {
     /// be another connection's.
     ///
     /// # Errors
-    /// As [`Self::list_windows`].
+    /// As [`Self::list_windows`]: [`IpcError::Unsupported`] from a daemon of
+    /// another wire revision, which is written nothing.
     pub(crate) async fn list_windows_with_revision(
         &self,
     ) -> Result<(Vec<WindowInfo>, Option<u32>), IpcError> {
@@ -1590,17 +1603,31 @@ impl IpcClient {
     /// Writes `message` on the open connection.
     ///
     /// # Errors
-    /// Returns [`IpcError`] when no connection is open, the connection's
-    /// revision cannot carry the message, or the write fails.
+    /// Returns [`IpcError`] when no connection is open, its daemon speaks
+    /// another wire revision, or the write fails.
     pub(crate) async fn send(&self, message: &ClientMessage) -> Result<(), IpcError> {
         self.shared.open()?.write(message).await
     }
 }
 
+/// The request [`IpcClient::close_window`] writes.
+pub(crate) fn close_window_message(window_id: &str, force: Option<bool>) -> ClientMessage {
+    ClientMessage::CloseWindow {
+        window_id: window_id.to_owned(),
+        force,
+    }
+}
+
+/// The request [`IpcClient::interrupt_window`] writes.
+pub(crate) fn interrupt_window_message(window_id: &str) -> ClientMessage {
+    ClientMessage::InterruptWindow {
+        window_id: window_id.to_owned(),
+    }
+}
+
 /// Registers a generation that is opening as the approver, and tells the
-/// WebView what the registration reported: the pending requests as a reset
-/// followed by one event each, or the refusal. Both come before the opening
-/// announces the daemon start. An answer read as `None` opens nothing.
+/// WebView what the registration reported, before the opening announces the
+/// daemon start. An answer read as `None` opens nothing and tells nothing.
 async fn register_approver(
     app: &impl GuiHost,
     generation: &Generation,
@@ -1614,52 +1641,71 @@ async fn register_approver(
         .await;
     reply.map(|answer| {
         let registration = registration_answer(&answer);
-        match (registration, answer) {
-            (Some(Registration::Accepted), Ok(Reply::ApproverRegistered(pending))) => {
-                app.emit_event(
-                    EVENT_APPROVAL_RESET,
-                    ApprovalResetPayload {
-                        requests: pending.clone(),
-                    },
-                );
-                for request in pending {
-                    app.emit_event(
-                        EVENT_APPROVAL_REQUESTED,
-                        ApprovalRequestedPayload { request },
-                    );
-                }
-            }
-            (Some(Registration::Refused), _) => app.emit_event(
-                EVENT_APPROVAL_REGISTRATION_REFUSED,
-                ApprovalRegistrationRefusedPayload {},
-            ),
-            _ => {}
+        if let Some(registration) = registration {
+            let pending = match answer {
+                Ok(Reply::ApproverRegistered(pending)) => pending,
+                _ => Vec::new(),
+            };
+            tell_registration(app, registration, pending);
         }
         registration
     })
 }
 
+/// The approval list a generation that opened as `registration` shows the
+/// WebView: the pending requests as a reset followed by one event each. A
+/// generation that is not the approver has none pending for it, so its list
+/// is reset to empty, ahead of a refusal's own news.
+fn tell_registration(
+    app: &impl GuiHost,
+    registration: Registration,
+    pending: Vec<ApprovalRequest>,
+) {
+    app.emit_event(
+        EVENT_APPROVAL_RESET,
+        ApprovalResetPayload {
+            requests: pending.clone(),
+        },
+    );
+    for request in pending {
+        app.emit_event(
+            EVENT_APPROVAL_REQUESTED,
+            ApprovalRequestedPayload { request },
+        );
+    }
+    if registration == Registration::Refused {
+        app.emit_event(
+            EVENT_APPROVAL_REGISTRATION_REFUSED,
+            ApprovalRegistrationRefusedPayload {},
+        );
+    }
+}
+
 /// The registration the daemon's answer to `RegisterApprover` settles on;
-/// `None` is an answer that opens nothing.
+/// `None` is an answer that opens nothing. A daemon of another wire revision
+/// is not let register, and opens unregistered.
 fn registration_answer(answer: &Result<Reply, IpcError>) -> Option<Registration> {
     match answer {
         Ok(Reply::ApproverRegistered(_)) => Some(Registration::Accepted),
         Err(IpcError::Rejected { code, .. }) if code == "auth_failed" => {
             Some(Registration::Refused)
         }
+        Err(IpcError::Unsupported { .. }) => Some(Registration::Unregistered),
         _ => None,
     }
 }
 
 /// The revision and boot a generation's probe settles on: the daemon's
-/// answer, or the baseline for a daemon built before the probe existed.
-/// `None` is any other outcome, which leaves the generation unopened.
+/// answer, or [`UNNAMED_REVISION`] for a daemon that does not know the probe
+/// or answers it in a shape this build cannot read -- either speaks another
+/// wire. `None` is any other outcome, which leaves the generation unopened.
 fn revision_probe_outcome(result: &Result<Reply, IpcError>) -> Option<(u32, Option<StatusBoot>)> {
     match result {
         Ok(Reply::ProtocolRevision { revision, boot }) => Some((*revision, *boot)),
         Err(IpcError::Rejected { code, .. }) if code == ERROR_CODE_UNKNOWN_TYPE => {
-            Some((PROTOCOL_REVISION_BASELINE, None))
+            Some((UNNAMED_REVISION, None))
         }
+        Err(IpcError::UnexpectedReply) => Some((UNNAMED_REVISION, None)),
         _ => None,
     }
 }
@@ -1864,20 +1910,19 @@ async fn request_decide_approval(
 }
 
 /// How a frame reaches a connection: weighed against the connection's
-/// settled revision first, so a frame its peer cannot parse is never written.
+/// settled revision first, so a daemon of another wire is never written
+/// anything but the revision probe.
 mod wire {
     use tokio::io::{AsyncWrite, AsyncWriteExt};
-    use yagura_protocol::{
-        ClientMessage, encode_correlated_client_message, frame_encode, required_protocol_revision,
-    };
+    use yagura_protocol::{ClientMessage, encode_correlated_client_message, frame_encode};
 
-    use super::{IpcError, client_message_wire_tag};
-    use crate::pool_outcomes::{ProtocolRevisionGate, protocol_revision_gate};
+    use super::{IpcError, client_message_wire_tag, speaks_this_wire};
 
     /// Why a frame was not written whole.
     #[derive(Debug)]
     pub(super) enum WriteError {
-        /// The settled revision cannot carry the frame: no byte was written.
+        /// The connection's daemon speaks another wire revision, or has not
+        /// told which yet: no byte was written.
         Refused { request_type: String },
         /// The write failed. Only the generation reads the error itself.
         Io(std::io::Error),
@@ -1892,19 +1937,16 @@ mod wire {
         }
     }
 
-    /// Refuses `message` when `revision` -- the one the connection settled,
-    /// `None` before it did -- cannot carry it.
+    /// Refuses `message` unless `revision` -- the one the connection settled,
+    /// `None` before it did -- is this build's wire. The revision probe is
+    /// what settles it, so the probe alone is never refused.
     pub(super) fn gate(message: &ClientMessage, revision: Option<u32>) -> Result<(), WriteError> {
-        if protocol_revision_gate(revision, required_protocol_revision(message))
-            == ProtocolRevisionGate::Refused
-        {
-            return Err(WriteError::Refused {
-                request_type: client_message_wire_tag(&encode_correlated_client_message(
-                    message, None,
-                )),
-            });
+        if matches!(message, ClientMessage::GetProtocolRevision) || speaks_this_wire(revision) {
+            return Ok(());
         }
-        Ok(())
+        Err(WriteError::Refused {
+            request_type: client_message_wire_tag(&encode_correlated_client_message(message, None)),
+        })
     }
 
     /// Writes `message` as one frame carrying `correlation_id`, unless
@@ -1977,7 +2019,7 @@ mod tests {
     use crate::host::fake::FakeHost;
     use crate::window_record::WindowRecord;
 
-    /// A message the baseline revision cannot carry.
+    /// A message a window connection writes once it is open.
     fn frame_gated_message() -> ClientMessage {
         ClientMessage::SetVisible { visible: true }
     }
@@ -2001,14 +2043,50 @@ mod tests {
         (outcome, written)
     }
 
+    // Before the revision is settled only the probe goes out; after it, only a
+    // daemon of this build's own wire revision is written anything else.
     #[tokio::test]
     async fn a_frame_the_settled_revision_cannot_carry_is_refused_before_any_byte_is_written() {
-        let (outcome, written) = send_and_collect(&frame_gated_message(), None).await;
+        let messages = [
+            ClientMessage::ListWindows,
+            frame_gated_message(),
+            ClientMessage::ClearChatRoom {
+                room_id: "main".to_owned(),
+            },
+        ];
+        let revisions = [
+            None,
+            Some(yagura_protocol::PROTOCOL_REVISION - 1),
+            Some(yagura_protocol::PROTOCOL_REVISION + 1),
+        ];
+        let mut written_anyway = Vec::new();
+        for message in &messages {
+            for settled in revisions {
+                let (outcome, written) = send_and_collect(message, settled).await;
+                if !matches!(outcome, Err(IpcError::Unsupported { .. })) || !written.is_empty() {
+                    written_anyway.push(format!(
+                        "{message:?} at {settled:?}: {outcome:?}, {} bytes",
+                        written.len()
+                    ));
+                }
+            }
+        }
         assert!(
-            matches!(outcome, Err(IpcError::Unsupported { .. })),
-            "got {outcome:?}"
+            written_anyway.is_empty(),
+            "not refused unwritten:\n{}",
+            written_anyway.join("\n")
         );
-        assert!(written.is_empty(), "wrote {written:?}");
+
+        let probe = ClientMessage::GetProtocolRevision;
+        let (outcome, written) = send_and_collect(&probe, None).await;
+        assert!(
+            outcome.is_ok(),
+            "the probe before a revision: got {outcome:?}"
+        );
+        assert_eq!(
+            written,
+            yagura_protocol::frame_encode(&yagura_protocol::encode_client_message(&probe))
+        );
     }
 
     #[tokio::test]
@@ -2021,24 +2099,6 @@ mod tests {
             written,
             yagura_protocol::frame_encode(&yagura_protocol::encode_client_message(&message))
         );
-    }
-
-    #[tokio::test]
-    async fn a_daemon_one_revision_behind_is_not_sent_a_room_removal() {
-        let message = ClientMessage::ClearChatRoom {
-            room_id: "main".to_owned(),
-        };
-        let behind = Some(yagura_protocol::CHAT_ROOM_REMOVAL_MIN_REVISION - 1);
-        let (refused, written) = send_and_collect(&message, behind).await;
-        assert!(
-            matches!(refused, Err(IpcError::Unsupported { .. })),
-            "got {refused:?}"
-        );
-        assert!(written.is_empty(), "wrote {written:?}");
-
-        let level = Some(yagura_protocol::CHAT_ROOM_REMOVAL_MIN_REVISION);
-        let (sent, _) = send_and_collect(&message, level).await;
-        assert!(sent.is_ok(), "got {sent:?}");
     }
 
     #[test]
@@ -2362,42 +2422,6 @@ mod tests {
         );
         assert_eq!(sent, ClientMessage::GetDaemonHealth);
         assert_eq!(health.expect("get_daemon_health").problems.len(), 1);
-
-        let (older, sent) = tokio::join!(
-            client.get_daemon_health(&host),
-            answer(
-                &generation,
-                &mut peer,
-                PendingKind::GetDaemonHealth,
-                Err(rejected(ERROR_CODE_UNKNOWN_TYPE))
-            )
-        );
-        assert_eq!(sent, ClientMessage::GetDaemonHealth);
-        assert!(
-            older
-                .expect("an older daemon has no problem to report")
-                .problems
-                .is_empty()
-        );
-
-        let (behind, sent) = tokio::join!(
-            client.get_daemon_health(&host),
-            answer(
-                &generation,
-                &mut peer,
-                PendingKind::GetDaemonHealth,
-                Err(IpcError::Unsupported {
-                    request_type: "get_daemon_health".to_owned()
-                })
-            )
-        );
-        assert_eq!(sent, ClientMessage::GetDaemonHealth);
-        assert!(
-            behind
-                .expect("a daemon whose revision cannot carry the request has no problem to report")
-                .problems
-                .is_empty()
-        );
 
         let (updated, sent) = tokio::join!(
             client.update_window_layout("w1", "{}".to_owned()),
@@ -3052,12 +3076,26 @@ mod tests {
         assert_eq!(outcome.map(|(revision, _)| revision), Some(9));
     }
 
+    // A daemon that does not know the probe, or answers it in a shape this
+    // build cannot read, speaks another wire revision: the probe settles one
+    // that is not this build's, so the generation opens as incompatible.
     #[test]
-    fn a_daemon_that_does_not_know_the_probe_is_credited_with_the_baseline() {
-        let outcome = revision_probe_outcome(&Err(rejected(ERROR_CODE_UNKNOWN_TYPE)));
-        assert_eq!(
-            outcome.map(|(revision, _)| revision),
-            Some(PROTOCOL_REVISION_BASELINE)
+    fn a_daemon_that_does_not_know_the_probe_or_cannot_be_read_settles_another_revision() {
+        let mut settled_ours_or_nothing = Vec::new();
+        for answer in [
+            Err(rejected(ERROR_CODE_UNKNOWN_TYPE)),
+            Err(IpcError::UnexpectedReply),
+        ] {
+            let outcome = revision_probe_outcome(&answer);
+            if !matches!(outcome, Some((revision, _)) if revision != yagura_protocol::PROTOCOL_REVISION)
+            {
+                settled_ours_or_nothing.push(format!("{answer:?} settles {outcome:?}"));
+            }
+        }
+        assert!(
+            settled_ours_or_nothing.is_empty(),
+            "not another revision:\n{}",
+            settled_ours_or_nothing.join("\n")
         );
     }
 
@@ -3069,9 +3107,10 @@ mod tests {
 
     #[tokio::test]
     async fn a_refused_frame_names_the_request_it_refused() {
-        let (outcome, _) = send_and_collect(&frame_gated_message(), None).await;
+        let settled = Some(yagura_protocol::PROTOCOL_REVISION - 1);
+        let (outcome, _) = send_and_collect(&ClientMessage::ListWindows, settled).await;
         assert!(
-            matches!(&outcome, Err(IpcError::Unsupported { request_type }) if request_type == "set_visible"),
+            matches!(&outcome, Err(IpcError::Unsupported { request_type }) if request_type == "list_windows"),
             "got {outcome:?}"
         );
     }

@@ -2,18 +2,18 @@
 //! the daemon sends something, against a host that records and a daemon that
 //! is scripted.
 
-use std::sync::atomic::{AtomicUsize, Ordering};
-
 use serde_json::json;
 use yagura_protocol::{
-    ClientMessage, CursorShape, CursorState, ViewState, WindowStatus, WithdrawReason,
+    ClientMessage, CursorShape, CursorState, PROTOCOL_REVISION, ViewState, WindowStatus,
+    WithdrawReason,
 };
 use yagura_test_support::ipc::reply_within;
 
 use super::*;
-use crate::events::EVENT_CHAT_HISTORY_CLEARED;
+use crate::events::{EVENT_APPROVAL_RESET, EVENT_CHAT_HISTORY_CLEARED};
 use crate::host::fake::{
-    FakeHost, Reaction, ScriptedDaemon, SentFrame, attached, error_frame, protocol_revision_at,
+    FakeHost, Reaction, ScriptedDaemon, SentFrame, announced, attached, error_frame,
+    protocol_revision_at,
 };
 use crate::window_record::WindowRecord;
 
@@ -55,15 +55,15 @@ fn idle_generation() -> (
     (generation, far, reader)
 }
 
-/// The last wire revision whose daemon answers without a correlation id.
-const BEFORE_CORRELATION_IDS: u32 = yagura_protocol::CORRELATION_ID_MIN_REVISION - 1;
+/// A wire revision one behind this build's.
+const OLDER_REVISION: u32 = PROTOCOL_REVISION - 1;
 
-/// What a daemon of [`BEFORE_CORRELATION_IDS`] answers of its own accord, as
-/// such a daemon answers it: under no correlation id.
+/// What a daemon of [`OLDER_REVISION`] answers of its own accord, as such a
+/// daemon answers it: under no correlation id.
 fn older_housekeeping(request: &ClientMessage) -> Option<Reaction> {
     match request {
         ClientMessage::GetProtocolRevision => Reaction::sends(vec![SentFrame::Unkeyed(
-            protocol_revision_at(BEFORE_CORRELATION_IDS, None),
+            protocol_revision_at(OLDER_REVISION, None),
         )]),
         ClientMessage::RegisterApprover => Reaction::sends(vec![SentFrame::Unkeyed(
             DaemonMessage::ApproverRegistered {
@@ -316,8 +316,7 @@ async fn a_reply_reaches_the_request_waiting_for_it_through_the_reader() {
 }
 
 #[tokio::test]
-async fn an_error_answers_the_request_of_a_control_connection_under_its_key_or_from_an_older_daemon()
- {
+async fn an_error_answers_the_request_of_a_control_connection_under_its_key() {
     let daemon = ScriptedDaemon::new(|request| match request {
         ClientMessage::ListWindows => Reaction::sends(vec![
             SentFrame::Unkeyed(error_frame("window_not_found")),
@@ -343,26 +342,6 @@ async fn an_error_answers_the_request_of_a_control_connection_under_its_key_or_f
         is_rejected_with(&deleted, "plan_not_found"),
         "got {deleted:?}"
     );
-
-    // A daemon that returns no key: the one request in flight is what any
-    // error answers.
-    let older = ScriptedDaemon::new(|request| match request {
-        ClientMessage::ListWindows => {
-            Reaction::sends(vec![SentFrame::Unkeyed(error_frame("window_not_found"))])
-        }
-        _ => older_housekeeping(request),
-    });
-    let host = FakeHost::served_by("control-error-older", &older).await;
-    let client = Arc::new(IpcClient::new());
-    client.connect(&host).await.expect("connect");
-
-    let listed = client.list_windows().await;
-
-    assert_eq!(client.protocol_revision(), Some(BEFORE_CORRELATION_IDS));
-    assert!(
-        is_rejected_with(&listed, "window_not_found"),
-        "got {listed:?}"
-    );
 }
 
 #[tokio::test]
@@ -377,36 +356,18 @@ async fn an_internal_error_answers_the_attach_it_arrives_during() {
         is_rejected_with(&outcome, ERROR_CODE_INTERNAL),
         "got {outcome:?}"
     );
-
-    // A daemon that returns no key leaves the error to be weighed by its
-    // code, and `internal` is one the attach itself can produce.
-    let older = ScriptedDaemon::new(|request| match request {
-        ClientMessage::AttachView { .. } => {
-            Reaction::sends(vec![SentFrame::Unkeyed(error_frame(ERROR_CODE_INTERNAL))])
-        }
-        _ => older_housekeeping(request),
-    });
-    let host = FakeHost::served_by("attach-internal-older", &older).await;
-    let client = Arc::new(IpcClient::new_window(Arc::new(WindowRecord::new())));
-
-    let outcome = reply_within("the attach", client.attach_window(&host, "w1", None)).await;
-
-    assert!(
-        is_rejected_with(&outcome, ERROR_CODE_INTERNAL),
-        "an older daemon: got {outcome:?}"
-    );
 }
 
-// Only a daemon that returns no key leaves an error to be weighed by its
-// code; a newer one names the request an error answers.
+// A daemon of this build's revision names the request an error answers, so
+// an error under no key answers no request.
 #[tokio::test]
 async fn an_error_frame_that_names_no_request_does_not_answer_the_attach() {
     let daemon = ScriptedDaemon::new(|request| match request {
         ClientMessage::AttachView { .. } => Reaction::sends(vec![
             SentFrame::Unkeyed(error_frame("invalid_argument")),
-            SentFrame::Unkeyed(attached(false)),
+            SentFrame::Answer(attached(false)),
         ]),
-        _ => older_housekeeping(request),
+        _ => None,
     });
     let host = FakeHost::served_by("attach-other-error", &daemon).await;
     let client = Arc::new(IpcClient::new_window(Arc::new(WindowRecord::new())));
@@ -421,7 +382,7 @@ async fn an_error_frame_that_names_no_request_does_not_answer_the_attach() {
         ClientMessage::AttachView { .. } => {
             Reaction::sends(vec![SentFrame::Unkeyed(error_frame(ERROR_CODE_SUPERSEDED))])
         }
-        _ => older_housekeeping(request),
+        _ => None,
     });
     let host = FakeHost::served_by("attach-superseded", &daemon).await;
     let client = Arc::new(IpcClient::new_window(Arc::new(WindowRecord::new())));
@@ -472,48 +433,127 @@ async fn a_superseded_error_ends_the_window_session_and_it_does_not_reconnect() 
     );
 }
 
-// A daemon before the interrupt outcome existed answers an interrupt in a
-// shape this build cannot read. The answer still ends the request it answers,
-// by its tag, and the connection goes on.
+/// What a control client did against one daemon: whether its connect opened,
+/// the approval resets and the compatibility its announcements carried, whether
+/// a window list was refused unwritten, what the daemon heard, and whether a
+/// generation is still open at the end.
+#[derive(Debug, Clone, PartialEq)]
+struct ControlSeen {
+    opened: bool,
+    resets: Vec<serde_json::Value>,
+    compatible: Vec<serde_json::Value>,
+    list_refused: bool,
+    received: Vec<ClientMessage>,
+    open_at_end: bool,
+}
+
+/// Connects a control client to `daemon`, asks it for the window list, and
+/// reports what happened.
+async fn control_against(
+    tag: &str,
+    daemon: &ScriptedDaemon,
+) -> (FakeHost, Arc<IpcClient>, ControlSeen) {
+    let host = FakeHost::served_by(tag, daemon).await;
+    let client = Arc::new(IpcClient::new());
+    let opened = reply_within("the connect", client.connect(&host))
+        .await
+        .is_ok();
+    let listed = reply_within("the window list", client.list_windows()).await;
+    let events = host.take_events();
+    let seen = ControlSeen {
+        opened,
+        resets: events
+            .iter()
+            .filter(|event| event.name == EVENT_APPROVAL_RESET)
+            .map(|event| event.payload.clone())
+            .collect(),
+        compatible: announced(&events)
+            .iter()
+            .map(|payload| payload["compatible"].clone())
+            .collect(),
+        list_refused: matches!(listed, Err(IpcError::Unsupported { .. })),
+        received: daemon.received(),
+        open_at_end: client.protocol_revision().is_some(),
+    };
+    (host, client, seen)
+}
+
+/// A daemon that answers the revision probe with `answer` and lists no
+/// windows.
+fn probe_answered_with(answer: SentFrame) -> ScriptedDaemon {
+    ScriptedDaemon::new(move |request| match request {
+        ClientMessage::GetProtocolRevision => Reaction::sends(vec![answer.clone()]),
+        ClientMessage::ListWindows => Reaction::reply(DaemonMessage::WindowList {
+            windows: Vec::new(),
+        }),
+        _ => None,
+    })
+}
+
 #[tokio::test]
-async fn an_answer_an_older_daemon_sends_in_a_shape_this_build_cannot_read_ends_the_request_it_answers()
+async fn a_control_connection_to_a_daemon_of_another_wire_revision_opens_writing_nothing_but_the_probe()
  {
-    let lists = AtomicUsize::new(0);
-    let daemon = ScriptedDaemon::new(move |request| match request {
-        ClientMessage::InterruptWindow { .. } => Reaction::sends(vec![
-            // Unreadable, and not the kind awaited: no answer at all.
-            SentFrame::Unreadable {
-                tag: "plan_deleted",
-                keyed: false,
-            },
-            SentFrame::Raw(br#"{"type":"window_interrupted","window_id":"w1"}"#.to_vec()),
-        ]),
-        ClientMessage::ListWindows => match lists.fetch_add(1, Ordering::SeqCst) {
-            // The list is what the caller reads, and it is missing.
-            0 => Reaction::sends(vec![SentFrame::Unreadable {
-                tag: "window_list",
-                keyed: false,
-            }]),
-            _ => Reaction::sends(vec![SentFrame::Unkeyed(DaemonMessage::WindowList {
-                windows: Vec::new(),
-            })]),
-        },
+    let older = ScriptedDaemon::new(|request| match request {
+        ClientMessage::ListWindows => Reaction::reply(DaemonMessage::WindowList {
+            windows: Vec::new(),
+        }),
         _ => older_housekeeping(request),
     });
-    let host = FakeHost::served_by("older-unreadable-answer", &daemon).await;
-    let client = Arc::new(IpcClient::new());
-    client.connect(&host).await.expect("connect");
-    assert_eq!(client.protocol_revision(), Some(BEFORE_CORRELATION_IDS));
+    let (host, _client, older_seen) = control_against("incompatible-older", &older).await;
+    let mut seen = vec![("older, unkeyed", older_seen)];
+    // A daemon that does not know the probe, or answers it in a shape this
+    // build cannot read, is no more one this build can talk to.
+    for (label, tag, answer) in [
+        (
+            "newer, keyed",
+            "incompatible-newer",
+            SentFrame::Answer(protocol_revision_at(PROTOCOL_REVISION + 1, None)),
+        ),
+        (
+            "probe unknown",
+            "incompatible-unknown",
+            SentFrame::Unkeyed(error_frame("unknown_type")),
+        ),
+        (
+            "unreadable, unkeyed",
+            "incompatible-unreadable",
+            SentFrame::Unreadable {
+                tag: "protocol_revision",
+                keyed: false,
+            },
+        ),
+        (
+            "unreadable, keyed",
+            "incompatible-unreadable-keyed",
+            SentFrame::Unreadable {
+                tag: "protocol_revision",
+                keyed: true,
+            },
+        ),
+    ] {
+        let daemon = probe_answered_with(answer);
+        let (_host, _client, outcome) = control_against(tag, &daemon).await;
+        seen.push((label, outcome));
+    }
 
-    let interrupted = reply_within("the interrupt", client.interrupt_window("w1")).await;
-    let unreadable = reply_within("the unreadable list", client.list_windows()).await;
-    let listed = reply_within("the next list", client.list_windows()).await;
+    let incompatible = ControlSeen {
+        opened: true,
+        resets: vec![json!({ "requests": [] })],
+        compatible: vec![json!(false)],
+        list_refused: true,
+        received: vec![ClientMessage::GetProtocolRevision],
+        open_at_end: true,
+    };
+    let expected: Vec<_> = seen
+        .iter()
+        .map(|(label, _)| (*label, incompatible.clone()))
+        .collect();
+    assert_eq!(seen, expected);
 
-    assert!(interrupted.is_ok(), "got {interrupted:?}");
-    assert!(
-        matches!(unreadable, Err(IpcError::UnexpectedReply)),
-        "got {unreadable:?}"
-    );
-    assert_eq!(listed.expect("the same connection answers"), Vec::new());
-    assert_eq!(daemon.probes(), 1, "the connection goes on");
+    // With no daemon left on the endpoint, the end of that generation starts
+    // one: a retry alone would find nothing to reach.
+    host.set_endpoint(Some(FakeHost::new("incompatible-gone").endpoint_name()));
+    older.hang_up();
+    host.wait_for_spawns(1).await;
+    assert_eq!(host.spawn_count(), 1);
 }

@@ -13,7 +13,7 @@ use yagura_protocol::{ClientMessage, StatusBoot};
 use super::super::{
     ConnectMode, Connection, DaemonStart, IpcError, MadeStart, MadeStartReached, PendingKind,
     SentDefaultPalettes, attach_restoring, lock_blocking, register_approver, restore_taken,
-    revision_probe_outcome, revision_taken,
+    revision_probe_outcome, revision_taken, speaks_this_wire,
 };
 use super::connect::{connect_after_spawn, connect_once, connect_retrying};
 use super::generation::{DaemonConnection, Generation, StepReply};
@@ -685,13 +685,14 @@ impl<H: GuiHost> Owner<H> {
     }
 
     fn announce(&mut self, generation: u64) {
-        if !self.generations.contains_key(&generation) {
+        let Some(announced) = self.generations.get(&generation) else {
             return;
-        }
+        };
+        let compatible = speaks_this_wire(announced.revision());
         let boot = self.boots.get(&generation).copied().flatten();
         let announcement = {
             let mut start = lock_blocking(&self.shared.daemon_start);
-            let (next, announcement) = start.first_settled(boot, self.shared.kind, true);
+            let (next, announcement) = start.first_settled(boot, self.shared.kind, compatible);
             *start = next;
             announcement
         };

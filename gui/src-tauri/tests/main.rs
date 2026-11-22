@@ -8,7 +8,6 @@ mod input_bounds;
 mod instance_resolution;
 mod keymap_file;
 mod lib_constants;
-mod protocol_revision_gate;
 mod recovery_disengage;
 mod recovery_state_machine;
 mod rejection_bridge;

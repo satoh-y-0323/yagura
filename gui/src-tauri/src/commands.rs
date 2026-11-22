@@ -146,9 +146,9 @@ pub enum WindowOpenFailure {
         /// The human-readable English reason.
         message: String,
     },
-    /// The connected daemon has not settled on a wire revision this request
-    /// needs, so the GUI's Rust layer refused to write it rather than send a
-    /// frame the daemon may not know how to parse.
+    /// The connected daemon speaks another wire revision than this build, so
+    /// the GUI's Rust layer did not send the request: no byte of it was
+    /// written.
     Unsupported {
         /// The wire tag of the request that was refused, one of
         /// [`yagura_protocol::client_message_wire_tags`].
@@ -945,7 +945,7 @@ pub async fn delete_chat_room(
 ///
 /// # Errors
 /// Returns a human-readable message when the daemon cannot be reached,
-/// predates the plan ledger, or rejects the request.
+/// speaks another wire revision, or rejects the request.
 #[tauri::command(rename_all = "snake_case")]
 pub async fn list_plans(
     app: AppHandle,
@@ -1095,7 +1095,7 @@ pub async fn mark_plan_seen(
 ///
 /// # Errors
 /// Returns a human-readable message when the daemon cannot be reached,
-/// predates the ticket board, or rejects the request.
+/// speaks another wire revision, or rejects the request.
 #[tauri::command(rename_all = "snake_case")]
 pub async fn list_ticket_workspaces(
     app: AppHandle,
@@ -1152,7 +1152,7 @@ pub async fn get_ticket(
 ///
 /// # Errors
 /// Returns a human-readable message when the daemon cannot be reached,
-/// predates the plan ledger, or rejects the request.
+/// speaks another wire revision, or rejects the request.
 #[tauri::command(rename_all = "snake_case")]
 pub async fn list_roles(
     app: AppHandle,
@@ -1190,7 +1190,7 @@ pub async fn save_roles(
 ///
 /// # Errors
 /// Returns a human-readable message when `profile` is not a valid profile
-/// id, the daemon cannot be reached, predates model aliases, or rejects the
+/// id, the daemon cannot be reached, speaks another wire revision, or rejects the
 /// request.
 #[tauri::command(rename_all = "snake_case")]
 pub async fn list_model_choices(
@@ -1213,7 +1213,7 @@ pub async fn list_model_choices(
 ///
 /// # Errors
 /// Returns a human-readable message when `profile` is not a valid profile
-/// id, the daemon cannot be reached, predates model aliases, or rejects the
+/// id, the daemon cannot be reached, speaks another wire revision, or rejects the
 /// aliases.
 #[tauri::command(rename_all = "snake_case")]
 pub async fn save_model_aliases(
@@ -1233,7 +1233,7 @@ pub async fn save_model_aliases(
 ///
 /// # Errors
 /// Returns a human-readable message when `profile` is not a valid profile
-/// id, the daemon cannot be reached, predates the setting, or rejects the
+/// id, the daemon cannot be reached, speaks another wire revision, or rejects the
 /// request.
 #[tauri::command(rename_all = "snake_case")]
 pub async fn set_profile_enabled(
@@ -1252,7 +1252,7 @@ pub async fn set_profile_enabled(
 ///
 /// # Errors
 /// Returns a human-readable message when `profile` is not a valid profile
-/// id, the daemon cannot be reached, predates profile details, or rejects the
+/// id, the daemon cannot be reached, speaks another wire revision, or rejects the
 /// request.
 #[tauri::command(rename_all = "snake_case")]
 pub async fn get_profile_detail(
@@ -1271,7 +1271,7 @@ pub async fn get_profile_detail(
 ///
 /// # Errors
 /// Returns a human-readable message when `profile` is not a valid profile
-/// id, the daemon cannot be reached, predates profile details, or rejects the
+/// id, the daemon cannot be reached, speaks another wire revision, or rejects the
 /// request.
 #[tauri::command(rename_all = "snake_case")]
 pub async fn set_profile_command(
@@ -1290,7 +1290,7 @@ pub async fn set_profile_command(
 ///
 /// # Errors
 /// Returns a human-readable message when the daemon cannot be reached,
-/// predates approval settings, or this connection is not a registered
+/// speaks another wire revision, or this connection is not a registered
 /// approver.
 #[tauri::command(rename_all = "snake_case")]
 pub async fn get_approval_settings(
@@ -1309,7 +1309,7 @@ pub async fn get_approval_settings(
 ///
 /// # Errors
 /// Returns a human-readable message when `tool` is not a valid tool name, the
-/// daemon cannot be reached, predates approval settings, or rejects the
+/// daemon cannot be reached, speaks another wire revision, or rejects the
 /// request.
 #[tauri::command(rename_all = "snake_case")]
 pub async fn set_auto_approve(
@@ -1329,7 +1329,7 @@ pub async fn set_auto_approve(
 ///
 /// # Errors
 /// Returns a human-readable message when the daemon cannot be reached,
-/// predates approval settings, or rejects the request.
+/// speaks another wire revision, or rejects the request.
 #[tauri::command(rename_all = "snake_case")]
 pub async fn set_plan_approval_required(
     app: AppHandle,
@@ -1349,7 +1349,7 @@ pub async fn set_plan_approval_required(
 ///
 /// # Errors
 /// Returns a human-readable message when the daemon cannot be reached,
-/// predates MCP registration, or rejects the request.
+/// speaks another wire revision, or rejects the request.
 #[tauri::command(rename_all = "snake_case")]
 pub async fn list_mcp_registrations(
     app: AppHandle,
@@ -1370,7 +1370,7 @@ pub async fn list_mcp_registrations(
 /// # Errors
 /// Returns a human-readable message when `profile` is not a valid profile
 /// id, `action` is not one of `register`, `update` or `remove`, the daemon
-/// cannot be reached, predates MCP registration, or rejects the request.
+/// cannot be reached, speaks another wire revision, or rejects the request.
 #[tauri::command(rename_all = "snake_case")]
 pub async fn run_mcp_registration(
     app: AppHandle,

@@ -33,7 +33,9 @@ use crate::commands::{
 use crate::events::DaemonConnectedPayload;
 use crate::frame_mailbox::FrameMailbox;
 use crate::host::GuiHost;
-use crate::ipc_client::{ERROR_CODE_SUPERSEDED, IpcClient, IpcError};
+use crate::ipc_client::{
+    ERROR_CODE_SUPERSEDED, IpcClient, IpcError, close_window_message, interrupt_window_message,
+};
 use crate::pool_outcomes::{
     ApprovalSyncOutcome, CloseOutcome, DecideApprovalOutcome, map_close_result,
     map_decide_approval_result, map_sync_approvals_result,
@@ -334,11 +336,18 @@ impl ConnectionPool {
     /// The caller establishes the control connection first. Comes with the
     /// wire revision of the connection that answered the list.
     ///
+    /// A daemon of another wire revision is written nothing, so none of its
+    /// windows can be shown: its refusal is read as an empty list, with no
+    /// revision, and every record goes.
+    ///
     /// # Errors
     /// Returns [`IpcError`] when the round trip fails.
     pub(crate) async fn listed_windows(&self) -> Result<(Vec<WindowInfo>, Option<u32>), IpcError> {
         let _listing = self.listing.lock().await;
-        let (windows, revision) = self.control.list_windows_with_revision().await?;
+        let (windows, revision) = match self.control.list_windows_with_revision().await {
+            Err(IpcError::Unsupported { .. }) => (Vec::new(), None),
+            listed => listed?,
+        };
         self.track(&windows).await;
         Ok((windows, revision))
     }
@@ -975,7 +984,8 @@ impl ConnectionPool {
         window_id: &str,
         force: Option<bool>,
     ) -> Result<(), IpcError> {
-        self.require_approver_registered(app, ControlConnect::Existing)
+        let request = close_window_message(window_id, force);
+        self.require_approver_registered(app, ControlConnect::Existing, &request)
             .await?
             .close_window(window_id, force)
             .await
@@ -997,8 +1007,9 @@ impl ConnectionPool {
     ///
     /// # Errors
     /// Returns [`IpcError`] when the daemon rejects the request for any
-    /// reason other than the window not existing, answers off-contract, or
-    /// this connection has not registered as an approver yet
+    /// reason other than the window not existing, answers off-contract,
+    /// speaks another wire revision ([`IpcError::Unsupported`]), or this
+    /// connection has not registered as an approver yet
     /// ([`IpcError::ApproverNotRegistered`]).
     pub async fn close_window(
         &self,
@@ -1019,15 +1030,17 @@ impl ConnectionPool {
     /// unregistered.
     ///
     /// # Errors
-    /// Returns [`IpcError`] when the daemon cannot be reached, the window
-    /// does not exist, or this connection has not registered as an approver
-    /// yet ([`IpcError::ApproverNotRegistered`]).
+    /// Returns [`IpcError`] when the daemon cannot be reached, speaks another
+    /// wire revision ([`IpcError::Unsupported`]), the window does not exist,
+    /// or this connection has not registered as an approver yet
+    /// ([`IpcError::ApproverNotRegistered`]).
     pub async fn interrupt_window(
         &self,
         app: &impl GuiHost,
         window_id: &str,
     ) -> Result<(), IpcError> {
-        self.require_approver_registered(app, ControlConnect::Spawn)
+        let request = interrupt_window_message(window_id);
+        self.require_approver_registered(app, ControlConnect::Spawn, &request)
             .await?
             .interrupt_window(window_id)
             .await
@@ -1091,15 +1104,21 @@ impl ConnectionPool {
     /// starts a daemon when none runs, whereas tidying the view up does not.
     ///
     /// # Errors
-    /// Returns [`IpcError`] when the daemon cannot be reached, and
+    /// Returns [`IpcError`] when the daemon cannot be reached,
+    /// [`IpcError::Unsupported`] when it speaks another wire revision, which
+    /// `request` would never be written to, and
     /// [`IpcError::ApproverNotRegistered`] when the open connection's
     /// registration was refused.
     async fn require_approver_registered(
         &self,
         app: &impl GuiHost,
         connect: ControlConnect,
+        request: &ClientMessage,
     ) -> Result<&Arc<IpcClient>, IpcError> {
         let control = self.control_connected(app, connect).await?;
+        // Such a daemon was never asked to register, so its refusal is the
+        // wire's, not the registration's.
+        control.weigh(request)?;
         // Opening settles the registration, so a connection that opened with
         // it refused stays unregistered until another generation opens.
         if !control.is_approver_registered() {

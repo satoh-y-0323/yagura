@@ -16,8 +16,8 @@ use crate::connection_pool::ConnectionPool;
 use crate::events::{EVENT_DAEMON_CONNECTED, EVENT_WINDOW_LINK};
 use crate::host::fake::{
     FakeHost, Link, Reaction, RecordedEvent, ScriptedDaemon, SentFrame, announced, attach_pane,
-    attached, brief, connected, connection, error_frame, probes_answered_in, protocol_revision,
-    sample_palette, text,
+    attached, brief, connected, connection, error_frame, probes_answered_at, probes_answered_in,
+    protocol_revision, sample_palette, text,
 };
 
 const BOOT_A: StatusBoot = StatusBoot { origin: 7, seq: 1 };
@@ -541,6 +541,35 @@ async fn a_lost_connection_is_restored_and_the_window_attached_again_as_it_was()
 }
 
 #[tokio::test]
+async fn a_window_reconnect_that_reaches_a_daemon_of_another_wire_revision_attaches_nothing_and_is_lost()
+ {
+    let probe = probes_answered_at(vec![
+        yagura_protocol::PROTOCOL_REVISION,
+        yagura_protocol::PROTOCOL_REVISION + 1,
+    ]);
+    let daemon = ScriptedDaemon::new(move |request| match request {
+        ClientMessage::AttachView { .. } => Reaction::reply(attached(false)),
+        _ => probe(request),
+    });
+    let (host, _pool, _client) = attached_window(&daemon, "restore-incompatible").await;
+    assert_eq!(host.next_link("w1").await.state, "attached");
+    assert_eq!(daemon.received_at_least(3).await.len(), 3);
+
+    daemon.hang_up();
+
+    let connecting = host.next_link("w1").await;
+    let ended = host.next_link("w1").await;
+    assert_eq!(connecting.state, "connecting");
+    assert_eq!(ended.state, "lost", "got {ended:?}");
+    let received = daemon.received();
+    assert_eq!(
+        connection(&received, 1),
+        [ClientMessage::GetProtocolRevision],
+        "a daemon of another wire revision is sent nothing but the probe"
+    );
+}
+
+#[tokio::test]
 async fn reattaching_to_a_child_that_exited_without_a_code_reports_the_code_as_unknown() {
     let attaches = Arc::new(AtomicUsize::new(0));
     let daemon = ScriptedDaemon::new({
@@ -860,6 +889,19 @@ async fn a_refused_registration_is_reported_once_per_generation() {
     assert!(refused_with(&first, "auth_failed"), "got {first:?}");
     assert!(refused_with(&second, "auth_failed"), "got {second:?}");
     let events = host.take_events();
+    // A refused generation is no approver, so the queue the WebView holds is
+    // emptied before it hears of the refusal.
+    let emptied = events.iter().position(|event| {
+        event.name == EVENT_APPROVAL_RESET && event.payload == json!({ "requests": [] })
+    });
+    let refused = events
+        .iter()
+        .position(|event| event.name == EVENT_APPROVAL_REGISTRATION_REFUSED);
+    assert!(
+        matches!((emptied, refused), (Some(emptied), Some(refused)) if emptied < refused),
+        "an empty reset before the refusal: {:?}",
+        events.iter().map(|event| &event.name).collect::<Vec<_>>()
+    );
     let refusals: Vec<_> = events
         .iter()
         .filter(|event| event.name == EVENT_APPROVAL_REGISTRATION_REFUSED)

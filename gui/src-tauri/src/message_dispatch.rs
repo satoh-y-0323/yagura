@@ -215,6 +215,11 @@ fn is_superseded(message: &DaemonMessage) -> bool {
 /// waiting. Returns whether the generation must end: the frame came under
 /// that request's key.
 ///
+/// The revision probe is the exception: an answer to it this build cannot
+/// read says the daemon speaks another wire, so under the probe's key it
+/// answers the probe as [`IpcError::UnexpectedReply`] and the generation goes
+/// on.
+///
 /// From a daemon that returns no correlation id, a frame whose tag is the
 /// kind of the answer awaited still ends the request: as success when the
 /// answer carries nothing this client reads, as [`IpcError::UnexpectedReply`]
@@ -225,6 +230,17 @@ fn settle_unreadable(generation: &Generation, label: &FrameLabel) -> bool {
         return false;
     };
     match label.correlation_id {
+        Some(key)
+            if key == awaiting.correlation_id
+                && awaiting.kind == PendingKind::GetProtocolRevision =>
+        {
+            eprintln!(
+                "warning: the daemon answered the revision probe with a frame this build cannot read ({})",
+                known_tag_name(label)
+            );
+            generation.settle(Some(key), awaiting.kind, Err(IpcError::UnexpectedReply));
+            false
+        }
         Some(key) => key == awaiting.correlation_id,
         None if answers_carry_correlation_ids(generation.revision()) => false,
         None => {

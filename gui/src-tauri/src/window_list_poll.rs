@@ -57,10 +57,15 @@ async fn poll_window_list(pool: &ConnectionPool, app: &impl GuiHost) {
 #[cfg(test)]
 mod tests {
     use serde_json::json;
-    use yagura_protocol::{ClientMessage, DaemonMessage, PROTOCOL_REVISION, WindowStatus};
+    use yagura_protocol::{
+        ClientMessage, DaemonMessage, InterruptOutcome, PROTOCOL_REVISION, WindowStatus,
+    };
 
     use super::*;
-    use crate::host::fake::{FakeHost, Reaction, ScriptedDaemon, window_info};
+    use crate::host::fake::{
+        FakeHost, Reaction, ScriptedDaemon, attached, protocol_revision_at, window_info,
+    };
+    use crate::ipc_client::IpcError;
 
     /// A daemon with a running window and an exited one, that lets windows
     /// attach.
@@ -126,5 +131,66 @@ mod tests {
 
         assert_eq!(published["windows"], listed_windows());
         polling.abort();
+    }
+
+    #[tokio::test]
+    async fn a_poll_of_a_daemon_of_another_wire_revision_lists_no_windows_and_writes_nothing_but_the_probe()
+     {
+        let daemon = ScriptedDaemon::new(|request| match request {
+            ClientMessage::GetProtocolRevision => {
+                Reaction::reply(protocol_revision_at(PROTOCOL_REVISION + 1, None))
+            }
+            ClientMessage::ListWindows => Reaction::reply(DaemonMessage::WindowList {
+                windows: vec![window_info("w1", WindowStatus::Running)],
+            }),
+            ClientMessage::AttachView { .. } => Reaction::reply(attached(false)),
+            ClientMessage::CloseWindow { window_id, .. } => {
+                Reaction::reply(DaemonMessage::WindowClosed {
+                    window_id: window_id.clone(),
+                })
+            }
+            ClientMessage::InterruptWindow { window_id } => {
+                Reaction::reply(DaemonMessage::WindowInterrupted {
+                    window_id: window_id.clone(),
+                    outcome: InterruptOutcome::Interrupted,
+                })
+            }
+            _ => None,
+        });
+        let host = FakeHost::served_by("poll-incompatible", &daemon).await;
+        let pool = ConnectionPool::new();
+        pool.track_window_list(&[window_info("w1", WindowStatus::Running)])
+            .await;
+
+        poll_window_list(&pool, &host).await;
+
+        // The window recorded before belongs to no daemon this build can talk
+        // to, so the list it is shown is empty and its record goes.
+        let published = host.next_event(EVENT_WINDOW_LIST).await;
+        let connected = pool.window_ids().await;
+        let attach = pool.attach_window(&host, "w1", None).await;
+        // A close or interrupt fails for the daemon's wire revision, not for
+        // a registration it was never asked for.
+        let closed = pool.close_window(&host, "w1", None).await;
+        let interrupted = pool.interrupt_window(&host, "w1").await;
+        assert_eq!(
+            (
+                published["windows"].clone(),
+                connected,
+                matches!(&attach, Err(IpcError::WindowNotAttached { window_id }) if window_id == "w1"),
+                matches!(closed, Err(IpcError::Unsupported { .. })),
+                matches!(interrupted, Err(IpcError::Unsupported { .. })),
+                daemon.received(),
+            ),
+            (
+                json!([]),
+                Vec::<String>::new(),
+                true,
+                true,
+                true,
+                vec![ClientMessage::GetProtocolRevision],
+            ),
+            "attach: {attach:?}, closed: {closed:?}, interrupted: {interrupted:?}"
+        );
     }
 }

@@ -14,7 +14,9 @@ use yagura_gui::commands::{
 };
 use yagura_gui::ipc_client::IpcError;
 use yagura_gui::message_dispatch::rejection_for;
-use yagura_protocol::{DaemonMessage, validate_open_window_exclusivity, validate_window_name};
+use yagura_protocol::{
+    DaemonMessage, client_message_wire_tags, validate_open_window_exclusivity, validate_window_name,
+};
 
 /// The rejection an error frame carrying these values turns into.
 fn rejection_from_frame(
@@ -214,6 +216,43 @@ fn serialized_local_failure_carries_exactly_what_it_was_given() {
         serde_json::json!({
             "kind": "local",
             "message": "cwd is not a directory",
+        })
+    );
+}
+
+/// The wire tag of a request the GUI refuses unwritten, read back from the
+/// protocol crate's own table rather than introduced as a new word here.
+fn refused_request_tag() -> &'static str {
+    client_message_wire_tags()
+        .iter()
+        .copied()
+        .find(|tag| *tag == "open_window_from_profile")
+        .expect("the refused request's tag must be one the protocol already names")
+}
+
+#[test]
+fn a_gate_refusal_reaches_the_form_as_its_own_kind_of_failure() {
+    assert_eq!(
+        window_open_failure(IpcError::Unsupported {
+            request_type: refused_request_tag().to_owned(),
+        }),
+        WindowOpenFailure::Unsupported {
+            request_type: refused_request_tag().to_owned(),
+        }
+    );
+}
+
+#[test]
+fn a_serialized_gate_refusal_carries_exactly_what_it_was_given() {
+    let serialized = serde_json::to_value(window_open_failure(IpcError::Unsupported {
+        request_type: refused_request_tag().to_owned(),
+    }))
+    .unwrap();
+    assert_eq!(
+        serialized,
+        serde_json::json!({
+            "kind": "unsupported",
+            "request_type": "open_window_from_profile",
         })
     );
 }

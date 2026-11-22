@@ -199,7 +199,7 @@ pub(crate) type Take = fn(&Result<Reply, IpcError>) -> TakenAnswer;
 /// What a request on a generation brought back.
 #[derive(Debug)]
 pub(crate) enum StepReply<T> {
-    /// What the daemon, or the revision gate, answered.
+    /// What the daemon, or the wire gate, answered.
     Answered(T),
     /// No answer: the connection failed under the request or the generation
     /// ended, and the generation's end tells how.
@@ -248,10 +248,11 @@ struct Slots {
 
 impl Slots {
     /// Records a refusal an opening step met before its request was written,
-    /// as the step's answer. Called while the generation has not ended.
-    fn record_refusal(&mut self, take: Option<Take>) {
-        if take.is_some() {
-            self.taken = Some(TakenAnswer::Refused);
+    /// read as the step reads any answer. Called while the generation has not
+    /// ended.
+    fn record_refusal(&mut self, take: Option<Take>, refusal: &IpcError) {
+        if let Some(take) = take {
+            self.taken = Some(take(&Err(refusal.duplicate())));
         }
     }
 }
@@ -362,8 +363,8 @@ impl Generation {
     ///
     /// # Errors
     /// [`IpcError::NotConnected`] when the generation ended before the frame
-    /// was written, [`IpcError::Unsupported`] when its revision cannot carry
-    /// the frame, [`IpcError::Write`] when the write failed and
+    /// was written, [`IpcError::Unsupported`] when its daemon speaks another
+    /// wire revision, [`IpcError::Write`] when the write failed and
     /// [`IpcError::ConnectionLost`] when the generation ended after the frame
     /// was written; otherwise what the daemon answered.
     pub(crate) async fn request(
@@ -377,7 +378,7 @@ impl Generation {
     /// [`Generation::request`], telling an answer from none: the failures of
     /// the connection and of the generation's end come back as
     /// [`StepReply::Unanswered`]. With `take` the request is an opening step:
-    /// the answer it is given, the revision gate's refusal included, is
+    /// the answer it is given, the wire gate's refusal included, is
     /// recorded as the step's answer in the same step that hands it over, so
     /// the generation's end carries it.
     pub(crate) async fn request_step(
@@ -396,8 +397,9 @@ impl Generation {
             }
             let revision = self.revision();
             if let Err(refusal) = wire::gate(message, revision) {
-                slots.record_refusal(take);
-                return StepReply::Answered(Err(refusal.into()));
+                let refusal = IpcError::from(refusal);
+                slots.record_refusal(take, &refusal);
+                return StepReply::Answered(Err(refusal));
             }
             slots.pending = Some(Pending {
                 kind,
@@ -435,7 +437,7 @@ impl Generation {
             if slots.ended {
                 return StepReply::Unanswered(IpcError::NotConnected);
             }
-            slots.record_refusal(take);
+            slots.record_refusal(take, &refusal);
         }
         StepReply::Answered(refusal)
     }
@@ -444,7 +446,7 @@ impl Generation {
     ///
     /// # Errors
     /// [`IpcError::NotConnected`] when the generation ended,
-    /// [`IpcError::Unsupported`] when its revision cannot carry the frame,
+    /// [`IpcError::Unsupported`] when its daemon speaks another wire revision,
     /// and [`IpcError::Write`] when the write failed.
     pub(crate) async fn write(&self, message: &ClientMessage) -> Result<(), IpcError> {
         self.write_frame(message, None, self.revision()).await

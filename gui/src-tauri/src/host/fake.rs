@@ -175,6 +175,27 @@ pub(crate) fn probes_answered_in(
     }
 }
 
+/// A script part that answers the `n`th revision probe, counted across
+/// connections from 0, as a daemon speaking `revisions[n]` does, and every
+/// probe after the last one at the last revision.
+pub(crate) fn probes_answered_at(
+    revisions: Vec<u32>,
+) -> impl Fn(&ClientMessage) -> Option<Reaction> + Send + Sync + 'static {
+    let probes = AtomicUsize::new(0);
+    move |request| match request {
+        ClientMessage::GetProtocolRevision => {
+            let nth = probes.fetch_add(1, Ordering::SeqCst);
+            let revision = revisions
+                .get(nth)
+                .or(revisions.last())
+                .copied()
+                .expect("a revision to answer with");
+            Reaction::reply(protocol_revision_at(revision, None))
+        }
+        _ => None,
+    }
+}
+
 /// The daemon-connected payload the WebView reads: all keys always present.
 pub(crate) fn connected(boot: Option<StatusBoot>, spawn_warning: Option<&str>) -> Value {
     json!({ "status_boot": boot, "spawn_warning": spawn_warning, "compatible": true })
