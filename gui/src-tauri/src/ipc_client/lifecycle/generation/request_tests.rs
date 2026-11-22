@@ -41,7 +41,7 @@ async fn a_decision_the_daemon_answers_after_a_day_settles_with_that_answer() {
     };
 
     let (answered, ()) = tokio::join!(
-        generation.request(&decision, PendingKind::DecideApproval),
+        generation.request_step(&decision, PendingKind::DecideApproval, None),
         async {
             yagura_test_support::ipc::reply_within("the request", reached.notified()).await;
             tokio::time::sleep(A_DAY).await;
@@ -49,9 +49,11 @@ async fn a_decision_the_daemon_answers_after_a_day_settles_with_that_answer() {
         }
     );
 
-    let decided = map_decide_approval_result(answered.and_then(|reply| match reply {
-        Reply::Done => Ok(()),
-        _ => Err(IpcError::UnexpectedReply),
+    let decided = map_decide_approval_result(answered.map(|answer| {
+        answer.and_then(|reply| match reply {
+            Reply::Done => Ok(()),
+            _ => Err(IpcError::UnexpectedReply),
+        })
     }));
     assert!(
         matches!(decided, Ok(DecideApprovalOutcome::Decided)),

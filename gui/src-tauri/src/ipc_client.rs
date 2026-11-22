@@ -47,8 +47,10 @@ use crate::window_record::{LinkState, RecordState, SentSize};
 
 mod lifecycle;
 
-pub(crate) use lifecycle::{BoxedRead, EndKind, Generation, Interrupt, ReaderLink, Settled};
-use lifecycle::{ClientKind, Registration, Shared, StepReply, Take, TakenAnswer, Until};
+pub(crate) use lifecycle::{
+    BoxedRead, EndKind, Generation, Interrupt, ReaderLink, Settled, StepReply,
+};
+use lifecycle::{ClientKind, Registration, Shared, Take, TakenAnswer, Until};
 
 /// A client-side connection to the daemon's endpoint.
 pub(crate) type Connection = <PlatformIpc as IpcTransport>::ClientConnection;
@@ -385,6 +387,7 @@ impl DaemonStart {
         &self,
         boot: Option<StatusBoot>,
         kind: ClientKind,
+        compatible: bool,
     ) -> (Self, Option<DaemonConnectedPayload>) {
         let mut next = self.clone();
         if kind != ClientKind::Control {
@@ -421,6 +424,7 @@ impl DaemonStart {
         let payload = DaemonConnectedPayload {
             status_boot: boot,
             spawn_warning,
+            compatible,
         };
         next.last = Some(payload.clone());
         (next, Some(payload))
@@ -708,18 +712,16 @@ impl IpcClient {
     /// an approver may call this meaningfully; an unregistered connection
     /// gets `invalid_state` back from the daemon.
     ///
-    /// # Errors
-    /// Returns [`IpcError`] when the daemon cannot be reached or the request
-    /// is no longer pending (`approval_not_pending`).
-    pub async fn decide_approval(&self, request_id: &str, approved: bool) -> Result<(), IpcError> {
-        let message = ClientMessage::ApprovalDecision {
-            request_id: request_id.to_owned(),
-            approved,
-        };
-        match self.request(&message, PendingKind::DecideApproval).await? {
-            Reply::Done => Ok(()),
-            _ => Err(IpcError::UnexpectedReply),
-        }
+    /// Returns what the daemon answered, or why it gave no answer: with no
+    /// open connection, a failed write or a connection lost before the
+    /// answer, the daemon may or may not have applied the decision.
+    pub(crate) async fn decide_approval(
+        &self,
+        request_id: &str,
+        approved: bool,
+    ) -> StepReply<Result<(), IpcError>> {
+        let generation = self.shared.open().ok();
+        request_decide_approval(generation.as_deref(), request_id, approved).await
     }
 
     /// Renames a window and returns the name as the daemon stored it, which
@@ -1835,6 +1837,31 @@ async fn request_attach(
     })
 }
 
+/// Settles one pending approval request on `generation`, the open one if
+/// there is one. With none, nothing is written and the answer is
+/// [`IpcError::NotConnected`] as no answer.
+async fn request_decide_approval(
+    generation: Option<&Generation>,
+    request_id: &str,
+    approved: bool,
+) -> StepReply<Result<(), IpcError>> {
+    let Some(generation) = generation else {
+        return StepReply::Unanswered(IpcError::NotConnected);
+    };
+    let message = ClientMessage::ApprovalDecision {
+        request_id: request_id.to_owned(),
+        approved,
+    };
+    generation
+        .request_step(&message, PendingKind::DecideApproval, None)
+        .await
+        .map(|answer| match answer {
+            Ok(Reply::Done) => Ok(()),
+            Ok(_) => Err(IpcError::UnexpectedReply),
+            Err(error) => Err(error),
+        })
+}
+
 /// How a frame reaches a connection: weighed against the connection's
 /// settled revision first, so a frame its peer cannot parse is never written.
 mod wire {
@@ -2447,6 +2474,7 @@ mod tests {
                 approved: false,
             }
         );
+        let decided = decided.into_result();
         assert!(decided.is_ok(), "got {decided:?}");
     }
 
@@ -2488,6 +2516,7 @@ mod tests {
                 Err(rejected("approval_not_pending"))
             )
         );
+        let decided = decided.into_result();
         assert!(refused(&decided, "approval_not_pending"), "got {decided:?}");
     }
 

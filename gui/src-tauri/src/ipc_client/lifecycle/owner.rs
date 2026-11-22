@@ -691,7 +691,7 @@ impl<H: GuiHost> Owner<H> {
         let boot = self.boots.get(&generation).copied().flatten();
         let announcement = {
             let mut start = lock_blocking(&self.shared.daemon_start);
-            let (next, announcement) = start.first_settled(boot, self.shared.kind);
+            let (next, announcement) = start.first_settled(boot, self.shared.kind, true);
             *start = next;
             announcement
         };

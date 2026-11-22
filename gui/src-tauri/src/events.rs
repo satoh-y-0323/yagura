@@ -151,7 +151,7 @@ pub struct WindowLinkPayload {
     pub epoch: u64,
 }
 
-/// Payload of [`EVENT_DAEMON_CONNECTED`]. Both keys are always present.
+/// Payload of [`EVENT_DAEMON_CONNECTED`]. All keys are always present.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct DaemonConnectedPayload {
     /// The boot the daemon answered with; `None` from a daemon that names
@@ -162,6 +162,8 @@ pub struct DaemonConnectedPayload {
     /// (`DetachedSpawn::used_fallback`), so it names the consequence. On Unix
     /// `setsid` detachment has no such fallback, so it is never set there.
     pub spawn_warning: Option<String>,
+    /// Whether the daemon speaks the wire revision this build speaks.
+    pub compatible: bool,
 }
 
 /// Payload of [`EVENT_STATUS`].

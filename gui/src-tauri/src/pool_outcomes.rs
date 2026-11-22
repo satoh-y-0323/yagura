@@ -7,7 +7,7 @@
 use serde::Serialize;
 use yagura_protocol::{ApprovalRequest, PROTOCOL_REVISION_BASELINE};
 
-use crate::ipc_client::IpcError;
+use crate::ipc_client::{IpcError, StepReply};
 
 /// Whether a frame that needs `required_revision` may be written to a
 /// connection whose peer settled on `settled_revision`.
@@ -65,21 +65,26 @@ pub enum DecideApprovalOutcome {
     Unconfirmed,
 }
 
-/// Maps the result of one `decide_approval` round trip onto
+/// Maps the reply to one `decide_approval` round trip onto
 /// [`DecideApprovalOutcome`]. A pure function, kept separate from
 /// [`crate::connection_pool::ConnectionPool::decide_approval`] (which needs a
 /// live connection) so the mapping itself is unit-testable.
 pub(crate) fn map_decide_approval_result(
-    result: Result<(), IpcError>,
+    reply: StepReply<Result<(), IpcError>>,
 ) -> Result<DecideApprovalOutcome, IpcError> {
-    match result {
-        Ok(()) => Ok(DecideApprovalOutcome::Decided),
-        Err(IpcError::Rejected { code, .. }) if code == "approval_not_pending" => {
+    match reply {
+        StepReply::Answered(Ok(())) => Ok(DecideApprovalOutcome::Decided),
+        StepReply::Answered(Err(IpcError::Rejected { code, .. }))
+            if code == "approval_not_pending" =>
+        {
             Ok(DecideApprovalOutcome::NotPending)
         }
+        StepReply::Answered(Err(error)) => Err(error),
         // Written, whole or in part, so the daemon may have applied it.
-        Err(IpcError::Write | IpcError::ConnectionLost) => Ok(DecideApprovalOutcome::Unconfirmed),
-        Err(error) => Err(error),
+        StepReply::Unanswered(IpcError::Write | IpcError::ConnectionLost) => {
+            Ok(DecideApprovalOutcome::Unconfirmed)
+        }
+        StepReply::Unanswered(error) => Err(error),
     }
 }
 
@@ -169,28 +174,28 @@ mod tests {
     #[test]
     fn map_decide_approval_result_maps_ok_to_decided() {
         assert!(matches!(
-            map_decide_approval_result(Ok(())),
+            map_decide_approval_result(StepReply::Answered(Ok(()))),
             Ok(DecideApprovalOutcome::Decided)
         ));
     }
 
     #[test]
     fn map_decide_approval_result_maps_an_approval_not_pending_rejection_to_not_pending() {
-        let result = map_decide_approval_result(Err(IpcError::Rejected {
+        let result = map_decide_approval_result(StepReply::Answered(Err(IpcError::Rejected {
             code: "approval_not_pending".to_owned(),
             message: String::new(),
             rejected_argument: None,
-        }));
+        })));
         assert!(matches!(result, Ok(DecideApprovalOutcome::NotPending)));
     }
 
     #[test]
     fn map_decide_approval_result_passes_through_every_other_rejection_as_an_error() {
-        let result = map_decide_approval_result(Err(IpcError::Rejected {
+        let result = map_decide_approval_result(StepReply::Answered(Err(IpcError::Rejected {
             code: "invalid_state".to_owned(),
             message: String::new(),
             rejected_argument: None,
-        }));
+        })));
         assert!(matches!(
             result,
             Err(IpcError::Rejected { code, .. }) if code == "invalid_state"
@@ -206,14 +211,14 @@ mod tests {
             let debug = format!("{written:?}");
             assert!(
                 matches!(
-                    map_decide_approval_result(Err(written)),
+                    map_decide_approval_result(StepReply::Unanswered(written)),
                     Ok(DecideApprovalOutcome::Unconfirmed)
                 ),
                 "expected Unconfirmed for {debug}"
             );
         }
         assert!(matches!(
-            map_decide_approval_result(Err(IpcError::NotConnected)),
+            map_decide_approval_result(StepReply::Unanswered(IpcError::NotConnected)),
             Err(IpcError::NotConnected)
         ));
     }

@@ -175,9 +175,9 @@ pub(crate) fn probes_answered_in(
     }
 }
 
-/// The daemon-connected payload the WebView reads: both keys always present.
+/// The daemon-connected payload the WebView reads: all keys always present.
 pub(crate) fn connected(boot: Option<StatusBoot>, spawn_warning: Option<&str>) -> Value {
-    json!({ "status_boot": boot, "spawn_warning": spawn_warning })
+    json!({ "status_boot": boot, "spawn_warning": spawn_warning, "compatible": true })
 }
 
 /// The payloads of the daemon-connected events among `events`, oldest first.
