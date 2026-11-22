@@ -7,7 +7,11 @@
  * is accepted as `unknown` and validated here; no other module has to trust
  * the boundary.
  */
-import { formatPathForDisplay, sanitizeForDisplay } from '../display/untrusted-text';
+import {
+  caughtValueText,
+  formatPathForDisplay,
+  sanitizeForDisplay,
+} from '../display/untrusted-text';
 import { parseLayoutJson, type LayoutV1 } from '../session/restore-model';
 import type { ApprovalRequesterKind, WithdrawReason } from '../session/approval-types';
 import type {
@@ -1710,23 +1714,6 @@ function namesFailureKind(value: unknown): value is UntrustedRecord {
 }
 
 /**
- * A value that claims no tag, as reason text. Objects are encoded rather than
- * stringified, which would flatten every one of them to the same word.
- */
-function failureText(value: unknown): string {
-  if (typeof value === 'object' && value !== null) {
-    try {
-      return JSON.stringify(value) ?? '';
-    } catch {
-      // A circular reference or a BigInt makes JSON.stringify throw. Losing
-      // the text beats losing the failure.
-      return '';
-    }
-  }
-  return String(value);
-}
-
-/**
  * Validates the value a command's rejection carries.
  *
  * Several kinds of value arrive here: the tagged shapes `CommandFailure`
@@ -1741,11 +1728,8 @@ function failureText(value: unknown): string {
  */
 export function narrowCommandFailure(value: unknown): CommandFailure {
   const context = 'command.failure';
-  if (value instanceof Error) {
-    return { kind: 'bare', text: value.message };
-  }
-  if (!namesFailureKind(value)) {
-    return { kind: 'bare', text: failureText(value) };
+  if (value instanceof Error || !namesFailureKind(value)) {
+    return { kind: 'bare', text: caughtValueText(value) };
   }
   const kind = requireString(value, 'kind', context);
   if (kind === 'rejected') {

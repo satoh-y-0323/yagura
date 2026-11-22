@@ -42,6 +42,7 @@ import {
   describeWindowRow as renderDescribeWindowRow,
   EXTERNAL_TEXT_MAX_CODE_POINTS,
   foldExternalText,
+  foldedFailureReason,
   type PickerWindowRowFacts,
   type WindowHeaderFacts,
 } from './i18n/render';
@@ -225,7 +226,12 @@ export function describeThemeName(name: string): string {
  * facade: folding external text is not message resolution, but the boundary
  * contract keeps `i18n/` imports to this one module.
  */
-export { describeOperationFailure, EXTERNAL_TEXT_MAX_CODE_POINTS, foldExternalText };
+export {
+  describeOperationFailure,
+  EXTERNAL_TEXT_MAX_CODE_POINTS,
+  foldExternalText,
+  foldedFailureReason,
+};
 
 /**
  * Builds the notice shown when a window opened but its detection definition

@@ -6,6 +6,7 @@ import type {
   DetectedStatusView,
   WindowStatus,
 } from '../ipc/session-boundary';
+import { caughtValueText } from '../display/untrusted-text';
 import type { ActionBlockReason } from '../keymap/action-availability';
 // Type-only: the gate itself reaches this module through `ui-messages.ts`, so
 // a value import here would close that loop at runtime.
@@ -371,26 +372,6 @@ export function describeThemeName(messages: Messages, name: string): string {
 export const EXTERNAL_TEXT_MAX_CODE_POINTS = 200;
 
 /**
- * The rejected value as text. Tauri commands reject with a plain string;
- * anything else reached the WebView as decoded JSON and can be encoded back.
- */
-function detailText(detail: unknown): string {
-  if (typeof detail === 'string') {
-    return detail;
-  }
-  if (detail instanceof Error) {
-    return detail.message;
-  }
-  try {
-    return JSON.stringify(detail) ?? '';
-  } catch {
-    // A circular reference or a BigInt makes JSON.stringify throw. The notice
-    // has to survive that: losing the detail beats losing the whole notice.
-    return '';
-  }
-}
-
-/**
  * Reduces text that came from outside the WebView to one display line: line
  * breaks, control characters and non-breaking whitespace are folded into
  * single spaces, the ends are trimmed, and the rest is capped so that one
@@ -412,6 +393,18 @@ export function foldExternalText(text: string): string {
 }
 
 /**
+ * The one display line a caught value is told by: its text
+ * (`caughtValueText`, `display/untrusted-text.ts`) folded and capped by
+ * {@link foldExternalText}. Every line that shows why an operation failed
+ * goes through here, since the reason may carry the daemon's words.
+ *
+ * @param error the value a failed operation threw or rejected with
+ */
+export function foldedFailureReason(error: unknown): string {
+  return foldExternalText(caughtValueText(error));
+}
+
+/**
  * Builds the notice shown when a window operation fails: the summary, and the
  * detail the daemon reported (an approval-gate rejection, for one) when
  * anything survives {@link foldExternalText}.
@@ -420,7 +413,7 @@ export function foldExternalText(text: string): string {
  * @param detail the rejected value the operation failed with
  */
 export function describeOperationFailure(summary: string, detail: unknown): string {
-  const folded = foldExternalText(detailText(detail));
+  const folded = foldedFailureReason(detail);
   return folded === '' ? summary : `${summary}: ${folded}`;
 }
 

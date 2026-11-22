@@ -1,6 +1,6 @@
 /**
  * How a failed command is read once it is caught: the failure behind the
- * caught value, the one sentence it is told by, and which line the user sees.
+ * caught value and which line the user sees.
  *
  * The line is picked by the failure's kind alone. A request the gate refused
  * for the daemon's wire revision is caused by the version difference, so
@@ -8,6 +8,7 @@
  * failure is the operation's own and shows the operation's line.
  */
 
+import { caughtValueText } from './display/untrusted-text';
 import { CommandFailureError, type CommandFailure } from './ipc/session-boundary';
 import { banners } from './ui-messages';
 
@@ -22,19 +23,7 @@ export function commandFailureOf(error: unknown): CommandFailure {
   if (error instanceof CommandFailureError) {
     return error.failure;
   }
-  return { kind: 'bare', text: commandFailureText(error) };
-}
-
-/**
- * The one sentence a caught value is told by.
- *
- * @param error the value a failed operation rejected with
- */
-export function commandFailureText(error: unknown): string {
-  if (error instanceof CommandFailureError) {
-    return error.failure.text;
-  }
-  return error instanceof Error ? error.message : String(error);
+  return { kind: 'bare', text: caughtValueText(error) };
 }
 
 /**

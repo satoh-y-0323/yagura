@@ -12,7 +12,7 @@
 import { describe, it, expect, vi } from 'vitest';
 
 import { CommandFailureError, type CommandFailure } from './ipc/session-boundary';
-import { banners, describeOperationFailure } from './ui-messages';
+import { banners, describeOperationFailure, foldedFailureReason } from './ui-messages';
 
 /** The module under test, loaded where each test reads it. */
 async function model(): Promise<typeof import('./command-failure-model')> {
@@ -57,6 +57,7 @@ describe('commandFailureOf: the failure behind a caught value', () => {
     ['a plain Error', new Error('the bridge broke'), 'the bridge broke'],
     ['a thrown string', 'unknown command', 'unknown command'],
     ['a thrown number', 42, '42'],
+    ['a thrown object', { code: 'EPERM' }, '{"code":"EPERM"}'],
   ])('reads %s as text alone', async (_label, caught, text) => {
     const { commandFailureOf } = await model();
 
@@ -64,13 +65,11 @@ describe('commandFailureOf: the failure behind a caught value', () => {
   });
 });
 
-describe('commandFailureText: the one sentence a caught value is told by', () => {
+describe('foldedFailureReason: the one display line a caught value is told by', () => {
   it.each([REJECTED, EMPTY_REASON, LOCAL, UNSUPPORTED, BARE].map((f) => [f.kind, f] as const))(
     'is the sentence the %s failure carries',
-    async (_kind, failure) => {
-      const { commandFailureText } = await model();
-
-      expect(commandFailureText(new CommandFailureError(failure))).toBe(failure.text);
+    (_kind, failure) => {
+      expect(foldedFailureReason(new CommandFailureError(failure))).toBe(failure.text);
     }
   );
 
@@ -78,10 +77,19 @@ describe('commandFailureText: the one sentence a caught value is told by', () =>
     ['a plain Error', new Error('the bridge broke'), 'the bridge broke'],
     ['a thrown string', 'unknown command', 'unknown command'],
     ['a thrown number', 42, '42'],
-  ])('is the text of %s', async (_label, caught, text) => {
-    const { commandFailureText } = await model();
+    ['a thrown object', { code: 'EPERM' }, '{"code":"EPERM"}'],
+  ])('is the text of %s', (_label, caught, text) => {
+    expect(foldedFailureReason(caught)).toBe(text);
+  });
 
-    expect(commandFailureText(caught)).toBe(text);
+  it.each<[string, unknown]>([
+    [
+      'a daemon rejection',
+      new CommandFailureError({ ...REJECTED, text: 'first line\r\nsecond\u001b[31m\u202Eline' }),
+    ],
+    ['a thrown string', 'first line\r\nsecond\u001b[31m\u202Eline'],
+  ])('folds the line breaks and control characters of %s', (_label, caught) => {
+    expect(foldedFailureReason(caught)).toBe('first line second [31m line');
   });
 });
 

@@ -989,8 +989,10 @@ pub async fn list_plans(
     app: AppHandle,
     pool: State<'_, Arc<ConnectionPool>>,
 ) -> Result<PlanListReply, CommandFailure> {
-    let plans = pool.list_plans(&app).await?;
-    Ok(PlanListReply { plans })
+    pool.list_plans(&app)
+        .await
+        .map(|plans| PlanListReply { plans })
+        .map_err(CommandFailure::from)
 }
 
 /// Reads one plan in full.
@@ -1143,8 +1145,10 @@ pub async fn list_ticket_workspaces(
     app: AppHandle,
     pool: State<'_, Arc<ConnectionPool>>,
 ) -> Result<TicketWorkspaceListReply, CommandFailure> {
-    let workspaces = pool.list_ticket_workspaces(&app).await?;
-    Ok(TicketWorkspaceListReply { workspaces })
+    pool.list_ticket_workspaces(&app)
+        .await
+        .map(|workspaces| TicketWorkspaceListReply { workspaces })
+        .map_err(CommandFailure::from)
 }
 
 /// Reads one workspace's ticket settings, milestones and the summaries of
@@ -1815,9 +1819,19 @@ impl From<IpcError> for CommandFailure {
                 rejected_argument,
             },
             IpcError::Unsupported { request_type } => FailureKind::Unsupported { request_type },
-            // Every other variant is a refusal this Rust layer raised on its own,
-            // so no `error.code` stands behind it.
-            _ => FailureKind::Local,
+            // Refusals this Rust layer raised on its own: no `error.code` stands
+            // behind them. Named one by one so a new variant has to be classified.
+            IpcError::EndpointName(_)
+            | IpcError::NotConnected
+            | IpcError::ConnectionLost
+            | IpcError::ConnectTimeout
+            | IpcError::UnexpectedReply
+            | IpcError::Write
+            | IpcError::DaemonNotFound
+            | IpcError::DaemonSpawn
+            | IpcError::InvalidArgument(_)
+            | IpcError::WindowNotAttached { .. }
+            | IpcError::ApproverNotRegistered => FailureKind::Local,
         };
         Self { kind, text }
     }

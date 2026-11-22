@@ -95,3 +95,38 @@ const PATH_KEPT_CONTROLS: ReadonlySet<string> = new Set();
 export function formatPathForDisplay(value: string): string {
   return formatMultilineText(value, MAX_DISPLAY_FIELD_CHARS, PATH_KEPT_CONTROLS);
 }
+
+/**
+ * The text a caught value is told by, before any display treatment. A string
+ * is its own text and an `Error` is its message (a `CommandFailureError`'s
+ * message is its failure's text). Any other object is encoded, since `String`
+ * would flatten every one of them to the same word, and is empty when it
+ * cannot be encoded. `undefined` carries nothing to show, so it is empty;
+ * anything else is `String` of it.
+ * @param value the value an operation threw or rejected with
+ */
+export function caughtValueText(value: unknown): string {
+  switch (typeof value) {
+    case 'string':
+      return value;
+    case 'undefined':
+      return '';
+    case 'object':
+      return value === null ? 'null' : objectText(value);
+    default:
+      return String(value);
+  }
+}
+
+function objectText(value: object): string {
+  if (value instanceof Error) {
+    return value.message;
+  }
+  try {
+    return JSON.stringify(value) ?? '';
+  } catch {
+    // A circular reference or a BigInt makes JSON.stringify throw. Losing the
+    // text beats losing the failure.
+    return '';
+  }
+}

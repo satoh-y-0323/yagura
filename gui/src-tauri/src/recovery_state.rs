@@ -87,8 +87,9 @@ pub struct RecoveryState {
     config_failure: Option<ClientConfigFailure>,
     startup_env_failure: Option<StartupEnvFailure>,
     /// Whether a connection has been established at least once since the
-    /// GUI started. Recovery is for a daemon that went away, so a process
-    /// that was never reached is left to the paths a user action drives.
+    /// GUI started. Windows held after an outage call for recovery only when
+    /// a daemon was reached; the unusable-daemon arm of `activation_holds`
+    /// does not look at this.
     ever_connected: bool,
     /// How many attempts have been made since the budget was last put back.
     attempts: u32,
@@ -245,10 +246,10 @@ impl RecoveryState {
 
 /// Puts the attempt budget back, so a state that had given up can try again.
 ///
-/// This is what an explicit user request goes through; the loop itself does
-/// the same thing when it observes the daemon back. The published status is
-/// left alone on purpose: a status only ever changes on an observation, so
-/// the next tick is what moves it.
+/// This is what an explicit user request goes through; the loop itself puts
+/// the budget back only when it reaches a daemon this build can use. The
+/// published status is left alone on purpose: a status only ever changes on
+/// an observation, so the next tick is what moves it.
 pub fn rearm_recovery_attempts(state: &mut RecoveryState) {
     state.attempts = 0;
 }

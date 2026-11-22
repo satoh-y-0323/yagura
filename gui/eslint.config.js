@@ -157,13 +157,27 @@ const NO_LOCALE_RESOURCES = {
 // A command reaching the daemon fails with the core's structured failure only through the
 // door that narrows it, so the bridge itself is called from that one module.
 const COMMAND_DOORS = 'src/ipc/command-invoke.ts';
-const NO_DIRECT_INVOKE = {
-  name: '@tauri-apps/api/core',
-  importNames: ['invoke'],
-  message: 'Call a command through ipc/command-invoke.ts, which owns the invoke bridge.',
-};
+const DIRECT_INVOKE_MESSAGE =
+  'Call a command through ipc/command-invoke.ts, which owns the invoke bridge.';
+// The package root re-exports `core`, so it is a second way to the bridge.
+const NO_DIRECT_INVOKE = [
+  { name: '@tauri-apps/api/core', importNames: ['invoke'], message: DIRECT_INVOKE_MESSAGE },
+  { name: '@tauri-apps/api', importNames: ['core'], message: DIRECT_INVOKE_MESSAGE },
+];
+// no-restricted-imports sees only static imports.
+const INVOKE_MODULES = '/^@tauri-apps[/]api([/]core)?$/';
+const NO_DYNAMIC_INVOKE = [
+  {
+    selector: `ImportExpression[source.value=${INVOKE_MODULES}]`,
+    message: DIRECT_INVOKE_MESSAGE,
+  },
+  {
+    selector: `ImportExpression[source.quasis.0.value.cooked=${INVOKE_MODULES}]`,
+    message: DIRECT_INVOKE_MESSAGE,
+  },
+];
 
-const SOURCE_SYNTAX = [
+const COMMAND_DOOR_SYNTAX = [
   ...NO_RAW_HTML,
   ...NO_JAPANESE_TEXT,
   ...NO_GLOBAL_KEYDOWN,
@@ -171,6 +185,7 @@ const SOURCE_SYNTAX = [
   ...NO_TEXT_SUBSTITUTION,
   ...NO_TITLE_ATTRIBUTE,
 ];
+const SOURCE_SYNTAX = [...COMMAND_DOOR_SYNTAX, ...NO_DYNAMIC_INVOKE];
 
 export default [
   js.configs.recommended,
@@ -224,6 +239,12 @@ export default [
     },
   },
   {
+    files: [COMMAND_DOORS],
+    rules: {
+      'no-restricted-syntax': ['error', ...COMMAND_DOOR_SYNTAX],
+    },
+  },
+  {
     files: ['src/**/*.svelte'],
     ignores: ['src/shell/AppShell.svelte'],
     rules: {
@@ -240,6 +261,7 @@ export default [
         ...NO_BARE_LABELLED_BUTTON,
         ...NO_TEXT_SUBSTITUTION,
         ...NO_TITLE_ATTRIBUTE,
+        ...NO_DYNAMIC_INVOKE,
         ...NO_LITERAL_MARKUP_TEXT,
       ],
     },
@@ -258,7 +280,7 @@ export default [
     rules: {
       'no-restricted-imports': [
         'error',
-        { paths: [NO_DIRECT_INVOKE], patterns: [NO_LOCALE_RESOURCES] },
+        { paths: NO_DIRECT_INVOKE, patterns: [NO_LOCALE_RESOURCES] },
       ],
     },
   },
@@ -266,7 +288,7 @@ export default [
     files: [LOCALE_READER, LOCALE_RESOURCES],
     ignores: TEST_SOURCES,
     rules: {
-      'no-restricted-imports': ['error', { paths: [NO_DIRECT_INVOKE] }],
+      'no-restricted-imports': ['error', { paths: NO_DIRECT_INVOKE }],
     },
   },
   {

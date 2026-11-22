@@ -63,9 +63,10 @@ the rest.
 - **`auto_respawn`** — whether the supervisor may start the daemon on its own: when the
   connection to it is lost, and after a daemon of another IPC wire revision, which this
   version cannot use, has ended. This governs only the supervisor's own backoff loop.
-  Setting it to `false` does not prevent yagura from starting the daemon when you take an
-  action that needs one (for example opening a window or the Settings panel); the
-  window list's refresh, closing a window and saving a window's layout never start it.
+  Setting it to `false` does not prevent yagura from starting the daemon when something
+  needs one: reading the window list when the GUI starts, or an action you take (for
+  example opening a window or the Settings panel). The periodic window-list poll, closing
+  a window and saving a window's layout never start it.
   The **Reconnect** button appears only once the supervisor has used up its attempts, so
   never when this is `false`.
 - **`initial_delay_ms`** — how long, in milliseconds, the supervisor waits before its

@@ -216,7 +216,7 @@ describe('narrowCommandFailure: a value that claims no tag is read for its text'
     ['an array', ['refused'], '["refused"]'],
     ['a number', 7, '7'],
     ['null', null, 'null'],
-    ['undefined', undefined, 'undefined'],
+    ['undefined', undefined, ''],
   ])('reads %s as text alone', (_label, value, expected) => {
     expect(narrowCommandFailure(value)).toEqual({ kind: 'bare', text: expected });
   });

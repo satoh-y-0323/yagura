@@ -2,11 +2,7 @@
   import { onDestroy, tick } from 'svelte';
   import { get, writable } from 'svelte/store';
 
-  import {
-    commandFailureLine,
-    commandFailureOf,
-    commandFailureText,
-  } from '../command-failure-model';
+  import { commandFailureLine, commandFailureOf } from '../command-failure-model';
   import { describeBoundaryNotice, type BoundaryOperation } from '../notices/boundary-notice';
   import type { OpenWindowSubmission, ProfileOption } from '../components/add-window-dialog-types';
   import AddWindowDialog from '../components/AddWindowDialog.svelte';
@@ -381,6 +377,7 @@
     describeOperationFailure,
     describeThemeName,
     foldExternalText,
+    foldedFailureReason,
     plans as plansText,
     settings,
   } from '../ui-messages';
@@ -1423,7 +1420,7 @@
     try {
       approvalSettings = await invokeSetAutoApprove(tool, autoApprove);
     } catch (error) {
-      const reason = foldExternalText(commandFailureText(error));
+      const reason = foldedFailureReason(error);
       // The request asked for `autoApprove`; a refusal leaves the tool at
       // the opposite of that.
       approvalSwitchFailure = commandFailureLine(error, () =>
@@ -1445,7 +1442,7 @@
     try {
       approvalSettings = await invokeSetPlanApprovalRequired(required);
     } catch (error) {
-      const reason = foldExternalText(commandFailureText(error));
+      const reason = foldedFailureReason(error);
       // The request asked for `required`; a refusal leaves the gate at the
       // opposite of that.
       approvalSwitchFailure = commandFailureLine(error, () =>
@@ -1468,7 +1465,7 @@
       await invokeSetProfileEnabled(id, enabled);
       await loadProfiles();
     } catch (error) {
-      const reason = foldExternalText(commandFailureText(error));
+      const reason = foldedFailureReason(error);
       // The request asked for `enabled`; a refusal leaves the profile at the
       // opposite of that.
       profileUpdateFailure = commandFailureLine(error, () =>
@@ -1617,7 +1614,7 @@
           failure: {
             kind: 'line',
             line: commandFailureLine(error, () =>
-              choicesFailureLine({ kind: 'reported', reason: commandFailureText(error) })
+              choicesFailureLine({ kind: 'reported', reason: foldedFailureReason(error) })
             ),
           },
         });
@@ -1684,7 +1681,7 @@
     } catch (error) {
       if (openProfileDetailId === id) {
         profileDetailFailure = commandFailureLine(error, () =>
-          settings.profileDetailFailed(foldExternalText(commandFailureText(error)))
+          settings.profileDetailFailed(foldedFailureReason(error))
         );
       }
     }
@@ -1714,7 +1711,7 @@
       profileCommandFailure = {
         id,
         line: commandFailureLine(error, () =>
-          settings.profileCommandFailed(foldExternalText(commandFailureText(error)))
+          settings.profileCommandFailed(foldedFailureReason(error))
         ),
       };
     } finally {
@@ -2929,12 +2926,8 @@
       console.error('failed to pull the pending approvals:', error);
     }
 
-    // Last, after every subscription: the start may have been announced before
-    // the session subscription opened. With none announced yet, or one already
-    // heard, nothing is read here: the core announces the first start it
-    // settles on, and that announcement reads the facts. A failed pull is not
-    // "none announced": a start already told is never told again, so its
-    // facts are read as for a start whose compatibility is unknown.
+    // Last, since a start may have been announced before the subscription opened.
+    // A failed pull is not "none announced": a start is told only once, so its facts are read.
     let announced: DaemonConnectedPayload | null = null;
     let isAnnouncementUnknown = false;
     try {
