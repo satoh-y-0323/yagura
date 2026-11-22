@@ -85,7 +85,7 @@
   import { writeClipboardText } from '../ipc/clipboard';
   import { pickFolder, subscribeFolderDrop } from '../ipc/folder-picker';
   import { startFramePull, type FramePull } from '../ipc/frame-pull';
-  import { sanitizeForDisplay } from '../display/untrusted-text';
+  import { caughtValueText, sanitizeForDisplay } from '../display/untrusted-text';
   import {
     type ApprovalRequest,
     type ChatChanged,
@@ -1614,7 +1614,7 @@
           failure: {
             kind: 'line',
             line: commandFailureLine(error, () =>
-              choicesFailureLine({ kind: 'reported', reason: foldedFailureReason(error) })
+              choicesFailureLine({ kind: 'reported', reason: caughtValueText(error) })
             ),
           },
         });

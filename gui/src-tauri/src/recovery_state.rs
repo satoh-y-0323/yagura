@@ -246,8 +246,9 @@ impl RecoveryState {
 
 /// Puts the attempt budget back, so a state that had given up can try again.
 ///
-/// This is what an explicit user request goes through; the loop itself puts
-/// the budget back only when it reaches a daemon this build can use. The
+/// This is what an explicit user request goes through. The loop itself puts
+/// the budget back when it reaches a daemon this build can use and when a
+/// retry cycle ends because activation stopped holding. The
 /// published status is left alone on purpose: a status only ever changes on
 /// an observation, so the next tick is what moves it.
 pub fn rearm_recovery_attempts(state: &mut RecoveryState) {

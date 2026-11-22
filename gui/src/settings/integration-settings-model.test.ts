@@ -196,6 +196,12 @@ describe('integrationGroups: buttons per state', () => {
     expect(view.reason).toBe('the status output could not be read');
   });
 
+  it('folds the line breaks and control characters of the reason', () => {
+    expect(viewOf('unknown', { reason: 'status\r\nunreadable\u202E' }).reason).toBe(
+      'status unreadable'
+    );
+  });
+
   it('carries no reason for a row whose state was read', () => {
     expect(viewOf('registered').reason).toBeNull();
   });

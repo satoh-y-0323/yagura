@@ -7,7 +7,7 @@
 import type { LaunchOptionAlias, ModelChoice, ModelChoiceSource } from '../ipc/model-boundary';
 import type { ProfileDetail } from '../ipc/profile-detail-boundary';
 import type { ProfileEntry } from '../ipc/session-client';
-import { plans } from '../ui-messages';
+import { foldExternalText, plans } from '../ui-messages';
 
 /** One alias as the editor shows it. */
 export interface AliasRow {
@@ -142,12 +142,19 @@ export function isChoicesFetchOverdue(startedAtMs: number, nowMs: number): boole
   return nowMs - startedAtMs >= CHOICES_FETCH_TIMEOUT_MS;
 }
 
-/** The line shown in place of the model list when none could be read. */
+/**
+ * The line shown in place of the model list when none could be read. A
+ * reported reason is the daemon's words, from its push or from a caught
+ * value, so it is folded here for both.
+ */
 export function choicesFailureLine(failure: ChoicesFailure): string {
   if (failure.kind === 'line') {
     return failure.line;
   }
-  const reason = failure.kind === 'reported' ? failure.reason : plans.modelChoicesOverdueReason;
+  const reason =
+    failure.kind === 'reported'
+      ? foldExternalText(failure.reason)
+      : plans.modelChoicesOverdueReason;
   return plans.modelChoicesFailed(reason);
 }
 

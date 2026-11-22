@@ -101,8 +101,9 @@ export function formatPathForDisplay(value: string): string {
  * is its own text and an `Error` is its message (a `CommandFailureError`'s
  * message is its failure's text). Any other object is encoded, since `String`
  * would flatten every one of them to the same word, and is empty when it
- * cannot be encoded. `undefined` carries nothing to show, so it is empty;
- * anything else is `String` of it.
+ * cannot be encoded. `undefined` and a function carry nothing to show (a
+ * function's `String` is its source), so they are empty; anything else is
+ * `String` of it.
  * @param value the value an operation threw or rejected with
  */
 export function caughtValueText(value: unknown): string {
@@ -110,6 +111,7 @@ export function caughtValueText(value: unknown): string {
     case 'string':
       return value;
     case 'undefined':
+    case 'function':
       return '';
     case 'object':
       return value === null ? 'null' : objectText(value);

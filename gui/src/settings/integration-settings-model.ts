@@ -15,7 +15,7 @@ import type {
   McpRegistrationsListed,
   McpRegistrationStatusInfo,
 } from '../ipc/mcp-registration-boundary';
-import { settings } from '../ui-messages';
+import { foldExternalText, settings } from '../ui-messages';
 
 /** The entries a command-less registration writes into one of its CLI's files. */
 export interface IntegrationFileWrite {
@@ -178,7 +178,7 @@ function buildRowView(
     isPrimaryDisabled: state === 'not_installed' || operationRunning || refused,
     canRemove: canRemoveFor(state),
     isRemoveDisabled: operationRunning,
-    reason: status?.reason ?? null,
+    reason: status?.reason == null ? null : foldExternalText(status.reason),
     tomlSetNote:
       row.tomlSet === null
         ? null

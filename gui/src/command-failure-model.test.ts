@@ -78,6 +78,8 @@ describe('foldedFailureReason: the one display line a caught value is told by', 
     ['a thrown string', 'unknown command', 'unknown command'],
     ['a thrown number', 42, '42'],
     ['a thrown object', { code: 'EPERM' }, '{"code":"EPERM"}'],
+    ['an object whose encoding is nothing', { toJSON: () => undefined }, ''],
+    ['a thrown function', () => 'source text', ''],
   ])('is the text of %s', (_label, caught, text) => {
     expect(foldedFailureReason(caught)).toBe(text);
   });
