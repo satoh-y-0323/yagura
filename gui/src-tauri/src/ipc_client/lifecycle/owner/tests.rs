@@ -13,7 +13,7 @@ use yagura_protocol::{
     frame_encode,
 };
 
-use super::super::generation::Settled;
+use super::super::generation::{Settled, WithLateBytes};
 use super::super::reader_link::ReaderLink;
 use super::super::transition::EndKind;
 use super::*;
@@ -268,6 +268,12 @@ impl Rig {
     /// generation it begins over a fresh stream. With a real reader the
     /// test polls it; without one the test reports its ends.
     fn begin(&mut self, attempt: u64, real_reader: bool) -> Conn {
+        self.begin_with_late_bytes(attempt, real_reader, Vec::new())
+    }
+
+    /// `begin`, with `late` bytes that reach the reader's end only after a
+    /// stopped reader has counted what was delivered.
+    fn begin_with_late_bytes(&mut self, attempt: u64, real_reader: bool, late: Vec<u8>) -> Conn {
         self.owner.feed(Event::Connected { attempt }, false, None);
         let step = self.pop("the begin of a generation");
         let Step::Do(Action::Begin { generation, .. }) = step else {
@@ -276,7 +282,10 @@ impl Rig {
         let (stream, peer) = connection();
         let (begun, reader, link) = Generation::begin(
             generation,
-            stream,
+            WithLateBytes {
+                connection: stream,
+                late,
+            },
             Arc::clone(&self.shared.correlation_ids),
             Some(end_sink(self.events.downgrade())),
         );
@@ -568,11 +577,12 @@ async fn chain_restoring(real_reader: bool, revision: u32) -> (Rig, Conn, Stage)
 
 /// A window client whose generation 0 is open on window `w1`, with its
 /// own reader.
-async fn open_window() -> (Rig, Conn) {
+/// Its reader's end holds `late` bytes.
+async fn open_window(late: Vec<u8>) -> (Rig, Conn) {
     let mut rig = Rig::new(ClientKind::Window);
     rig.want(ConnectMode::Retry, Until::Open);
     let attempt = rig.next_attempt();
-    let mut open = rig.begin(attempt, true);
+    let mut open = rig.begin_with_late_bytes(attempt, true, late);
     rig.probe(&mut open, REVISION).await;
     assert!(rig.carry_out().await.is_empty());
     open.generation.set_window_id(Some(WINDOW.to_owned()));
@@ -804,11 +814,29 @@ async fn failed_write_with_a_live_peer(order: usize) -> Observed {
     rig.observe(count, notes)
 }
 
-/// (h)/(i) An open window whose input failed to write, with `superseded`
-/// already sent by the daemon. In (h) the peer closed; in (i) the write
-/// failed here and the daemon wrote `superseded` before it.
-async fn input_failed_then_superseded(order: usize, closed_peer: bool) -> Observed {
-    let (mut rig, mut open) = open_window().await;
+/// Where the daemon's `superseded` frame is when an input write fails.
+#[derive(Clone, Copy, PartialEq)]
+enum SupersededFrame {
+    /// (h) The peer closed; the frame follows, then the end of the stream.
+    AfterAClosedPeer,
+    /// (i) The write failed here and the frame was delivered before it,
+    /// beyond the first chunk the stopped reader takes.
+    AlreadyDelivered,
+    /// (j) The write failed here; the frame reaches this end only after the
+    /// stopped reader has counted what was delivered, so it is not read.
+    AfterTheStoppedReadBegan,
+}
+
+/// An open window whose input failed to write, with the daemon's `superseded`
+/// frame placed as `frame` says.
+async fn input_failed_then_superseded(order: usize, frame: SupersededFrame) -> Observed {
+    let closed_peer = frame == SupersededFrame::AfterAClosedPeer;
+    let late = if frame == SupersededFrame::AfterTheStoppedReadBegan {
+        frame_encode(&encode_daemon_message(&superseded_frame()))
+    } else {
+        Vec::new()
+    };
+    let (mut rig, mut open) = open_window(late).await;
     let mut notes = Vec::new();
     if closed_peer {
         open.peer.stop_reading();
@@ -819,7 +847,8 @@ async fn input_failed_then_superseded(order: usize, closed_peer: bool) -> Observ
             "the reader ended before the daemon sent or closed anything",
         );
         // Pushes that end nothing, together longer than one read chunk,
-        // so `superseded` lies beyond the first chunk the stopped reader takes.
+        // so a frame beyond them lies beyond the first chunk the stopped
+        // reader takes.
         let filler = "x".repeat(crate::constants::READ_CHUNK_LEN);
         for plan in ["p1", "p2"] {
             let plan_id = format!("{plan}{filler}");
@@ -827,7 +856,9 @@ async fn input_failed_then_superseded(order: usize, closed_peer: bool) -> Observ
                 .send(&DaemonMessage::PlanChanged { plan_id })
                 .await;
         }
-        open.peer.send(&superseded_frame()).await;
+        if frame == SupersededFrame::AlreadyDelivered {
+            open.peer.send(&superseded_frame()).await;
+        }
         open.peer.make_writes_fail();
     }
     let write = open
@@ -849,17 +880,22 @@ async fn input_failed_then_superseded(order: usize, closed_peer: bool) -> Observ
         open.peer.send(&superseded_frame()).await;
         open.peer.stop_writing();
     }
+    let (end, what) = if frame == SupersededFrame::AfterTheStoppedReadBegan {
+        (EndKind::WriteFailed, "a failed write")
+    } else {
+        (EndKind::Superseded, "superseded")
+    };
     check(
         &mut notes,
         open.reader_ended().await,
-        "the reader did not end on the superseded frame",
+        "the reader did not end after the input write failed",
     );
-    let (ended, superseded) = rig.ends(EndKind::Superseded);
+    let (ended, of_kind) = rig.ends(end);
     check(
         &mut notes,
-        ended == 1 && superseded == 1,
+        ended == 1 && of_kind == 1,
         &format!(
-            "{ended} ends reached the inbox, {superseded} of them superseded; wanted exactly one, superseded"
+            "{ended} ends reached the inbox, {of_kind} of them {what}; wanted exactly one, {what}"
         ),
     );
     let items: Vec<Item> = std::mem::take(&mut rig.news)
@@ -896,6 +932,23 @@ fn superseded_without_a_chain(observed: &Observed) -> Result<(), String> {
         require(
             !observed.tries(),
             "a reconnect started after the window was taken over",
+        ),
+    ])
+}
+
+fn reconnects_after_a_failed_write(observed: &Observed) -> Result<(), String> {
+    all(vec![
+        require(
+            observed.moves_to(LinkState::Connecting) && observed.tries_in_retry(),
+            "a window whose connection ended on a failed write did not start a new chain",
+        ),
+        require(
+            !observed.moves_to(LinkState::Superseded),
+            "a frame the stopped reader did not read was reported as a takeover",
+        ),
+        require(
+            !observed.lost(),
+            "a window whose connection ended on a failed write was reported as lost",
         ),
     ])
 }
@@ -1006,7 +1059,7 @@ async fn the_owner_settles_a_generation_the_same_whichever_news_of_it_arrives_fi
         (
             "(h) input failed, peer closed, then superseded",
             across_orders(
-                |order| input_failed_then_superseded(order, true),
+                |order| input_failed_then_superseded(order, SupersededFrame::AfterAClosedPeer),
                 superseded_without_a_chain,
             )
             .await,
@@ -1014,8 +1067,18 @@ async fn the_owner_settles_a_generation_the_same_whichever_news_of_it_arrives_fi
         (
             "(i) input failed here, superseded already sent",
             across_orders(
-                |order| input_failed_then_superseded(order, false),
+                |order| input_failed_then_superseded(order, SupersededFrame::AlreadyDelivered),
                 superseded_without_a_chain,
+            )
+            .await,
+        ),
+        (
+            "(j) input failed here, superseded reaching this end only after the stopped read began",
+            across_orders(
+                |order| {
+                    input_failed_then_superseded(order, SupersededFrame::AfterTheStoppedReadBegan)
+                },
+                reconnects_after_a_failed_write,
             )
             .await,
         ),

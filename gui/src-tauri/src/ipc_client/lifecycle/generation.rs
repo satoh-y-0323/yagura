@@ -16,7 +16,8 @@ use super::super::{
 use super::reader_link::{EndSink, ReaderLink};
 use super::transition::TakenAnswer;
 
-/// The read half a generation's reader takes.
+/// An async read plus a way to count and read, without waiting, the bytes
+/// already delivered to this end.
 pub(crate) trait GenerationRead: AsyncRead + Send + Unpin {
     /// How many bytes already delivered to this end were not read yet.
     ///
@@ -44,7 +45,7 @@ impl GenerationRead for yagura_os::ClientReadHalf {
     }
 }
 
-/// The read half a generation's reader takes.
+/// A [`GenerationRead`] in a box: the form a generation hands its reader.
 pub(crate) type BoxedRead = Box<dyn GenerationRead>;
 
 /// The write half a generation writes through.
@@ -86,13 +87,38 @@ where
     }
 }
 
+/// An in-memory connection whose read half also holds `late` bytes: bytes
+/// that reach this end after a stopped reader has counted what was delivered.
+#[cfg(test)]
+pub(super) struct WithLateBytes<R, W> {
+    pub(super) connection: tokio::io::Join<R, W>,
+    pub(super) late: Vec<u8>,
+}
+
+#[cfg(test)]
+impl<R, W> GenerationStream for WithLateBytes<R, W>
+where
+    R: AsyncRead + Send + Unpin + 'static,
+    W: AsyncWrite + Send + Unpin + 'static,
+{
+    fn into_halves(self) -> (BoxedRead, BoxedWrite) {
+        let (read, write) = self.connection.into_inner();
+        let mut read = Polled::new(read);
+        read.late = self.late.into();
+        (Box::new(read), Box::new(write))
+    }
+}
+
 /// An in-memory read half: what polling until it would wait does not return
 /// was not delivered. `delivered_len` takes the delivered bytes in, and they
-/// are read before anything polled after them.
+/// are read before anything polled after them. `late` bytes are only ever
+/// handed over by `read_delivered`, after the bytes taken in, and a finite
+/// run of them ends in `Ok(0)`.
 #[cfg(test)]
 struct Polled<R> {
     inner: R,
     delivered: std::collections::VecDeque<u8>,
+    late: std::collections::VecDeque<u8>,
 }
 
 #[cfg(test)]
@@ -101,6 +127,7 @@ impl<R> Polled<R> {
         Self {
             inner,
             delivered: std::collections::VecDeque::new(),
+            late: std::collections::VecDeque::new(),
         }
     }
 
@@ -156,7 +183,12 @@ impl<R: AsyncRead + Send + Unpin> GenerationRead for Polled<R> {
     }
 
     fn read_delivered(&mut self, into: &mut [u8]) -> std::io::Result<usize> {
-        Ok(self.hand_over(into))
+        let taken = self.hand_over(into);
+        let room = (into.len() - taken).min(self.late.len());
+        for (slot, byte) in into[taken..].iter_mut().zip(self.late.drain(..room)) {
+            *slot = byte;
+        }
+        Ok(taken + room)
     }
 }
 
