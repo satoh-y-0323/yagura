@@ -1756,9 +1756,28 @@ fn descriptor_is_open_on(id: (u64, u64)) -> bool {
 
 /// Whether some `flock` request on the file with this inode is queued behind
 /// the lock holder. Only Linux reports waiters (`->` lines of `/proc/locks`).
+///
+/// `/proc/locks` is rebuilt on every `read(2)` while other tests add and drop
+/// locks, so the file is opened afresh and judged from one `read(2)` only. The
+/// buffer is smaller than what the kernel's page-sized staging buffer leaves
+/// room for after the largest record (a lock with its queued waiters), so a
+/// read that returns less than the buffer reached the end of the file, and a
+/// read that fills it may have been cut short and is refused.
 #[cfg(target_os = "linux")]
 fn flock_waiter_is_queued(inode: u64) -> bool {
-    let locks = std::fs::read_to_string("/proc/locks").expect("read /proc/locks");
+    use std::io::Read;
+
+    const SNAPSHOT_BUF: usize = 2048;
+    let mut buf = [0u8; SNAPSHOT_BUF];
+    let n = std::fs::File::open("/proc/locks")
+        .expect("open /proc/locks")
+        .read(&mut buf)
+        .expect("read /proc/locks");
+    assert!(
+        n < SNAPSHOT_BUF,
+        "/proc/locks filled the {SNAPSHOT_BUF}-byte snapshot buffer, so it may be cut short"
+    );
+    let locks = std::str::from_utf8(&buf[..n]).expect("/proc/locks is text");
     locks.lines().any(|line| {
         let fields: Vec<&str> = line.split_whitespace().collect();
         fields.get(1) == Some(&"->")
