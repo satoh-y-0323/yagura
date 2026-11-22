@@ -318,6 +318,49 @@ impl std::fmt::Debug for Generation {
     }
 }
 
+/// Owns the slot a request put in the table, from the insert until the
+/// request is done or dropped. Keys are never reused, so a slot a dropped
+/// request left would be overwritten by nothing and would stay until the end.
+struct PendingSlot<'a> {
+    generation: &'a Generation,
+    correlation_id: u64,
+}
+
+impl Drop for PendingSlot<'_> {
+    fn drop(&mut self) {
+        self.generation.forget(self.correlation_id);
+    }
+}
+
+/// A writer's hold on the write half. Dropped `midway` through a frame, it
+/// gives the half up as a failed write does: the frame may be cut short.
+struct WriteTurn<'a> {
+    generation: &'a Generation,
+    writer: tokio::sync::MutexGuard<'a, Option<BoxedWrite>>,
+    midway: bool,
+}
+
+impl WriteTurn<'_> {
+    /// Takes the half away, as a frame may be cut short and nothing more may
+    /// be written on this connection. A peer that closed shows its reader
+    /// every byte it sent and then the end, so the reader tells how the
+    /// connection ended; otherwise a live peer's reader would wait on.
+    fn give_up_writer(&mut self, peer_closed: bool) {
+        *self.writer = None;
+        if !peer_closed {
+            self.generation.stop_reader();
+        }
+    }
+}
+
+impl Drop for WriteTurn<'_> {
+    fn drop(&mut self) {
+        if self.midway {
+            self.give_up_writer(false);
+        }
+    }
+}
+
 impl Generation {
     /// Builds generation `number` on `connection`. Its reader reports the end
     /// it sees to `owner`; nothing else does.
@@ -408,6 +451,11 @@ impl Generation {
     /// recorded as the step's answer in the same step that hands it over, so
     /// the generation's end carries it. It waits on no other request: only
     /// its own answer or the generation's end settles it.
+    ///
+    /// Cancel safe: dropped at any await, the request leaves no slot behind,
+    /// and one dropped midway through its frame ends writing on the
+    /// connection as a failed write does. Whether the daemon acted on a frame
+    /// written before the drop is not known.
     pub(crate) async fn request_step(
         &self,
         message: &ClientMessage,
@@ -432,13 +480,16 @@ impl Generation {
                 .insert(correlation_id, Pending { kind, sender, take });
             revision
         };
+        let _slot = PendingSlot {
+            generation: self,
+            correlation_id,
+        };
         // The gate passed for this revision above, so a failure here is the
         // connection's.
         if let Err(error) = self
             .write_frame(message, Some(correlation_id), revision)
             .await
         {
-            self.forget(correlation_id);
             return StepReply::Unanswered(error);
         }
         // No deadline: a daemon that has the frame may still carry it out, so
@@ -482,30 +533,29 @@ impl Generation {
         correlation_id: Option<u64>,
         revision: Option<u32>,
     ) -> Result<(), IpcError> {
-        let mut writer = self.writer.lock().await;
+        let mut turn = WriteTurn {
+            generation: self,
+            writer: self.writer.lock().await,
+            midway: false,
+        };
         if lock_blocking(&self.slots).ended {
-            *writer = None;
+            *turn.writer = None;
         }
-        let Some(half) = writer.as_mut() else {
+        let Some(half) = turn.writer.as_mut() else {
             return Err(IpcError::NotConnected);
         };
-        match wire::write_frame(half, message, correlation_id, revision).await {
+        turn.midway = true;
+        let outcome = wire::write_frame(half, message, correlation_id, revision).await;
+        turn.midway = false;
+        match outcome {
             Err(wire::WriteError::Io(error)) => {
-                // Taken away: a frame may be cut short, so nothing more is
-                // written on this connection.
-                *writer = None;
-                // A peer that closed shows its reader every byte it sent and
-                // then the end, so the reader tells how the connection ended.
-                // Any other failure would leave a live peer's reader waiting.
-                if !yagura_os::write_error_shows_peer_closed(&error) {
-                    self.stop_reader();
-                }
+                turn.give_up_writer(yagura_os::write_error_shows_peer_closed(&error));
                 Err(wire::WriteError::Io(error).into())
             }
             outcome => {
                 // An end that came while this write held the half lets it go now.
                 if lock_blocking(&self.slots).ended {
-                    *writer = None;
+                    *turn.writer = None;
                 }
                 outcome.map_err(IpcError::from)
             }

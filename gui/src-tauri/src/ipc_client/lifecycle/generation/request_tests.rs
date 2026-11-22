@@ -130,3 +130,116 @@ async fn a_decision_is_answered_while_an_open_waits_for_its_permit() {
         "got {opened:?}"
     );
 }
+
+fn decision(request_id: &str) -> ClientMessage {
+    ClientMessage::ApprovalDecision {
+        request_id: request_id.to_owned(),
+        approved: true,
+    }
+}
+
+/// Polls `future` once with a waker nothing wakes: what it does before it
+/// would wait is done when this returns.
+fn poll_now<F: std::future::Future + ?Sized>(future: Pin<&mut F>) -> std::task::Poll<F::Output> {
+    future.poll(&mut std::task::Context::from_waker(std::task::Waker::noop()))
+}
+
+/// The next request written to `peer`, with the correlation id it carries.
+async fn next_request(peer: &mut tokio::io::DuplexStream) -> (Option<u64>, ClientMessage) {
+    use tokio::io::AsyncReadExt;
+    let mut length = [0u8; 4];
+    peer.read_exact(&mut length).await.expect("frame length");
+    let mut body = vec![0u8; u32::from_le_bytes(length) as usize];
+    peer.read_exact(&mut body).await.expect("frame body");
+    yagura_protocol::decode_correlated_client_message(&body).expect("a client frame")
+}
+
+// The request's key is fresh, so nothing written later would overwrite the
+// slot a cancelled request left: only its own owner can clear it.
+#[tokio::test]
+async fn a_request_dropped_while_it_waits_for_its_answer_leaves_no_slot_behind() {
+    let (near, mut far) = tokio::io::duplex(1 << 16);
+    let (generation, _reader) = Generation::wired(near);
+    let request = decision("r1");
+
+    let key = {
+        let mut waiting =
+            std::pin::pin!(generation.request_step(&request, PendingKind::DecideApproval, None));
+        assert!(
+            poll_now(waiting.as_mut()).is_pending(),
+            "the request waits for its answer"
+        );
+        let (key, written) =
+            yagura_test_support::ipc::reply_within("the request's frame", next_request(&mut far))
+                .await;
+        assert_eq!(written, request);
+        let key = key.expect("the request carries a key");
+        assert!(
+            generation.awaiting(Some(key)).is_some(),
+            "the request waits under its key before it is dropped"
+        );
+        key
+    };
+
+    assert_eq!(
+        generation.awaiting(Some(key)),
+        None,
+        "a dropped request must not stay in the table of requests waiting"
+    );
+}
+
+// A frame cut short leaves the daemon reading the next bytes as the rest of
+// it, so a write dropped midway must end writing on that connection, as a
+// failed write does.
+#[tokio::test]
+async fn a_request_dropped_midway_through_its_frame_has_nothing_written_after_the_cut() {
+    use tokio::io::AsyncReadExt;
+    const ROOM: usize = 16;
+    let (near, mut far) = tokio::io::duplex(ROOM);
+    let (generation, _reader) = Generation::wired(near);
+
+    {
+        let first = decision("r1");
+        let mut writing =
+            std::pin::pin!(generation.request_step(&first, PendingKind::DecideApproval, None));
+        assert!(
+            poll_now(writing.as_mut()).is_pending(),
+            "the frame waits for room on the connection"
+        );
+    }
+    let mut cut = [0u8; ROOM];
+    yagura_test_support::ipc::reply_within("the cut frame", far.read_exact(&mut cut))
+        .await
+        .expect("the bytes written before the drop");
+    let length = u32::from_le_bytes([cut[0], cut[1], cut[2], cut[3]]) as usize;
+    assert!(4 + length > ROOM, "the dropped frame was cut short");
+
+    let second = decision("r2");
+    let mut next =
+        std::pin::pin!(generation.request_step(&second, PendingKind::DecideApproval, None));
+    let mut after_cut = [0u8; 64];
+    let read = yagura_test_support::ipc::reply_within("the next request or its bytes", async {
+        tokio::select! {
+            biased;
+            _ = next.as_mut() => None,
+            read = far.read(&mut after_cut) => Some(read),
+        }
+    })
+    .await;
+    let written = match read {
+        Some(read) => read.expect("reading the connection"),
+        None => {
+            let pending = std::pin::pin!(tokio::task::unconstrained(far.read(&mut after_cut)));
+            match poll_now(pending) {
+                std::task::Poll::Ready(read) => read.expect("reading the connection"),
+                std::task::Poll::Pending => 0,
+            }
+        }
+    };
+    assert_eq!(
+        written,
+        0,
+        "nothing may be written on a connection after a frame cut short; got {:?}",
+        &after_cut[..written]
+    );
+}
