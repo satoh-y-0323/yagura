@@ -464,6 +464,13 @@ pub const LAUNCH_OVERLAY_MIN_REVISION: u32 = 34;
 /// caller reads an older daemon's `-1` as unknown.
 pub const EXIT_CODE_ON_STATUS_MIN_REVISION: u32 = 37;
 
+/// The first wire revision whose daemon answers a request under the
+/// correlation id the request carried.
+///
+/// An older daemon answers without an id, so a caller matches its answers by
+/// kind instead.
+pub const CORRELATION_ID_MIN_REVISION: u32 = 38;
+
 /// How long a hook door waits for one answer of the daemon.
 pub const DOOR_ANSWER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 

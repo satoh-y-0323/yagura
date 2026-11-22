@@ -56,7 +56,7 @@ fn idle_generation() -> (
 }
 
 /// The last wire revision whose daemon answers without a correlation id.
-const BEFORE_CORRELATION_IDS: u32 = 37;
+const BEFORE_CORRELATION_IDS: u32 = yagura_protocol::CORRELATION_ID_MIN_REVISION - 1;
 
 /// What a daemon of [`BEFORE_CORRELATION_IDS`] answers of its own accord, as
 /// such a daemon answers it: under no correlation id.

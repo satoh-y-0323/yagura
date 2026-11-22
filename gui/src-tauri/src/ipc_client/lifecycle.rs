@@ -2324,7 +2324,8 @@ mod tests {
     use crate::events::LinkLostReason;
     use crate::window_record::LinkState;
 
-    const REVISION: u32 = 38;
+    /// A daemon of the current wire revision.
+    const REVISION: u32 = yagura_protocol::PROTOCOL_REVISION;
     const WINDOW: &str = "w-1";
     const OTHER_WINDOW: &str = "w-2";
 
@@ -3625,7 +3626,8 @@ mod owner_tests {
     use crate::ipc_client::ERROR_CODE_SUPERSEDED;
 
     const PIPE: usize = 64 * 1024;
-    const REVISION: u32 = 38;
+    /// A daemon of the current wire revision.
+    const REVISION: u32 = yagura_protocol::PROTOCOL_REVISION;
     /// Older than the first revision that carries frames.
     const BEFORE_FRAMES: u32 = 18;
     const WINDOW: &str = "w1";

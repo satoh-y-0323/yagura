@@ -64,15 +64,11 @@ pub(crate) const ERROR_CODE_INTERNAL: &str = "internal";
 /// would: the refusal itself says which wire the peer speaks.
 const ERROR_CODE_UNKNOWN_TYPE: &str = "unknown_type";
 
-/// The first wire revision whose daemon answers a request under the
-/// correlation id the request carried.
-const CORRELATION_ID_MIN_REVISION: u32 = 38;
-
 /// Whether a daemon of `revision` names the request each answer belongs to.
 /// `None` -- a generation still probing -- does not: the probe's answer is
 /// matched by its kind, whichever daemon sends it.
 pub(crate) fn answers_carry_correlation_ids(revision: Option<u32>) -> bool {
-    revision.is_some_and(|revision| revision >= CORRELATION_ID_MIN_REVISION)
+    revision.is_some_and(|revision| revision >= yagura_protocol::CORRELATION_ID_MIN_REVISION)
 }
 
 /// The rendered tail of a rejection: the daemon's reason behind a separator,
