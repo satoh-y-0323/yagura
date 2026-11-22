@@ -33,13 +33,14 @@ use crate::events::{
     PlanChangedPayload, StatusPayload, TicketChangedPayload,
 };
 use crate::host::GuiHost;
+use crate::ipc_client::{
+    BoxedRead, ERROR_CODE_SUPERSEDED, EndKind, Generation, Interrupt, IpcError, PendingKind,
+    ReaderLink, Reply, Settled,
+};
+
 // The host tests drive what the reader dispatches through a client.
 #[cfg(test)]
-use crate::ipc_client::IpcClient;
-use crate::ipc_client::{
-    BoxedRead, ERROR_CODE_INTERNAL, ERROR_CODE_SUPERSEDED, EndKind, Generation, Interrupt,
-    IpcError, PendingKind, ReaderLink, Reply, Settled, answers_carry_correlation_ids,
-};
+use crate::ipc_client::{ERROR_CODE_INTERNAL, IpcClient};
 
 /// Window-scoped event to be emitted to the WebView. Separated from dispatch
 /// so payload assembly stays separate from delivery.
@@ -212,57 +213,34 @@ fn is_superseded(message: &DaemonMessage) -> bool {
 }
 
 /// Weighs a frame this build cannot read as a message against the request
-/// waiting. Returns whether the generation must end: the frame came under
-/// that request's key.
+/// it would answer (see [`Generation::awaiting`]). Returns whether the
+/// generation must end: the frame came under the key of a request waiting.
 ///
 /// The revision probe is the exception: an answer to it this build cannot
-/// read says the daemon speaks another wire, so under the probe's key it
-/// answers the probe as [`IpcError::UnexpectedReply`] and the generation goes
-/// on.
-///
-/// From a daemon that returns no correlation id, a frame whose tag is the
-/// kind of the answer awaited still ends the request: as success when the
-/// answer carries nothing this client reads, as [`IpcError::UnexpectedReply`]
-/// otherwise. Every other unreadable frame is dropped, as a push of a newer
-/// daemon is.
+/// read says the daemon speaks another wire, so it answers the probe as
+/// [`IpcError::UnexpectedReply`] and the generation goes on -- under the
+/// probe's key, or under none when its tag is the probe's answer. Every
+/// other unreadable frame is dropped, as a push of a newer daemon is.
 fn settle_unreadable(generation: &Generation, label: &FrameLabel) -> bool {
-    let Some(awaiting) = generation.awaiting() else {
+    let Some(awaiting) = generation.awaiting(label.correlation_id) else {
         return false;
     };
-    match label.correlation_id {
-        Some(key)
-            if key == awaiting.correlation_id
-                && awaiting.kind == PendingKind::GetProtocolRevision =>
-        {
-            eprintln!(
-                "warning: the daemon answered the revision probe with a frame this build cannot read ({})",
-                known_tag_name(label)
-            );
-            generation.settle(Some(key), awaiting.kind, Err(IpcError::UnexpectedReply));
-            false
-        }
-        Some(key) => key == awaiting.correlation_id,
-        None if answers_carry_correlation_ids(generation.revision()) => false,
-        None => {
-            let Some((kind, carries)) = label.tag.as_deref().and_then(answer_kind) else {
-                return false;
-            };
-            if kind != awaiting.kind {
-                return false;
-            }
-            let result = if carries {
-                eprintln!(
-                    "warning: the daemon answered with a {} this build cannot read",
-                    known_tag_name(label)
-                );
-                Err(IpcError::UnexpectedReply)
-            } else {
-                Ok(Reply::Done)
-            };
-            generation.settle(None, kind, result);
-            false
-        }
+    let answers_the_probe = awaiting.kind == PendingKind::GetProtocolRevision
+        && (label.correlation_id.is_some()
+            || label.tag.as_deref().and_then(answer_kind) == Some(awaiting.kind));
+    if answers_the_probe {
+        eprintln!(
+            "warning: the daemon answered the revision probe with a frame this build cannot read ({})",
+            known_tag_name(label)
+        );
+        generation.settle(
+            label.correlation_id,
+            awaiting.kind,
+            Err(IpcError::UnexpectedReply),
+        );
+        return false;
     }
+    label.correlation_id.is_some()
 }
 
 /// The name this build gives the `type` tag of a frame it could not read:
@@ -305,10 +283,10 @@ macro_rules! answer_table {
             #[cfg(test)]
             const ALL: &[Self] = &[ $( Self::$bare, )* $( Self::$valued, )* ];
 
-            fn answer(self) -> (PendingKind, bool) {
+            fn answer(self) -> PendingKind {
                 match self {
-                    $( Self::$bare => (PendingKind::$bare_kind, false), )*
-                    $( Self::$valued => (PendingKind::$valued_kind, true), )*
+                    $( Self::$bare => PendingKind::$bare_kind, )*
+                    $( Self::$valued => PendingKind::$valued_kind, )*
                 }
             }
         }
@@ -325,9 +303,8 @@ macro_rules! answer_table {
             }
         }
 
-        /// The request an answer tagged `tag` belongs to, and whether this
-        /// client reads anything it carries.
-        fn answer_kind(tag: &str) -> Option<(PendingKind, bool)> {
+        /// The request an answer tagged `tag` belongs to.
+        fn answer_kind(tag: &str) -> Option<PendingKind> {
             use serde::de::{Deserialize, IntoDeserializer, value::Error};
             AnswerTag::deserialize(IntoDeserializer::<Error>::into_deserializer(tag))
                 .ok()
@@ -561,45 +538,23 @@ pub fn rejection_for(frame: DaemonMessage) -> Result<IpcError, Box<DaemonMessage
     }
 }
 
-/// Fails the request in flight with `rejection` when the error frame is its
-/// answer. Returns whether the session was superseded.
+/// Fails the request the error frame answers (see [`Generation::awaiting`])
+/// with `rejection`. Under no key, once the revision is settled, it answers
+/// nothing waiting: a refused send. Returns whether the session was
+/// superseded.
 ///
 /// A `superseded` frame ends the connection and answers no request, under
-/// any key and from any revision; the request waiting ends with the
+/// any key and from any revision; the requests waiting end with the
 /// generation.
 async fn settle_rejection(
     generation: &Generation,
     correlation_id: Option<u64>,
     rejection: IpcError,
 ) -> bool {
-    let has_code =
-        |wanted: &str| matches!(&rejection, IpcError::Rejected { code, .. } if code == wanted);
-    if has_code(ERROR_CODE_SUPERSEDED) {
+    if matches!(&rejection, IpcError::Rejected { code, .. } if code == ERROR_CODE_SUPERSEDED) {
         return true;
     }
-    let Some(awaiting) = generation.awaiting() else {
-        return false;
-    };
-    let attributable = match (correlation_id, generation.revision()) {
-        // The key names the request; `settle` compares it.
-        (Some(_), _) => true,
-        // Such a daemon names every answer, so an error under no key answers
-        // nothing waiting: a refused send.
-        (None, revision) if answers_carry_correlation_ids(revision) => false,
-        // Still probing: the probe is the only frame written.
-        (None, None) => true,
-        // Input, frame acknowledgements and `resize` are fire-and-forget on a
-        // window connection, so an error frame there may answer one of them
-        // rather than the request in flight; only the codes that request
-        // itself can produce are attributed to it.
-        (None, Some(_)) => match awaiting.kind {
-            PendingKind::Attach | PendingKind::CopySelection => has_code(ERROR_CODE_INTERNAL),
-            // Nothing but the outstanding request is in flight on a control
-            // connection, so the error can only answer it.
-            _ => true,
-        },
-    };
-    if attributable {
+    if let Some(awaiting) = generation.awaiting(correlation_id) {
         generation.settle(correlation_id, awaiting.kind, Err(rejection));
     }
     false

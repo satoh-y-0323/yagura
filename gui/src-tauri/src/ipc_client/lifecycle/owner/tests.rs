@@ -168,7 +168,7 @@ async fn answer_next(
 ) {
     let (key, _request) = peer.read_request().await;
     let awaiting = generation
-        .awaiting()
+        .awaiting(key)
         .expect("the request written is the one awaiting");
     assert_eq!(key, Some(awaiting.correlation_id));
     assert_eq!(
@@ -637,13 +637,13 @@ async fn ended_before_the_step_was_answered() -> (Observed, bool) {
     assert!(answered.is_ok(), "{answered:?}");
 
     // The step's request is written and not answered.
-    tokio::select! {
+    let key = tokio::select! {
         _ = &mut stage => panic!("the step ended before its request was answered"),
-        _ = restoring.peer.read_request() => {}
-    }
+        (key, _) = restoring.peer.read_request() => key,
+    };
     let awaiting = restoring
         .generation
-        .awaiting()
+        .awaiting(key)
         .expect("the step's request awaits");
     rig.owner.queue.clear();
     rig.lose(&mut restoring, EndKind::ReadError);

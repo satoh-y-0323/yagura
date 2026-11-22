@@ -1,6 +1,7 @@
-//! One connection's lifetime: its write half, the request waiting on it,
+//! One connection's lifetime: its write half, the requests waiting on it,
 //! the attribution of answers and its end.
 
+use std::collections::HashMap;
 #[cfg(test)]
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -10,9 +11,7 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::oneshot;
 use yagura_protocol::ClientMessage;
 
-use super::super::{
-    Connection, IpcError, PendingKind, Reply, answers_carry_correlation_ids, lock_blocking, wire,
-};
+use super::super::{Connection, IpcError, PendingKind, Reply, lock_blocking, wire};
 use super::reader_link::{EndSink, ReaderLink};
 use super::transition::TakenAnswer;
 
@@ -225,11 +224,10 @@ impl<T> StepReply<Result<T, IpcError>> {
     }
 }
 
-/// The request waiting on a generation.
+/// A request waiting on a generation.
 #[derive(Debug)]
 struct Pending {
     kind: PendingKind,
-    correlation_id: u64,
     sender: oneshot::Sender<Result<Reply, IpcError>>,
     /// Set on an opening step.
     take: Option<Take>,
@@ -239,7 +237,9 @@ struct Pending {
 #[derive(Debug, Default)]
 struct Slots {
     ended: bool,
-    pending: Option<Pending>,
+    /// Every request written and not yet answered, under its key: an answer
+    /// names the request it settles, so no request waits for another's.
+    pending: HashMap<u64, Pending>,
     /// The last answer an opening step took.
     taken: Option<TakenAnswer>,
     cancel_reader: Option<oneshot::Sender<()>>,
@@ -255,9 +255,25 @@ impl Slots {
             self.taken = Some(take(&Err(refusal.duplicate())));
         }
     }
+
+    /// The request a frame under `correlation_id` answers, with its key. A
+    /// frame under no key answers the revision probe while the generation is
+    /// `probing` -- the probe alone is written then, and a daemon that returns
+    /// no key answers it so -- and nothing once the revision is settled.
+    fn answered(&self, correlation_id: Option<u64>, probing: bool) -> Option<(u64, &Pending)> {
+        match correlation_id {
+            Some(key) => self.pending.get(&key).map(|pending| (key, pending)),
+            None if probing => self
+                .pending
+                .iter()
+                .find(|(_, pending)| pending.kind == PendingKind::GetProtocolRevision)
+                .map(|(key, pending)| (*key, pending)),
+            None => None,
+        }
+    }
 }
 
-/// The request a generation is waiting on, as its reader weighs a frame.
+/// A request a generation is waiting on, as its reader weighs a frame.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Awaiting {
     pub(crate) kind: PendingKind,
@@ -277,22 +293,19 @@ pub(crate) enum Settled {
 }
 
 /// One connection from the moment it was accepted until it ends: its write
-/// half, the request waiting on it, and what opening it settled.
+/// half, the requests waiting on it, and what opening it settled.
 pub(crate) struct Generation {
     number: u64,
     writer: tokio::sync::Mutex<Option<BoxedWrite>>,
     slots: std::sync::Mutex<Slots>,
-    /// One request waits for its answer on a connection at a time. Every
-    /// request this client waits on is answered while the daemon handles its
-    /// frame, so a second slot would be answered no sooner, and a single
-    /// slot keeps the answers of a daemon that sends no correlation id
-    /// attributable by their kind.
-    request_lock: tokio::sync::Mutex<()>,
     revision: OnceLock<u32>,
     /// The window the reader routes frames to. An attach writes it before
     /// its request goes out, as the daemon may stream before this side reads
     /// the answer.
     window_id: std::sync::Mutex<Option<String>>,
+    /// Held by an attach for its whole request: [`Self::window_id`] routes to
+    /// one window, so attaches go one at a time. No other request takes it.
+    attach_lock: tokio::sync::Mutex<()>,
     correlation_ids: Arc<AtomicU64>,
 }
 
@@ -325,9 +338,9 @@ impl Generation {
                 stop_reader: Some(stop),
                 ..Slots::default()
             }),
-            request_lock: tokio::sync::Mutex::new(()),
             revision: OnceLock::new(),
             window_id: std::sync::Mutex::new(None),
+            attach_lock: tokio::sync::Mutex::new(()),
             correlation_ids,
         });
         let link = ReaderLink::new(number, cancelled, stopped, owner);
@@ -350,6 +363,11 @@ impl Generation {
         let _ = self.revision.set(revision);
     }
 
+    /// Whether the wire revision is still being probed.
+    fn probing(&self) -> bool {
+        self.revision.get().is_none()
+    }
+
     /// The window frames on this generation are routed to.
     pub(crate) fn window_id(&self) -> Option<String> {
         lock_blocking(&self.window_id).clone()
@@ -359,12 +377,20 @@ impl Generation {
         *lock_blocking(&self.window_id) = window_id;
     }
 
+    /// Waits for the attach before to finish, and holds this attach's turn
+    /// for as long as the guard lives.
+    pub(crate) async fn attach_turn(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.attach_lock.lock().await
+    }
+
     /// Writes `message` under a fresh correlation id and waits for its answer.
     ///
     /// # Errors
     /// [`IpcError::NotConnected`] when the generation ended before the frame
-    /// was written, [`IpcError::Unsupported`] when its daemon speaks another
-    /// wire revision, [`IpcError::Write`] when the write failed and
+    /// was written, [`IpcError::Unsupported`], with no byte written, when the
+    /// generation has not settled on this build's wire revision (only the
+    /// revision probe is written before it does), [`IpcError::Write`] when
+    /// the write failed and
     /// [`IpcError::ConnectionLost`] when the generation ended after the frame
     /// was written; otherwise what the daemon answered.
     pub(crate) async fn request(
@@ -380,14 +406,14 @@ impl Generation {
     /// [`StepReply::Unanswered`]. With `take` the request is an opening step:
     /// the answer it is given, the wire gate's refusal included, is
     /// recorded as the step's answer in the same step that hands it over, so
-    /// the generation's end carries it.
+    /// the generation's end carries it. It waits on no other request: only
+    /// its own answer or the generation's end settles it.
     pub(crate) async fn request_step(
         &self,
         message: &ClientMessage,
         kind: PendingKind,
         take: Option<Take>,
     ) -> StepReply<Result<Reply, IpcError>> {
-        let _in_flight = self.request_lock.lock().await;
         let correlation_id = self.correlation_ids.fetch_add(1, Ordering::SeqCst);
         let (sender, receiver) = oneshot::channel();
         let revision = {
@@ -401,12 +427,9 @@ impl Generation {
                 slots.record_refusal(take, &refusal);
                 return StepReply::Answered(Err(refusal));
             }
-            slots.pending = Some(Pending {
-                kind,
-                correlation_id,
-                sender,
-                take,
-            });
+            slots
+                .pending
+                .insert(correlation_id, Pending { kind, sender, take });
             revision
         };
         // The gate passed for this revision above, so a failure here is the
@@ -446,8 +469,9 @@ impl Generation {
     ///
     /// # Errors
     /// [`IpcError::NotConnected`] when the generation ended,
-    /// [`IpcError::Unsupported`] when its daemon speaks another wire revision,
-    /// and [`IpcError::Write`] when the write failed.
+    /// [`IpcError::Unsupported`], with no byte written, when the generation
+    /// has not settled on this build's wire revision, and [`IpcError::Write`]
+    /// when the write failed.
     pub(crate) async fn write(&self, message: &ClientMessage) -> Result<(), IpcError> {
         self.write_frame(message, None, self.revision()).await
     }
@@ -503,34 +527,29 @@ impl Generation {
         }
     }
 
-    /// Hands `result` to the request waiting, when the answer is its own:
-    /// under its correlation id once the daemon returns them, and by `kind`
-    /// alone while opening and with an older daemon.
+    /// Hands `result`, an answer of `kind`, to the request it answers: the
+    /// one under `correlation_id`, or under none the revision probe while it
+    /// is probed (see [`Generation::awaiting`]).
     pub(crate) fn settle(
         &self,
         correlation_id: Option<u64>,
         kind: PendingKind,
         result: Result<Reply, IpcError>,
     ) -> Settled {
+        let probing = self.probing();
         let mut slots = lock_blocking(&self.slots);
-        let Some(pending) = slots.pending.as_ref() else {
+        let Some((key, pending)) = slots.answered(correlation_id, probing) else {
             return Settled::Unanswered;
         };
-        let answers = match correlation_id {
-            // An error answers whatever request carried its key.
-            Some(key) if key == pending.correlation_id => {
-                if result.is_ok() && kind != pending.kind {
-                    return Settled::Broken;
-                }
-                true
+        if kind != pending.kind {
+            match correlation_id {
+                // An error answers whatever request carried its key.
+                Some(_) if result.is_err() => {}
+                Some(_) => return Settled::Broken,
+                None => return Settled::Unanswered,
             }
-            Some(_) => false,
-            None => !answers_carry_correlation_ids(self.revision()) && kind == pending.kind,
-        };
-        if !answers {
-            return Settled::Unanswered;
         }
-        if let Some(pending) = slots.pending.take() {
+        if let Some(pending) = slots.pending.remove(&key) {
             if let Some(take) = pending.take {
                 slots.taken = Some(take(&result));
             }
@@ -539,30 +558,26 @@ impl Generation {
         Settled::Answered
     }
 
-    /// The request waiting for an answer, if any.
-    pub(crate) fn awaiting(&self) -> Option<Awaiting> {
+    /// The request waiting that a frame under `correlation_id` answers: the
+    /// one under that key, or, under no key, the revision probe while the
+    /// revision is probed. Once it is settled, a frame under no key answers
+    /// no request.
+    pub(crate) fn awaiting(&self, correlation_id: Option<u64>) -> Option<Awaiting> {
+        let probing = self.probing();
         lock_blocking(&self.slots)
-            .pending
-            .as_ref()
-            .map(|pending| Awaiting {
+            .answered(correlation_id, probing)
+            .map(|(key, pending)| Awaiting {
                 kind: pending.kind,
-                correlation_id: pending.correlation_id,
+                correlation_id: key,
             })
     }
 
     /// Clears the slot of the request under `correlation_id`, which gave up.
     fn forget(&self, correlation_id: u64) {
-        let mut slots = lock_blocking(&self.slots);
-        if slots
-            .pending
-            .as_ref()
-            .is_some_and(|pending| pending.correlation_id == correlation_id)
-        {
-            slots.pending = None;
-        }
+        lock_blocking(&self.slots).pending.remove(&correlation_id);
     }
 
-    /// Ends the generation, in one step with no await: the request waiting
+    /// Ends the generation, in one step with no await: every request waiting
     /// hears of it, the reader stops and the write half is let go of, by a
     /// writer midway as soon as its write is done. Returns the last answer an
     /// opening step took before; later calls do nothing and return `None`.
@@ -574,7 +589,7 @@ impl Generation {
             }
             slots.ended = true;
             (
-                slots.pending.take(),
+                std::mem::take(&mut slots.pending),
                 slots.cancel_reader.take(),
                 slots.taken,
             )

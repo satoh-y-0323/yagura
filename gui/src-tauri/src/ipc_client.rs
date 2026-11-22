@@ -60,6 +60,7 @@ pub(crate) const ERROR_CODE_SUPERSEDED: &str =
     yagura_protocol::ConnectionErrorCode::Superseded.as_str();
 
 /// `error.code` for internal daemon failures.
+#[cfg(test)]
 pub(crate) const ERROR_CODE_INTERNAL: &str = "internal";
 
 /// `error.code` a daemon built before a message type existed answers it
@@ -77,13 +78,6 @@ const UNNAMED_REVISION: u32 = 0;
 /// to. Any other is written nothing but the revision probe.
 pub(crate) fn speaks_this_wire(revision: Option<u32>) -> bool {
     revision == Some(yagura_protocol::PROTOCOL_REVISION)
-}
-
-/// Whether a daemon of `revision` names the request each answer belongs to.
-/// `None` -- a generation still probing -- does not: the probe's answer is
-/// matched by its kind, whichever daemon sends it.
-pub(crate) fn answers_carry_correlation_ids(revision: Option<u32>) -> bool {
-    revision.is_some_and(|revision| revision >= yagura_protocol::CORRELATION_ID_MIN_REVISION)
 }
 
 /// The rendered tail of a rejection: the daemon's reason behind a separator,
@@ -215,9 +209,9 @@ fn duplicate_os_error(error: &OsError) -> OsError {
     }
 }
 
-/// Which request a generation's waiting slot holds. A daemon that returns
-/// correlation ids is matched by the key and checked against this; an older
-/// one is matched by this alone.
+/// Which request a generation's waiting slot holds. An answer is matched by
+/// its key and checked against this; one under no key is matched by this
+/// only to the revision probe, while the revision is probed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PendingKind {
     Attach,
@@ -1444,7 +1438,7 @@ impl IpcClient {
     }
 
     /// Lets the client go for good: once this returns, nothing of it is
-    /// open and nothing opens again, the request in flight has ended, and a
+    /// open and nothing opens again, every request in flight has ended, and a
     /// window client changes its record no more.
     pub async fn disconnect(&self) {
         self.shared.retire().await;
@@ -1854,13 +1848,15 @@ async fn send_held(generation: &Generation, state: &mut RecordState) -> Result<(
 }
 
 /// Attaches `generation` at `size` (`None` keeps the window's own size), as
-/// a step of its opening when `take` is given.
+/// a step of its opening when `take` is given. Waits for an attach before on
+/// `generation` to be answered, as the generation routes frames to one window.
 async fn request_attach(
     generation: &Generation,
     window_id: &str,
     size: Option<TerminalSize>,
     take: Option<Take>,
 ) -> StepReply<Result<AttachResponse, IpcError>> {
+    let _turn = generation.attach_turn().await;
     // Recorded before the request goes out: the daemon may stream output
     // for the window between its `attached` reply and this task waking up,
     // and the reader needs the window id to route it.
@@ -3113,5 +3109,120 @@ mod tests {
             matches!(&outcome, Err(IpcError::Unsupported { request_type }) if request_type == "list_windows"),
             "got {outcome:?}"
         );
+    }
+
+    /// Polls `future` once with a waker nothing wakes: what it does before it
+    /// would wait is done when this returns.
+    fn poll_now<F: std::future::Future + ?Sized>(
+        future: std::pin::Pin<&mut F>,
+    ) -> std::task::Poll<F::Output> {
+        future.poll(&mut std::task::Context::from_waker(std::task::Waker::noop()))
+    }
+
+    /// The requests already written to `peer`, read without waiting.
+    fn written_now(peer: &mut tokio::io::DuplexStream) -> Vec<ClientMessage> {
+        use tokio::io::AsyncReadExt;
+        let mut bytes = Vec::new();
+        loop {
+            let mut chunk = [0u8; 4096];
+            let read = std::pin::pin!(tokio::task::unconstrained(peer.read(&mut chunk)));
+            match poll_now(read) {
+                std::task::Poll::Ready(Ok(count)) if count > 0 => {
+                    bytes.extend_from_slice(&chunk[..count]);
+                }
+                std::task::Poll::Ready(Ok(_)) | std::task::Poll::Pending => break,
+                std::task::Poll::Ready(Err(error)) => panic!("reading the peer: {error}"),
+            }
+        }
+        let mut requests = Vec::new();
+        let mut rest = bytes.as_slice();
+        while !rest.is_empty() {
+            let (length, tail) = rest.split_at(4);
+            let length = u32::from_le_bytes(length.try_into().expect("a frame length")) as usize;
+            let (body, tail) = tail.split_at(length);
+            let (_, request) =
+                yagura_protocol::decode_correlated_client_message(body).expect("a client frame");
+            requests.push(request);
+            rest = tail;
+        }
+        requests
+    }
+
+    fn attach_view(window_id: &str) -> ClientMessage {
+        ClientMessage::AttachView {
+            window_id: window_id.to_owned(),
+            size: None,
+        }
+    }
+
+    fn attached_reply() -> Result<Reply, IpcError> {
+        Ok(Reply::Attached(AttachResponse {
+            child_exited: false,
+            exit_code: None,
+        }))
+    }
+
+    // A window connection routes frames to the one window it attached, so a
+    // second attach is written only once the first is answered.
+    #[tokio::test]
+    async fn a_second_attach_is_written_only_once_the_first_is_answered() {
+        let (_client, generation, mut peer, _reader) = wired();
+        let mut first = std::pin::pin!(tokio::task::unconstrained(request_attach(
+            &generation,
+            "w1",
+            None,
+            None
+        )));
+        assert!(poll_now(first.as_mut()).is_pending());
+        let (key, sent) =
+            yagura_test_support::ipc::reply_within("the first attach", next_request(&mut peer))
+                .await;
+        assert_eq!(sent, attach_view("w1"));
+
+        let mut second = std::pin::pin!(tokio::task::unconstrained(request_attach(
+            &generation,
+            "w2",
+            None,
+            None
+        )));
+        assert!(poll_now(second.as_mut()).is_pending());
+        assert_eq!(
+            written_now(&mut peer),
+            Vec::<ClientMessage>::new(),
+            "a second attach is written while the first is unanswered"
+        );
+
+        assert_eq!(
+            generation.settle(key, PendingKind::Attach, attached_reply()),
+            Settled::Answered
+        );
+        let answered = poll_now(first.as_mut());
+        assert!(
+            matches!(answered, std::task::Poll::Ready(StepReply::Answered(Ok(_)))),
+            "got {answered:?}"
+        );
+        assert!(poll_now(second.as_mut()).is_pending());
+        assert_eq!(written_now(&mut peer), [attach_view("w2")]);
+    }
+
+    // Only attaches go one at a time: a request of another kind is written
+    // while an attach waits for its answer.
+    #[tokio::test]
+    async fn a_copy_is_written_while_an_attach_waits_for_its_answer() {
+        let (client, generation, mut peer, _reader) = wired();
+        let mut attaching = std::pin::pin!(tokio::task::unconstrained(request_attach(
+            &generation,
+            "w1",
+            None,
+            None
+        )));
+        assert!(poll_now(attaching.as_mut()).is_pending());
+        let (_, sent) =
+            yagura_test_support::ipc::reply_within("the attach", next_request(&mut peer)).await;
+        assert_eq!(sent, attach_view("w1"));
+
+        let copying = std::pin::pin!(tokio::task::unconstrained(client.copy_selection()));
+        assert!(poll_now(copying).is_pending());
+        assert_eq!(written_now(&mut peer), [ClientMessage::CopySelection]);
     }
 }

@@ -78,6 +78,9 @@ pub(crate) struct Reaction {
     send: Vec<SentFrame>,
     /// Told when the request has arrived, then waited on before answering.
     hold: Option<(Arc<Notify>, Arc<Notify>)>,
+    /// Whether a held answer is written from a task of its own while the
+    /// connection goes on reading and answering.
+    aside: bool,
 }
 
 impl Reaction {
@@ -96,6 +99,7 @@ impl Reaction {
         Some(Self {
             send: frames,
             hold: None,
+            aside: false,
         })
     }
 
@@ -117,6 +121,22 @@ impl Reaction {
             hold: Some((reached, gate)),
             ..self
         }
+    }
+
+    /// Answers with `messages` under the request's key once the test opens
+    /// `gate`, after telling `reached` that the request has arrived, while
+    /// the connection goes on reading and answering other requests: the way
+    /// a daemon holds a request for an approver. The request counts as
+    /// arrived once it is set aside, before its answer is written.
+    pub(crate) fn replies_aside(
+        reached: Arc<Notify>,
+        gate: Arc<Notify>,
+        messages: Vec<DaemonMessage>,
+    ) -> Option<Self> {
+        Self::replies_after(reached, gate, messages).map(|reaction| Self {
+            aside: true,
+            ..reaction
+        })
     }
 }
 
@@ -464,7 +484,9 @@ async fn serve(
     mut hang_up: watch::Receiver<u64>,
     mut pushes: broadcast::Receiver<Vec<u8>>,
 ) {
-    let (reader, mut writer) = tokio::io::split(connection);
+    let (reader, writer) = tokio::io::split(connection);
+    // Shared with the tasks that write answers held aside.
+    let writer = Arc::new(tokio::sync::Mutex::new(writer));
     let mut requests = Requests {
         idle: Some(reader),
         reading: None,
@@ -478,7 +500,7 @@ async fn serve(
             },
             _ = hang_up.changed() => return,
             Ok(body) = pushes.recv() => {
-                if writer.write_all(&frame_encode(&body)).await.is_err() {
+                if writer.lock().await.write_all(&frame_encode(&body)).await.is_err() {
                     return;
                 }
                 continue;
@@ -486,28 +508,48 @@ async fn serve(
         };
         let reaction = (state.script)(&request).or_else(|| housekeeping(&request));
         if let Some(reaction) = reaction {
-            if let Some((reached, gate)) = &reaction.hold {
-                reached.notify_one();
-                let opened = gate.notified();
-                tokio::pin!(opened);
-                loop {
-                    tokio::select! {
-                        () = &mut opened => break,
-                        _ = hang_up.changed() => return,
-                        Ok(body) = pushes.recv() => {
+            let bodies: Vec<Vec<u8>> = reaction.send.iter().map(|frame| frame.body(key)).collect();
+            match &reaction.hold {
+                Some((reached, gate)) if reaction.aside => {
+                    reached.notify_one();
+                    let (gate, writer, mut hang_up) =
+                        (Arc::clone(gate), Arc::clone(&writer), hang_up.clone());
+                    tokio::spawn(async move {
+                        tokio::select! {
+                            () = gate.notified() => {}
+                            _ = hang_up.changed() => return,
+                        }
+                        let mut writer = writer.lock().await;
+                        for body in bodies {
                             if writer.write_all(&frame_encode(&body)).await.is_err() {
                                 return;
                             }
                         }
+                    });
+                    state.arrived.send_replace(count);
+                    continue;
+                }
+                Some((reached, gate)) => {
+                    reached.notify_one();
+                    let opened = gate.notified();
+                    tokio::pin!(opened);
+                    loop {
+                        tokio::select! {
+                            () = &mut opened => break,
+                            _ = hang_up.changed() => return,
+                            Ok(body) = pushes.recv() => {
+                                if writer.lock().await.write_all(&frame_encode(&body)).await.is_err() {
+                                    return;
+                                }
+                            }
+                        }
                     }
                 }
+                None => {}
             }
-            for frame in &reaction.send {
-                if writer
-                    .write_all(&frame_encode(&frame.body(key)))
-                    .await
-                    .is_err()
-                {
+            let mut writer = writer.lock().await;
+            for body in bodies {
+                if writer.write_all(&frame_encode(&body)).await.is_err() {
                     return;
                 }
             }
