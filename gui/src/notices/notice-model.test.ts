@@ -6,6 +6,7 @@ import {
   dismissNotice,
   reopenOffer,
   applyRecoveryUpdate,
+  applyCompatibilityUpdate,
   applyClientConfigFailure,
   recordApprovalExpiredUnseen,
   dismissApprovalExpiredUnseen,
@@ -41,6 +42,7 @@ function baseState(overrides: Partial<NoticeSourceState> = {}): NoticeSourceStat
     daemonRecoveryRev: 0,
     clientConfigFailure: null,
     isDaemonIncompatible: false,
+    daemonCompatibilityRev: 0,
     startupEnvFailure: null,
     profilesNeedingNativeProgram: [],
     isProfileUnavailableDismissed: false,
@@ -588,6 +590,56 @@ describe('applyRecoveryUpdate: generation-ordered adoption', () => {
     });
     const next = applyRecoveryUpdate(state, { status: 'retrying', rev: 1 });
     expect(next).toEqual({ ...state, daemonRecovery: 'retrying', daemonRecoveryRev: 1 });
+  });
+});
+
+/**
+ * Whether the daemon can be used arrives twice -- as a change event and as the
+ * value a freshly started view reads -- and the two can arrive in either
+ * order. Both are ordered by the same rule as a recovery status: a generation
+ * no later than the one held never wins.
+ */
+describe('applyCompatibilityUpdate: generation-ordered adoption', () => {
+  it('adopts a later generation in either direction, and touches no other field', () => {
+    const state = baseState({ daemonSpawnNotice: DAEMON_SPAWN_NOTICE });
+
+    const raised = applyCompatibilityUpdate(state, { incompatible: true, rev: 1 });
+    expect(raised).toEqual({ ...state, isDaemonIncompatible: true, daemonCompatibilityRev: 1 });
+    const lowered = applyCompatibilityUpdate(raised, { incompatible: false, rev: 2 });
+    expect(lowered).toEqual({ ...state, isDaemonIncompatible: false, daemonCompatibilityRev: 2 });
+  });
+
+  it.each([
+    ['equals', 3],
+    ['is less than', 2],
+  ])('does not change state when the incoming generation %s the current one', (_label, rev) => {
+    const state = baseState({ isDaemonIncompatible: true, daemonCompatibilityRev: 3 });
+
+    expect(applyCompatibilityUpdate(state, { incompatible: false, rev })).toEqual(state);
+  });
+
+  it('ends at the same state whichever of the event and the read arrives first', () => {
+    const event = { incompatible: false, rev: 5 };
+    const read = { incompatible: true, rev: 4 };
+    const start = baseState();
+
+    const eventFirst = applyCompatibilityUpdate(applyCompatibilityUpdate(start, event), read);
+    const readFirst = applyCompatibilityUpdate(applyCompatibilityUpdate(start, read), event);
+
+    expect(eventFirst).toEqual(readFirst);
+    expect(eventFirst.isDaemonIncompatible).toBe(false);
+  });
+
+  it('leaves the recovery status and its generation to their own updates', () => {
+    const state = baseState({ daemonRecovery: 'retrying', daemonRecoveryRev: 9 });
+
+    const next = applyCompatibilityUpdate(state, { incompatible: true, rev: 1 });
+    expect(next.daemonRecovery).toBe('retrying');
+    expect(next.daemonRecoveryRev).toBe(9);
+    expect(applyRecoveryUpdate(next, { status: 'exhausted', rev: 10 })).toMatchObject({
+      isDaemonIncompatible: true,
+      daemonCompatibilityRev: 1,
+    });
   });
 });
 

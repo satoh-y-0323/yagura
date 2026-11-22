@@ -25,8 +25,8 @@ import {
   type LayoutApplicationTarget,
   type RestoreLaunch,
 } from './restore-model';
-import { WindowOpenFailureError } from '../ipc/session-boundary';
-import type { RestoreEntry, WindowInfo, WindowOpenFailure } from '../ipc/session-boundary';
+import { CommandFailureError } from '../ipc/session-boundary';
+import type { CommandFailure, RestoreEntry, WindowInfo } from '../ipc/session-boundary';
 import { describeWindowOpenFailure } from '../window-open-failure-model';
 import { banners, EXTERNAL_TEXT_MAX_CODE_POINTS } from '../ui-messages';
 
@@ -598,11 +598,12 @@ describe('restoreSelected', () => {
     profile: 'codex-cli',
   });
 
-  const notFound: WindowOpenFailure = {
+  const notFound: CommandFailure = {
     kind: 'rejected',
     code: 'profile_not_found',
     message: 'unknown launch profile',
     rejectedArgument: 'profile',
+    text: 'the daemon rejected the request: profile_not_found: unknown launch profile',
   };
 
   /** A fake `open` answering each launch from `answer`; a throw becomes a rejection. */
@@ -616,7 +617,7 @@ describe('restoreSelected', () => {
   it('calls open exactly once per candidate with its restore launch, never retrying a refused profile from argv', async () => {
     const open = fakeOpen((launch) => {
       if (launch.name === 'review-pane') {
-        throw new WindowOpenFailureError(notFound);
+        throw new CommandFailureError(notFound);
       }
       return { windowId: `id-${launch.name}` };
     });
@@ -635,7 +636,7 @@ describe('restoreSelected', () => {
   it('collects each refused candidate by name with its failure and keeps opening the rest', async () => {
     const open = fakeOpen((launch) => {
       if (launch.name === 'review-pane') {
-        throw new WindowOpenFailureError(notFound);
+        throw new CommandFailureError(notFound);
       }
       if (launch.name === 'shell') {
         throw new Error('bridge failed');
@@ -651,7 +652,7 @@ describe('restoreSelected', () => {
 
     expect(result.failed).toEqual([
       { name: 'review-pane', failure: notFound },
-      { name: 'shell', failure: { kind: 'bare', message: 'bridge failed' } },
+      { name: 'shell', failure: { kind: 'bare', text: 'bridge failed' } },
     ]);
     expect(result.opened).toEqual([
       { candidate: secondProfileCandidate, windowId: 'id-build-runner' },
@@ -683,7 +684,8 @@ describe('restoreSelected', () => {
 
 describe('restoreNoticeForFailures', () => {
   function rejected(code: string, message: string, rejectedArgument: string | null = null) {
-    const failure: WindowOpenFailure = { kind: 'rejected', code, message, rejectedArgument };
+    const text = `the daemon rejected the request: ${code}${message === '' ? '' : `: ${message}`}`;
+    const failure: CommandFailure = { kind: 'rejected', code, message, rejectedArgument, text };
     return failure;
   }
 
@@ -716,8 +718,15 @@ describe('restoreNoticeForFailures', () => {
   it('builds each line the way a failed window launch is described', () => {
     const failed = [
       { name: 'b', failure: rejected('spawn_failed', '') },
-      { name: 'c', failure: { kind: 'unsupported', requestType: 'open_window' } as const },
-      { name: 'd', failure: { kind: 'local', message: 'line\nbreak' } as const },
+      {
+        name: 'c',
+        failure: {
+          kind: 'unsupported',
+          requestType: 'open_window',
+          text: 'not sent, as the connected daemon speaks another wire revision: open_window',
+        } as const,
+      },
+      { name: 'd', failure: { kind: 'local', text: 'line\nbreak' } as const },
     ];
 
     expect(restoreNoticeForFailures(failed)).toBe(
@@ -729,7 +738,7 @@ describe('restoreNoticeForFailures', () => {
     expect(
       restoreNoticeForFailures([
         { name: 'review-pane', failure: rejected('profile_not_found', 'unknown launch profile') },
-        { name: 'build-runner', failure: { kind: 'bare', message: 'bridge failed' } },
+        { name: 'build-runner', failure: { kind: 'bare', text: 'bridge failed' } },
         { name: 'review-pane', failure: rejected('profile_not_found', 'unknown launch profile') },
         {
           name: 'review-pane',
@@ -752,7 +761,7 @@ describe('restoreNoticeForFailures', () => {
         name: 'r-d',
         failure: rejected('invalid_argument', 'the working directory does not exist', 'cwd'),
       },
-      { name: 'r-e', failure: { kind: 'bare', message: 'bridge failed' } },
+      { name: 'r-e', failure: { kind: 'bare', text: 'bridge failed' } },
     ]);
 
     expect(notice).toBe(
@@ -779,7 +788,7 @@ describe('restoreNoticeForFailures', () => {
         const name = `w-${String(index + 1).padStart(2, '0')}`;
         return {
           name,
-          failure: { kind: 'bare', message: 'x'.repeat(length - name.length - 2) } as const,
+          failure: { kind: 'bare', text: 'x'.repeat(length - name.length - 2) } as const,
         };
       });
       const names = failed.map(({ name }) => name);
@@ -807,7 +816,7 @@ describe('restoreNoticeForFailures', () => {
   it('always shows the first line whole, even when it alone is longer than the cap', () => {
     const first = {
       name: 'long-pane',
-      failure: { kind: 'bare', message: 'y'.repeat(300) } as const,
+      failure: { kind: 'bare', text: 'y'.repeat(300) } as const,
     };
     const firstLine = describeWindowOpenFailure(first.name, first.failure);
     expect(Array.from(firstLine).length).toBeGreaterThan(EXTERNAL_TEXT_MAX_CODE_POINTS);
@@ -815,7 +824,7 @@ describe('restoreNoticeForFailures', () => {
     const notice =
       restoreNoticeForFailures([
         first,
-        { name: 'short-pane', failure: { kind: 'bare', message: 'bridge failed' } },
+        { name: 'short-pane', failure: { kind: 'bare', text: 'bridge failed' } },
       ]) ?? '';
 
     expect(notice.startsWith(`Not restored (2): ${firstLine}`)).toBe(true);

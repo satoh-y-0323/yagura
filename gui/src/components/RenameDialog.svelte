@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { commandFailureLine } from '../command-failure-model';
   import { buttons, describeOperationFailure, errors } from '../ui-messages';
   import ModalDialog from './ModalDialog.svelte';
 
@@ -11,11 +12,6 @@
   /** Renames to `value`; rejects with the daemon's reason when it refuses the name. */
   export let onConfirm: (value: string) => Promise<void>;
   export let onCancel: () => void;
-  /**
-   * Picks the line a refusal shows from the dialog's own; the shell puts its
-   * one sentence in place of it while the daemon cannot be used.
-   */
-  export let failureLine: (describe: () => string) => string = (describe) => describe();
 
   let value = initialValue;
   let formError: string | null = null;
@@ -43,7 +39,9 @@
       }
     } catch (error) {
       if (current === attempt) {
-        formError = failureLine(() => describeOperationFailure(errors.renameWindowFailed, error));
+        formError = commandFailureLine(error, () =>
+          describeOperationFailure(errors.renameWindowFailed, error)
+        );
       }
     } finally {
       if (current === attempt) {

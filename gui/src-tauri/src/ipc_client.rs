@@ -38,8 +38,9 @@ use crate::commands::{
 };
 use crate::events::{
     ApprovalRegistrationRefusedPayload, ApprovalRequestedPayload, ApprovalResetPayload,
-    AttachResponse, DaemonConnectedPayload, EVENT_APPROVAL_REGISTRATION_REFUSED,
-    EVENT_APPROVAL_REQUESTED, EVENT_APPROVAL_RESET, EVENT_EXIT, ExitPayload, LinkLostReason,
+    AttachResponse, DaemonCompatibilityPayload, DaemonConnectedPayload,
+    EVENT_APPROVAL_REGISTRATION_REFUSED, EVENT_APPROVAL_REQUESTED, EVENT_APPROVAL_RESET,
+    EVENT_EXIT, ExitPayload, LinkLostReason,
 };
 use crate::host::GuiHost;
 use crate::instance::InstanceResolution;
@@ -1538,6 +1539,12 @@ impl IpcClient {
     /// The daemon start this client last announced, `None` before the first.
     pub(crate) fn daemon_connection(&self) -> Option<DaemonConnectedPayload> {
         self.shared.daemon_connection()
+    }
+
+    /// The last change this client told of whether it is open to a daemon of
+    /// another wire revision.
+    pub(crate) fn daemon_compatibility(&self) -> DaemonCompatibilityPayload {
+        self.shared.daemon_compatibility()
     }
 
     /// Sends `message` on the open connection and waits for its answer. Never

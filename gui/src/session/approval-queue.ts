@@ -29,15 +29,16 @@ export interface ApprovalQueueState {
    */
   readonly inFlightIds: ReadonlySet<string>;
   /**
-   * Ids of the requests whose last decision failed to reach the daemon. The
-   * failure note is shown only while one of these is the displayed request.
+   * The line to show for each request whose last decision failed to reach the
+   * daemon, by request id. The failure note is shown only while one of these
+   * is the displayed request.
    */
-  readonly failedIds: ReadonlySet<string>;
+  readonly decisionFailures: ReadonlyMap<string, string>;
 }
 
 /** A queue holding nothing. */
 export function emptyQueue(): ApprovalQueueState {
-  return { items: [], shownIds: new Set(), inFlightIds: new Set(), failedIds: new Set() };
+  return { items: [], shownIds: new Set(), inFlightIds: new Set(), decisionFailures: new Map() };
 }
 
 /**
@@ -104,7 +105,7 @@ export function reset(
   const shownIds = new Set(
     requests.map((entry) => entry.request_id).filter((id) => state.shownIds.has(id))
   );
-  return { items: [...requests], shownIds, inFlightIds: new Set(), failedIds: new Set() };
+  return { items: [...requests], shownIds, inFlightIds: new Set(), decisionFailures: new Map() };
 }
 
 /**
@@ -220,26 +221,32 @@ export function settleDecision(
  * cannot mark a later request that reuses the id.
  * @param state the current queue
  * @param requestId the request whose decision failed
+ * @param line the line shown for the failure
  */
-export function failDecision(state: ApprovalQueueState, requestId: string): ApprovalQueueState {
+export function failDecision(
+  state: ApprovalQueueState,
+  requestId: string,
+  line: string
+): ApprovalQueueState {
   if (!state.inFlightIds.has(requestId)) {
     return state;
   }
   const inFlightIds = new Set(state.inFlightIds);
   inFlightIds.delete(requestId);
-  const failedIds = new Set(state.failedIds);
-  failedIds.add(requestId);
-  return { ...state, inFlightIds, failedIds };
+  const decisionFailures = new Map(state.decisionFailures);
+  decisionFailures.set(requestId, line);
+  return { ...state, inFlightIds, decisionFailures };
 }
 
 /**
- * Whether the failure note belongs on `requestId`: its own decision failed.
+ * The failure line that belongs on `requestId`: its own decision failed.
  * A failure of another request never shows on this one.
  * @param state the current queue
  * @param requestId the displayed request's id
+ * @returns the line, or `null` when this request's decision did not fail
  */
-export function decisionFailed(state: ApprovalQueueState, requestId: string): boolean {
-  return state.failedIds.has(requestId);
+export function decisionFailure(state: ApprovalQueueState, requestId: string): string | null {
+  return state.decisionFailures.get(requestId) ?? null;
 }
 
 /**
@@ -254,19 +261,19 @@ export function isWithinGuard(openedAt: number, now: number): boolean {
 
 /**
  * Drops the entry with `requestId`, keeping the order of the rest, and drops
- * it from `inFlightIds` and `failedIds` too: a decided or withdrawn id must not stay hidden
+ * it from `inFlightIds` and `decisionFailures` too: a decided or withdrawn id must not stay hidden
  * from `head()` forever if it is ever re-enqueued (e.g. after a reconnect
  * that never went through `reset`).
  */
 function removeRequest(state: ApprovalQueueState, requestId: string): ApprovalQueueState {
   const inFlightIds = new Set(state.inFlightIds);
   inFlightIds.delete(requestId);
-  const failedIds = new Set(state.failedIds);
-  failedIds.delete(requestId);
+  const decisionFailures = new Map(state.decisionFailures);
+  decisionFailures.delete(requestId);
   return {
     items: state.items.filter((entry) => entry.request_id !== requestId),
     shownIds: state.shownIds,
     inFlightIds,
-    failedIds,
+    decisionFailures,
   };
 }

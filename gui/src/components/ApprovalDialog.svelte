@@ -3,7 +3,7 @@
   import type { ApprovalRequest } from '../ipc/session-boundary';
   import { isWithinGuard } from '../session/approval-queue';
   import { describeUntargeted } from '../session/approval-target';
-  import { banners, buttons, dialogs, describeStatus } from '../ui-messages';
+  import { buttons, dialogs, describeStatus } from '../ui-messages';
   import Icon from './Icon.svelte';
   import ModalDialog from './ModalDialog.svelte';
 
@@ -17,13 +17,13 @@
   export let openedAt: number;
   export let onDecide: (requestId: string, approved: boolean) => void;
   /**
-   * Whether the decision on the request shown now could not be sent. The
+   * The line for the decision on the request shown now that could not be sent, `null` when it did not fail. The
    * shell answers it for this request only; the note never moves focus.
    */
-  export let decisionFailed: boolean = false;
+  export let decisionFailure: string | null = null;
 
   const failureNoteId = 'approval-decision-failed';
-  $: describedBy = decisionFailed ? failureNoteId : undefined;
+  $: describedBy = decisionFailure !== null ? failureNoteId : undefined;
 
   $: requesterName = sanitizeForDisplay(request.requester.name ?? '');
   $: requesterLabel =
@@ -74,10 +74,10 @@
 <ModalDialog bind:isOpen onCancel={handleCancel} refocusKey={request.request_id}>
   <div class="dialog-content">
     <h2 class="dialog-title">{title}</h2>
-    {#if decisionFailed}
+    {#if decisionFailure !== null}
       <p class="approval-failure" id={failureNoteId}>
         <Icon name="circle-exclamation-point" size="sm" />
-        {banners.approvalDecisionFailed}
+        {decisionFailure}
       </p>
     {/if}
     <p class="dialog-message">{requesterLabel} → {request.tool} → {targetLabel}</p>

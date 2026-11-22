@@ -17,9 +17,9 @@
  * which owns the per-window status the view renders.
  */
 
-import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 
+import { invokeDaemonCommand, invokeLocalCommand } from './command-invoke';
 import { sanitizeForDisplay } from '../display/untrusted-text';
 import type { FrameAckEntry } from './frame-pull';
 import {
@@ -36,6 +36,7 @@ import {
   narrowChatPosted,
   narrowChatRooms,
   narrowCloseOutcome,
+  narrowDaemonCompatibilityPayload,
   narrowDaemonRecoveryPayload,
   narrowDaemonConnectedPayload,
   narrowDecideApprovalOutcome,
@@ -50,7 +51,6 @@ import {
   narrowWindowInfoList,
   narrowWindowLinkPayload,
   narrowWindowListPayload,
-  narrowWindowOpenFailure,
   ownEntries,
   readOptionalInteger,
   readOptionalString,
@@ -61,7 +61,6 @@ import {
   requireNonNegativeInteger,
   requireString,
   SESSION_EVENT,
-  WindowOpenFailureError,
   type ApprovalRegistrationRefusedPayload,
   type ApprovalRequestedPayload,
   type ApprovalResetPayload,
@@ -73,6 +72,7 @@ import {
   type ChatPosted,
   type ChatRoomInfo,
   type CloseOutcome,
+  type DaemonCompatibilityPayload,
   type DaemonProblem,
   type DaemonRecoveryPayload,
   type DaemonConnectedPayload,
@@ -136,6 +136,8 @@ export interface AppEventHandlers {
   onApprovalRegistrationRefused?: (payload: ApprovalRegistrationRefusedPayload) => void;
   /** The daemon-recovery supervisor moved to a new status. */
   onDaemonRecovery?: (payload: DaemonRecoveryPayload) => void;
+  /** The control connection opened to, or left, a daemon of another wire revision. */
+  onDaemonCompatibility?: (payload: DaemonCompatibilityPayload) => void;
 }
 
 /**
@@ -160,7 +162,7 @@ export async function invokeAttachWindow(
   windowId: string,
   size: { cols: number; rows: number } | null
 ): Promise<void> {
-  await invoke('attach_window', { window_id: windowId, size });
+  await invokeDaemonCommand('attach_window', { window_id: windowId, size });
 }
 
 /** A cell of a window's view, counted from 0 at the top-left. */
@@ -203,7 +205,7 @@ export interface WirePalette {
  * @throws when the core rejects the request.
  */
 export async function invokeSendWindowInput(windowId: string, input: WindowInput): Promise<void> {
-  await invoke<unknown>('send_window_input', { window_id: windowId, input });
+  await invokeDaemonCommand('send_window_input', { window_id: windowId, input });
 }
 
 /**
@@ -217,7 +219,7 @@ export async function invokeNextFrames(
   acks: FrameAckEntry[],
   onInvalid: (error: unknown) => void
 ): Promise<[string, Frame][]> {
-  const response = requireArray(await invoke<unknown>('next_frames', { acks }), 'next_frames');
+  const response = requireArray(await invokeDaemonCommand('next_frames', { acks }), 'next_frames');
   const frames: [string, Frame][] = [];
   for (const entry of response) {
     try {
@@ -243,7 +245,7 @@ export async function invokeSetWindowPalette(
   windowId: string,
   palette: WirePalette
 ): Promise<void> {
-  await invoke<unknown>('set_window_palette', { window_id: windowId, palette });
+  await invokeDaemonCommand('set_window_palette', { window_id: windowId, palette });
 }
 
 /**
@@ -257,7 +259,7 @@ export async function invokeSetDefaultPalettes(
   appPalette: WirePalette,
   vendorPalettes: Record<string, WirePalette>
 ): Promise<void> {
-  await invoke<unknown>('set_default_palettes', {
+  await invokeDaemonCommand('set_default_palettes', {
     app_palette: appPalette,
     vendor_palettes: vendorPalettes,
   });
@@ -270,7 +272,7 @@ export async function invokeSetDefaultPalettes(
  * @throws when the core rejects the request.
  */
 export async function invokeSetWindowVisible(windowId: string, visible: boolean): Promise<void> {
-  await invoke<unknown>('set_window_visible', { window_id: windowId, visible });
+  await invokeDaemonCommand('set_window_visible', { window_id: windowId, visible });
 }
 
 /**
@@ -280,7 +282,7 @@ export async function invokeSetWindowVisible(windowId: string, visible: boolean)
  */
 export async function invokeCopyWindowSelection(windowId: string): Promise<string | null> {
   return narrowSelectionText(
-    await invoke<unknown>('copy_window_selection', { window_id: windowId })
+    await invokeDaemonCommand('copy_window_selection', { window_id: windowId })
   );
 }
 
@@ -290,7 +292,7 @@ export async function invokeCopyWindowSelection(windowId: string): Promise<strin
  * @throws when the core rejects the request.
  */
 export async function invokeClearWindowSelection(windowId: string): Promise<void> {
-  await invoke<unknown>('clear_window_selection', { window_id: windowId });
+  await invokeDaemonCommand('clear_window_selection', { window_id: windowId });
 }
 
 /**
@@ -299,7 +301,7 @@ export async function invokeClearWindowSelection(windowId: string): Promise<void
  * @throws when the core rejects the request.
  */
 export async function invokeResize(windowId: string, cols: number, rows: number): Promise<void> {
-  await invoke<unknown>('resize', { window_id: windowId, cols, rows });
+  await invokeDaemonCommand('resize', { window_id: windowId, cols, rows });
 }
 
 /**
@@ -308,7 +310,7 @@ export async function invokeResize(windowId: string, cols: number, rows: number)
  * @throws when the core rejects the request or an entry fails validation.
  */
 export async function invokeListWindows(): Promise<WindowInfo[]> {
-  return narrowWindowInfoList(await invoke<unknown>('list_windows'));
+  return narrowWindowInfoList(await invokeDaemonCommand('list_windows'));
 }
 
 /** Result of `invokeListRestoreCandidates`. */
@@ -328,7 +330,7 @@ export interface RestoreCandidatesResult {
  */
 export async function invokeListRestoreCandidates(): Promise<RestoreCandidatesResult> {
   const record = requireRecord(
-    await invoke<unknown>('list_restore_candidates'),
+    await invokeDaemonCommand('list_restore_candidates'),
     'list_restore_candidates'
   );
   return {
@@ -353,7 +355,7 @@ export async function invokeUpdateWindowLayout(
 ): Promise<{ windowId: string }> {
   const context = 'update_window_layout';
   const record = requireRecord(
-    await invoke<unknown>(context, {
+    await invokeDaemonCommand(context, {
       window_id: windowId,
       layout_json: layoutJson,
     }),
@@ -417,7 +419,7 @@ export interface OpenWindowResult {
  * @throws {BoundaryError} when the reply does not match the contract.
  */
 export async function invokeListDetections(): Promise<DetectionListResult> {
-  return narrowDetectionListResult(await invoke<unknown>('list_detections'));
+  return narrowDetectionListResult(await invokeDaemonCommand('list_detections'));
 }
 
 /**
@@ -540,7 +542,7 @@ export interface ProfileListResult {
  * @throws {BoundaryError} when the reply does not match the contract.
  */
 export async function invokeListProfiles(): Promise<ProfileListResult> {
-  return narrowProfileListResult(await invoke<unknown>('list_profiles'));
+  return narrowProfileListResult(await invokeDaemonCommand('list_profiles'));
 }
 
 /** Result of `invokeSetProfileEnabled`: the state the daemon stored. */
@@ -563,7 +565,7 @@ export async function invokeSetProfileEnabled(
   enabled: boolean
 ): Promise<ProfileEnabledResult> {
   return narrowProfileEnabledResult(
-    await invoke<unknown>('set_profile_enabled', { profile, enabled })
+    await invokeDaemonCommand('set_profile_enabled', { profile, enabled })
   );
 }
 
@@ -660,7 +662,7 @@ function narrowApprovalSettingsInfo(value: unknown): ApprovalSettingsInfo {
  * @throws when the core rejects the request or the reply fails validation.
  */
 export async function invokeGetApprovalSettings(): Promise<ApprovalSettingsInfo> {
-  return narrowApprovalSettingsInfo(await invoke<unknown>('get_approval_settings'));
+  return narrowApprovalSettingsInfo(await invokeDaemonCommand('get_approval_settings'));
 }
 
 /**
@@ -674,7 +676,7 @@ export async function invokeSetAutoApprove(
   autoApprove: boolean
 ): Promise<ApprovalSettingsInfo> {
   return narrowApprovalSettingsInfo(
-    await invoke<unknown>('set_auto_approve', { tool, auto_approve: autoApprove })
+    await invokeDaemonCommand('set_auto_approve', { tool, auto_approve: autoApprove })
   );
 }
 
@@ -688,7 +690,7 @@ export async function invokeSetPlanApprovalRequired(
   required: boolean
 ): Promise<ApprovalSettingsInfo> {
   return narrowApprovalSettingsInfo(
-    await invoke<unknown>('set_plan_approval_required', { required })
+    await invokeDaemonCommand('set_plan_approval_required', { required })
   );
 }
 
@@ -727,13 +729,7 @@ export async function invokeOpenWindow(request: OpenWindowRequest): Promise<Open
       args[key] = value;
     }
   }
-  let reply: unknown;
-  try {
-    reply = await invoke<unknown>('open_window', args);
-  } catch (rejection) {
-    throw new WindowOpenFailureError(narrowWindowOpenFailure(rejection));
-  }
-  return narrowOpenWindowResult(reply);
+  return narrowOpenWindowResult(await invokeDaemonCommand('open_window', args));
 }
 
 /**
@@ -982,7 +978,9 @@ function narrowOpenWindowResult(value: unknown): OpenWindowResult {
  * @throws when the core rejects the request.
  */
 export async function invokeCloseWindow(windowId: string, force?: boolean): Promise<CloseOutcome> {
-  return narrowCloseOutcome(await invoke<unknown>('close_window', { window_id: windowId, force }));
+  return narrowCloseOutcome(
+    await invokeDaemonCommand('close_window', { window_id: windowId, force })
+  );
 }
 
 /**
@@ -991,7 +989,7 @@ export async function invokeCloseWindow(windowId: string, force?: boolean): Prom
  * @throws when the core rejects the request.
  */
 export async function invokeInterruptWindow(windowId: string): Promise<void> {
-  await invoke<unknown>('interrupt_window', { window_id: windowId });
+  await invokeDaemonCommand('interrupt_window', { window_id: windowId });
 }
 
 /**
@@ -1009,7 +1007,7 @@ export async function invokeDecideApproval(
   requestId: string,
   approved: boolean
 ): Promise<DecideApprovalOutcome> {
-  const result = await invoke<unknown>('decide_approval', { request_id: requestId, approved });
+  const result = await invokeDaemonCommand('decide_approval', { request_id: requestId, approved });
   return narrowDecideApprovalOutcome(result);
 }
 
@@ -1022,7 +1020,7 @@ export async function invokeDecideApproval(
  * @throws when the core rejects the request or the outcome fails validation.
  */
 export async function invokeSyncApprovals(): Promise<ApprovalSyncOutcome> {
-  return narrowApprovalSyncOutcome(await invoke<unknown>('sync_approvals'));
+  return narrowApprovalSyncOutcome(await invokeDaemonCommand('sync_approvals'));
 }
 
 /**
@@ -1033,7 +1031,7 @@ export async function invokeSyncApprovals(): Promise<ApprovalSyncOutcome> {
  */
 export async function invokeRenameWindow(windowId: string, name: string): Promise<string> {
   return narrowStringResult(
-    await invoke<unknown>('rename_window', { window_id: windowId, name }),
+    await invokeDaemonCommand('rename_window', { window_id: windowId, name }),
     'rename_window'
   );
 }
@@ -1045,7 +1043,7 @@ export async function invokeRenameWindow(windowId: string, name: string): Promis
  * @throws when the core rejects the post or the reply fails validation.
  */
 export async function invokeSendChat(body: string, roomId?: string): Promise<ChatPosted> {
-  return narrowChatPosted(await invoke<unknown>('send_chat', { body, room_id: roomId }));
+  return narrowChatPosted(await invokeDaemonCommand('send_chat', { body, room_id: roomId }));
 }
 
 /**
@@ -1054,7 +1052,7 @@ export async function invokeSendChat(body: string, roomId?: string): Promise<Cha
  * @throws when the core rejects the post or the reply fails validation.
  */
 export async function invokeBroadcastChat(body: string, roomId?: string): Promise<ChatPosted> {
-  return narrowChatPosted(await invoke<unknown>('broadcast_chat', { body, room_id: roomId }));
+  return narrowChatPosted(await invokeDaemonCommand('broadcast_chat', { body, room_id: roomId }));
 }
 
 /**
@@ -1070,7 +1068,7 @@ export async function invokeReadChat(
   limit?: number
 ): Promise<ChatMessages> {
   return narrowChatMessages(
-    await invoke<unknown>('read_chat', { room_id: roomId, after_seq: afterSeq, limit })
+    await invokeDaemonCommand('read_chat', { room_id: roomId, after_seq: afterSeq, limit })
   );
 }
 
@@ -1080,7 +1078,7 @@ export async function invokeReadChat(
  * @throws when the core rejects the request or the reply fails validation.
  */
 export async function invokeListChatRooms(): Promise<ChatRoomInfo[]> {
-  return narrowChatRooms(await invoke<unknown>('list_chat_rooms'));
+  return narrowChatRooms(await invokeDaemonCommand('list_chat_rooms'));
 }
 
 /**
@@ -1091,7 +1089,7 @@ export async function invokeListChatRooms(): Promise<ChatRoomInfo[]> {
  */
 export async function invokeClearChatRoom(roomId: string): Promise<string> {
   return narrowStringResult(
-    await invoke<unknown>('clear_chat_room', { room_id: roomId }),
+    await invokeDaemonCommand('clear_chat_room', { room_id: roomId }),
     'clear_chat_room'
   );
 }
@@ -1104,7 +1102,7 @@ export async function invokeClearChatRoom(roomId: string): Promise<string> {
  */
 export async function invokeDeleteChatRoom(roomId: string): Promise<string> {
   return narrowStringResult(
-    await invoke<unknown>('delete_chat_room', { room_id: roomId }),
+    await invokeDaemonCommand('delete_chat_room', { room_id: roomId }),
     'delete_chat_room'
   );
 }
@@ -1117,7 +1115,7 @@ export async function invokeDeleteChatRoom(roomId: string): Promise<string> {
  * @throws {BoundaryError} when the reply does not match the contract.
  */
 export async function invokeGetRecoveryStatus(): Promise<RecoveryStatusReport> {
-  return narrowRecoveryStatusReport(await invoke<unknown>('get_recovery_status'));
+  return narrowRecoveryStatusReport(await invokeLocalCommand('get_recovery_status'));
 }
 
 /**
@@ -1128,8 +1126,18 @@ export async function invokeGetRecoveryStatus(): Promise<RecoveryStatusReport> {
  * @throws {BoundaryError} when the reply does not match the contract.
  */
 export async function invokeGetDaemonConnection(): Promise<DaemonConnectedPayload | null> {
-  const reply = await invoke<unknown>('get_daemon_connection');
+  const reply = await invokeLocalCommand('get_daemon_connection');
   return reply === null ? null : narrowDaemonConnectedPayload(reply);
+}
+
+/**
+ * Reads whether the control connection is open to a daemon of another wire
+ * revision, so a change published before the subscription opened is not lost.
+ *
+ * @throws {BoundaryError} when the reply does not match the contract.
+ */
+export async function invokeGetDaemonCompatibility(): Promise<DaemonCompatibilityPayload> {
+  return narrowDaemonCompatibilityPayload(await invokeLocalCommand('get_daemon_compatibility'));
 }
 
 /**
@@ -1140,7 +1148,7 @@ export async function invokeGetDaemonConnection(): Promise<DaemonConnectedPayloa
  * speaks another wire revision, which the core writes nothing to.
  */
 export async function invokeGetDaemonHealth(): Promise<DaemonProblem[]> {
-  return narrowDaemonHealth(await invoke<unknown>('get_daemon_health'));
+  return narrowDaemonHealth(await invokeDaemonCommand('get_daemon_health'));
 }
 
 /**
@@ -1153,7 +1161,7 @@ export async function invokeGetDaemonHealth(): Promise<DaemonProblem[]> {
  * daemon being unreachable.
  */
 export async function invokeReconnectDaemon(): Promise<void> {
-  await invoke<unknown>('reconnect_daemon');
+  await invokeDaemonCommand('reconnect_daemon');
 }
 
 /**
@@ -1171,7 +1179,7 @@ export async function invokeSetAttentionSummary(
   pendingPermissions: number,
   arrived: boolean
 ): Promise<void> {
-  await invoke<unknown>('set_attention_summary', {
+  await invokeLocalCommand('set_attention_summary', {
     needs_you: needsYou,
     pending_permissions: pendingPermissions,
     arrived,
@@ -1219,7 +1227,7 @@ const KEYMAP_SAVE_FAILURES: ReadonlySet<string> = new Set([
  * @throws {BoundaryError} when the reply does not match the contract.
  */
 export async function invokeLoadKeymap(): Promise<LoadKeymapResult> {
-  return narrowLoadKeymapResult(await invoke<unknown>('load_keymap'));
+  return narrowLoadKeymapResult(await invokeLocalCommand('load_keymap'));
 }
 
 /**
@@ -1229,7 +1237,7 @@ export async function invokeLoadKeymap(): Promise<LoadKeymapResult> {
  * @throws {BoundaryError} when the reply is neither a string nor `null`.
  */
 export async function invokeKeymapFilePath(): Promise<string | null> {
-  const reply = await invoke<unknown>('keymap_file_path');
+  const reply = await invokeLocalCommand('keymap_file_path');
   if (reply === null || typeof reply === 'string') return reply;
   throw new BoundaryError(`keymap_file_path: expected a string or null, got ${typeof reply}`);
 }
@@ -1245,7 +1253,7 @@ export async function invokeKeymapFilePath(): Promise<string | null> {
  */
 export async function invokeSaveKeymap(keys: Record<string, string>): Promise<SaveKeymapResult> {
   try {
-    await invoke<unknown>('save_keymap', { keys });
+    await invokeLocalCommand('save_keymap', { keys });
   } catch (rejection) {
     if (typeof rejection === 'string' && KEYMAP_SAVE_FAILURES.has(rejection)) {
       return { ok: false, reason: rejection as KeymapSaveFailure };
@@ -1314,7 +1322,7 @@ const THEMES_LOAD_FAILURES: ReadonlySet<string> = new Set([
  * @throws {BoundaryError} when the reply does not match the contract.
  */
 export async function invokeLoadThemes(): Promise<LoadThemesResult> {
-  return narrowLoadThemesResult(await invoke<unknown>('load_themes'));
+  return narrowLoadThemesResult(await invokeLocalCommand('load_themes'));
 }
 
 /**
@@ -1465,6 +1473,14 @@ export async function subscribeSession(
       narrowDaemonRecoveryPayload,
       (payload) => {
         app.onDaemonRecovery?.(payload);
+      },
+      app.onBoundaryError
+    ),
+    listenAppEvent(
+      SESSION_EVENT.daemonCompatibility,
+      narrowDaemonCompatibilityPayload,
+      (payload) => {
+        app.onDaemonCompatibility?.(payload);
       },
       app.onBoundaryError
     ),

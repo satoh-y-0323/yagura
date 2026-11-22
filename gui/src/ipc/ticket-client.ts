@@ -9,9 +9,9 @@
  * rather than resolving to an empty result.
  */
 
-import { invoke } from '@tauri-apps/api/core';
 import { type UnlistenFn } from '@tauri-apps/api/event';
 
+import { invokeDaemonCommand } from './command-invoke';
 import { SESSION_EVENT } from './session-boundary';
 import { listenAppEvent } from './session-client';
 import {
@@ -42,7 +42,7 @@ export interface TicketListQuery {
  * @throws when the core rejects the request or the reply fails validation.
  */
 export async function invokeListTicketWorkspaces(): Promise<TicketWorkspace[]> {
-  return narrowTicketWorkspaceList(await invoke<unknown>('list_ticket_workspaces'));
+  return narrowTicketWorkspaceList(await invokeDaemonCommand('list_ticket_workspaces'));
 }
 
 /**
@@ -54,7 +54,7 @@ export async function invokeListTicketWorkspaces(): Promise<TicketWorkspace[]> {
  */
 export async function invokeListTickets(query: TicketListQuery): Promise<TicketList> {
   return narrowTicketList(
-    await invoke<unknown>('list_tickets', {
+    await invokeDaemonCommand('list_tickets', {
       workspace_id: query.workspaceId,
       state: query.state ?? null,
       milestone: query.milestone ?? null,
@@ -70,7 +70,7 @@ export async function invokeListTickets(query: TicketListQuery): Promise<TicketL
  */
 export async function invokeGetTicket(workspaceId: number, ticket: number): Promise<Ticket> {
   return narrowTicketDetail(
-    await invoke<unknown>('get_ticket', { workspace_id: workspaceId, ticket })
+    await invokeDaemonCommand('get_ticket', { workspace_id: workspaceId, ticket })
   );
 }
 

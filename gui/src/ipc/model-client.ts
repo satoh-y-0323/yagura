@@ -7,9 +7,9 @@
  * daemon that predates model aliases -- rejects the returned promise.
  */
 
-import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 
+import { invokeDaemonCommand } from './command-invoke';
 import {
   narrowModelAliasesSaved,
   narrowModelChoicesPayload,
@@ -34,7 +34,7 @@ export async function invokeListModelChoices(
   requestId: number
 ): Promise<ModelChoicesRequested> {
   return narrowModelChoicesRequested(
-    await invoke<unknown>('list_model_choices', { profile, request_id: requestId })
+    await invokeDaemonCommand('list_model_choices', { profile, request_id: requestId })
   );
 }
 
@@ -48,7 +48,9 @@ export async function invokeSaveModelAliases(
   profile: string,
   aliases: LaunchOptionAlias[]
 ): Promise<ModelAliasesSaved> {
-  return narrowModelAliasesSaved(await invoke<unknown>('save_model_aliases', { profile, aliases }));
+  return narrowModelAliasesSaved(
+    await invokeDaemonCommand('save_model_aliases', { profile, aliases })
+  );
 }
 
 /**

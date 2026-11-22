@@ -6,8 +6,7 @@
  * daemon that predates profile details -- rejects the returned promise.
  */
 
-import { invoke } from '@tauri-apps/api/core';
-
+import { invokeDaemonCommand } from './command-invoke';
 import {
   narrowProfileCommandSet,
   narrowProfileDetail,
@@ -21,7 +20,7 @@ import {
  * @throws when the core rejects the request or the reply fails validation.
  */
 export async function invokeGetProfileDetail(profile: string): Promise<ProfileDetail> {
-  return narrowProfileDetail(await invoke<unknown>('get_profile_detail', { profile }));
+  return narrowProfileDetail(await invokeDaemonCommand('get_profile_detail', { profile }));
 }
 
 /**
@@ -35,7 +34,7 @@ export async function invokeSetProfileCommand(
   argv: readonly string[] | null
 ): Promise<ProfileCommandSet> {
   return narrowProfileCommandSet(
-    await invoke<unknown>('set_profile_command', {
+    await invokeDaemonCommand('set_profile_command', {
       profile,
       argv: argv === null ? null : [...argv],
     })

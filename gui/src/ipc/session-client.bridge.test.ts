@@ -17,7 +17,12 @@ const { invokeMock, listenMock, unlistenMock } = vi.hoisted(() => ({
 vi.mock('@tauri-apps/api/core', () => ({ invoke: invokeMock }));
 vi.mock('@tauri-apps/api/event', () => ({ listen: listenMock }));
 
-import { BoundaryError, SESSION_EVENT, type Frame } from './session-boundary';
+import { BoundaryError, CommandFailureError, SESSION_EVENT, type Frame } from './session-boundary';
+import { invokeListMcpRegistrations } from './mcp-registration-client';
+import { invokeListModelChoices } from './model-client';
+import { invokeListPlans } from './plan-client';
+import { invokeGetProfileDetail } from './profile-detail-client';
+import { invokeListTicketWorkspaces } from './ticket-client';
 import {
   invokeClearWindowSelection,
   invokeCloseWindow,
@@ -29,6 +34,7 @@ import {
   invokeListDetections,
   invokeListProfiles,
   invokeListRestoreCandidates,
+  invokeListWindows,
   invokeLoadKeymap,
   invokeLoadThemes,
   invokeNextFrames,
@@ -152,6 +158,15 @@ describe('the thin window commands', () => {
     });
     invokeMock.mockResolvedValueOnce({ status_boot: null, spawn_warning: 5, compatible: true });
     await expect(invokeGetDaemonConnection()).rejects.toThrow(BoundaryError);
+  });
+
+  it('reads whether the daemon can be used by command name and narrows the reply', async () => {
+    const { invokeGetDaemonCompatibility } = await import('./session-client');
+    invokeMock.mockResolvedValueOnce({ incompatible: true, rev: 4 });
+    await expect(invokeGetDaemonCompatibility()).resolves.toEqual({ incompatible: true, rev: 4 });
+    expect(invokeMock).toHaveBeenLastCalledWith('get_daemon_compatibility');
+    invokeMock.mockResolvedValueOnce({ incompatible: 'yes', rev: 4 });
+    await expect(invokeGetDaemonCompatibility()).rejects.toThrow(BoundaryError);
   });
 
   it('renames a window and returns the stored name', async () => {
@@ -626,6 +641,7 @@ describe('subscribeSession routing', () => {
       onApprovalReset: vi.fn(),
       onApprovalRegistrationRefused: vi.fn(),
       onDaemonRecovery: vi.fn(),
+      onDaemonCompatibility: vi.fn(),
     });
     await subscribeSession(() => undefined, app);
 
@@ -657,6 +673,8 @@ describe('subscribeSession routing', () => {
     expect(app.onApprovalRegistrationRefused).toHaveBeenCalledWith({});
     push(SESSION_EVENT.daemonRecovery, { status: 'retrying', rev: 1 });
     expect(app.onDaemonRecovery).toHaveBeenCalledTimes(1);
+    push(SESSION_EVENT.daemonCompatibility, { incompatible: true, rev: 2 });
+    expect(app.onDaemonCompatibility).toHaveBeenCalledWith({ incompatible: true, rev: 2 });
     expect(app.onBoundaryError).not.toHaveBeenCalled();
   });
 
@@ -675,15 +693,21 @@ describe('subscribeSession routing', () => {
   });
 
   it('reports a bad application payload to the boundary-error sink and not to its handler', async () => {
-    const app = appHandlers({ onStatus: vi.fn(), onDaemonRecovery: vi.fn() });
+    const app = appHandlers({
+      onStatus: vi.fn(),
+      onDaemonRecovery: vi.fn(),
+      onDaemonCompatibility: vi.fn(),
+    });
     await subscribeSession(() => undefined, app);
     push(SESSION_EVENT.status, { status: 'idle' });
     push(SESSION_EVENT.daemonRecovery, 5);
+    push(SESSION_EVENT.daemonCompatibility, { incompatible: true });
     push(SESSION_EVENT.daemonConnected, { status_boot: null, spawn_warning: 5, compatible: true });
     expect(app.onStatus).not.toHaveBeenCalled();
     expect(app.onDaemonRecovery).not.toHaveBeenCalled();
+    expect(app.onDaemonCompatibility).not.toHaveBeenCalled();
     expect(app.onDaemonConnected).not.toHaveBeenCalled();
-    expect(app.onBoundaryError).toHaveBeenCalledTimes(3);
+    expect(app.onBoundaryError).toHaveBeenCalledTimes(4);
   });
 
   it('routes a window event to the handlers of the window it names', async () => {
@@ -738,5 +762,73 @@ describe('subscribeWindowList', () => {
     handler?.({ payload: 5 });
     expect(onBoundaryError).toHaveBeenCalledTimes(1);
     expect(onList).toHaveBeenCalledTimes(1);
+  });
+});
+
+/**
+ * Every command that reaches the daemon fails with the one structured shape
+ * the core serializes, whichever client calls it. Each client hands the
+ * caller the same Error, told by the core's own sentence, so a caller reads
+ * the kind of failure rather than the wording of it.
+ */
+describe('a daemon command refusal reaches the caller as the one failure error', () => {
+  const REJECTION = {
+    kind: 'rejected',
+    code: 'invalid_argument',
+    message: 'unknown plan',
+    rejected_argument: 'plan_id',
+    text: 'the daemon rejected the request: invalid_argument: unknown plan',
+  };
+  const GATE_REFUSAL = {
+    kind: 'unsupported',
+    request_type: 'list_plans',
+    text: 'not sent, as the connected daemon speaks another wire revision: list_plans',
+  };
+
+  it.each<[string, () => Promise<unknown>]>([
+    ['session client', () => invokeListWindows()],
+    ['plan client', () => invokeListPlans()],
+    ['ticket client', () => invokeListTicketWorkspaces()],
+    ['model client', () => invokeListModelChoices('claude-code', 1)],
+    ['profile-detail client', () => invokeGetProfileDetail('claude-code')],
+    ['MCP-registration client', () => invokeListMcpRegistrations(1)],
+  ])('the %s narrows every kind of refusal into it', async (_client, call) => {
+    const caught = async (rejection: unknown): Promise<unknown> => {
+      invokeMock.mockRejectedValueOnce(rejection);
+      return call().then(
+        () => 'resolved',
+        (error: unknown) => error
+      );
+    };
+
+    const rejected = await caught(REJECTION);
+    expect(rejected).toBeInstanceOf(CommandFailureError);
+    expect(rejected).toMatchObject({
+      message: REJECTION.text,
+      failure: {
+        kind: 'rejected',
+        code: 'invalid_argument',
+        message: 'unknown plan',
+        rejectedArgument: 'plan_id',
+        text: REJECTION.text,
+      },
+    });
+
+    const gated = await caught(GATE_REFUSAL);
+    expect(gated).toBeInstanceOf(CommandFailureError);
+    expect(gated).toMatchObject({
+      message: GATE_REFUSAL.text,
+      failure: { kind: 'unsupported', requestType: 'list_plans', text: GATE_REFUSAL.text },
+    });
+
+    const bare = await caught('invalid args for command');
+    expect(bare).toBeInstanceOf(CommandFailureError);
+    expect(bare).toMatchObject({
+      message: 'invalid args for command',
+      failure: { kind: 'bare', text: 'invalid args for command' },
+    });
+
+    const malformed = await caught({ kind: 'rejected', code: 'invalid_argument' });
+    expect(malformed).toBeInstanceOf(BoundaryError);
   });
 });

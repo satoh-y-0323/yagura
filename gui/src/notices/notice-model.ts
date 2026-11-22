@@ -77,6 +77,14 @@ export type DaemonRecoveryUpdate = {
   rev: number;
 };
 
+/** A change of whether the daemon can be used, with the generation that orders it. */
+export type DaemonCompatibilityUpdate = {
+  /** Whether the control connection is open to a daemon of another wire revision. */
+  incompatible: boolean;
+  /** The generation of that change; it only ever grows. */
+  rev: number;
+};
+
 /**
  * The button a notice offers. A label key, never a handler: the view owns
  * what a click does, so this module stays free of behavior.
@@ -154,11 +162,13 @@ export type NoticeSourceState = {
   /** Why the client settings could not be loaded, `null` when they were. */
   clientConfigFailure: ClientConfigFailure | null;
   /**
-   * Whether the connected daemon was announced as not speaking this build's
-   * wire revision; `false` both before any announcement and once a compatible
-   * daemon has been announced.
+   * Whether the control connection is open to a daemon that does not speak
+   * this build's wire revision. Written only from the core's compatibility
+   * changes, never inferred from another fact.
    */
   isDaemonIncompatible: boolean;
+  /** The generation `isDaemonIncompatible` was taken at; a smaller one never wins. */
+  daemonCompatibilityRev: number;
   /**
    * Why start-up could not resolve which instance this process belongs to,
    * `null` when it could. Carries the reason code
@@ -478,10 +488,36 @@ export function applyRecoveryUpdate(
   state: NoticeSourceState,
   incoming: DaemonRecoveryUpdate
 ): NoticeSourceState {
-  if (incoming.rev <= state.daemonRecoveryRev) {
+  if (!supersedes(incoming.rev, state.daemonRecoveryRev)) {
     return state;
   }
   return { ...state, daemonRecovery: incoming.status, daemonRecoveryRev: incoming.rev };
+}
+
+/**
+ * Folds one change of whether the daemon can be used into the state, by the
+ * same ordering as {@link applyRecoveryUpdate}: the change event and the read
+ * a starting view makes can arrive in either order.
+ * @param state the current notice-relevant application state
+ * @param incoming the change that arrived, with its generation
+ */
+export function applyCompatibilityUpdate(
+  state: NoticeSourceState,
+  incoming: DaemonCompatibilityUpdate
+): NoticeSourceState {
+  if (!supersedes(incoming.rev, state.daemonCompatibilityRev)) {
+    return state;
+  }
+  return {
+    ...state,
+    isDaemonIncompatible: incoming.incompatible,
+    daemonCompatibilityRev: incoming.rev,
+  };
+}
+
+/** Whether a generation is later than the one held; an equal one arrived twice. */
+function supersedes(incoming: number, held: number): boolean {
+  return incoming > held;
 }
 
 /**

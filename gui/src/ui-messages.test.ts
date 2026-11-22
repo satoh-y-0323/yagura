@@ -250,8 +250,8 @@ describe('describeDetectionWarning: Japanese summary, folding and capping', () =
  * touch).
  */
 /**
- * The fixed line the add-window form shows when the
- * connected daemon has not settled a wire revision the launch options need.
- * `describeWindowOpenFailure` (window-open-failure-model.ts) is the only
- * caller; this only checks the facade re-export resolves to real text.
+ * The fixed line an operation shows when its request was not sent because
+ * the connected daemon speaks another wire revision, picked by
+ * `commandFailureLine` (command-failure-model.ts); this only checks the facade
+ * re-export resolves to real text.
  */

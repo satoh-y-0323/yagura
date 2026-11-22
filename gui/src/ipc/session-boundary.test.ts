@@ -23,7 +23,7 @@ import {
   narrowApprovalRegistrationRefusedPayload,
   narrowCloseOutcome,
   narrowChatMessages,
-  narrowWindowOpenFailure,
+  narrowDaemonCompatibilityPayload,
   narrowWindowListPayload,
   narrowStatusPayload,
 } from './session-boundary';
@@ -1613,42 +1613,36 @@ describe('a listed window and a pending request read a room the same way', () =>
   });
 });
 
-// ---------------------------------------------------------------------------
-// The gate's rejection arriving as a new
-// tagged arm of `WindowOpenFailure`, and the window-list push carrying the
-// connection's wire revision alongside the windows it always carried.
-// ---------------------------------------------------------------------------
-
-describe('narrowWindowOpenFailure: the "unsupported" arm', () => {
-  it('narrows a well-formed unsupported failure, reading the wire tag under requestType', () => {
-    const result = narrowWindowOpenFailure({
-      kind: 'unsupported',
-      request_type: 'open_window_from_profile',
-    });
-    expect(result).toEqual({ kind: 'unsupported', requestType: 'open_window_from_profile' });
+/**
+ * Whether the control connection is open to a daemon of another wire
+ * revision, with the generation that orders the change. Neither field is ever
+ * guessed: a payload that does not carry both is refused.
+ */
+describe('narrowDaemonCompatibilityPayload', () => {
+  it.each([
+    [true, 1],
+    [false, 0],
+  ])('reads incompatible %s at generation %i', (incompatible, rev) => {
+    expect(narrowDaemonCompatibilityPayload({ incompatible, rev })).toEqual({ incompatible, rev });
   });
 
-  it('carries whatever wire tag the daemon reports, not a fixed one', () => {
-    const result = narrowWindowOpenFailure({ kind: 'unsupported', request_type: 'send_handoff' });
-    expect(result).toEqual({ kind: 'unsupported', requestType: 'send_handoff' });
-  });
-
-  it('rejects a payload that claims the "unsupported" tag but omits request_type', () => {
-    expect(() => narrowWindowOpenFailure({ kind: 'unsupported' })).toThrow(BoundaryError);
-  });
-
-  it('rejects a payload whose request_type is not a string', () => {
-    expect(() => narrowWindowOpenFailure({ kind: 'unsupported', request_type: 7 })).toThrow(
-      BoundaryError
-    );
-  });
-
-  it('rejects a payload whose request_type is spelled otherwise (camelCase)', () => {
-    expect(() =>
-      narrowWindowOpenFailure({ kind: 'unsupported', requestType: 'open_window_from_profile' })
-    ).toThrow(BoundaryError);
+  it.each<[string, unknown]>([
+    ['incompatible is missing', { rev: 1 }],
+    ['incompatible is not a boolean', { incompatible: 'yes', rev: 1 }],
+    ['rev is missing', { incompatible: true }],
+    ['rev is a string', { incompatible: true, rev: '1' }],
+    ['rev is not an integer', { incompatible: true, rev: 1.5 }],
+    ['rev is negative', { incompatible: true, rev: -1 }],
+    ['the payload is not a record', true],
+  ])('refuses a payload whose %s', (_label, value) => {
+    expect(() => narrowDaemonCompatibilityPayload(value)).toThrow(BoundaryError);
   });
 });
+
+// ---------------------------------------------------------------------------
+// The window-list push carrying the connection's wire revision alongside the
+// windows it always carried.
+// ---------------------------------------------------------------------------
 
 describe('narrowWindowListPayload (session://window-list)', () => {
   it('narrows the windows field the same way narrowWindowInfoList does, and nothing else', () => {

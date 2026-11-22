@@ -102,6 +102,10 @@ pub const EVENT_MCP_REGISTRATION_RESULT: &str = "session://mcp-registration-resu
 /// rather than waiting for the next change.
 pub const EVENT_DAEMON_RECOVERY: &str = "session://daemon-recovery";
 
+/// The control connection came to, or left, a daemon that speaks another wire
+/// revision than this build. Payload: [`DaemonCompatibilityPayload`].
+pub const EVENT_DAEMON_COMPATIBILITY: &str = "session://daemon-compatibility";
+
 /// Payload of [`EVENT_EXIT`].
 #[derive(Debug, Clone, Serialize)]
 pub struct ExitPayload {
@@ -333,6 +337,18 @@ pub struct DaemonRecoveryPayload {
     pub status: RecoveryStatus,
     /// The generation of this change, which orders it against every other
     /// delivery of a status -- including the one a fresh WebView reads.
+    pub rev: u64,
+}
+
+/// Payload of [`EVENT_DAEMON_COMPATIBILITY`]. The default is the value before
+/// any change: not open to an unusable daemon, at generation 0.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct DaemonCompatibilityPayload {
+    /// Whether the control connection is open to a daemon that speaks
+    /// another wire revision than this build.
+    pub incompatible: bool,
+    /// The generation of this change, which orders it against every other
+    /// delivery of the value -- including the one a fresh WebView reads.
     pub rev: u64,
 }
 

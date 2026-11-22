@@ -15,7 +15,7 @@ import type {
   TaskAssignment,
   ReviewMark,
 } from '../ipc/plan-boundary';
-import { daemonRejectionCode } from '../ipc/daemon-rejection';
+import { commandRejectionCode } from '../command-failure-model';
 import type { DetectedStatusView } from '../ipc/session-boundary';
 import { limitGuidance, profileLimit, type LaunchProfile } from '../profile/launch-profile-choices';
 import { plans } from '../ui-messages';
@@ -195,7 +195,7 @@ export function selectionAfterPlanReadFailure(
   if (selectedPlanId !== failedPlanId) {
     return selectedPlanId;
   }
-  return daemonRejectionCode(error) === 'plan_not_found' ? null : selectedPlanId;
+  return commandRejectionCode(error) === 'plan_not_found' ? null : selectedPlanId;
 }
 
 /** Builds the assignment the editor's fields describe; empty text means "not set". */

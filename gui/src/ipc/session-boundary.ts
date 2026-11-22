@@ -33,6 +33,7 @@ export const SESSION_EVENT = {
   ticketChanged: 'session://ticket-changed',
   modelChoices: 'session://model-choices',
   daemonRecovery: 'session://daemon-recovery',
+  daemonCompatibility: 'session://daemon-compatibility',
   mcpRegistrationStatus: 'session://mcp-registration-status',
   mcpRegistrationResult: 'session://mcp-registration-result',
 } as const;
@@ -728,6 +729,17 @@ export interface RecoveryStatusReport {
   startup_env_failure: StartupEnvFailure | null;
 }
 
+/**
+ * Payload of `session://daemon-compatibility`, and the reply of the
+ * `get_daemon_compatibility` command.
+ */
+export interface DaemonCompatibilityPayload {
+  /** Whether the control connection is open to a daemon of another wire revision. */
+  incompatible: boolean;
+  /** The generation of this change, which orders it against every other. */
+  rev: number;
+}
+
 /** What keeps the daemon from opening windows, as `get_daemon_health` names it. */
 export type DaemonProblemKind = 'windows_unavailable';
 
@@ -739,46 +751,51 @@ export interface DaemonProblem {
 }
 
 /**
- * Why an `open_window` attempt failed, in a shape a caller can branch on
- * without reading the English reason text.
+ * Why a command that reaches the daemon failed, in a shape a caller can branch
+ * on without reading the English sentence.
  *
  * The daemon's own rejection, a refusal the core's Rust layer raised on its
- * own, and the wire-revision gate's refusal are
- * tagged objects. Everything else carries text alone: a refusal Tauri raised
- * before the command ran arrives as a bare string, and a failure of the
- * invoke bridge itself arrives as an `Error`.
+ * own, and the wire-revision gate's refusal are tagged objects. Everything
+ * else carries text alone: a refusal Tauri raised before the command ran
+ * arrives as a bare string, and a failure of the invoke bridge itself arrives
+ * as an `Error`. Every shape carries `text`, the one sentence the failure is
+ * told by, so wording is decided by the core alone.
  */
-export type WindowOpenFailure =
+export type CommandFailure =
   | {
       /** The daemon answered the request with an error frame. */
       kind: 'rejected';
       /** The `error.code` the daemon reported. */
       code: string;
-      /** The daemon's human-readable English reason. */
+      /** The daemon's own English reason, empty when it gave none. */
       message: string;
       /** The argument the rejection points at, `null` when it names none. */
       rejectedArgument: string | null;
+      /** The sentence the failure is told by. */
+      text: string;
     }
   | {
       /** The core's Rust layer refused the request or could not carry it out. */
       kind: 'local';
-      /** The human-readable English reason. */
-      message: string;
+      /** The sentence the failure is told by. */
+      text: string;
     }
   | {
       /**
-       * The connected daemon has not settled on a wire revision this request
-       * needs, so the core's Rust layer refused to send it.
+       * The connected daemon speaks another wire revision than this build, so
+       * the core's Rust layer did not send the request.
        */
       kind: 'unsupported';
-      /** The wire tag of the request that was refused. */
+      /** The wire tag of the request that was refused; never for display. */
       requestType: string;
+      /** The sentence the failure is told by. */
+      text: string;
     }
   | {
       /** No structure stands behind the failure: only text was reported. */
       kind: 'bare';
       /** The text the failure was reported with. */
-      message: string;
+      text: string;
     };
 
 /** Raised when a value from the core does not match the boundary contract. */
@@ -790,31 +807,17 @@ export class BoundaryError extends Error {
 }
 
 /**
- * The `Error` message a {@link WindowOpenFailureError} carries: the reason
- * text for the three shapes that have one, or a diagnostic sentence built
- * from the wire tag for the gate's refusal, which carries no reason text of
- * its own. Diagnostic only -- not the rendered display line, which never
- * names the wire tag (`window-open-failure-model.ts` builds that instead).
+ * Raised when a command that reaches the daemon fails, carrying the failure
+ * in a shape the callers branch on. The `Error` message is the failure's own
+ * sentence, so a caller that only reads `message` shows the core's wording.
  */
-function windowOpenFailureMessage(failure: WindowOpenFailure): string {
-  if (failure.kind === 'unsupported') {
-    return `the connected daemon has not settled a wire revision for ${failure.requestType}`;
-  }
-  return failure.message;
-}
+export class CommandFailureError extends Error {
+  /** Why the command failed. */
+  readonly failure: CommandFailure;
 
-/**
- * Raised when `open_window` fails, carrying the failure in a shape the
- * callers branch on. The `Error` message stays the reason text, so a caller
- * that only reads `message` sees what it saw before.
- */
-export class WindowOpenFailureError extends Error {
-  /** Why the attempt failed. */
-  readonly failure: WindowOpenFailure;
-
-  constructor(failure: WindowOpenFailure) {
-    super(windowOpenFailureMessage(failure));
-    this.name = 'WindowOpenFailureError';
+  constructor(failure: CommandFailure) {
+    super(failure.text);
+    this.name = 'CommandFailureError';
     this.failure = failure;
   }
 }
@@ -1153,6 +1156,22 @@ export function narrowDaemonRecoveryPayload(value: unknown): DaemonRecoveryPaylo
   const record = requireRecord(value, context);
   return {
     status: requireDaemonRecoveryStatus(record, 'status', context),
+    rev: requireNonNegativeInteger(record, 'rev', context),
+  };
+}
+
+/**
+ * Validates a `session://daemon-compatibility` payload or a
+ * `get_daemon_compatibility` reply. Neither field is guessed: whether the
+ * daemon can be used is never assumed from a partial payload.
+ *
+ * @throws {BoundaryError} when the payload does not match the contract.
+ */
+export function narrowDaemonCompatibilityPayload(value: unknown): DaemonCompatibilityPayload {
+  const context = SESSION_EVENT.daemonCompatibility;
+  const record = requireRecord(value, context);
+  return {
+    incompatible: requireBoolean(record, 'incompatible', context),
     rev: requireNonNegativeInteger(record, 'rev', context),
   };
 }
@@ -1708,9 +1727,9 @@ function failureText(value: unknown): string {
 }
 
 /**
- * Validates the value an `open_window` rejection carries.
+ * Validates the value a command's rejection carries.
  *
- * Several kinds of value arrive here: the tagged shapes `WindowOpenFailure`
+ * Several kinds of value arrive here: the tagged shapes `CommandFailure`
  * (`commands.rs`) serializes, a bare string when Tauri refused the call
  * before the command ran, and an `Error` when the invoke bridge itself threw.
  * Only a value that claims a tag is held to the contract; one that claims
@@ -1720,13 +1739,13 @@ function failureText(value: unknown): string {
  *
  * @throws {BoundaryError} when a value claims a tag but does not match it.
  */
-export function narrowWindowOpenFailure(value: unknown): WindowOpenFailure {
-  const context = 'open_window.failure';
+export function narrowCommandFailure(value: unknown): CommandFailure {
+  const context = 'command.failure';
   if (value instanceof Error) {
-    return { kind: 'bare', message: value.message };
+    return { kind: 'bare', text: value.message };
   }
   if (!namesFailureKind(value)) {
-    return { kind: 'bare', message: failureText(value) };
+    return { kind: 'bare', text: failureText(value) };
   }
   const kind = requireString(value, 'kind', context);
   if (kind === 'rejected') {
@@ -1735,13 +1754,18 @@ export function narrowWindowOpenFailure(value: unknown): WindowOpenFailure {
       code: requireString(value, 'code', context),
       message: requireString(value, 'message', context),
       rejectedArgument: readOptionalString(value, 'rejected_argument', context),
+      text: requireString(value, 'text', context),
     };
   }
   if (kind === 'local') {
-    return { kind: 'local', message: requireString(value, 'message', context) };
+    return { kind: 'local', text: requireString(value, 'text', context) };
   }
   if (kind === 'unsupported') {
-    return { kind: 'unsupported', requestType: requireString(value, 'request_type', context) };
+    return {
+      kind: 'unsupported',
+      requestType: requireString(value, 'request_type', context),
+      text: requireString(value, 'text', context),
+    };
   }
   throw new BoundaryError(`${context}.kind: unrecognized failure kind "${kind}"`);
 }

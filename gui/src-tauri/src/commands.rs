@@ -20,7 +20,7 @@ use crate::attention::{AttentionState, MAIN_WINDOW_LABEL};
 use crate::connection_pool::ConnectionPool;
 use crate::constants::{MAX_PTY_DIMENSION, MIN_PTY_COLS, MIN_PTY_ROWS};
 use crate::daemon_supervisor::RecoverySupervisorState;
-use crate::events::DaemonConnectedPayload;
+use crate::events::{DaemonCompatibilityPayload, DaemonConnectedPayload};
 use crate::instance::StartupContext;
 use crate::ipc_client::IpcError;
 use crate::pool_outcomes::{ApprovalSyncOutcome, CloseOutcome, DecideApprovalOutcome};
@@ -32,7 +32,7 @@ use crate::recovery_state::RecoveryStatusReport;
 /// `session://exit`, not as this result.
 ///
 /// # Errors
-/// Returns a human-readable message when a dimension is outside the protocol
+/// Returns a [`CommandFailure`] when a dimension is outside the protocol
 /// range, the daemon cannot be reached, the window does not exist, the
 /// attach times out, or another GUI took the window over.
 #[tauri::command(rename_all = "snake_case")]
@@ -41,28 +41,28 @@ pub async fn attach_window(
     window_id: String,
     size: Option<TerminalSize>,
     pool: State<'_, Arc<ConnectionPool>>,
-) -> Result<(), String> {
-    validate_window_id(&window_id).map_err(stringify)?;
+) -> Result<(), CommandFailure> {
+    validate_window_id(&window_id)?;
     if let Some(size) = size {
-        validate_dimension(size.cols, MIN_PTY_COLS, "cols").map_err(stringify)?;
-        validate_dimension(size.rows, MIN_PTY_ROWS, "rows").map_err(stringify)?;
+        validate_dimension(size.cols, MIN_PTY_COLS, "cols")?;
+        validate_dimension(size.rows, MIN_PTY_ROWS, "rows")?;
     }
     pool.attach_window(&app, &window_id, size)
         .await
-        .map_err(stringify)
+        .map_err(CommandFailure::from)
 }
 
 /// Lists all windows the daemon currently manages.
 ///
 /// # Errors
-/// Returns a human-readable message when the daemon cannot be reached or
+/// Returns a [`CommandFailure`] when the daemon cannot be reached or
 /// the response is invalid.
 #[tauri::command(rename_all = "snake_case")]
 pub async fn list_windows(
     app: AppHandle,
     pool: State<'_, Arc<ConnectionPool>>,
-) -> Result<Vec<yagura_protocol::WindowInfo>, String> {
-    pool.list_windows(&app).await.map_err(stringify)
+) -> Result<Vec<yagura_protocol::WindowInfo>, CommandFailure> {
+    pool.list_windows(&app).await.map_err(CommandFailure::from)
 }
 
 /// The reply of [`list_detections`]: the definition names to offer, plus the
@@ -118,8 +118,16 @@ pub struct OpenWindowReply {
     pub detection_warning: Option<String>,
 }
 
-/// Why [`open_window`] failed, in a shape the WebView can branch on without
-/// reading the English reason text.
+/// Why a command that reaches the daemon failed, in a shape the WebView can
+/// branch on without reading the English sentence.
+///
+/// Every command that takes the [`ConnectionPool`] and returns a `Result`
+/// fails with this. The sentence is serialized as `text` beside the kind's
+/// own fields, and is the only copy of it: an [`IpcError`]'s
+/// [`Display`](std::fmt::Display), or the Display of the argument check that
+/// refused the request (see [`CommandFailure::from_reason`]). The fields are
+/// private and there is no `Display`, so a command cannot turn a failure back
+/// into a string of its own wording.
 ///
 /// The daemon's own rejection and a refusal the GUI's Rust layer raised on
 /// its own are different kinds, because only the former carries an
@@ -127,13 +135,21 @@ pub struct OpenWindowReply {
 /// argument that does not deserialize, an unknown command name) never takes
 /// this shape: it reaches the WebView as a bare string.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct CommandFailure {
+    #[serde(flatten)]
+    kind: FailureKind,
+    text: String,
+}
+
+/// The kind of a [`CommandFailure`], serialized as its `kind` key.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-pub enum WindowOpenFailure {
+enum FailureKind {
     /// The daemon answered the request with an error frame.
     Rejected {
         /// The `error.code` the daemon reported.
         code: String,
-        /// The daemon's human-readable English reason.
+        /// The daemon's own English reason, empty when it gave none.
         message: String,
         /// The argument the rejection points at, when it points at one the
         /// caller itself sent. Omitted from the wire when absent.
@@ -142,10 +158,7 @@ pub enum WindowOpenFailure {
     },
     /// The GUI's own Rust layer refused the request or could not carry it
     /// out, so no daemon rejection stands behind it.
-    Local {
-        /// The human-readable English reason.
-        message: String,
-    },
+    Local,
     /// The connected daemon speaks another wire revision than this build, so
     /// the GUI's Rust layer did not send the request: no byte of it was
     /// written.
@@ -414,34 +427,38 @@ pub struct UpdateWindowLayoutReply {
 /// Read-only: never rotates or writes the store.
 ///
 /// # Errors
-/// Returns a human-readable message when the daemon cannot be reached or
+/// Returns a [`CommandFailure`] when the daemon cannot be reached or
 /// the response is invalid.
 #[tauri::command(rename_all = "snake_case")]
 pub async fn list_restore_candidates(
     app: AppHandle,
     pool: State<'_, Arc<ConnectionPool>>,
-) -> Result<RestoreCandidateListReply, String> {
-    pool.list_restore_candidates(&app).await.map_err(stringify)
+) -> Result<RestoreCandidateListReply, CommandFailure> {
+    pool.list_restore_candidates(&app)
+        .await
+        .map_err(CommandFailure::from)
 }
 
 /// Asks the daemon what keeps it from opening windows.
 ///
 /// # Errors
-/// Returns a human-readable message when the daemon cannot be reached or
+/// Returns a [`CommandFailure`] when the daemon cannot be reached or
 /// the response is invalid.
 #[tauri::command(rename_all = "snake_case")]
 pub async fn get_daemon_health(
     app: AppHandle,
     pool: State<'_, Arc<ConnectionPool>>,
-) -> Result<DaemonHealthReply, String> {
-    pool.get_daemon_health(&app).await.map_err(stringify)
+) -> Result<DaemonHealthReply, CommandFailure> {
+    pool.get_daemon_health(&app)
+        .await
+        .map_err(CommandFailure::from)
 }
 
 /// Reports a window's presentation layout to the daemon, verbatim. The
 /// daemon stores it unparsed and never interprets it.
 ///
 /// # Errors
-/// Returns a human-readable message when the daemon cannot be reached, the
+/// Returns a [`CommandFailure`] when the daemon cannot be reached, the
 /// window does not exist, or `layout_json` exceeds the size the daemon
 /// accepts.
 #[tauri::command(rename_all = "snake_case")]
@@ -450,12 +467,12 @@ pub async fn update_window_layout(
     window_id: String,
     layout_json: String,
     pool: State<'_, Arc<ConnectionPool>>,
-) -> Result<UpdateWindowLayoutReply, String> {
-    validate_window_id(&window_id).map_err(stringify)?;
-    validate_layout_json_len(&layout_json).map_err(stringify)?;
+) -> Result<UpdateWindowLayoutReply, CommandFailure> {
+    validate_window_id(&window_id)?;
+    validate_layout_json_len(&layout_json)?;
     pool.update_window_layout(&app, &window_id, layout_json)
         .await
-        .map_err(stringify)
+        .map_err(CommandFailure::from)
 }
 
 /// Lists the detection definition names the daemon can offer for
@@ -469,14 +486,16 @@ pub async fn update_window_layout(
 /// already had.
 ///
 /// # Errors
-/// Returns a human-readable message when the daemon cannot be reached or
+/// Returns a [`CommandFailure`] when the daemon cannot be reached or
 /// rejects the request.
 #[tauri::command(rename_all = "snake_case")]
 pub async fn list_detections(
     app: AppHandle,
     pool: State<'_, Arc<ConnectionPool>>,
-) -> Result<DetectionListReply, String> {
-    pool.list_detections(&app).await.map_err(stringify)
+) -> Result<DetectionListReply, CommandFailure> {
+    pool.list_detections(&app)
+        .await
+        .map_err(CommandFailure::from)
 }
 
 /// Lists the launch profiles the daemon can offer for `open_window`'s
@@ -487,14 +506,14 @@ pub async fn list_detections(
 /// [`list_detections`] reports its own: the list is simply empty.
 ///
 /// # Errors
-/// Returns a human-readable message when the daemon cannot be reached or
+/// Returns a [`CommandFailure`] when the daemon cannot be reached or
 /// rejects the request.
 #[tauri::command(rename_all = "snake_case")]
 pub async fn list_profiles(
     app: AppHandle,
     pool: State<'_, Arc<ConnectionPool>>,
-) -> Result<ProfileListReply, String> {
-    pool.list_profiles(&app).await.map_err(stringify)
+) -> Result<ProfileListReply, CommandFailure> {
+    pool.list_profiles(&app).await.map_err(CommandFailure::from)
 }
 
 /// Opens a new window, either from an explicit `command` or from a launch
@@ -511,7 +530,7 @@ pub async fn list_profiles(
 /// than resolved silently, matching the MCP tool of the same name.
 ///
 /// # Errors
-/// Returns a [`WindowOpenFailure`] when the daemon cannot be reached, the
+/// Returns a [`CommandFailure`] when the daemon cannot be reached, the
 /// operation fails, `name` is invalid, or the arguments are mutually
 /// exclusive.
 // A Tauri command takes one parameter per argument name on the wire, so the
@@ -530,7 +549,7 @@ pub async fn open_window(
     effort: Option<String>,
     on_name_taken: Option<OnNameTaken>,
     pool: State<'_, Arc<ConnectionPool>>,
-) -> Result<OpenWindowReply, WindowOpenFailure> {
+) -> Result<OpenWindowReply, CommandFailure> {
     let on_name_taken = on_name_taken.unwrap_or_default();
     check_open_window_arguments(
         &command,
@@ -545,11 +564,11 @@ pub async fn open_window(
         Some(profile) => pool
             .open_window_from_profile(&app, profile, cwd, name, on_name_taken, model, effort)
             .await
-            .map_err(window_open_failure),
+            .map_err(CommandFailure::from),
         None => pool
             .open_window(&app, command, cwd, name, on_name_taken, detection, vendor)
             .await
-            .map_err(window_open_failure),
+            .map_err(CommandFailure::from),
     }
 }
 
@@ -563,7 +582,7 @@ fn check_open_window_arguments(
     vendor: Option<&str>,
     model: Option<&str>,
     effort: Option<&str>,
-) -> Result<(), WindowOpenFailure> {
+) -> Result<(), CommandFailure> {
     validate_open_window_exclusivity(
         !command.is_empty(),
         profile,
@@ -571,10 +590,9 @@ fn check_open_window_arguments(
         vendor,
         model.is_some() || effort.is_some(),
     )
-    .map_err(|error| window_open_failure_from_reason(error.to_string()))?;
+    .map_err(CommandFailure::from_reason)?;
     if let Some(name) = name {
-        validate_window_name(name)
-            .map_err(|error| window_open_failure_from_reason(error.to_string()))?;
+        validate_window_name(name).map_err(CommandFailure::from_reason)?;
     }
     Ok(())
 }
@@ -679,7 +697,7 @@ pub async fn reconnect_daemon(
     app: AppHandle,
     pool: State<'_, Arc<ConnectionPool>>,
     recovery: State<'_, RecoverySupervisorState>,
-) -> Result<(), String> {
+) -> Result<(), CommandFailure> {
     crate::daemon_supervisor::trigger_manual_reconnect(&app, &pool, &recovery).await;
     Ok(())
 }
@@ -706,6 +724,18 @@ pub fn get_daemon_connection(
     pool: State<'_, Arc<ConnectionPool>>,
 ) -> Option<DaemonConnectedPayload> {
     pool.daemon_connection()
+}
+
+/// The last change of whether the control connection is open to a daemon of
+/// another wire revision, so a WebView that has just started listening does
+/// not have to wait for the next one.
+///
+/// Never returns `Err`: the value is held in memory.
+#[tauri::command(rename_all = "snake_case")]
+pub fn get_daemon_compatibility(
+    pool: State<'_, Arc<ConnectionPool>>,
+) -> DaemonCompatibilityPayload {
+    pool.daemon_compatibility()
 }
 
 /// Shows how many things wait for the user outside the WebView: the count in
@@ -757,7 +787,7 @@ pub fn set_attention_summary(
 /// retire the pane in either case.
 ///
 /// # Errors
-/// Returns a human-readable message when the window id is invalid, the
+/// Returns a [`CommandFailure`] when the window id is invalid, the
 /// daemon rejects the request for a reason other than the window not
 /// existing, or this connection is not a registered approver.
 #[tauri::command(rename_all = "snake_case")]
@@ -766,35 +796,35 @@ pub async fn close_window(
     window_id: String,
     force: Option<bool>,
     pool: State<'_, Arc<ConnectionPool>>,
-) -> Result<CloseOutcome, String> {
-    validate_window_id(&window_id).map_err(stringify)?;
+) -> Result<CloseOutcome, CommandFailure> {
+    validate_window_id(&window_id)?;
     pool.close_window(&app, &window_id, force)
         .await
-        .map_err(stringify)
+        .map_err(CommandFailure::from)
 }
 
 /// Sends an interrupt signal to a window's child process.
 ///
 /// # Errors
-/// Returns a human-readable message when the daemon cannot be reached or
+/// Returns a [`CommandFailure`] when the daemon cannot be reached or
 /// the window does not exist.
 #[tauri::command(rename_all = "snake_case")]
 pub async fn interrupt_window(
     app: AppHandle,
     window_id: String,
     pool: State<'_, Arc<ConnectionPool>>,
-) -> Result<(), String> {
-    validate_window_id(&window_id).map_err(stringify)?;
+) -> Result<(), CommandFailure> {
+    validate_window_id(&window_id)?;
     pool.interrupt_window(&app, &window_id)
         .await
-        .map_err(stringify)
+        .map_err(CommandFailure::from)
 }
 
 /// Settles one pending approval request raised through the daemon's human
 /// approval gate.
 ///
 /// # Errors
-/// Returns a human-readable message when the daemon cannot be reached or
+/// Returns a [`CommandFailure`] when the daemon cannot be reached or
 /// rejects the request for a reason other than it no longer being pending
 /// (see [`DecideApprovalOutcome::NotPending`]).
 #[tauri::command(rename_all = "snake_case")]
@@ -803,10 +833,10 @@ pub async fn decide_approval(
     request_id: String,
     approved: bool,
     pool: State<'_, Arc<ConnectionPool>>,
-) -> Result<DecideApprovalOutcome, String> {
+) -> Result<DecideApprovalOutcome, CommandFailure> {
     pool.decide_approval(&app, &request_id, approved)
         .await
-        .map_err(stringify)
+        .map_err(CommandFailure::from)
 }
 
 /// Pulls the approval requests pending for this GUI, and whether it is a
@@ -816,14 +846,16 @@ pub async fn decide_approval(
 /// (or a refusal) that the daemon announced before then is not lost.
 ///
 /// # Errors
-/// Returns a human-readable message when the daemon cannot be reached or
+/// Returns a [`CommandFailure`] when the daemon cannot be reached or
 /// rejects the registration for a reason other than refusing this approver.
 #[tauri::command(rename_all = "snake_case")]
 pub async fn sync_approvals(
     app: AppHandle,
     pool: State<'_, Arc<ConnectionPool>>,
-) -> Result<ApprovalSyncOutcome, String> {
-    pool.sync_approvals(&app).await.map_err(stringify)
+) -> Result<ApprovalSyncOutcome, CommandFailure> {
+    pool.sync_approvals(&app)
+        .await
+        .map_err(CommandFailure::from)
 }
 
 /// Posts a message to the chat room, addressed to the windows its `@`
@@ -834,7 +866,7 @@ pub async fn sync_approvals(
 /// untrusted input.
 ///
 /// # Errors
-/// Returns a human-readable message when the body is empty, too long or holds
+/// Returns a [`CommandFailure`] when the body is empty, too long or holds
 /// a forbidden character, when the daemon cannot be reached, or when it
 /// refuses the post (including a denied approval).
 #[tauri::command(rename_all = "snake_case")]
@@ -843,9 +875,11 @@ pub async fn send_chat(
     body: String,
     room_id: Option<String>,
     pool: State<'_, Arc<ConnectionPool>>,
-) -> Result<ChatPostedReply, String> {
-    validate_chat_body(&body).map_err(|error| error.to_string())?;
-    pool.send_chat(&app, room_id, body).await.map_err(stringify)
+) -> Result<ChatPostedReply, CommandFailure> {
+    validate_chat_body(&body).map_err(CommandFailure::from_reason)?;
+    pool.send_chat(&app, room_id, body)
+        .await
+        .map_err(CommandFailure::from)
 }
 
 /// Posts a message to every participant in the chat room but the poster.
@@ -853,7 +887,7 @@ pub async fn send_chat(
 /// Same argument handling as [`send_chat`]; the daemon decides the addressees.
 ///
 /// # Errors
-/// Returns a human-readable message when the body is invalid, the daemon
+/// Returns a [`CommandFailure`] when the body is invalid, the daemon
 /// cannot be reached, or it refuses the post (including a denied approval).
 #[tauri::command(rename_all = "snake_case")]
 pub async fn broadcast_chat(
@@ -861,11 +895,11 @@ pub async fn broadcast_chat(
     body: String,
     room_id: Option<String>,
     pool: State<'_, Arc<ConnectionPool>>,
-) -> Result<ChatPostedReply, String> {
-    validate_chat_body(&body).map_err(|error| error.to_string())?;
+) -> Result<ChatPostedReply, CommandFailure> {
+    validate_chat_body(&body).map_err(CommandFailure::from_reason)?;
     pool.broadcast_chat(&app, room_id, body)
         .await
-        .map_err(stringify)
+        .map_err(CommandFailure::from)
 }
 
 /// Reads a page of the chat room's history, plus the room state the panel
@@ -876,7 +910,7 @@ pub async fn broadcast_chat(
 /// default.
 ///
 /// # Errors
-/// Returns a human-readable message when `limit` is outside the range the
+/// Returns a [`CommandFailure`] when `limit` is outside the range the
 /// daemon accepts, the daemon cannot be reached, or it rejects the request.
 #[tauri::command(rename_all = "snake_case")]
 pub async fn read_chat(
@@ -885,25 +919,27 @@ pub async fn read_chat(
     after_seq: Option<u64>,
     limit: Option<u32>,
     pool: State<'_, Arc<ConnectionPool>>,
-) -> Result<ChatMessagesReply, String> {
-    validate_chat_read_limit(limit).map_err(stringify)?;
+) -> Result<ChatMessagesReply, CommandFailure> {
+    validate_chat_read_limit(limit)?;
     pool.read_chat(&app, room_id, after_seq, limit)
         .await
-        .map_err(stringify)
+        .map_err(CommandFailure::from)
 }
 
 /// Lists every chat room the daemon knows of. Approver-only on the daemon
 /// side; the GUI is registered as one before this command can succeed.
 ///
 /// # Errors
-/// Returns a human-readable message when the daemon cannot be reached or
+/// Returns a [`CommandFailure`] when the daemon cannot be reached or
 /// rejects the request.
 #[tauri::command(rename_all = "snake_case")]
 pub async fn list_chat_rooms(
     app: AppHandle,
     pool: State<'_, Arc<ConnectionPool>>,
-) -> Result<ChatRoomListReply, String> {
-    pool.list_chat_rooms(&app).await.map_err(stringify)
+) -> Result<ChatRoomListReply, CommandFailure> {
+    pool.list_chat_rooms(&app)
+        .await
+        .map_err(CommandFailure::from)
 }
 
 /// Clears one chat room's history and returns the room the daemon cleared.
@@ -911,32 +947,34 @@ pub async fn list_chat_rooms(
 /// which rooms exist.
 ///
 /// # Errors
-/// Returns a human-readable message when the daemon cannot be reached or
+/// Returns a [`CommandFailure`] when the daemon cannot be reached or
 /// rejects the request.
 #[tauri::command(rename_all = "snake_case")]
 pub async fn clear_chat_room(
     app: AppHandle,
     room_id: String,
     pool: State<'_, Arc<ConnectionPool>>,
-) -> Result<String, String> {
-    pool.clear_chat_room(&app, room_id).await.map_err(stringify)
+) -> Result<String, CommandFailure> {
+    pool.clear_chat_room(&app, room_id)
+        .await
+        .map_err(CommandFailure::from)
 }
 
 /// Deletes one chat room and returns the room the daemon deleted. The
 /// daemon refuses `main` and a room a window is open in (`room_in_use`).
 ///
 /// # Errors
-/// Returns a human-readable message when the daemon cannot be reached or
+/// Returns a [`CommandFailure`] when the daemon cannot be reached or
 /// rejects the request.
 #[tauri::command(rename_all = "snake_case")]
 pub async fn delete_chat_room(
     app: AppHandle,
     room_id: String,
     pool: State<'_, Arc<ConnectionPool>>,
-) -> Result<String, String> {
+) -> Result<String, CommandFailure> {
     pool.delete_chat_room(&app, room_id)
         .await
-        .map_err(stringify)
+        .map_err(CommandFailure::from)
 }
 
 /// Lists the plans the daemon lets this GUI see. Every plan-ledger command
@@ -944,45 +982,49 @@ pub async fn delete_chat_room(
 /// approver; the daemon, not this layer, decides what an approver may do.
 ///
 /// # Errors
-/// Returns a human-readable message when the daemon cannot be reached,
+/// Returns a [`CommandFailure`] when the daemon cannot be reached,
 /// speaks another wire revision, or rejects the request.
 #[tauri::command(rename_all = "snake_case")]
 pub async fn list_plans(
     app: AppHandle,
     pool: State<'_, Arc<ConnectionPool>>,
-) -> Result<PlanListReply, String> {
-    let plans = pool.list_plans(&app).await.map_err(stringify)?;
+) -> Result<PlanListReply, CommandFailure> {
+    let plans = pool.list_plans(&app).await?;
     Ok(PlanListReply { plans })
 }
 
 /// Reads one plan in full.
 ///
 /// # Errors
-/// Returns a human-readable message when `plan_id` is empty, the daemon
+/// Returns a [`CommandFailure`] when `plan_id` is empty, the daemon
 /// cannot be reached, or it rejects the request (an unknown plan included).
 #[tauri::command(rename_all = "snake_case")]
 pub async fn get_plan(
     app: AppHandle,
     plan_id: String,
     pool: State<'_, Arc<ConnectionPool>>,
-) -> Result<yagura_protocol::PlanInfo, String> {
-    validate_plan_id(&plan_id).map_err(stringify)?;
-    pool.get_plan(&app, plan_id).await.map_err(stringify)
+) -> Result<yagura_protocol::PlanInfo, CommandFailure> {
+    validate_plan_id(&plan_id)?;
+    pool.get_plan(&app, plan_id)
+        .await
+        .map_err(CommandFailure::from)
 }
 
 /// Deletes one plan and returns the id the daemon deleted.
 ///
 /// # Errors
-/// Returns a human-readable message when `plan_id` is empty, the daemon
+/// Returns a [`CommandFailure`] when `plan_id` is empty, the daemon
 /// cannot be reached, or it rejects the request.
 #[tauri::command(rename_all = "snake_case")]
 pub async fn delete_plan(
     app: AppHandle,
     plan_id: String,
     pool: State<'_, Arc<ConnectionPool>>,
-) -> Result<String, String> {
-    validate_plan_id(&plan_id).map_err(stringify)?;
-    pool.delete_plan(&app, plan_id).await.map_err(stringify)
+) -> Result<String, CommandFailure> {
+    validate_plan_id(&plan_id)?;
+    pool.delete_plan(&app, plan_id)
+        .await
+        .map_err(CommandFailure::from)
 }
 
 /// Sets the user's assignment override for one task and returns the plan as
@@ -993,7 +1035,7 @@ pub async fn delete_plan(
 /// every other source of an assignment.
 ///
 /// # Errors
-/// Returns a human-readable message when an id is empty, the daemon cannot
+/// Returns a [`CommandFailure`] when an id is empty, the daemon cannot
 /// be reached, or it rejects the request.
 #[tauri::command(rename_all = "snake_case")]
 pub async fn set_task_assignment(
@@ -1002,19 +1044,19 @@ pub async fn set_task_assignment(
     task_id: String,
     assignment: yagura_protocol::TaskAssignment,
     pool: State<'_, Arc<ConnectionPool>>,
-) -> Result<yagura_protocol::PlanInfo, String> {
-    validate_plan_id(&plan_id).map_err(stringify)?;
-    validate_task_id(&task_id).map_err(stringify)?;
+) -> Result<yagura_protocol::PlanInfo, CommandFailure> {
+    validate_plan_id(&plan_id)?;
+    validate_task_id(&task_id)?;
     pool.set_task_assignment(&app, plan_id, task_id, assignment)
         .await
-        .map_err(stringify)
+        .map_err(CommandFailure::from)
 }
 
 /// Removes the user's assignment override from one task and returns the plan
 /// as stored afterwards.
 ///
 /// # Errors
-/// Returns a human-readable message when an id is empty, the daemon cannot
+/// Returns a [`CommandFailure`] when an id is empty, the daemon cannot
 /// be reached, or it rejects the request.
 #[tauri::command(rename_all = "snake_case")]
 pub async fn clear_task_assignment(
@@ -1022,19 +1064,19 @@ pub async fn clear_task_assignment(
     plan_id: String,
     task_id: String,
     pool: State<'_, Arc<ConnectionPool>>,
-) -> Result<yagura_protocol::PlanInfo, String> {
-    validate_plan_id(&plan_id).map_err(stringify)?;
-    validate_task_id(&task_id).map_err(stringify)?;
+) -> Result<yagura_protocol::PlanInfo, CommandFailure> {
+    validate_plan_id(&plan_id)?;
+    validate_task_id(&task_id)?;
     pool.clear_task_assignment(&app, plan_id, task_id)
         .await
-        .map_err(stringify)
+        .map_err(CommandFailure::from)
 }
 
 /// Names a window as a plan's owner and returns the plan as stored
 /// afterwards. Whether that window is alive is the daemon's decision.
 ///
 /// # Errors
-/// Returns a human-readable message when an id is empty, the daemon cannot
+/// Returns a [`CommandFailure`] when an id is empty, the daemon cannot
 /// be reached, or it rejects the request.
 #[tauri::command(rename_all = "snake_case")]
 pub async fn set_plan_owner(
@@ -1042,12 +1084,12 @@ pub async fn set_plan_owner(
     plan_id: String,
     window_id: String,
     pool: State<'_, Arc<ConnectionPool>>,
-) -> Result<yagura_protocol::PlanInfo, String> {
-    validate_plan_id(&plan_id).map_err(stringify)?;
-    validate_window_id(&window_id).map_err(stringify)?;
+) -> Result<yagura_protocol::PlanInfo, CommandFailure> {
+    validate_plan_id(&plan_id)?;
+    validate_window_id(&window_id)?;
     pool.set_plan_owner(&app, plan_id, window_id)
         .await
-        .map_err(stringify)
+        .map_err(CommandFailure::from)
 }
 
 /// Approves a plan awaiting review and returns it as stored afterwards.
@@ -1055,7 +1097,7 @@ pub async fn set_plan_owner(
 /// are never approved unseen.
 ///
 /// # Errors
-/// Returns a human-readable message when `plan_id` is empty, the daemon
+/// Returns a [`CommandFailure`] when `plan_id` is empty, the daemon
 /// cannot be reached, or it rejects the request (a stale `version` included).
 #[tauri::command(rename_all = "snake_case")]
 pub async fn approve_plan(
@@ -1063,11 +1105,11 @@ pub async fn approve_plan(
     plan_id: String,
     version: u64,
     pool: State<'_, Arc<ConnectionPool>>,
-) -> Result<yagura_protocol::PlanInfo, String> {
-    validate_plan_id(&plan_id).map_err(stringify)?;
+) -> Result<yagura_protocol::PlanInfo, CommandFailure> {
+    validate_plan_id(&plan_id)?;
     pool.approve_plan(&app, plan_id, version)
         .await
-        .map_err(stringify)
+        .map_err(CommandFailure::from)
 }
 
 /// Clears the review marks of a plan the user has looked at and returns it
@@ -1075,7 +1117,7 @@ pub async fn approve_plan(
 /// that arrived after it stay.
 ///
 /// # Errors
-/// Returns a human-readable message when `plan_id` is empty, the daemon
+/// Returns a [`CommandFailure`] when `plan_id` is empty, the daemon
 /// cannot be reached, or it rejects the request (a stale `version` included).
 #[tauri::command(rename_all = "snake_case")]
 pub async fn mark_plan_seen(
@@ -1083,25 +1125,25 @@ pub async fn mark_plan_seen(
     plan_id: String,
     version: u64,
     pool: State<'_, Arc<ConnectionPool>>,
-) -> Result<yagura_protocol::PlanInfo, String> {
-    validate_plan_id(&plan_id).map_err(stringify)?;
+) -> Result<yagura_protocol::PlanInfo, CommandFailure> {
+    validate_plan_id(&plan_id)?;
     pool.mark_plan_seen(&app, plan_id, version)
         .await
-        .map_err(stringify)
+        .map_err(CommandFailure::from)
 }
 
 /// Lists every workspace that has tickets. The ticket commands are read-only
 /// and go through the control connection, like the plan-ledger commands.
 ///
 /// # Errors
-/// Returns a human-readable message when the daemon cannot be reached,
+/// Returns a [`CommandFailure`] when the daemon cannot be reached,
 /// speaks another wire revision, or rejects the request.
 #[tauri::command(rename_all = "snake_case")]
 pub async fn list_ticket_workspaces(
     app: AppHandle,
     pool: State<'_, Arc<ConnectionPool>>,
-) -> Result<TicketWorkspaceListReply, String> {
-    let workspaces = pool.list_ticket_workspaces(&app).await.map_err(stringify)?;
+) -> Result<TicketWorkspaceListReply, CommandFailure> {
+    let workspaces = pool.list_ticket_workspaces(&app).await?;
     Ok(TicketWorkspaceListReply { workspaces })
 }
 
@@ -1110,7 +1152,7 @@ pub async fn list_ticket_workspaces(
 /// `limit` of them (`None` leaves the cap to the daemon).
 ///
 /// # Errors
-/// Returns a human-readable message when `state` or `milestone` is not a
+/// Returns a [`CommandFailure`] when `state` or `milestone` is not a
 /// name the daemon could hold, the daemon cannot be reached, or it rejects
 /// the request.
 #[tauri::command(rename_all = "snake_case")]
@@ -1121,20 +1163,18 @@ pub async fn list_tickets(
     milestone: Option<String>,
     limit: Option<u32>,
     pool: State<'_, Arc<ConnectionPool>>,
-) -> Result<TicketListReply, String> {
-    validate_optional_token(state.as_deref(), "state must be a lowercase token")
-        .map_err(stringify)?;
-    validate_optional_token(milestone.as_deref(), "milestone must be a lowercase token")
-        .map_err(stringify)?;
+) -> Result<TicketListReply, CommandFailure> {
+    validate_optional_token(state.as_deref(), "state must be a lowercase token")?;
+    validate_optional_token(milestone.as_deref(), "milestone must be a lowercase token")?;
     pool.list_tickets(&app, workspace_id, state, milestone, limit)
         .await
-        .map_err(stringify)
+        .map_err(CommandFailure::from)
 }
 
 /// Reads one ticket of a workspace in full.
 ///
 /// # Errors
-/// Returns a human-readable message when the daemon cannot be reached or
+/// Returns a [`CommandFailure`] when the daemon cannot be reached or
 /// rejects the request (an unknown ticket included).
 #[tauri::command(rename_all = "snake_case")]
 pub async fn get_ticket(
@@ -1142,23 +1182,23 @@ pub async fn get_ticket(
     workspace_id: i64,
     ticket: u32,
     pool: State<'_, Arc<ConnectionPool>>,
-) -> Result<yagura_protocol::TicketInfo, String> {
+) -> Result<yagura_protocol::TicketInfo, CommandFailure> {
     pool.get_ticket(&app, workspace_id, ticket)
         .await
-        .map_err(stringify)
+        .map_err(CommandFailure::from)
 }
 
 /// Reads the role-to-assignment table.
 ///
 /// # Errors
-/// Returns a human-readable message when the daemon cannot be reached,
+/// Returns a [`CommandFailure`] when the daemon cannot be reached,
 /// speaks another wire revision, or rejects the request.
 #[tauri::command(rename_all = "snake_case")]
 pub async fn list_roles(
     app: AppHandle,
     pool: State<'_, Arc<ConnectionPool>>,
-) -> Result<RoleListReply, String> {
-    pool.list_roles(&app).await.map_err(stringify)
+) -> Result<RoleListReply, CommandFailure> {
+    pool.list_roles(&app).await.map_err(CommandFailure::from)
 }
 
 /// Replaces the whole role-to-assignment table and returns it as stored.
@@ -1168,7 +1208,7 @@ pub async fn list_roles(
 /// default that names one of the rows) before it stores any of it.
 ///
 /// # Errors
-/// Returns a human-readable message when the daemon cannot be reached or
+/// Returns a [`CommandFailure`] when the daemon cannot be reached or
 /// rejects the table.
 #[tauri::command(rename_all = "snake_case")]
 pub async fn save_roles(
@@ -1176,10 +1216,10 @@ pub async fn save_roles(
     roles: Vec<yagura_protocol::RoleEntry>,
     default_role: Option<String>,
     pool: State<'_, Arc<ConnectionPool>>,
-) -> Result<RoleListReply, String> {
+) -> Result<RoleListReply, CommandFailure> {
     pool.save_roles(&app, roles, default_role)
         .await
-        .map_err(stringify)
+        .map_err(CommandFailure::from)
 }
 
 /// Asks the daemon for the models a profile's `model` launch option can take.
@@ -1189,7 +1229,7 @@ pub async fn save_roles(
 /// WebView chooses so it can record it before the push can arrive.
 ///
 /// # Errors
-/// Returns a human-readable message when `profile` is not a valid profile
+/// Returns a [`CommandFailure`] when `profile` is not a valid profile
 /// id, the daemon cannot be reached, speaks another wire revision, or rejects the
 /// request.
 #[tauri::command(rename_all = "snake_case")]
@@ -1198,11 +1238,11 @@ pub async fn list_model_choices(
     profile: String,
     request_id: u64,
     pool: State<'_, Arc<ConnectionPool>>,
-) -> Result<ModelChoicesRequestedReply, String> {
-    validate_profile_id(&profile).map_err(stringify)?;
+) -> Result<ModelChoicesRequestedReply, CommandFailure> {
+    validate_profile_id(&profile)?;
     pool.list_model_choices(&app, profile, request_id)
         .await
-        .map_err(stringify)
+        .map_err(CommandFailure::from)
 }
 
 /// Replaces the values of a profile's model aliases and returns them as
@@ -1212,7 +1252,7 @@ pub async fn list_model_choices(
 /// set and every value against the profile file before it writes any of it.
 ///
 /// # Errors
-/// Returns a human-readable message when `profile` is not a valid profile
+/// Returns a [`CommandFailure`] when `profile` is not a valid profile
 /// id, the daemon cannot be reached, speaks another wire revision, or rejects the
 /// aliases.
 #[tauri::command(rename_all = "snake_case")]
@@ -1221,18 +1261,18 @@ pub async fn save_model_aliases(
     profile: String,
     aliases: Vec<yagura_protocol::LaunchOptionAlias>,
     pool: State<'_, Arc<ConnectionPool>>,
-) -> Result<ModelAliasesSavedReply, String> {
-    validate_profile_id(&profile).map_err(stringify)?;
+) -> Result<ModelAliasesSavedReply, CommandFailure> {
+    validate_profile_id(&profile)?;
     pool.save_model_aliases(&app, profile, aliases)
         .await
-        .map_err(stringify)
+        .map_err(CommandFailure::from)
 }
 
 /// Turns a profile's launching on or off and returns the setting as the
 /// daemon stored it.
 ///
 /// # Errors
-/// Returns a human-readable message when `profile` is not a valid profile
+/// Returns a [`CommandFailure`] when `profile` is not a valid profile
 /// id, the daemon cannot be reached, speaks another wire revision, or rejects the
 /// request.
 #[tauri::command(rename_all = "snake_case")]
@@ -1241,17 +1281,17 @@ pub async fn set_profile_enabled(
     profile: String,
     enabled: bool,
     pool: State<'_, Arc<ConnectionPool>>,
-) -> Result<ProfileEnabledSetReply, String> {
-    validate_profile_id(&profile).map_err(stringify)?;
+) -> Result<ProfileEnabledSetReply, CommandFailure> {
+    validate_profile_id(&profile)?;
     pool.set_profile_enabled(&app, profile, enabled)
         .await
-        .map_err(stringify)
+        .map_err(CommandFailure::from)
 }
 
 /// Reads every value a profile uses, with the layer each comes from.
 ///
 /// # Errors
-/// Returns a human-readable message when `profile` is not a valid profile
+/// Returns a [`CommandFailure`] when `profile` is not a valid profile
 /// id, the daemon cannot be reached, speaks another wire revision, or rejects the
 /// request.
 #[tauri::command(rename_all = "snake_case")]
@@ -1259,18 +1299,18 @@ pub async fn get_profile_detail(
     app: AppHandle,
     profile: String,
     pool: State<'_, Arc<ConnectionPool>>,
-) -> Result<ProfileDetailReply, String> {
-    validate_profile_id(&profile).map_err(stringify)?;
+) -> Result<ProfileDetailReply, CommandFailure> {
+    validate_profile_id(&profile)?;
     pool.get_profile_detail(&app, profile)
         .await
-        .map_err(stringify)
+        .map_err(CommandFailure::from)
 }
 
 /// Sets the argv a profile launches on this host, or with `argv` absent puts
 /// the shipped one back, and returns the argv in use afterwards.
 ///
 /// # Errors
-/// Returns a human-readable message when `profile` is not a valid profile
+/// Returns a [`CommandFailure`] when `profile` is not a valid profile
 /// id, the daemon cannot be reached, speaks another wire revision, or rejects the
 /// request.
 #[tauri::command(rename_all = "snake_case")]
@@ -1279,25 +1319,27 @@ pub async fn set_profile_command(
     profile: String,
     argv: Option<Vec<String>>,
     pool: State<'_, Arc<ConnectionPool>>,
-) -> Result<ProfileCommandSetReply, String> {
-    validate_profile_id(&profile).map_err(stringify)?;
+) -> Result<ProfileCommandSetReply, CommandFailure> {
+    validate_profile_id(&profile)?;
     pool.set_profile_command(&app, profile, argv)
         .await
-        .map_err(stringify)
+        .map_err(CommandFailure::from)
 }
 
 /// Reads the daemon's current approval settings.
 ///
 /// # Errors
-/// Returns a human-readable message when the daemon cannot be reached,
+/// Returns a [`CommandFailure`] when the daemon cannot be reached,
 /// speaks another wire revision, or this connection is not a registered
 /// approver.
 #[tauri::command(rename_all = "snake_case")]
 pub async fn get_approval_settings(
     app: AppHandle,
     pool: State<'_, Arc<ConnectionPool>>,
-) -> Result<ApprovalSettingsReply, String> {
-    pool.get_approval_settings(&app).await.map_err(stringify)
+) -> Result<ApprovalSettingsReply, CommandFailure> {
+    pool.get_approval_settings(&app)
+        .await
+        .map_err(CommandFailure::from)
 }
 
 /// Turns automatic approval of one destructive tool on or off and returns the
@@ -1308,7 +1350,7 @@ pub async fn get_approval_settings(
 /// name is refused by its reply, not caught here.
 ///
 /// # Errors
-/// Returns a human-readable message when `tool` is not a valid tool name, the
+/// Returns a [`CommandFailure`] when `tool` is not a valid tool name, the
 /// daemon cannot be reached, speaks another wire revision, or rejects the
 /// request.
 #[tauri::command(rename_all = "snake_case")]
@@ -1317,28 +1359,28 @@ pub async fn set_auto_approve(
     tool: String,
     auto_approve: bool,
     pool: State<'_, Arc<ConnectionPool>>,
-) -> Result<ApprovalSettingsReply, String> {
-    validate_tool_name(&tool).map_err(stringify)?;
+) -> Result<ApprovalSettingsReply, CommandFailure> {
+    validate_tool_name(&tool)?;
     pool.set_auto_approve(&app, tool, auto_approve)
         .await
-        .map_err(stringify)
+        .map_err(CommandFailure::from)
 }
 
 /// Turns the plan review gate on or off and returns the settings after the
 /// change.
 ///
 /// # Errors
-/// Returns a human-readable message when the daemon cannot be reached,
+/// Returns a [`CommandFailure`] when the daemon cannot be reached,
 /// speaks another wire revision, or rejects the request.
 #[tauri::command(rename_all = "snake_case")]
 pub async fn set_plan_approval_required(
     app: AppHandle,
     required: bool,
     pool: State<'_, Arc<ConnectionPool>>,
-) -> Result<ApprovalSettingsReply, String> {
+) -> Result<ApprovalSettingsReply, CommandFailure> {
     pool.set_plan_approval_required(&app, required)
         .await
-        .map_err(stringify)
+        .map_err(CommandFailure::from)
 }
 
 /// Asks the daemon which profiles describe how to register the MCP bridge
@@ -1348,17 +1390,17 @@ pub async fn set_plan_approval_required(
 /// `session://mcp-registration-status` push carrying the same `request_id`.
 ///
 /// # Errors
-/// Returns a human-readable message when the daemon cannot be reached,
+/// Returns a [`CommandFailure`] when the daemon cannot be reached,
 /// speaks another wire revision, or rejects the request.
 #[tauri::command(rename_all = "snake_case")]
 pub async fn list_mcp_registrations(
     app: AppHandle,
     request_id: u64,
     pool: State<'_, Arc<ConnectionPool>>,
-) -> Result<McpRegistrationsListedReply, String> {
+) -> Result<McpRegistrationsListedReply, CommandFailure> {
     pool.list_mcp_registrations(&app, request_id)
         .await
-        .map_err(stringify)
+        .map_err(CommandFailure::from)
 }
 
 /// Asks the daemon to register, update or remove the MCP bridge with one
@@ -1368,7 +1410,7 @@ pub async fn list_mcp_registrations(
 /// `session://mcp-registration-result` push carrying the same `request_id`.
 ///
 /// # Errors
-/// Returns a human-readable message when `profile` is not a valid profile
+/// Returns a [`CommandFailure`] when `profile` is not a valid profile
 /// id, `action` is not one of `register`, `update` or `remove`, the daemon
 /// cannot be reached, speaks another wire revision, or rejects the request.
 #[tauri::command(rename_all = "snake_case")]
@@ -1378,18 +1420,18 @@ pub async fn run_mcp_registration(
     action: String,
     request_id: u64,
     pool: State<'_, Arc<ConnectionPool>>,
-) -> Result<McpRegistrationRequestedReply, String> {
-    validate_profile_id(&profile).map_err(stringify)?;
-    let action = parse_mcp_registration_action(&action).map_err(stringify)?;
+) -> Result<McpRegistrationRequestedReply, CommandFailure> {
+    validate_profile_id(&profile)?;
+    let action = parse_mcp_registration_action(&action)?;
     pool.run_mcp_registration(&app, profile, action, request_id)
         .await
-        .map_err(stringify)
+        .map_err(CommandFailure::from)
 }
 
 /// Renames a window.
 ///
 /// # Errors
-/// Returns a human-readable message when the daemon cannot be reached, the
+/// Returns a [`CommandFailure`] when the daemon cannot be reached, the
 /// window does not exist, or the name is invalid (empty, too long, or contains
 /// forbidden characters).
 #[tauri::command(rename_all = "snake_case")]
@@ -1398,17 +1440,14 @@ pub async fn rename_window(
     window_id: String,
     name: String,
     pool: State<'_, Arc<ConnectionPool>>,
-) -> Result<String, String> {
-    validate_window_id(&window_id).map_err(stringify)?;
+) -> Result<String, CommandFailure> {
+    validate_window_id(&window_id)?;
     // The protocol's error text is forwarded verbatim so the caller can tell
     // "empty" from "too long" from "forbidden character".
-    match validate_window_name(&name) {
-        Ok(()) => {}
-        Err(err) => return Err(err.to_string()),
-    }
+    validate_window_name(&name).map_err(CommandFailure::from_reason)?;
     pool.rename_window(&app, &window_id, &name)
         .await
-        .map_err(stringify)
+        .map_err(CommandFailure::from)
 }
 
 /// Forwards one input event to a window: a `key`, `text`, `paste`,
@@ -1417,7 +1456,7 @@ pub async fn rename_window(
 /// is held and delivered in order once it is attached again.
 ///
 /// # Errors
-/// Returns a human-readable message when `input` is another message type or
+/// Returns a [`CommandFailure`] when `input` is another message type or
 /// is past its bounds, the window is not one the GUI knows, or the input held
 /// while it reconnects is past its bound.
 #[tauri::command(rename_all = "snake_case")]
@@ -1425,12 +1464,12 @@ pub async fn send_window_input(
     window_id: String,
     input: ClientMessage,
     pool: State<'_, Arc<ConnectionPool>>,
-) -> Result<(), String> {
-    validate_window_id(&window_id).map_err(stringify)?;
-    validate_window_input(&input).map_err(stringify)?;
+) -> Result<(), CommandFailure> {
+    validate_window_id(&window_id)?;
+    validate_window_input(&input)?;
     pool.send_window_input(&window_id, &input)
         .await
-        .map_err(stringify)
+        .map_err(CommandFailure::from)
 }
 
 /// One acknowledgement the WebView sends with its next `next_frames` request:
@@ -1463,7 +1502,7 @@ fn frame_ack_messages(acks: Vec<FrameAckEntry>) -> Vec<(String, ClientMessage)> 
 pub async fn next_frames(
     acks: Vec<FrameAckEntry>,
     pool: State<'_, Arc<ConnectionPool>>,
-) -> Result<Vec<(String, Frame)>, String> {
+) -> Result<Vec<(String, Frame)>, CommandFailure> {
     for (window_id, message) in frame_ack_messages(acks) {
         let _ = pool.send_to_window(&window_id, &message).await;
     }
@@ -1475,74 +1514,76 @@ pub async fn next_frames(
 /// by its next attach.
 ///
 /// # Errors
-/// Returns a human-readable message when the palette does not hold 16 ANSI
+/// Returns a [`CommandFailure`] when the palette does not hold 16 ANSI
 /// colors, the window is not one the GUI knows, or the write fails.
 #[tauri::command(rename_all = "snake_case")]
 pub async fn set_window_palette(
     window_id: String,
     palette: Palette,
     pool: State<'_, Arc<ConnectionPool>>,
-) -> Result<(), String> {
-    validate_window_id(&window_id).map_err(stringify)?;
-    validate_palette(&palette).map_err(stringify)?;
+) -> Result<(), CommandFailure> {
+    validate_window_id(&window_id)?;
+    validate_palette(&palette)?;
     pool.set_window_palette(&window_id, palette)
         .await
-        .map_err(stringify)
+        .map_err(CommandFailure::from)
 }
 
 /// Tells the daemon whether a window is on screen, so it builds no frames for
 /// one that is not. A window that is not attached is told by its next attach.
 ///
 /// # Errors
-/// Returns a human-readable message when the window is not one the GUI knows
+/// Returns a [`CommandFailure`] when the window is not one the GUI knows
 /// or the write fails.
 #[tauri::command(rename_all = "snake_case")]
 pub async fn set_window_visible(
     window_id: String,
     visible: bool,
     pool: State<'_, Arc<ConnectionPool>>,
-) -> Result<(), String> {
-    validate_window_id(&window_id).map_err(stringify)?;
+) -> Result<(), CommandFailure> {
+    validate_window_id(&window_id)?;
     pool.set_window_visible(&window_id, visible)
         .await
-        .map_err(stringify)
+        .map_err(CommandFailure::from)
 }
 
 /// Reads the text selected in a window; `None` when nothing is selected.
 ///
 /// # Errors
-/// Returns a human-readable message when the daemon connection is gone or
+/// Returns a [`CommandFailure`] when the daemon connection is gone or
 /// does not answer in time.
 #[tauri::command(rename_all = "snake_case")]
 pub async fn copy_window_selection(
     window_id: String,
     pool: State<'_, Arc<ConnectionPool>>,
-) -> Result<Option<String>, String> {
-    validate_window_id(&window_id).map_err(stringify)?;
-    pool.copy_selection(&window_id).await.map_err(stringify)
+) -> Result<Option<String>, CommandFailure> {
+    validate_window_id(&window_id)?;
+    pool.copy_selection(&window_id)
+        .await
+        .map_err(CommandFailure::from)
 }
 
 /// Clears the selection in a window, as a copy does once its text is on the
 /// clipboard.
 ///
 /// # Errors
-/// Returns a human-readable message when the daemon connection is gone.
+/// Returns a [`CommandFailure`] when the daemon connection is gone.
 #[tauri::command(rename_all = "snake_case")]
 pub async fn clear_window_selection(
     window_id: String,
     pool: State<'_, Arc<ConnectionPool>>,
-) -> Result<(), String> {
-    validate_window_id(&window_id).map_err(stringify)?;
+) -> Result<(), CommandFailure> {
+    validate_window_id(&window_id)?;
     pool.send_to_window(&window_id, &ClientMessage::ClearSelection)
         .await
-        .map_err(stringify)
+        .map_err(CommandFailure::from)
 }
 
 /// Resizes a window's PTY. A window that is not attached is given the size by
 /// its next attach.
 ///
 /// # Errors
-/// Returns a human-readable message when a dimension is outside the protocol
+/// Returns a [`CommandFailure`] when a dimension is outside the protocol
 /// range, the window is not one the GUI knows, or the write fails.
 #[tauri::command(rename_all = "snake_case")]
 pub async fn resize(
@@ -1550,11 +1591,13 @@ pub async fn resize(
     cols: u16,
     rows: u16,
     pool: State<'_, Arc<ConnectionPool>>,
-) -> Result<(), String> {
-    validate_window_id(&window_id).map_err(stringify)?;
-    validate_dimension(cols, MIN_PTY_COLS, "cols").map_err(stringify)?;
-    validate_dimension(rows, MIN_PTY_ROWS, "rows").map_err(stringify)?;
-    pool.resize(&window_id, cols, rows).await.map_err(stringify)
+) -> Result<(), CommandFailure> {
+    validate_window_id(&window_id)?;
+    validate_dimension(cols, MIN_PTY_COLS, "cols")?;
+    validate_dimension(rows, MIN_PTY_ROWS, "rows")?;
+    pool.resize(&window_id, cols, rows)
+        .await
+        .map_err(CommandFailure::from)
 }
 
 /// Rejects a window id that no daemon request could ever match.
@@ -1680,7 +1723,7 @@ pub fn validate_window_input(input: &ClientMessage) -> Result<(), IpcError> {
 /// dropped rather than sent: it could never be looked up.
 ///
 /// # Errors
-/// Returns a human-readable message when a palette does not hold 16 ANSI
+/// Returns a [`CommandFailure`] when a palette does not hold 16 ANSI
 /// colors, there are more vendors than the daemon takes, or a connected
 /// daemon could not be written to.
 #[tauri::command(rename_all = "snake_case")]
@@ -1689,11 +1732,11 @@ pub async fn set_default_palettes(
     app_palette: Palette,
     vendor_palettes: std::collections::BTreeMap<String, Palette>,
     pool: State<'_, Arc<ConnectionPool>>,
-) -> Result<(), String> {
-    let palettes = default_palettes_to_send(app_palette, vendor_palettes).map_err(stringify)?;
+) -> Result<(), CommandFailure> {
+    let palettes = default_palettes_to_send(app_palette, vendor_palettes)?;
     pool.set_default_palettes(&app, palettes)
         .await
-        .map_err(stringify)
+        .map_err(CommandFailure::from)
 }
 
 fn default_palettes_to_send(
@@ -1756,39 +1799,40 @@ fn validate_dimension(value: u16, min: u16, name: &'static str) -> Result<(), Ip
     }
 }
 
-fn stringify(error: IpcError) -> String {
-    error.to_string()
-}
-
-/// Builds the failure [`open_window`] returns from an [`IpcError`].
-///
-/// Kept out of the command function -- which only a running Tauri app can
-/// call, since it takes `State` -- so the mapping is testable on its own.
-pub fn window_open_failure(error: IpcError) -> WindowOpenFailure {
-    match error {
-        IpcError::Rejected {
-            code,
-            message,
-            rejected_argument,
-        } => WindowOpenFailure::Rejected {
-            code,
-            message,
-            rejected_argument,
-        },
-        IpcError::Unsupported { request_type } => WindowOpenFailure::Unsupported { request_type },
-        // Every other variant is a refusal this Rust layer raised on its own,
-        // so no `error.code` stands behind it.
-        other => WindowOpenFailure::Local {
-            message: other.to_string(),
-        },
+/// Builds the failure a command returns from an [`IpcError`], whose `text` is
+/// that error's [`Display`](std::fmt::Display).
+impl From<IpcError> for CommandFailure {
+    fn from(error: IpcError) -> Self {
+        let text = error.to_string();
+        let kind = match error {
+            IpcError::Rejected {
+                code,
+                message,
+                rejected_argument,
+            } => FailureKind::Rejected {
+                code,
+                message,
+                rejected_argument,
+            },
+            IpcError::Unsupported { request_type } => FailureKind::Unsupported { request_type },
+            // Every other variant is a refusal this Rust layer raised on its own,
+            // so no `error.code` stands behind it.
+            _ => FailureKind::Local,
+        };
+        Self { kind, text }
     }
 }
 
-/// Builds the failure [`open_window`] returns from a reason that never
-/// becomes an [`IpcError`]: the argument checks it runs before reaching the
-/// pool report themselves this way.
-pub fn window_open_failure_from_reason(reason: String) -> WindowOpenFailure {
-    WindowOpenFailure::Local { message: reason }
+impl CommandFailure {
+    /// Builds the failure a command returns when it refuses an argument with
+    /// a check whose error never becomes an [`IpcError`]; the `text` is that
+    /// error's [`Display`](std::fmt::Display).
+    pub fn from_reason(reason: impl std::fmt::Display) -> Self {
+        Self {
+            kind: FailureKind::Local,
+            text: reason.to_string(),
+        }
+    }
 }
 
 /// Contract tests for the argument validators and dispatch logic in this module.
@@ -1983,6 +2027,20 @@ mod tests {
         vec!["bash".to_owned()]
     }
 
+    /// The kind and the sentence the WebView reads of a failure, off the wire.
+    fn kind_and_text(failure: CommandFailure) -> (serde_json::Value, serde_json::Value) {
+        let wire = serde_json::to_value(failure).expect("a failure serializes");
+        (wire["kind"].clone(), wire["text"].clone())
+    }
+
+    /// What a refusal of `reason` reaches the WebView as.
+    fn refused_here(reason: impl std::fmt::Display) -> (serde_json::Value, serde_json::Value) {
+        (
+            serde_json::json!("local"),
+            serde_json::json!(reason.to_string()),
+        )
+    }
+
     #[test]
     fn open_window_arguments_accept_a_bare_command() {
         assert_eq!(
@@ -2000,14 +2058,24 @@ mod tests {
     fn open_window_arguments_reject_a_model_without_a_profile() {
         let checked =
             check_open_window_arguments(&command_line(), None, None, None, None, Some("m"), None);
-        assert!(matches!(checked, Err(WindowOpenFailure::Local { .. })));
+        let reason = validate_open_window_exclusivity(true, None, None, None, true)
+            .expect_err("launch options without a profile are refused");
+        assert_eq!(
+            kind_and_text(checked.expect_err("refused")),
+            refused_here(reason)
+        );
     }
 
     #[test]
     fn open_window_arguments_reject_an_effort_without_a_profile() {
         let checked =
             check_open_window_arguments(&command_line(), None, None, None, None, None, Some("e"));
-        assert!(matches!(checked, Err(WindowOpenFailure::Local { .. })));
+        let reason = validate_open_window_exclusivity(true, None, None, None, true)
+            .expect_err("launch options without a profile are refused");
+        assert_eq!(
+            kind_and_text(checked.expect_err("refused")),
+            refused_here(reason)
+        );
     }
 
     #[test]
@@ -2022,7 +2090,11 @@ mod tests {
     fn open_window_arguments_reject_an_empty_window_name() {
         let checked =
             check_open_window_arguments(&command_line(), Some(""), None, None, None, None, None);
-        assert!(matches!(checked, Err(WindowOpenFailure::Local { .. })));
+        let reason = validate_window_name("").expect_err("an empty name is refused");
+        assert_eq!(
+            kind_and_text(checked.expect_err("refused")),
+            refused_here(reason)
+        );
     }
 
     #[test]
@@ -2089,13 +2161,5 @@ mod tests {
         assert!(validate_dimension(MAX_PTY_DIMENSION, MIN_PTY_COLS, "cols").is_ok());
         assert!(validate_dimension(MIN_PTY_COLS - 1, MIN_PTY_COLS, "cols").is_err());
         assert!(validate_dimension(MAX_PTY_DIMENSION + 1, MIN_PTY_COLS, "cols").is_err());
-    }
-
-    #[test]
-    fn stringify_carries_the_reason_the_webview_shows() {
-        assert_eq!(
-            stringify(IpcError::InvalidArgument("cols")),
-            "invalid argument: cols"
-        );
     }
 }

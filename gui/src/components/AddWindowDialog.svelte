@@ -1,7 +1,8 @@
 <script lang="ts">
+  import { commandFailureOf } from '../command-failure-model';
   import { mappedLaunchOptionValues } from '../profile/launch-profile-choices';
   import { buttons, errors, forms } from '../ui-messages';
-  import { describeWindowOpenFailure, windowOpenFailureOf } from '../window-open-failure-model';
+  import { describeWindowOpenFailure } from '../window-open-failure-model';
   import type { OpenWindowSubmission, ProfileOption } from './add-window-dialog-types';
   import Icon from './Icon.svelte';
   import IconButton from './IconButton.svelte';
@@ -140,7 +141,7 @@
       nameInput = '';
       isOpen = false;
     } catch (error) {
-      formError = describeWindowOpenFailure(errors.openWindowFailed, windowOpenFailureOf(error));
+      formError = describeWindowOpenFailure(errors.openWindowFailed, commandFailureOf(error));
     } finally {
       isSubmitting = false;
     }

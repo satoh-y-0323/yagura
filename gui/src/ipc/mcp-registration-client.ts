@@ -7,9 +7,9 @@
  * daemon that predates MCP registration -- rejects the returned promise.
  */
 
-import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 
+import { invokeDaemonCommand } from './command-invoke';
 import {
   narrowMcpRegistrationRequested,
   narrowMcpRegistrationResultPayload,
@@ -36,7 +36,7 @@ export async function invokeListMcpRegistrations(
   requestId: number
 ): Promise<McpRegistrationsListed> {
   return narrowMcpRegistrationsListed(
-    await invoke<unknown>('list_mcp_registrations', { request_id: requestId })
+    await invokeDaemonCommand('list_mcp_registrations', { request_id: requestId })
   );
 }
 
@@ -54,7 +54,7 @@ export async function invokeRunMcpRegistration(
   requestId: number
 ): Promise<McpRegistrationRequested> {
   return narrowMcpRegistrationRequested(
-    await invoke<unknown>('run_mcp_registration', { profile, action, request_id: requestId })
+    await invokeDaemonCommand('run_mcp_registration', { profile, action, request_id: requestId })
   );
 }
 

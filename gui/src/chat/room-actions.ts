@@ -2,7 +2,7 @@
  * The room rail's menu: whether a room may be deleted, and what the user is
  * told when the daemon refuses to remove one.
  */
-import { daemonRejectionCode } from '../ipc/daemon-rejection';
+import { commandFailureLine, commandRejectionCode } from '../command-failure-model';
 import { MAIN_CHAT_ROOM_ID, ROOM_IN_USE_CODE, type ChatRoomInfo } from '../ipc/session-boundary';
 import { chat, describeOperationFailure } from '../ui-messages';
 
@@ -40,7 +40,7 @@ export function readRefusedForRemovedRoom(
   rooms: ReadonlyMap<string, ChatRoomInfo>
 ): boolean {
   return (
-    daemonRejectionCode(error) === INVALID_ARGUMENT_CODE &&
+    commandRejectionCode(error) === INVALID_ARGUMENT_CODE &&
     roomId !== MAIN_CHAT_ROOM_ID &&
     !rooms.has(roomId)
   );
@@ -54,7 +54,9 @@ export function readRefusedForRemovedRoom(
  * @param error the value the command rejected with
  */
 export function describeRoomRemovalFailure(error: unknown): string {
-  const detail =
-    daemonRejectionCode(error) === ROOM_IN_USE_CODE ? chat.deleteRoomWithWindowsNote : error;
-  return describeOperationFailure(chat.panelTitle, detail);
+  return commandFailureLine(error, () => {
+    const detail =
+      commandRejectionCode(error) === ROOM_IN_USE_CODE ? chat.deleteRoomWithWindowsNote : error;
+    return describeOperationFailure(chat.panelTitle, detail);
+  });
 }

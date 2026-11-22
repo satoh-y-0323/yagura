@@ -18,6 +18,7 @@ import type {
   PlanTaskInfo,
   TaskAssignment,
 } from '../ipc/plan-boundary';
+import { CommandFailureError } from '../ipc/session-boundary';
 import type { ProfileEntry, ProfileLimit, WindowInfo } from '../ipc/session-client';
 import { plans } from '../ui-messages';
 import { createWindowRegistry, type WindowEntry } from '../stores/window-registry';
@@ -372,37 +373,6 @@ describe('when the board reads again', () => {
       roles: false,
       planId: null,
     });
-  });
-
-  it('drops the selection when the shown plan no longer exists', () => {
-    const failure = selectionAfterPlanReadFailure;
-
-    expect(
-      failure('plan-a', 'plan-a', 'the daemon rejected the request: plan_not_found: no such plan')
-    ).toBeNull();
-    expect(
-      failure('plan-a', 'plan-a', 'the daemon rejected the request: plan_not_found')
-    ).toBeNull();
-  });
-
-  it('keeps the selection when the read failed for another reason', () => {
-    const failure = selectionAfterPlanReadFailure;
-
-    expect(failure('plan-a', 'plan-a', 'not connected to the yagura daemon')).toBe('plan-a');
-    expect(
-      failure('plan-a', 'plan-a', 'the daemon rejected the request: invalid_state: plan_not_found')
-    ).toBe('plan-a');
-    expect(failure('plan-a', 'plan-a', new Error('plan: expected a record'))).toBe('plan-a');
-  });
-
-  it('keeps a selection made after the failed read was sent', () => {
-    expect(
-      selectionAfterPlanReadFailure(
-        'plan-b',
-        'plan-a',
-        'the daemon rejected the request: plan_not_found'
-      )
-    ).toBe('plan-b');
   });
 });
 
@@ -762,27 +732,51 @@ describe('reading again after a push', () => {
 });
 
 describe('dropping a selection after a failed read', () => {
-  const rejected = (code: string, rest = ''): string =>
-    `the daemon rejected the request: ${code}${rest}`;
+  /** A read the daemon refused with `code`, the way the plan client rejects it. */
+  const rejected = (code: string, reason = ''): CommandFailureError =>
+    new CommandFailureError({
+      kind: 'rejected',
+      code,
+      message: reason,
+      rejectedArgument: null,
+      text: `the daemon rejected the request: ${code}${reason === '' ? '' : `: ${reason}`}`,
+    });
 
-  it('drops it when the daemon refused the plan as not found, whether the error is text or an Error', () => {
+  it('drops it when the daemon refused the shown plan as not found, with or without a reason', () => {
     expect(selectionAfterPlanReadFailure('p', 'p', rejected('plan_not_found'))).toBeNull();
     expect(
-      selectionAfterPlanReadFailure('p', 'p', new Error(rejected('plan_not_found')))
-    ).toBeNull();
-    expect(
-      selectionAfterPlanReadFailure('p', 'p', rejected('plan_not_found', ': gone'))
+      selectionAfterPlanReadFailure('p', 'p', rejected('plan_not_found', 'no such plan'))
     ).toBeNull();
   });
 
-  it.each<[string, unknown]>([
-    ['another code', rejected('invalid_state', ': plan_not_found')],
-    ['text that is not a rejection', 'plan_not_found'],
-    ['a number', 42],
-    ['null', null],
-    ['an object', { code: 'plan_not_found' }],
+  it.each<[string, () => unknown]>([
+    ['another code whose reason names it', () => rejected('invalid_state', 'plan_not_found')],
+    [
+      'a refusal the core raised on its own',
+      () => new CommandFailureError({ kind: 'local', text: 'not connected to the yagura daemon' }),
+    ],
+    [
+      'a gate refusal',
+      () =>
+        new CommandFailureError({
+          kind: 'unsupported',
+          requestType: 'get_plan',
+          text: 'not sent, as the connected daemon speaks another wire revision: get_plan',
+        }),
+    ],
+    ['a malformed reply', () => new Error('plan: expected a record')],
+    ['text that is not a rejection', () => 'plan_not_found'],
+    ['a number', () => 42],
+    ['null', () => null],
+    ['an object', () => ({ code: 'plan_not_found' })],
   ])('keeps it for %s', (_label, error) => {
-    expect(selectionAfterPlanReadFailure('p', 'p', error)).toBe('p');
+    expect(selectionAfterPlanReadFailure('p', 'p', error())).toBe('p');
+  });
+
+  it('keeps a selection made after the failed read was sent', () => {
+    expect(selectionAfterPlanReadFailure('plan-b', 'plan-a', rejected('plan_not_found'))).toBe(
+      'plan-b'
+    );
   });
 
   it('keeps no selection when there was none', () => {

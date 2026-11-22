@@ -33,8 +33,6 @@ import {
   narrowWindowInfo,
   narrowWindowInfoList,
   narrowWindowListPayload,
-  narrowWindowOpenFailure,
-  WindowOpenFailureError,
 } from './session-boundary';
 
 type Wire = Record<string, unknown>;
@@ -545,71 +543,6 @@ describe('the window list', () => {
     expect(messageOf(() => narrowWindowInfoList({}))).toBe('list_windows: expected an array');
     expect(messageOf(() => narrowWindowInfoList([5]))).toMatch(/^list_windows: expected an object/);
     expect(messageOf(() => narrowWindowListPayload(5))).toMatch(/^session:\/\/window-list/);
-  });
-});
-
-describe('the failure an open_window rejection carries', () => {
-  it('reads a string, an Error and an untagged value for their text', () => {
-    expect(narrowWindowOpenFailure('refused')).toEqual({ kind: 'bare', message: 'refused' });
-    expect(narrowWindowOpenFailure(new Error('bridge'))).toEqual({
-      kind: 'bare',
-      message: 'bridge',
-    });
-    expect(narrowWindowOpenFailure(7)).toEqual({ kind: 'bare', message: '7' });
-    expect(narrowWindowOpenFailure(null)).toEqual({ kind: 'bare', message: 'null' });
-    expect(narrowWindowOpenFailure({ code: 1 })).toEqual({ kind: 'bare', message: '{"code":1}' });
-  });
-
-  it('reads an object that cannot be encoded as empty text', () => {
-    expect(narrowWindowOpenFailure({ toJSON: () => undefined })).toEqual({
-      kind: 'bare',
-      message: '',
-    });
-    const cyclic: Wire = {};
-    cyclic['self'] = cyclic;
-    expect(narrowWindowOpenFailure(cyclic)).toEqual({ kind: 'bare', message: '' });
-  });
-
-  it('names a tag it does not know', () => {
-    expect(messageOf(() => narrowWindowOpenFailure({ kind: 'weird' }))).toBe(
-      'open_window.failure.kind: unrecognized failure kind "weird"'
-    );
-  });
-
-  it('refuses a tagged failure missing its fields, naming the command', () => {
-    expect(messageOf(() => narrowWindowOpenFailure({ kind: 'local' }))).toMatch(
-      /^open_window\.failure\.message: expected a string/
-    );
-    expect(messageOf(() => narrowWindowOpenFailure({ kind: 'unsupported' }))).toMatch(
-      /^open_window\.failure\.request_type: expected a string/
-    );
-  });
-
-  it('keeps the unsupported request type and reads it into the error message', () => {
-    const failure = narrowWindowOpenFailure({ kind: 'unsupported', request_type: 'OpenWindow' });
-    expect(failure).toEqual({ kind: 'unsupported', requestType: 'OpenWindow' });
-    const error = new WindowOpenFailureError(failure);
-    expect(error.name).toBe('WindowOpenFailureError');
-    expect(error.message).toBe(
-      'the connected daemon has not settled a wire revision for OpenWindow'
-    );
-    expect(error.failure).toBe(failure);
-  });
-
-  it('carries the reason text of every other shape as the error message', () => {
-    const rejected = narrowWindowOpenFailure({
-      kind: 'rejected',
-      code: 'bad_cwd',
-      message: 'no such directory',
-    });
-    expect(rejected).toEqual({
-      kind: 'rejected',
-      code: 'bad_cwd',
-      message: 'no such directory',
-      rejectedArgument: null,
-    });
-    expect(new WindowOpenFailureError(rejected).message).toBe('no such directory');
-    expect(new WindowOpenFailureError({ kind: 'bare', message: 'plain' }).message).toBe('plain');
   });
 });
 

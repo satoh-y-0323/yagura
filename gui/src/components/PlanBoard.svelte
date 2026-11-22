@@ -47,8 +47,8 @@
   export let onDeletePlan: (planId: string) => void;
   export let onSetTaskAssignment: (taskId: string, assignment: AssignmentView) => void;
   export let onClearTaskAssignment: (taskId: string) => void;
-  /** Names a window as the owner; resolves false when that was refused. */
-  export let onSetPlanOwner: (windowId: string) => Promise<boolean>;
+  /** Names a window as the owner; resolves the line to show when that failed, `null` when accepted. */
+  export let onSetPlanOwner: (windowId: string) => Promise<string | null>;
   /** Approves the selected plan. */
   export let onApprovePlan: () => void;
   /** The launch profiles an assignment's profile is chosen from. */
@@ -58,7 +58,7 @@
   // are unique within one plan, not across plans.
   let drafts: Record<string, EditorFields> = {};
   let draftsPlanId: string | null = null;
-  let isOwnerAssignmentRefused = false;
+  let ownerAssignmentFailure: string | null = null;
 
   $: forgetDraftsOnPlanSwitch(plan === null ? null : plan.plan_id);
   $: owner = plan === null ? null : planOwner(plan, windows);
@@ -69,7 +69,7 @@
     }
     draftsPlanId = planId;
     drafts = {};
-    isOwnerAssignmentRefused = false;
+    ownerAssignmentFailure = null;
   }
 
   function draftFor(current: Record<string, EditorFields>, task: TaskView): EditorFields {
@@ -115,8 +115,7 @@
   }
 
   async function assignOwner(windowId: string): Promise<void> {
-    const accepted = await onSetPlanOwner(windowId);
-    isOwnerAssignmentRefused = !accepted;
+    ownerAssignmentFailure = await onSetPlanOwner(windowId);
   }
 
   function deleteSelectedPlan(): void {
@@ -194,8 +193,8 @@
         <span class="plan-board__muted">{hints.noWindows}</span>
       {/each}
     </div>
-    {#if isOwnerAssignmentRefused}
-      <p class="plan-board__refused" role="alert">{plans.assignOwnerFailed}</p>
+    {#if ownerAssignmentFailure !== null}
+      <p class="plan-board__refused" role="alert">{ownerAssignmentFailure}</p>
     {/if}
 
     <div class="plan-board__columns">

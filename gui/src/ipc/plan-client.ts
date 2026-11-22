@@ -8,9 +8,9 @@
  * rather than resolving to an empty result.
  */
 
-import { invoke } from '@tauri-apps/api/core';
 import { type UnlistenFn } from '@tauri-apps/api/event';
 
+import { invokeDaemonCommand } from './command-invoke';
 import {
   narrowPlanChanged,
   narrowPlanInfo,
@@ -32,7 +32,7 @@ import { listenAppEvent } from './session-client';
  * @throws when the core rejects the request or the reply fails validation.
  */
 export async function invokeListPlans(): Promise<PlanSummary[]> {
-  return narrowPlanList(await invoke<unknown>('list_plans'));
+  return narrowPlanList(await invokeDaemonCommand('list_plans'));
 }
 
 /**
@@ -41,7 +41,7 @@ export async function invokeListPlans(): Promise<PlanSummary[]> {
  * @throws when the core rejects the request or the reply fails validation.
  */
 export async function invokeGetPlan(planId: string): Promise<PlanInfo> {
-  return narrowPlanInfo(await invoke<unknown>('get_plan', { plan_id: planId }));
+  return narrowPlanInfo(await invokeDaemonCommand('get_plan', { plan_id: planId }));
 }
 
 /**
@@ -52,7 +52,7 @@ export async function invokeGetPlan(planId: string): Promise<PlanInfo> {
  */
 export async function invokeDeletePlan(planId: string): Promise<string> {
   return narrowStringResult(
-    await invoke<unknown>('delete_plan', { plan_id: planId }),
+    await invokeDaemonCommand('delete_plan', { plan_id: planId }),
     'delete_plan'
   );
 }
@@ -69,7 +69,7 @@ export async function invokeSetTaskAssignment(
   assignment: TaskAssignment
 ): Promise<PlanInfo> {
   return narrowPlanInfo(
-    await invoke<unknown>('set_task_assignment', {
+    await invokeDaemonCommand('set_task_assignment', {
       plan_id: planId,
       task_id: taskId,
       assignment,
@@ -85,7 +85,7 @@ export async function invokeSetTaskAssignment(
  */
 export async function invokeClearTaskAssignment(planId: string, taskId: string): Promise<PlanInfo> {
   return narrowPlanInfo(
-    await invoke<unknown>('clear_task_assignment', { plan_id: planId, task_id: taskId })
+    await invokeDaemonCommand('clear_task_assignment', { plan_id: planId, task_id: taskId })
   );
 }
 
@@ -97,7 +97,7 @@ export async function invokeClearTaskAssignment(planId: string, taskId: string):
  */
 export async function invokeSetPlanOwner(planId: string, windowId: string): Promise<PlanInfo> {
   return narrowPlanInfo(
-    await invoke<unknown>('set_plan_owner', { plan_id: planId, window_id: windowId })
+    await invokeDaemonCommand('set_plan_owner', { plan_id: planId, window_id: windowId })
   );
 }
 
@@ -109,7 +109,7 @@ export async function invokeSetPlanOwner(planId: string, windowId: string): Prom
  * @throws when the core rejects the request or the reply fails validation.
  */
 export async function invokeApprovePlan(planId: string, version: number): Promise<PlanInfo> {
-  return narrowPlanInfo(await invoke<unknown>('approve_plan', { plan_id: planId, version }));
+  return narrowPlanInfo(await invokeDaemonCommand('approve_plan', { plan_id: planId, version }));
 }
 
 /**
@@ -120,7 +120,7 @@ export async function invokeApprovePlan(planId: string, version: number): Promis
  * @throws when the core rejects the request or the reply fails validation.
  */
 export async function invokeMarkPlanSeen(planId: string, version: number): Promise<PlanInfo> {
-  return narrowPlanInfo(await invoke<unknown>('mark_plan_seen', { plan_id: planId, version }));
+  return narrowPlanInfo(await invokeDaemonCommand('mark_plan_seen', { plan_id: planId, version }));
 }
 
 /**
@@ -129,7 +129,7 @@ export async function invokeMarkPlanSeen(planId: string, version: number): Promi
  * @throws when the core rejects the request or the reply fails validation.
  */
 export async function invokeListRoles(): Promise<RoleTable> {
-  return narrowRoleList(await invoke<unknown>('list_roles'));
+  return narrowRoleList(await invokeDaemonCommand('list_roles'));
 }
 
 /**
@@ -143,7 +143,9 @@ export async function invokeSaveRoles(
   roles: RoleEntry[],
   defaultRole: string | null
 ): Promise<RoleTable> {
-  return narrowRoleList(await invoke<unknown>('save_roles', { roles, default_role: defaultRole }));
+  return narrowRoleList(
+    await invokeDaemonCommand('save_roles', { roles, default_role: defaultRole })
+  );
 }
 
 /**

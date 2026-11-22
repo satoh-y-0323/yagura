@@ -30,7 +30,7 @@ use crate::commands::{
     ProfileListReply, RestoreCandidateListReply, RoleListReply, TicketListReply,
     UpdateWindowLayoutReply,
 };
-use crate::events::DaemonConnectedPayload;
+use crate::events::{DaemonCompatibilityPayload, DaemonConnectedPayload};
 use crate::frame_mailbox::FrameMailbox;
 use crate::host::GuiHost;
 use crate::ipc_client::{DestructiveRequest, ERROR_CODE_SUPERSEDED, IpcClient, IpcError};
@@ -1336,6 +1336,12 @@ impl ConnectionPool {
     /// later.
     pub(crate) fn daemon_connection(&self) -> Option<DaemonConnectedPayload> {
         self.control.daemon_connection()
+    }
+
+    /// Whether the control connection is open to a daemon of another wire
+    /// revision, for a WebView that starts listening after a change went out.
+    pub(crate) fn daemon_compatibility(&self) -> DaemonCompatibilityPayload {
+        self.control.daemon_compatibility()
     }
 
     async fn window_or_error(&self, window_id: &str) -> Result<Arc<IpcClient>, IpcError> {

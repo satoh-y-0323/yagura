@@ -13,11 +13,11 @@ use yagura_test_support::ipc::reply_within;
 
 use super::*;
 use crate::connection_pool::ConnectionPool;
-use crate::events::{EVENT_DAEMON_CONNECTED, EVENT_WINDOW_LINK};
+use crate::events::{EVENT_DAEMON_COMPATIBILITY, EVENT_DAEMON_CONNECTED, EVENT_WINDOW_LINK};
 use crate::host::fake::{
     FakeHost, Link, Reaction, RecordedEvent, ScriptedDaemon, SentFrame, announced, attach_pane,
     attached, brief, connected, connection, error_frame, probes_answered_at, probes_answered_in,
-    protocol_revision, sample_palette, text,
+    protocol_revision, protocol_revision_at, sample_palette, text,
 };
 
 const BOOT_A: StatusBoot = StatusBoot { origin: 7, seq: 1 };
@@ -557,8 +557,9 @@ async fn a_window_reconnect_that_reaches_a_daemon_of_another_wire_revision_attac
 
     daemon.hang_up();
 
-    let connecting = host.next_link("w1").await;
-    let ended = host.next_link("w1").await;
+    let (connecting, mut events) = next_link_with_events(&host, "w1").await;
+    let (ended, more) = next_link_with_events(&host, "w1").await;
+    events.extend(more);
     assert_eq!(connecting.state, "connecting");
     assert_eq!(ended.state, "lost", "got {ended:?}");
     let received = daemon.received();
@@ -566,6 +567,96 @@ async fn a_window_reconnect_that_reaches_a_daemon_of_another_wire_revision_attac
         connection(&received, 1),
         [ClientMessage::GetProtocolRevision],
         "a daemon of another wire revision is sent nothing but the probe"
+    );
+    assert!(
+        compatibility_of(&events).is_empty(),
+        "only the control connection tells whether the daemon is usable: {events:?}"
+    );
+}
+
+/// The daemon-compatibility events among `events`, oldest first, as
+/// `(incompatible, rev)`.
+fn compatibility_of(events: &[RecordedEvent]) -> Vec<(bool, u64)> {
+    events
+        .iter()
+        .filter(|event| event.name == EVENT_DAEMON_COMPATIBILITY)
+        .map(|event| {
+            (
+                event.payload["incompatible"]
+                    .as_bool()
+                    .expect("a boolean incompatible"),
+                event.payload["rev"].as_u64().expect("an integer rev"),
+            )
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn the_control_connection_tells_each_time_it_comes_to_or_leaves_an_unusable_daemon() {
+    let usable = ScriptedDaemon::new(probes_answered_in(vec![Some(BOOT_B)]));
+    let newer = ScriptedDaemon::new(|request| match request {
+        ClientMessage::GetProtocolRevision => Reaction::reply(protocol_revision_at(
+            yagura_protocol::PROTOCOL_REVISION + 1,
+            Some(BOOT_A),
+        )),
+        _ => None,
+    });
+    let host = FakeHost::served_by("compatibility", &usable).await;
+    let newer_endpoint = FakeHost::new("compatibility-newer").endpoint_name();
+    newer.listen(&newer_endpoint).await;
+    let pool = ConnectionPool::new();
+    pool.control_connection()
+        .connect(&host)
+        .await
+        .expect("connect to the usable daemon");
+
+    host.set_endpoint(Some(newer_endpoint));
+    usable.hang_up();
+    let came = host.events_through(EVENT_DAEMON_COMPATIBILITY).await;
+    // Only the connection drops: the daemon that answers again is the same
+    // start, which is not announced a second time.
+    newer.hang_up();
+    let left = host.events_through(EVENT_DAEMON_COMPATIBILITY).await;
+    let came_again = host.events_through(EVENT_DAEMON_COMPATIBILITY).await;
+    let pulled_while_open = pool.daemon_compatibility();
+    host.set_endpoint(Some(FakeHost::new("compatibility-gone").endpoint_name()));
+    newer.hang_up();
+    let left_for_good = host.events_through(EVENT_DAEMON_COMPATIBILITY).await;
+    let pulled_after = pool.daemon_compatibility();
+
+    let mut newer_start = connected(Some(BOOT_A), None);
+    newer_start["compatible"] = json!(false);
+    assert_eq!(
+        announced(&came),
+        [connected(Some(BOOT_B), None), newer_start],
+        "a usable daemon tells nothing of compatibility, and the start comes first"
+    );
+    assert!(
+        announced(&came_again).is_empty(),
+        "the same start is not announced again: {came_again:?}"
+    );
+    let told: Vec<(bool, u64)> = [&came, &left, &came_again, &left_for_good]
+        .into_iter()
+        .flat_map(|events| compatibility_of(events))
+        .collect();
+    assert_eq!(
+        told.iter()
+            .map(|(incompatible, _)| *incompatible)
+            .collect::<Vec<_>>(),
+        [true, false, true, false]
+    );
+    assert!(
+        told.windows(2).all(|pair| pair[0].1 < pair[1].1),
+        "each change is ordered after the one before: {told:?}"
+    );
+    let pulled: Vec<(bool, u64)> = [pulled_while_open, pulled_after]
+        .into_iter()
+        .map(|payload| (payload.incompatible, payload.rev))
+        .collect();
+    assert_eq!(
+        pulled,
+        [told[2], told[3]],
+        "a WebView that starts listening late reads the last change"
     );
 }
 

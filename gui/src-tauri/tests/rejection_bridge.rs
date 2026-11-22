@@ -4,19 +4,17 @@
 //! own, still carry by the time they reach the Tauri command boundary.
 //!
 //! Every test below drives the pure items directly
-//! ([`rejection_for`], [`window_open_failure`],
-//! [`window_open_failure_from_reason`]). None of them construct an
-//! `AppHandle`, a `State` or a live connection, so none of them reach
-//! `dispatch` or a command function.
+//! ([`rejection_for`], [`CommandFailure`]'s `From<IpcError>` and
+//! [`CommandFailure::from_reason`]). None of them construct an `AppHandle`, a
+//! `State` or a live connection, so none of them reach `dispatch` or a
+//! command function. A failure is read as the JSON the WebView receives.
 
-use yagura_gui::commands::{
-    WindowOpenFailure, window_open_failure, window_open_failure_from_reason,
-};
+use serde_json::{Value, json};
+use yagura_gui::commands::CommandFailure;
 use yagura_gui::ipc_client::IpcError;
 use yagura_gui::message_dispatch::rejection_for;
-use yagura_protocol::{
-    DaemonMessage, client_message_wire_tags, validate_open_window_exclusivity, validate_window_name,
-};
+use yagura_os::OsError;
+use yagura_protocol::{DaemonMessage, client_message_wire_tags};
 
 /// The rejection an error frame carrying these values turns into.
 fn rejection_from_frame(
@@ -112,81 +110,102 @@ fn rejection_display_still_includes_the_error_code() {
     );
 }
 
-#[test]
-fn window_open_failure_keeps_the_rejection_as_its_own_kind() {
-    assert_eq!(
-        window_open_failure(cwd_rejection()),
-        WindowOpenFailure::Rejected {
-            code: "invalid_argument".to_owned(),
-            message: "cwd does not exist: /nonexistent/project".to_owned(),
-            rejected_argument: Some("cwd".to_owned()),
+/// The JSON the WebView receives for the failure made from `error`.
+fn wire_of(error: IpcError) -> Value {
+    serde_json::to_value(CommandFailure::from(error)).unwrap()
+}
+
+/// One error of every [`IpcError`] variant. The match below names each
+/// variant, so a new one does not compile until it is listed here too.
+fn one_of_each_ipc_error() -> Vec<IpcError> {
+    let errors = vec![
+        IpcError::EndpointName(OsError::Security("no user id".to_owned())),
+        IpcError::NotConnected,
+        IpcError::ConnectionLost,
+        IpcError::ConnectTimeout,
+        cwd_rejection(),
+        IpcError::UnexpectedReply,
+        IpcError::Write,
+        IpcError::DaemonNotFound,
+        IpcError::DaemonSpawn,
+        IpcError::InvalidArgument("cols"),
+        IpcError::WindowNotAttached {
+            window_id: "w1".to_owned(),
+        },
+        IpcError::ApproverNotRegistered,
+        IpcError::Unsupported {
+            request_type: refused_request_tag().to_owned(),
+        },
+    ];
+    for error in &errors {
+        match error {
+            IpcError::EndpointName(_)
+            | IpcError::NotConnected
+            | IpcError::ConnectionLost
+            | IpcError::ConnectTimeout
+            | IpcError::Rejected { .. }
+            | IpcError::UnexpectedReply
+            | IpcError::Write
+            | IpcError::DaemonNotFound
+            | IpcError::DaemonSpawn
+            | IpcError::InvalidArgument(_)
+            | IpcError::WindowNotAttached { .. }
+            | IpcError::ApproverNotRegistered
+            | IpcError::Unsupported { .. } => {}
         }
+    }
+    errors
+}
+
+#[test]
+fn every_failure_carries_the_sentence_of_the_error_it_was_made_from() {
+    let sentences: Vec<String> = one_of_each_ipc_error()
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    let carried: Vec<Value> = one_of_each_ipc_error()
+        .into_iter()
+        .map(|error| wire_of(error)["text"].clone())
+        .collect();
+    let expected: Vec<Value> = sentences.into_iter().map(Value::String).collect();
+    assert_eq!(carried, expected);
+}
+
+#[test]
+fn a_rejection_without_a_reason_keeps_its_code_in_the_sentence() {
+    let error = rejection_from_frame("superseded".to_owned(), String::new(), None);
+    assert_eq!(
+        wire_of(error),
+        json!({
+            "kind": "rejected",
+            "code": "superseded",
+            "message": "",
+            "text": "the daemon rejected the request: superseded",
+        })
     );
 }
 
 #[test]
-fn window_open_failure_keeps_a_rejection_that_names_no_argument() {
-    let error = rejection_from_frame(
-        "resource_exhausted".to_owned(),
-        "window limit reached".to_owned(),
-        None,
-    );
+fn a_gui_side_failure_reaches_the_webview_as_local_with_its_sentence_only() {
     assert_eq!(
-        window_open_failure(error),
-        WindowOpenFailure::Rejected {
-            code: "resource_exhausted".to_owned(),
-            message: "window limit reached".to_owned(),
-            rejected_argument: None,
-        }
-    );
-}
-
-#[test]
-fn window_open_failure_reports_a_gui_side_failure_as_local() {
-    assert_eq!(
-        window_open_failure(IpcError::NotConnected),
-        WindowOpenFailure::Local {
-            message: "not connected to the yagura daemon".to_owned(),
-        }
-    );
-}
-
-#[test]
-fn window_open_failure_from_reason_keeps_the_exclusivity_check_reason() {
-    let reason = validate_open_window_exclusivity(true, Some("claude"), None, None, false)
-        .expect_err("command plus profile must be refused")
-        .to_string();
-    assert_eq!(
-        window_open_failure_from_reason(reason),
-        WindowOpenFailure::Local {
-            message: "command and profile are mutually exclusive".to_owned(),
-        }
-    );
-}
-
-#[test]
-fn window_open_failure_from_reason_keeps_the_window_name_check_reason() {
-    let reason = validate_window_name("")
-        .expect_err("an empty window name must be refused")
-        .to_string();
-    assert_eq!(
-        window_open_failure_from_reason(reason),
-        WindowOpenFailure::Local {
-            message: "window label must not be empty".to_owned(),
-        }
+        wire_of(IpcError::InvalidArgument("cols")),
+        json!({
+            "kind": "local",
+            "text": "invalid argument: cols",
+        })
     );
 }
 
 #[test]
 fn serialized_rejection_carries_exactly_what_it_was_given() {
-    let serialized = serde_json::to_value(window_open_failure(cwd_rejection())).unwrap();
     assert_eq!(
-        serialized,
-        serde_json::json!({
+        wire_of(cwd_rejection()),
+        json!({
             "kind": "rejected",
             "code": "invalid_argument",
             "message": "cwd does not exist: /nonexistent/project",
             "rejected_argument": "cwd",
+            "text": "the daemon rejected the request: invalid_argument: cwd does not exist: /nonexistent/project",
         })
     );
 }
@@ -194,28 +213,28 @@ fn serialized_rejection_carries_exactly_what_it_was_given() {
 #[test]
 fn serialized_rejection_omits_the_argument_key_when_none_is_named() {
     let error = rejection_from_frame("internal".to_owned(), "store write failed".to_owned(), None);
-    let serialized = serde_json::to_value(window_open_failure(error)).unwrap();
     assert_eq!(
-        serialized,
-        serde_json::json!({
+        wire_of(error),
+        json!({
             "kind": "rejected",
             "code": "internal",
             "message": "store write failed",
+            "text": "the daemon rejected the request: internal: store write failed",
         })
     );
 }
 
 #[test]
 fn serialized_local_failure_carries_exactly_what_it_was_given() {
-    let serialized = serde_json::to_value(window_open_failure_from_reason(
+    let serialized = serde_json::to_value(CommandFailure::from_reason(
         "cwd is not a directory".to_owned(),
     ))
     .unwrap();
     assert_eq!(
         serialized,
-        serde_json::json!({
+        json!({
             "kind": "local",
-            "message": "cwd is not a directory",
+            "text": "cwd is not a directory",
         })
     );
 }
@@ -231,28 +250,16 @@ fn refused_request_tag() -> &'static str {
 }
 
 #[test]
-fn a_gate_refusal_reaches_the_form_as_its_own_kind_of_failure() {
-    assert_eq!(
-        window_open_failure(IpcError::Unsupported {
-            request_type: refused_request_tag().to_owned(),
-        }),
-        WindowOpenFailure::Unsupported {
-            request_type: refused_request_tag().to_owned(),
-        }
-    );
-}
-
-#[test]
 fn a_serialized_gate_refusal_carries_exactly_what_it_was_given() {
-    let serialized = serde_json::to_value(window_open_failure(IpcError::Unsupported {
+    let serialized = wire_of(IpcError::Unsupported {
         request_type: refused_request_tag().to_owned(),
-    }))
-    .unwrap();
+    });
     assert_eq!(
         serialized,
-        serde_json::json!({
+        json!({
             "kind": "unsupported",
             "request_type": "open_window_from_profile",
+            "text": "not sent, as the connected daemon speaks another wire revision: open_window_from_profile",
         })
     );
 }

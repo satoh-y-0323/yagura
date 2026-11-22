@@ -9,7 +9,7 @@
 import { describe, it, expect } from 'vitest';
 
 import windowSource from '../../crates/yagura-daemon/src/window.rs?raw';
-import type { WindowOpenFailure } from './ipc/session-boundary';
+import type { CommandFailure } from './ipc/session-boundary';
 import { bracedBody, itemBody } from './test-utils/markup-scan';
 import { shouldDropRememberedCwd } from './window-open-failure-model';
 
@@ -49,17 +49,18 @@ function argumentNames(source: string): Map<string, string> {
 }
 
 /** A rejection naming `argument`, the only shape the rule consults. */
-function rejectionNaming(argument: string): WindowOpenFailure {
+function rejectionNaming(argument: string): CommandFailure {
   return {
     kind: 'rejected',
     code: 'invalid_argument',
     message: 'the daemon refused',
     rejectedArgument: argument,
+    text: 'the daemon rejected the request: invalid_argument: the daemon refused',
   };
 }
 
 /** Whether a refused launch costs the remembered working directory. */
-type LaunchMemoryRule = (failure: WindowOpenFailure) => boolean;
+type LaunchMemoryRule = (failure: CommandFailure) => boolean;
 
 /**
  * Every way `names` and the launch-memory rule disagree: a working-directory

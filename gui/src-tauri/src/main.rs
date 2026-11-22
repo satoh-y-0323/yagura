@@ -151,6 +151,7 @@ fn main() -> anyhow::Result<()> {
             commands::reconnect_daemon,
             commands::get_recovery_status,
             commands::get_daemon_connection,
+            commands::get_daemon_compatibility,
             commands::set_attention_summary
         ])
         .run(tauri::generate_context!())

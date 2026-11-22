@@ -146,6 +146,23 @@ const NO_TEXT_SUBSTITUTION = [
 
 const DISPLAY_ONLY_IMPORTS = '(^|/)(ipc|stores)/|^@tauri-apps/';
 
+// Only ui-messages.ts reads the locale resources, so every caller gets the active locale.
+const LOCALE_READER = 'src/ui-messages.ts';
+const LOCALE_RESOURCES = 'src/i18n/**';
+const NO_LOCALE_RESOURCES = {
+  regex: '(^|/)i18n(/|$)',
+  message: 'Read UI text through ui-messages.ts.',
+};
+
+// A command reaching the daemon fails with the core's structured failure only through the
+// door that narrows it, so the bridge itself is called from that one module.
+const COMMAND_DOORS = 'src/ipc/command-invoke.ts';
+const NO_DIRECT_INVOKE = {
+  name: '@tauri-apps/api/core',
+  importNames: ['invoke'],
+  message: 'Call a command through ipc/command-invoke.ts, which owns the invoke bridge.',
+};
+
 const SOURCE_SYNTAX = [
   ...NO_RAW_HTML,
   ...NO_JAPANESE_TEXT,
@@ -233,17 +250,29 @@ export default [
       'no-restricted-syntax': ['error', ...SOURCE_SYNTAX, ...NO_VENDOR_NAMES],
     },
   },
+  // A later block's no-restricted-imports replaces an earlier one for the same file, so the two
+  // restrictions below are combined per file rather than given a block each.
   {
-    // Only ui-messages.ts reads the locale resources, so every caller gets the active locale.
     files: PRODUCTION_SOURCES,
-    ignores: [...TEST_SOURCES, 'src/ui-messages.ts', 'src/i18n/**'],
+    ignores: [...TEST_SOURCES, LOCALE_READER, LOCALE_RESOURCES, COMMAND_DOORS],
     rules: {
       'no-restricted-imports': [
         'error',
-        {
-          patterns: [{ regex: '(^|/)i18n(/|$)', message: 'Read UI text through ui-messages.ts.' }],
-        },
+        { paths: [NO_DIRECT_INVOKE], patterns: [NO_LOCALE_RESOURCES] },
       ],
+    },
+  },
+  {
+    files: [LOCALE_READER, LOCALE_RESOURCES],
+    ignores: TEST_SOURCES,
+    rules: {
+      'no-restricted-imports': ['error', { paths: [NO_DIRECT_INVOKE] }],
+    },
+  },
+  {
+    files: [COMMAND_DOORS],
+    rules: {
+      'no-restricted-imports': ['error', { patterns: [NO_LOCALE_RESOURCES] }],
     },
   },
   {

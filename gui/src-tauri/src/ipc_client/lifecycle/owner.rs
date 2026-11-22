@@ -22,7 +22,10 @@ use super::transition::{
     Action, ClientKind, Event, Failure, Lifecycle, Public, PublicState, Registration, Step,
     TakenAnswer, Until, WantId,
 };
-use crate::events::{DaemonConnectedPayload, EVENT_DAEMON_CONNECTED};
+use crate::events::{
+    DaemonCompatibilityPayload, DaemonConnectedPayload, EVENT_DAEMON_COMPATIBILITY,
+    EVENT_DAEMON_CONNECTED,
+};
 use crate::host::GuiHost;
 use crate::message_dispatch::read_loop;
 use crate::window_record::{LinkState, WindowRecord};
@@ -101,6 +104,8 @@ pub(crate) struct Shared {
     /// Keys requests across generations, so no key of this client is used twice.
     correlation_ids: Arc<AtomicU64>,
     daemon_start: std::sync::Mutex<DaemonStart>,
+    /// Kept after it is sent: a WebView that starts listening later reads it.
+    compatibility: std::sync::Mutex<DaemonCompatibilityPayload>,
     palettes: Arc<tokio::sync::Mutex<SentDefaultPalettes>>,
 }
 
@@ -125,6 +130,7 @@ impl Shared {
             published,
             correlation_ids: Arc::new(AtomicU64::new(0)),
             daemon_start: std::sync::Mutex::new(DaemonStart::default()),
+            compatibility: std::sync::Mutex::new(DaemonCompatibilityPayload::default()),
             palettes: Arc::new(tokio::sync::Mutex::new(SentDefaultPalettes::default())),
         }
     }
@@ -156,6 +162,7 @@ impl Shared {
             published,
             correlation_ids,
             daemon_start: std::sync::Mutex::new(DaemonStart::default()),
+            compatibility: std::sync::Mutex::new(DaemonCompatibilityPayload::default()),
             palettes: Arc::new(tokio::sync::Mutex::new(SentDefaultPalettes::default())),
         }
     }
@@ -197,6 +204,26 @@ impl Shared {
     /// The daemon start this client last announced, `None` before the first.
     pub(crate) fn daemon_connection(&self) -> Option<DaemonConnectedPayload> {
         lock_blocking(&self.daemon_start).last.clone()
+    }
+
+    /// The last change this client told of whether it is open to a daemon of
+    /// another wire revision; the default before the first.
+    pub(crate) fn daemon_compatibility(&self) -> DaemonCompatibilityPayload {
+        lock_blocking(&self.compatibility).clone()
+    }
+
+    /// Holds `incompatible` and returns the change to tell, `None` when it is
+    /// the value already held.
+    fn note_compatibility(&self, incompatible: bool) -> Option<DaemonCompatibilityPayload> {
+        let mut held = lock_blocking(&self.compatibility);
+        if held.incompatible == incompatible {
+            return None;
+        }
+        *held = DaemonCompatibilityPayload {
+            incompatible,
+            rev: held.rev.saturating_add(1),
+        };
+        Some(held.clone())
     }
 
     pub(crate) fn palettes(&self) -> &tokio::sync::Mutex<SentDefaultPalettes> {
@@ -567,7 +594,18 @@ impl<H: GuiHost> Owner<H> {
         if open.is_none() && matches!(public.state, PublicState::Open { .. }) {
             public.state = PublicState::Reached;
         }
+        let incompatible = open
+            .as_ref()
+            .is_some_and(|generation| !speaks_this_wire(generation.revision()));
         self.publisher.send_replace(Published { public, open });
+        // Told apart from the start announcement, which tells a boot only
+        // once: reconnecting to the same unusable daemon must raise it again.
+        if self.shared.kind != ClientKind::Control {
+            return;
+        }
+        if let Some(change) = self.shared.note_compatibility(incompatible) {
+            self.app.emit_event(EVENT_DAEMON_COMPATIBILITY, change);
+        }
     }
 
     fn execute(&mut self, step: Step<IpcError>) -> Option<Stage> {

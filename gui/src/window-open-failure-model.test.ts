@@ -10,12 +10,8 @@
  */
 import { describe, it, expect } from 'vitest';
 
-import { WindowOpenFailureError, type WindowOpenFailure } from './ipc/session-boundary';
-import {
-  describeWindowOpenFailure,
-  shouldDropRememberedCwd,
-  windowOpenFailureOf,
-} from './window-open-failure-model';
+import type { CommandFailure } from './ipc/session-boundary';
+import { describeWindowOpenFailure, shouldDropRememberedCwd } from './window-open-failure-model';
 import { banners } from './ui-messages';
 
 /** Operation-specific wording the caller supplies; never read from `i18n/`. */
@@ -24,18 +20,29 @@ const SUMMARY = 'Launch refused';
 /** The argument name the daemon uses for a refused working directory. */
 const CWD_ARGUMENT = 'cwd';
 
+/** The sentence the core's Display gives a daemon rejection. */
+function rejectedText(code: string, message: string): string {
+  return `the daemon rejected the request: ${code}${message === '' ? '' : `: ${message}`}`;
+}
+
 function rejection(
   rejectedArgument: string | null,
   message = 'the daemon refused'
-): WindowOpenFailure {
-  return { kind: 'rejected', code: 'invalid_argument', message, rejectedArgument };
+): CommandFailure {
+  return {
+    kind: 'rejected',
+    code: 'invalid_argument',
+    message,
+    rejectedArgument,
+    text: rejectedText('invalid_argument', message),
+  };
 }
 
 describe('describeWindowOpenFailure: the reason goes through the display formatting', () => {
   it('folds line breaks, tabs, control characters and non-breaking spaces into single spaces', () => {
-    const failure: WindowOpenFailure = {
+    const failure: CommandFailure = {
       kind: 'local',
-      message: 'first\nsecond\tthird\u00a0fourth\u0007fifth',
+      text: 'first\nsecond\tthird\u00a0fourth\u0007fifth',
     };
 
     expect(describeWindowOpenFailure(SUMMARY, failure)).toBe(
@@ -44,13 +51,13 @@ describe('describeWindowOpenFailure: the reason goes through the display formatt
   });
 
   it('folds a run of several control characters into one space, not one space each', () => {
-    const failure: WindowOpenFailure = { kind: 'bare', message: 'left\r\n\r\n\tright' };
+    const failure: CommandFailure = { kind: 'bare', text: 'left\r\n\r\n\tright' };
 
     expect(describeWindowOpenFailure(SUMMARY, failure)).toBe(`${SUMMARY}: left right`);
   });
 
   it('drops control characters at the ends rather than keeping them as spaces', () => {
-    const failure: WindowOpenFailure = { kind: 'bare', message: '\n  boom  \n' };
+    const failure: CommandFailure = { kind: 'bare', text: '\n  boom  \n' };
 
     expect(describeWindowOpenFailure(SUMMARY, failure)).toBe(`${SUMMARY}: boom`);
   });
@@ -59,7 +66,7 @@ describe('describeWindowOpenFailure: the reason goes through the display formatt
     const tokens = Array.from({ length: 400 }, (_, index) => `t${index}`);
     const raw = tokens.join('-');
 
-    const line = describeWindowOpenFailure(SUMMARY, { kind: 'bare', message: raw });
+    const line = describeWindowOpenFailure(SUMMARY, { kind: 'bare', text: raw });
 
     expect(line.startsWith(`${SUMMARY}: t0-t1-`)).toBe(true);
     expect(line).not.toContain('t399');
@@ -67,10 +74,10 @@ describe('describeWindowOpenFailure: the reason goes through the display formatt
   });
 
   it('carries a short reason through whole, for each of the three failure shapes', () => {
-    const shapes: WindowOpenFailure[] = [
+    const shapes: CommandFailure[] = [
       rejection(CWD_ARGUMENT, 'no such directory'),
-      { kind: 'local', message: 'no such directory' },
-      { kind: 'bare', message: 'no such directory' },
+      { kind: 'local', text: 'no such directory' },
+      { kind: 'bare', text: 'no such directory' },
     ];
 
     for (const failure of shapes) {
@@ -81,11 +88,11 @@ describe('describeWindowOpenFailure: the reason goes through the display formatt
 
 describe('describeWindowOpenFailure: an empty reason leaves the summary alone for a failure that carries no code', () => {
   it('returns the summary alone when the reason is empty', () => {
-    expect(describeWindowOpenFailure(SUMMARY, { kind: 'bare', message: '' })).toBe(SUMMARY);
+    expect(describeWindowOpenFailure(SUMMARY, { kind: 'bare', text: '' })).toBe(SUMMARY);
   });
 
   it('returns the summary alone when the reason holds nothing but whitespace and control characters', () => {
-    expect(describeWindowOpenFailure(SUMMARY, { kind: 'local', message: '\t\n\u00a0 ' })).toBe(
+    expect(describeWindowOpenFailure(SUMMARY, { kind: 'local', text: '\t\n\u00a0 ' })).toBe(
       SUMMARY
     );
   });
@@ -105,12 +112,14 @@ describe('describeWindowOpenFailure: a rejection whose reason is empty still nam
       code: 'invalid_argument',
       message: '',
       rejectedArgument: CWD_ARGUMENT,
+      text: rejectedText('invalid_argument', ''),
     });
     const second = describeWindowOpenFailure(SUMMARY, {
       kind: 'rejected',
       code: 'window_not_found',
       message: '',
       rejectedArgument: null,
+      text: rejectedText('window_not_found', ''),
     });
 
     expect(first).toContain('invalid_argument');
@@ -130,17 +139,21 @@ describe('describeWindowOpenFailure: a rejection that names no argument still re
 
 /**
  * The request was refused because the running daemon does not speak this
- * build's wire revision. The arm carries no `message` -- only the wire tag of
- * the refused request, which must never reach the user -- and the line is the
- * one sentence every operation shows while the daemon cannot be used, so no
- * operation summary goes in front of it.
+ * build's wire revision. Neither the arm's sentence nor the wire tag of the
+ * refused request reaches the user: the line is the one sentence every
+ * operation shows while the daemon cannot be used, so no operation summary
+ * goes in front of it.
  */
 describe('describeWindowOpenFailure: the daemon cannot be used with this build', () => {
   /** A value distinctive enough that only real leakage would produce it. */
   const REQUEST_TYPE = 'probe-wire-tag-open_window_from_profile';
 
-  function unsupported(): WindowOpenFailure {
-    return { kind: 'unsupported', requestType: REQUEST_TYPE };
+  function unsupported(): CommandFailure {
+    return {
+      kind: 'unsupported',
+      requestType: REQUEST_TYPE,
+      text: `not sent, as the connected daemon speaks another wire revision: ${REQUEST_TYPE}`,
+    };
   }
 
   it('is the incompatible-daemon sentence itself, with no summary in front and no wire tag', () => {
@@ -167,22 +180,29 @@ describe('describeWindowOpenFailure: a taken name says how to get past it', () =
   const TAKEN = 'a window named “Claude Code” is already open';
 
   it('follows a name_taken refusal with the hint, as its own sentence', () => {
-    const failure: WindowOpenFailure = {
+    const failure: CommandFailure = {
       kind: 'rejected',
       code: 'name_taken',
       message: TAKEN,
       rejectedArgument: 'name',
+      text: rejectedText('name_taken', TAKEN),
     };
 
     expect(describeWindowOpenFailure(SUMMARY, failure)).toBe(`${SUMMARY}: ${TAKEN}. ${HINT}`);
   });
 
   it('leaves the hint off any other refusal, a refused directory included', () => {
-    const others: WindowOpenFailure[] = [
+    const others: CommandFailure[] = [
       rejection(CWD_ARGUMENT, 'no such directory'),
-      { kind: 'rejected', code: 'profile_disabled', message: TAKEN, rejectedArgument: 'profile' },
-      { kind: 'local', message: TAKEN },
-      { kind: 'bare', message: TAKEN },
+      {
+        kind: 'rejected',
+        code: 'profile_disabled',
+        message: TAKEN,
+        rejectedArgument: 'profile',
+        text: rejectedText('profile_disabled', TAKEN),
+      },
+      { kind: 'local', text: TAKEN },
+      { kind: 'bare', text: TAKEN },
     ];
 
     for (const failure of others) {
@@ -218,46 +238,20 @@ describe('shouldDropRememberedCwd: the directory is dropped only when the reject
   });
 
   it('keeps it for a refusal the core raised on its own, whatever its text says', () => {
-    expect(shouldDropRememberedCwd({ kind: 'local', message: 'cwd is not a directory' })).toBe(
-      false
-    );
+    expect(shouldDropRememberedCwd({ kind: 'local', text: 'cwd is not a directory' })).toBe(false);
   });
 
   it('keeps it for a gate refusal, which never names an argument', () => {
     expect(
-      shouldDropRememberedCwd({ kind: 'unsupported', requestType: 'open_window_from_profile' })
+      shouldDropRememberedCwd({
+        kind: 'unsupported',
+        requestType: 'open_window_from_profile',
+        text: 'not sent, as the connected daemon speaks another wire revision: open_window_from_profile',
+      })
     ).toBe(false);
   });
 
   it('keeps it for a failure that carries text alone, whatever its text says', () => {
-    expect(shouldDropRememberedCwd({ kind: 'bare', message: 'cwd is not a directory' })).toBe(
-      false
-    );
-  });
-});
-
-describe('windowOpenFailureOf: the failure behind a caught value', () => {
-  it('unwraps the failure a WindowOpenFailureError carries', () => {
-    const failure = rejection(CWD_ARGUMENT);
-
-    expect(windowOpenFailureOf(new WindowOpenFailureError(failure))).toEqual(failure);
-  });
-
-  it('reads a plain Error as text alone', () => {
-    expect(windowOpenFailureOf(new Error('the bridge broke'))).toEqual({
-      kind: 'bare',
-      message: 'the bridge broke',
-    });
-  });
-
-  it('reads a thrown string as text alone', () => {
-    expect(windowOpenFailureOf('unknown command')).toEqual({
-      kind: 'bare',
-      message: 'unknown command',
-    });
-  });
-
-  it('reads a thrown value that is neither an Error nor a string as text alone', () => {
-    expect(windowOpenFailureOf(42)).toEqual({ kind: 'bare', message: '42' });
+    expect(shouldDropRememberedCwd({ kind: 'bare', text: 'cwd is not a directory' })).toBe(false);
   });
 });

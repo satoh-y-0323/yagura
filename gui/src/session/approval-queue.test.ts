@@ -27,11 +27,14 @@ import {
   markInFlight,
   failDecision,
   settleDecision,
-  decisionFailed,
+  decisionFailure,
   windowsAwaitingPermission,
   type ApprovalQueueState,
 } from './approval-queue';
 import type { ApprovalRequest } from '../ipc/session-boundary';
+
+/** The line a failed decision is shown with; passed through untouched. */
+const LINE = 'Could not send the decision.';
 
 function makeRequest(requestId: string, overrides: Partial<ApprovalRequest> = {}): ApprovalRequest {
   return {
@@ -49,7 +52,7 @@ describe('emptyQueue', () => {
     const state = emptyQueue();
     expect(size(state)).toBe(0);
     expect(head(state)).toBeNull();
-    expect(state.failedIds.size).toBe(0);
+    expect(state.decisionFailures.size).toBe(0);
   });
 });
 
@@ -337,7 +340,7 @@ describe('markInFlight / failDecision: head() and size()', () => {
     let state = emptyQueue();
     state = enqueue(state, makeRequest('req-a'));
     state = markInFlight(state, 'req-a');
-    state = failDecision(state, 'req-a');
+    state = failDecision(state, 'req-a', LINE);
 
     expect(head(state)?.request_id).toBe('req-a');
   });
@@ -349,7 +352,7 @@ describe('markInFlight / failDecision: head() and size()', () => {
     state = markInFlight(state, 'req-a');
 
     expect(head(state)?.request_id).toBe('req-b');
-    state = failDecision(state, 'req-b');
+    state = failDecision(state, 'req-b', LINE);
     expect(head(state)?.request_id).toBe('req-b');
   });
 });
@@ -381,7 +384,7 @@ describe('settleDecision: the answer to a decision that was sent', () => {
 
     expect(state.items.map((entry) => entry.request_id)).toEqual(['req-b']);
     expect(state.inFlightIds.has('req-a')).toBe(false);
-    expect(decisionFailed(state, 'req-a')).toBe(false);
+    expect(decisionFailure(state, 'req-a')).toBeNull();
     expect([...windowsAwaitingPermission(state)]).toEqual(['w-2']);
   });
 
@@ -390,7 +393,7 @@ describe('settleDecision: the answer to a decision that was sent', () => {
 
     expect(size(state)).toBe(2);
     expect(head(state)?.request_id).toBe('req-b');
-    expect(decisionFailed(state, 'req-a')).toBe(false);
+    expect(decisionFailure(state, 'req-a')).toBeNull();
     expect([...windowsAwaitingPermission(state)].sort()).toEqual(['w-1', 'w-2']);
 
     const alone = markInFlight(enqueue(emptyQueue(), makeRequest('req-a')), 'req-a');
@@ -520,8 +523,8 @@ describe('in-flight marks: edges', () => {
     let state = enqueue(enqueue(emptyQueue(), makeRequest('req-a')), makeRequest('req-b'));
     state = markInFlight(markInFlight(state, 'req-a'), 'req-b');
 
-    state = failDecision(state, 'req-a');
-    state = failDecision(state, 'req-unknown');
+    state = failDecision(state, 'req-a', LINE);
+    state = failDecision(state, 'req-unknown', LINE);
 
     expect(head(state)?.request_id).toBe('req-a');
     state = markInFlight(state, 'req-a');
@@ -555,7 +558,7 @@ describe('in-flight marks: edges', () => {
 // decision did not get through.
 // ---------------------------------------------------------------------------
 
-describe('failDecision / decisionFailed: which request carries the failure note', () => {
+describe('failDecision / decisionFailure: which request carries the failure note', () => {
   /** A and B pending, A's decision in flight, so the dialog shows B. */
   function sendingA(): ApprovalQueueState {
     let state = enqueue(enqueue(emptyQueue(), makeRequest('req-a')), makeRequest('req-b'));
@@ -565,99 +568,99 @@ describe('failDecision / decisionFailed: which request carries the failure note'
   }
 
   it('puts no note on the request that was shown while the failed one was in flight', () => {
-    const state = failDecision(sendingA(), 'req-a');
+    const state = failDecision(sendingA(), 'req-a', LINE);
 
-    expect(decisionFailed(state, 'req-b')).toBe(false);
+    expect(decisionFailure(state, 'req-b')).toBeNull();
   });
 
   it('puts no note on the head while the failed request is being sent again', () => {
-    let state = failDecision(sendingA(), 'req-a');
+    let state = failDecision(sendingA(), 'req-a', LINE);
     state = markInFlight(state, 'req-a');
 
     const shown = head(state);
     expect(shown?.request_id).toBe('req-b');
-    expect(decisionFailed(state, shown?.request_id ?? '')).toBe(false);
+    expect(decisionFailure(state, shown?.request_id ?? '')).toBeNull();
   });
 
   it('puts the note on the failed request once it is the head again', () => {
-    let state = failDecision(sendingA(), 'req-a');
+    let state = failDecision(sendingA(), 'req-a', LINE);
     state = resolve(state, 'req-b');
 
     const shown = head(state);
     expect(shown?.request_id).toBe('req-a');
-    expect(decisionFailed(state, shown?.request_id ?? '')).toBe(true);
+    expect(decisionFailure(state, shown?.request_id ?? '')).toBe(LINE);
   });
 
   it('remembers two failures, and shows each note when that request is the head', () => {
     let state = enqueue(enqueue(emptyQueue(), makeRequest('req-a')), makeRequest('req-b'));
     state = markInFlight(markInFlight(state, 'req-a'), 'req-b');
-    state = failDecision(failDecision(state, 'req-a'), 'req-b');
+    state = failDecision(failDecision(state, 'req-a', LINE), 'req-b', LINE);
 
     expect(head(state)?.request_id).toBe('req-a');
-    expect(decisionFailed(state, 'req-a')).toBe(true);
+    expect(decisionFailure(state, 'req-a')).toBe(LINE);
     state = resolve(state, 'req-a');
     expect(head(state)?.request_id).toBe('req-b');
-    expect(decisionFailed(state, 'req-b')).toBe(true);
+    expect(decisionFailure(state, 'req-b')).toBe(LINE);
   });
 
   it('ignores a failure for a request whose decision is not in flight', () => {
     const state = enqueue(enqueue(emptyQueue(), makeRequest('req-a')), makeRequest('req-b'));
 
-    const after = failDecision(state, 'req-b');
+    const after = failDecision(state, 'req-b', LINE);
 
-    expect(decisionFailed(after, 'req-b')).toBe(false);
+    expect(decisionFailure(after, 'req-b')).toBeNull();
     expect(head(after)?.request_id).toBe('req-a');
   });
 
   it('ignores a failure that lands after the request was withdrawn, so a later request with that id has no note', () => {
     let state = withdraw(sendingA(), 'req-a');
 
-    state = failDecision(state, 'req-a');
+    state = failDecision(state, 'req-a', LINE);
 
     expect(holds(state, 'req-a')).toBe(false);
     state = enqueue(state, makeRequest('req-a'));
-    expect(decisionFailed(state, 'req-a')).toBe(false);
+    expect(decisionFailure(state, 'req-a')).toBeNull();
   });
 
   it('drops the note when the failed request is decided, and keeps the note of another', () => {
     let state = enqueue(enqueue(emptyQueue(), makeRequest('req-a')), makeRequest('req-b'));
     state = markInFlight(markInFlight(state, 'req-a'), 'req-b');
-    state = failDecision(failDecision(state, 'req-a'), 'req-b');
+    state = failDecision(failDecision(state, 'req-a', LINE), 'req-b', LINE);
 
     state = resolve(state, 'req-a');
     state = enqueue(state, makeRequest('req-a'));
 
-    expect(decisionFailed(state, 'req-a')).toBe(false);
-    expect(decisionFailed(state, 'req-b')).toBe(true);
+    expect(decisionFailure(state, 'req-a')).toBeNull();
+    expect(decisionFailure(state, 'req-b')).toBe(LINE);
   });
 
   it('drops the note when the failed request is withdrawn, and keeps the note of another', () => {
     let state = enqueue(enqueue(emptyQueue(), makeRequest('req-a')), makeRequest('req-b'));
     state = markInFlight(markInFlight(state, 'req-a'), 'req-b');
-    state = failDecision(failDecision(state, 'req-a'), 'req-b');
+    state = failDecision(failDecision(state, 'req-a', LINE), 'req-b', LINE);
 
     state = withdraw(state, 'req-a');
     state = enqueue(state, makeRequest('req-a'));
 
-    expect(decisionFailed(state, 'req-a')).toBe(false);
-    expect(decisionFailed(state, 'req-b')).toBe(true);
+    expect(decisionFailure(state, 'req-a')).toBeNull();
+    expect(decisionFailure(state, 'req-b')).toBe(LINE);
   });
 
   it('drops every note on reset, even for an id the replacement list still holds', () => {
-    let state = failDecision(sendingA(), 'req-a');
+    let state = failDecision(sendingA(), 'req-a', LINE);
 
     state = reset(state, [makeRequest('req-a'), makeRequest('req-b')]);
 
-    expect(decisionFailed(state, 'req-a')).toBe(false);
-    expect(state.failedIds.size).toBe(0);
+    expect(decisionFailure(state, 'req-a')).toBeNull();
+    expect(state.decisionFailures.size).toBe(0);
   });
 
   it('keeps the note across a merge, which removes no request', () => {
-    let state = failDecision(sendingA(), 'req-a');
+    let state = failDecision(sendingA(), 'req-a', LINE);
 
     state = merge(state, [makeRequest('req-b'), makeRequest('req-c')]);
 
-    expect(decisionFailed(state, 'req-a')).toBe(true);
+    expect(decisionFailure(state, 'req-a')).toBe(LINE);
   });
 });
 

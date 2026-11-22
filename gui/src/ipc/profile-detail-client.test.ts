@@ -34,11 +34,6 @@ describe('invokeGetProfileDetail', () => {
     invokeMock.mockResolvedValue({ profile: 'p' });
     await expect(invokeGetProfileDetail('p')).rejects.toBeInstanceOf(BoundaryError);
   });
-
-  it('passes a refusal from the core through', async () => {
-    invokeMock.mockRejectedValue('unsupported');
-    await expect(invokeGetProfileDetail('p')).rejects.toBe('unsupported');
-  });
 });
 
 describe('invokeSetProfileCommand', () => {

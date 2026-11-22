@@ -4,14 +4,15 @@
  * only calls the injected {@link LayoutTarget}, and {@link restoreSelected},
  * which only awaits the injected `open`.
  */
+import { commandFailureOf } from '../command-failure-model';
 import type {
+  CommandFailure,
   OnNameTaken,
   RestoreEntry,
   WindowInfo,
-  WindowOpenFailure,
 } from '../ipc/session-boundary';
 import { banners, EXTERNAL_TEXT_MAX_CODE_POINTS } from '../ui-messages';
-import { describeWindowOpenFailure, windowOpenFailureOf } from '../window-open-failure-model';
+import { describeWindowOpenFailure } from '../window-open-failure-model';
 
 /** Byte cap of a `layout_json` payload (mirrors `yagura_protocol::MAX_LAYOUT_JSON_BYTES`). */
 export const MAX_LAYOUT_JSON_BYTES = 16_384;
@@ -374,7 +375,7 @@ function argvLaunchOf(candidate: RestoreEntry): RestoreLaunch {
 /** One restore candidate that could not be opened, and why. */
 export interface RestoreFailure {
   name: string;
-  failure: WindowOpenFailure;
+  failure: CommandFailure;
 }
 
 /** What {@link restoreSelected} opened and what it could not. */
@@ -406,7 +407,7 @@ export async function restoreSelected(
     } catch (error) {
       // The display derivative: the name comes from the store, which the
       // restore UI treats as untrusted.
-      outcome.failed.push({ name: candidate.displayName, failure: windowOpenFailureOf(error) });
+      outcome.failed.push({ name: candidate.displayName, failure: commandFailureOf(error) });
     }
   }
   return outcome;

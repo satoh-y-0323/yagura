@@ -2,6 +2,11 @@
   import { onDestroy, tick } from 'svelte';
   import { get, writable } from 'svelte/store';
 
+  import {
+    commandFailureLine,
+    commandFailureOf,
+    commandFailureText,
+  } from '../command-failure-model';
   import { describeBoundaryNotice, type BoundaryOperation } from '../notices/boundary-notice';
   import type { OpenWindowSubmission, ProfileOption } from '../components/add-window-dialog-types';
   import AddWindowDialog from '../components/AddWindowDialog.svelte';
@@ -68,6 +73,7 @@
   } from '../notices/notice-feed';
   import {
     applyClientConfigFailure,
+    applyCompatibilityUpdate,
     applyRecoveryUpdate,
     buildNotices,
     dismissNotice,
@@ -110,6 +116,7 @@
     invokeCloseWindow,
     invokeDecideApproval,
     invokeGetRecoveryStatus,
+    invokeGetDaemonCompatibility,
     invokeGetDaemonConnection,
     invokeGetDaemonHealth,
     invokeSyncApprovals,
@@ -377,7 +384,7 @@
     plans as plansText,
     settings,
   } from '../ui-messages';
-  import { shouldDropRememberedCwd, windowOpenFailureOf } from '../window-open-failure-model';
+  import { shouldDropRememberedCwd } from '../window-open-failure-model';
   import Navigator from './Navigator.svelte';
   import WorkArea from './WorkArea.svelte';
 
@@ -463,6 +470,7 @@
     daemonRecoveryRev: 0,
     clientConfigFailure: null,
     isDaemonIncompatible: false,
+    daemonCompatibilityRev: 0,
     startupEnvFailure: null,
     profilesNeedingNativeProgram: [],
     isProfileUnavailableDismissed: false,
@@ -471,10 +479,6 @@
     isReopenOfferDismissed: false,
     hasOpenWindows: false,
   };
-
-  // Whether the last announced daemon start speaks this build's wire revision,
-  // `null` until one is announced: the start's facts are read only once `true`.
-  let lastAnnouncedCompatible: boolean | null = null;
 
   // Things that happened, kept until the user dismisses them; `noticeMemory` numbers them.
   let eventLog: EventLog = [];
@@ -1196,10 +1200,7 @@
         : invokeDeleteChatRoom(room.room_id));
     } catch (error) {
       console.error(chat.panelTitle, error);
-      recordFailure(
-        'operation-failure',
-        failureLine(() => describeRoomRemovalFailure(error))
-      );
+      recordFailure('operation-failure', describeRoomRemovalFailure(error));
       void refreshChatRooms();
     }
   }
@@ -1355,7 +1356,7 @@
       }
     } catch (error) {
       if (integrationsListRequestId === requestId) {
-        integrationsFailure = failureLine(() =>
+        integrationsFailure = commandFailureLine(error, () =>
           describeOperationFailure(settings.integrationsListFailure, error)
         );
       }
@@ -1392,7 +1393,7 @@
         integrationRunning = null;
         const name =
           integrationsListed?.rows.find((row) => row.profile === profile)?.displayName ?? profile;
-        integrationsFailure = failureLine(() =>
+        integrationsFailure = commandFailureLine(error, () =>
           describeOperationFailure(settings.integrationRunFailure(name), error)
         );
       }
@@ -1422,12 +1423,10 @@
     try {
       approvalSettings = await invokeSetAutoApprove(tool, autoApprove);
     } catch (error) {
-      const reason = foldExternalText(
-        typeof error === 'string' ? error : error instanceof Error ? error.message : String(error)
-      );
+      const reason = foldExternalText(commandFailureText(error));
       // The request asked for `autoApprove`; a refusal leaves the tool at
       // the opposite of that.
-      approvalSwitchFailure = failureLine(() =>
+      approvalSwitchFailure = commandFailureLine(error, () =>
         approvalUpdateFailure(tool, reason, !autoApprove, 'tool')
       );
     } finally {
@@ -1446,12 +1445,10 @@
     try {
       approvalSettings = await invokeSetPlanApprovalRequired(required);
     } catch (error) {
-      const reason = foldExternalText(
-        typeof error === 'string' ? error : error instanceof Error ? error.message : String(error)
-      );
+      const reason = foldExternalText(commandFailureText(error));
       // The request asked for `required`; a refusal leaves the gate at the
       // opposite of that.
-      approvalSwitchFailure = failureLine(() =>
+      approvalSwitchFailure = commandFailureLine(error, () =>
         approvalUpdateFailure(PLAN_REVIEW_GATE_ID, reason, !required, 'plan')
       );
     } finally {
@@ -1471,12 +1468,12 @@
       await invokeSetProfileEnabled(id, enabled);
       await loadProfiles();
     } catch (error) {
-      const reason = foldExternalText(
-        typeof error === 'string' ? error : error instanceof Error ? error.message : String(error)
-      );
+      const reason = foldExternalText(commandFailureText(error));
       // The request asked for `enabled`; a refusal leaves the profile at the
       // opposite of that.
-      profileUpdateFailure = failureLine(() => settings.profileUpdateFailed(id, reason, !enabled));
+      profileUpdateFailure = commandFailureLine(error, () =>
+        settings.profileUpdateFailed(id, reason, !enabled)
+      );
     } finally {
       savingProfileId = null;
     }
@@ -1619,8 +1616,8 @@
           kind: 'failed',
           failure: {
             kind: 'line',
-            line: failureLine(() =>
-              choicesFailureLine({ kind: 'reported', reason: String(error) })
+            line: commandFailureLine(error, () =>
+              choicesFailureLine({ kind: 'reported', reason: commandFailureText(error) })
             ),
           },
         });
@@ -1676,12 +1673,6 @@
     await loadProfiles();
   }
 
-  function errorReason(error: unknown): string {
-    return foldExternalText(
-      typeof error === 'string' ? error : error instanceof Error ? error.message : String(error)
-    );
-  }
-
   /** Reads the open profile's details, dropping an answer for one since closed. */
   async function loadProfileDetail(id: string): Promise<void> {
     try {
@@ -1692,7 +1683,9 @@
       }
     } catch (error) {
       if (openProfileDetailId === id) {
-        profileDetailFailure = failureLine(() => settings.profileDetailFailed(errorReason(error)));
+        profileDetailFailure = commandFailureLine(error, () =>
+          settings.profileDetailFailed(foldExternalText(commandFailureText(error)))
+        );
       }
     }
   }
@@ -1720,7 +1713,9 @@
     } catch (error) {
       profileCommandFailure = {
         id,
-        line: failureLine(() => settings.profileCommandFailed(errorReason(error))),
+        line: commandFailureLine(error, () =>
+          settings.profileCommandFailed(foldExternalText(commandFailureText(error)))
+        ),
       };
     } finally {
       savingCommandProfileId = null;
@@ -1997,21 +1992,21 @@
     }
   }
 
-  /** Resolves false when the daemon refused the window; the panel says so itself. */
-  async function setPlanOwner(windowId: string): Promise<boolean> {
+  /** Resolves the line to show when the assignment failed, `null` when it was accepted. */
+  async function setPlanOwner(windowId: string): Promise<string | null> {
     const planId = selectedPlanId;
     if (planId === null) {
-      return false;
+      return plansText.assignOwnerFailed;
     }
     try {
       const next = await invokeSetPlanOwner(planId, windowId);
       if (selectedPlanId === planId) {
         plan = next;
       }
-      return true;
+      return null;
     } catch (error) {
       console.error('failed to assign the plan owner:', error);
-      return false;
+      return commandFailureLine(error, () => plansText.assignOwnerFailed);
     }
   }
 
@@ -2086,11 +2081,9 @@
       })
       .catch((error: unknown) => {
         console.error('failed to decide approval:', error);
-        approvals = approvalQueue.failDecision(approvals, requestId);
-        recordFailure(
-          'operation-failure',
-          failureLine(() => banners.approvalDecisionFailed)
-        );
+        const line = commandFailureLine(error, () => banners.approvalDecisionFailed);
+        approvals = approvalQueue.failDecision(approvals, requestId, line);
+        recordFailure('operation-failure', line);
       });
   }
 
@@ -2782,8 +2775,7 @@
         },
         onDaemonConnected: (payload) => {
           isDaemonConnectionHeard = true;
-          takeDaemonConnection(payload);
-          void rereadDaemonFacts();
+          void takeDaemonConnection(payload);
         },
         onBoundaryError: (error) => {
           reportBoundaryNotice('sessionEvent', error);
@@ -2806,6 +2798,9 @@
         },
         onDaemonRecovery: (payload) => {
           applyRecovery(payload);
+        },
+        onDaemonCompatibility: (payload) => {
+          noticeState = applyCompatibilityUpdate(noticeState, payload);
         },
       });
     } catch (error) {
@@ -2839,6 +2834,13 @@
       };
     } catch (error) {
       console.error('failed to pull the daemon recovery status:', error);
+    }
+    // Pulled for the same reason: a change published before the subscription
+    // opened would leave the incompatible notice wrong until the next one.
+    try {
+      noticeState = applyCompatibilityUpdate(noticeState, await invokeGetDaemonCompatibility());
+    } catch (error) {
+      console.error('failed to pull the daemon compatibility:', error);
     }
 
     await refreshWindowList();
@@ -2930,16 +2932,23 @@
     // Last, after every subscription: the start may have been announced before
     // the session subscription opened. With none announced yet, or one already
     // heard, nothing is read here: the core announces the first start it
-    // settles on, and that announcement reads the facts.
+    // settles on, and that announcement reads the facts. A failed pull is not
+    // "none announced": a start already told is never told again, so its
+    // facts are read as for a start whose compatibility is unknown.
     let announced: DaemonConnectedPayload | null = null;
+    let isAnnouncementUnknown = false;
     try {
       announced = await invokeGetDaemonConnection();
     } catch (error) {
       console.error('failed to pull the daemon connection:', error);
+      isAnnouncementUnknown = true;
     }
-    if (announced !== null && !isDaemonConnectionHeard) {
-      takeDaemonConnection(announced);
-      await rereadDaemonFacts();
+    if (!isDaemonConnectionHeard) {
+      if (isAnnouncementUnknown) {
+        await rereadDaemonStart();
+      } else if (announced !== null) {
+        await takeDaemonConnection(announced);
+      }
     }
 
     // Unconditional: the core learns this shell's totals even when nothing
@@ -3019,7 +3028,7 @@
       detectionNames = result.names;
     } catch (error) {
       logBoundaryFailure('detectionsList', error);
-      detectionListWarning = failureLine(() =>
+      detectionListWarning = commandFailureLine(error, () =>
         describeBoundaryNotice({ operation: 'detectionsList', detail: error })
       );
     }
@@ -3058,7 +3067,7 @@
         .sort((left, right) => left.displayName.localeCompare(right.displayName));
     } catch (error) {
       logBoundaryFailure('profilesList', error);
-      profileListWarning = failureLine(() =>
+      profileListWarning = commandFailureLine(error, () =>
         describeBoundaryNotice({ operation: 'profilesList', detail: error })
       );
     }
@@ -3134,7 +3143,7 @@
     console.error(summary, error);
     recordFailure(
       'operation-failure',
-      failureLine(() => describeOperationFailure(summary, error))
+      commandFailureLine(error, () => describeOperationFailure(summary, error))
     );
   }
 
@@ -3169,7 +3178,10 @@
       restoreTakenAtEpochS = result.takenAtEpochS;
     } catch (error) {
       console.error('failed to list restore candidates:', error);
-      recordFailure('restore-load-failed', banners.restoreLoadFailed);
+      recordFailure(
+        'restore-load-failed',
+        commandFailureLine(error, () => banners.restoreLoadFailed)
+      );
       return;
     }
     // A position counts among the rows of this read, so a choice made against
@@ -3203,37 +3215,18 @@
 
   /**
    * Takes in one announced daemon start: its spawn warning replaces the last
-   * start's, and whether this build can use the daemon raises or lowers the
-   * incompatible notice.
+   * start's, and the facts of a start this build can use are read again (an
+   * incompatible one refuses every read). Whether the start is usable is used
+   * here and not kept: whether the connection is usable now is told by the
+   * compatibility changes alone, which also say when it stops being so.
    */
-  function takeDaemonConnection(connection: DaemonConnectedPayload): void {
+  function takeDaemonConnection(connection: DaemonConnectedPayload): Promise<void> {
     const warning = connection.spawn_warning;
-    lastAnnouncedCompatible = connection.compatible;
     noticeState = {
       ...noticeState,
       daemonSpawnNotice: warning === null ? null : foldExternalText(warning),
-      isDaemonIncompatible: !connection.compatible,
     };
-  }
-
-  /**
-   * Reads the facts of the announced start again, only for a daemon known to
-   * be usable: an incompatible one refuses every read, and until a start is
-   * announced there is nothing to read them from.
-   */
-  function rereadDaemonFacts(): Promise<void> {
-    return lastAnnouncedCompatible === true ? rereadDaemonStart() : Promise.resolve();
-  }
-
-  /**
-   * The line a failed daemon request leaves behind. A daemon of another wire
-   * revision refuses every request for that one reason, so while it is the
-   * one connected every operation shows the same sentence instead of its own.
-   *
-   * @param describe the operation's own line, used only for a usable daemon
-   */
-  function failureLine(describe: () => string): string {
-    return noticeState.isDaemonIncompatible ? banners.daemonIncompatible : describe();
+    return connection.compatible ? rereadDaemonStart() : Promise.resolve();
   }
 
   /**
@@ -3570,7 +3563,7 @@
     } catch (failed) {
       // A refusal can make the remembered directory not worth offering again.
       // The refusal itself still reaches the dialog, which stays open on it.
-      if (shouldDropRememberedCwd(windowOpenFailureOf(failed))) {
+      if (shouldDropRememberedCwd(commandFailureOf(failed))) {
         profileMemory.dropCwd();
       }
       throw failed;
@@ -4224,7 +4217,7 @@
     isRequesterOpen={isApprovalRequesterOpen}
     pendingCount={approvalQueue.size(approvals)}
     openedAt={approvalOpenedAt}
-    decisionFailed={approvalQueue.decisionFailed(approvals, approvalRequest.request_id)}
+    decisionFailure={approvalQueue.decisionFailure(approvals, approvalRequest.request_id)}
     onDecide={decideApproval}
   />
 {/if}
@@ -4244,7 +4237,6 @@
   onCancel={() => {
     // Dialog will close automatically
   }}
-  {failureLine}
 />
 
 <Tooltip />

@@ -7,44 +7,25 @@
  * the i18n resources.
  */
 
-import {
-  NAME_TAKEN_CODE,
-  WindowOpenFailureError,
-  type WindowOpenFailure,
-} from './ipc/session-boundary';
+import { lineForFailure } from './command-failure-model';
+import { NAME_TAKEN_CODE, type CommandFailure } from './ipc/session-boundary';
 // The same folding and capping every other operation failure goes through:
 // the reason is external text of the same kind, so it gets the same
-// treatment rather than a second copy of it. `banners` holds the one sentence
-// shown while the daemon cannot be used; all are read through the facade,
+// treatment rather than a second copy of it. All are read through the facade,
 // never i18n/ directly.
-import { banners, describeOperationFailure, errors } from './ui-messages';
+import { describeOperationFailure, errors } from './ui-messages';
 
 /** The argument name the core reports for a refused working directory. */
 const WORKING_DIRECTORY_ARGUMENT = 'cwd';
 
 /**
- * The failure behind a caught error.
- *
- * An error the open-window boundary did not raise -- a malformed reply, or
- * anything the work around the call threw -- still has text worth showing, so
- * it becomes the arm that carries text alone rather than being discarded.
- *
- * @param error the value a failed launch rejected with
- */
-export function windowOpenFailureOf(error: unknown): WindowOpenFailure {
-  if (error instanceof WindowOpenFailureError) {
-    return error.failure;
-  }
-  return { kind: 'bare', message: error instanceof Error ? error.message : String(error) };
-}
-
-/**
  * Builds the line shown when a window could not be opened.
  *
- * A rejection whose reason text carries nothing falls back to the code the
- * daemon answered with: the summary alone would name no cause, while the code
- * is the one handle left on the refusal. Whether the reason carries anything
- * is decided by the formatter rather than restated here.
+ * A rejection shows the daemon's own reason rather than the whole sentence,
+ * and one whose reason carries nothing falls back to the code the daemon
+ * answered with: the summary alone would name no cause, while the code is the
+ * one handle left on the refusal. Whether the reason carries anything is
+ * decided by the formatter rather than restated here.
  *
  * A taken name is followed by how to get past it: an empty name gets the
  * default name, which the daemon numbers instead of refusing.
@@ -52,17 +33,16 @@ export function windowOpenFailureOf(error: unknown): WindowOpenFailure {
  * @param summary the operation-specific wording, supplied by the caller
  * @param failure why the attempt failed
  */
-export function describeWindowOpenFailure(summary: string, failure: WindowOpenFailure): string {
-  if (failure.kind === 'unsupported') {
-    // Only a daemon of another wire revision refuses this way, and every
-    // operation then shows the same sentence, so no summary goes in front.
-    // The wire tag the arm carries (`requestType`) is never for display.
-    return banners.daemonIncompatible;
+export function describeWindowOpenFailure(summary: string, failure: CommandFailure): string {
+  return lineForFailure(failure, () => describeLaunchFailure(summary, failure));
+}
+
+/** The launch's own line for a failure the daemon's wire revision did not cause. */
+function describeLaunchFailure(summary: string, failure: CommandFailure): string {
+  if (failure.kind !== 'rejected') {
+    return describeOperationFailure(summary, failure.text);
   }
   const line = describeOperationFailure(summary, failure.message);
-  if (failure.kind !== 'rejected') {
-    return line;
-  }
   const reason = line !== summary ? line : describeOperationFailure(summary, failure.code);
   // The daemon's reason carries no closing period.
   return failure.code === NAME_TAKEN_CODE ? `${reason}. ${errors.nameTakenOpenHint}` : reason;
@@ -79,6 +59,6 @@ export function describeWindowOpenFailure(summary: string, failure: WindowOpenFa
  *
  * @param failure why the attempt failed
  */
-export function shouldDropRememberedCwd(failure: WindowOpenFailure): boolean {
+export function shouldDropRememberedCwd(failure: CommandFailure): boolean {
   return failure.kind === 'rejected' && failure.rejectedArgument === WORKING_DIRECTORY_ARGUMENT;
 }
