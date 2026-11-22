@@ -58,10 +58,9 @@ pub enum DecideApprovalOutcome {
     Decided,
     /// The request was no longer pending when the decision arrived.
     NotPending,
-    /// The decision's write failed, or the connection was lost before the
-    /// daemon answered: a failed write can have sent part of the decision, so
-    /// it may have been applied. The next registration's pending list says
-    /// which.
+    /// The daemon gave no answer, whether or not the decision was written: a
+    /// failed write can have sent part of it, so it may have been applied. The
+    /// next registration's pending list says which.
     Unconfirmed,
 }
 
@@ -80,11 +79,8 @@ pub(crate) fn map_decide_approval_result(
             Ok(DecideApprovalOutcome::NotPending)
         }
         StepReply::Answered(Err(error)) => Err(error),
-        // Written, whole or in part, so the daemon may have applied it.
-        StepReply::Unanswered(IpcError::Write | IpcError::ConnectionLost) => {
-            Ok(DecideApprovalOutcome::Unconfirmed)
-        }
-        StepReply::Unanswered(error) => Err(error),
+        // No answer, written or not: the daemon may have applied it.
+        StepReply::Unanswered(_) => Ok(DecideApprovalOutcome::Unconfirmed),
     }
 }
 
@@ -202,25 +198,22 @@ mod tests {
         ));
     }
 
-    // A failed write can have sent part of the decision and a lost connection
-    // can follow a whole one, so the daemon may have applied either; any other
-    // error is returned as one.
+    // Whether or not the frame went out, a decision the daemon never answered
+    // may have been applied; the next registration's pending list settles it.
     #[test]
     fn map_decide_approval_result_maps_a_decision_that_may_have_been_applied_to_unconfirmed() {
-        for written in [IpcError::Write, IpcError::ConnectionLost] {
-            let debug = format!("{written:?}");
+        for unanswered in [
+            IpcError::Write,
+            IpcError::ConnectionLost,
+            IpcError::NotConnected,
+        ] {
+            let debug = format!("{unanswered:?}");
+            let mapped = map_decide_approval_result(StepReply::Unanswered(unanswered));
             assert!(
-                matches!(
-                    map_decide_approval_result(StepReply::Unanswered(written)),
-                    Ok(DecideApprovalOutcome::Unconfirmed)
-                ),
-                "expected Unconfirmed for {debug}"
+                matches!(mapped, Ok(DecideApprovalOutcome::Unconfirmed)),
+                "expected Unconfirmed for {debug}, got {mapped:?}"
             );
         }
-        assert!(matches!(
-            map_decide_approval_result(StepReply::Unanswered(IpcError::NotConnected)),
-            Err(IpcError::NotConnected)
-        ));
     }
 
     #[test]

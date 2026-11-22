@@ -712,9 +712,9 @@ impl IpcClient {
     /// an approver may call this meaningfully; an unregistered connection
     /// gets `invalid_state` back from the daemon.
     ///
-    /// Returns what the daemon answered, or why it gave no answer: with no
-    /// open connection, a failed write or a connection lost before the
-    /// answer, the daemon may or may not have applied the decision.
+    /// Returns what the daemon answered, or why it gave no answer. With no
+    /// answer the daemon may or may not have applied the decision, so the
+    /// caller must not treat it as a failure.
     pub(crate) async fn decide_approval(
         &self,
         request_id: &str,
@@ -1839,7 +1839,8 @@ async fn request_attach(
 
 /// Settles one pending approval request on `generation`, the open one if
 /// there is one. With none, nothing is written and the answer is
-/// [`IpcError::NotConnected`] as no answer.
+/// [`IpcError::NotConnected`] as no answer, which the caller treats like any
+/// other unanswered decision.
 async fn request_decide_approval(
     generation: Option<&Generation>,
     request_id: &str,
@@ -3023,6 +3024,22 @@ mod tests {
         assert!(
             matches!(sent, Err(IpcError::NotConnected)),
             "a write on an ended generation: got {sent:?}"
+        );
+
+        // With no open generation a decision is written nowhere and gets no
+        // answer, which leaves it unconfirmed like one lost in flight.
+        let decided = client.decide_approval("r1", true).await;
+        assert!(
+            matches!(decided, StepReply::Unanswered(IpcError::NotConnected)),
+            "a decision with no open generation: got {decided:?}"
+        );
+        let outcome = crate::pool_outcomes::map_decide_approval_result(decided);
+        assert!(
+            matches!(
+                outcome,
+                Ok(crate::pool_outcomes::DecideApprovalOutcome::Unconfirmed)
+            ),
+            "a decision with no open generation maps to: got {outcome:?}"
         );
     }
 
