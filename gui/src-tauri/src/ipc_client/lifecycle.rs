@@ -161,7 +161,24 @@ pub(crate) enum Event {
     Retire,
 }
 
-/// One thing the owner does, in the order returned.
+/// One step the lifecycle returns, in order: work for the owner to carry
+/// out, or the answer to a want. `E` tells an answer's failure: the
+/// lifecycle's [`Failure`], and the owner's [`IpcError`] once the failed
+/// attempt's error is attached.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Step<E> {
+    Do(Action),
+    /// `opened` names the generation a caller reads as open once answered,
+    /// so the answer waits until that generation is published.
+    Answer {
+        id: WantId,
+        result: Result<(), E>,
+        opened: Option<u64>,
+    },
+}
+
+/// One thing the owner does. Answers are not actions, so carrying out an
+/// action cannot drop one.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Action {
     /// Start connect attempt `attempt` of the given form.
@@ -187,13 +204,6 @@ pub(crate) enum Action {
     /// Move the window's record to `to`. A move to `Connecting` applies only
     /// to a record that is still attached.
     MoveLink { window_id: String, to: LinkState },
-    /// Answer a want. `opened` names the generation a caller reads as open
-    /// once answered, so the answer waits until that generation is published.
-    Answer {
-        id: WantId,
-        result: Result<(), Failure>,
-        opened: Option<u64>,
-    },
     /// Acknowledge the retirement.
     AckRetire,
 }
@@ -263,7 +273,7 @@ impl Public {
 /// The result of one event.
 #[derive(Debug)]
 pub(crate) struct Transition {
-    pub(crate) actions: Vec<Action>,
+    pub(crate) actions: Vec<Step<Failure>>,
     pub(crate) public: Public,
 }
 
@@ -385,12 +395,12 @@ impl Lifecycle {
             } => self.on_ended(generation, kind, window_id, taken, &mut out),
             Event::Retire => {
                 if let Some(generation) = self.current_generation() {
-                    out.push(Action::End { generation });
+                    out.push(Step::Do(Action::End { generation }));
                 }
                 self.answer_where(Err(Failure::NotConnected), None, |_| true, &mut out);
                 self.chain = None;
                 self.phase = Phase::Retired;
-                out.push(Action::AckRetire);
+                out.push(Step::Do(Action::AckRetire));
             }
         }
         Transition {
@@ -453,21 +463,21 @@ impl Lifecycle {
         }
     }
 
-    fn on_want(&mut self, want: Want, out: &mut Vec<Action>) {
+    fn on_want(&mut self, want: Want, out: &mut Vec<Step<Failure>>) {
         match self.phase {
-            Phase::Retired => out.push(Action::Answer {
+            Phase::Retired => out.push(Step::Answer {
                 id: want.id,
                 result: Err(Failure::NotConnected),
                 opened: None,
             }),
             Phase::Open { generation, .. } | Phase::Restoring { generation, .. } => {
-                out.push(Action::Answer {
+                out.push(Step::Answer {
                     id: want.id,
                     result: Ok(()),
                     opened: Some(generation),
                 });
             }
-            Phase::Opening { .. } if want.until == Until::Reached => out.push(Action::Answer {
+            Phase::Opening { .. } if want.until == Until::Reached => out.push(Step::Answer {
                 id: want.id,
                 result: Ok(()),
                 opened: None,
@@ -481,28 +491,28 @@ impl Lifecycle {
         }
     }
 
-    fn on_connected(&mut self, attempt: u64, out: &mut Vec<Action>) {
+    fn on_connected(&mut self, attempt: u64, out: &mut Vec<Step<Failure>>) {
         let Phase::Connecting {
             attempt: current,
             mode,
         } = self.phase
         else {
-            out.push(Action::Discard { attempt });
+            out.push(Step::Do(Action::Discard { attempt }));
             return;
         };
         if current != attempt {
-            out.push(Action::Discard { attempt });
+            out.push(Step::Do(Action::Discard { attempt }));
             return;
         }
         let generation = self.next_generation;
         self.next_generation += 1;
         self.daemon_answers = true;
-        out.push(Action::Begin {
+        out.push(Step::Do(Action::Begin {
             attempt,
             generation,
-        });
+        }));
         self.answer_where(Ok(()), None, |want| want.until == Until::Reached, out);
-        out.push(Action::ProbeRevision { generation });
+        out.push(Step::Do(Action::ProbeRevision { generation }));
         self.phase = Phase::Opening {
             mode,
             generation,
@@ -510,7 +520,7 @@ impl Lifecycle {
         };
     }
 
-    fn on_probed(&mut self, generation: u64, revision: u32, out: &mut Vec<Action>) {
+    fn on_probed(&mut self, generation: u64, revision: u32, out: &mut Vec<Step<Failure>>) {
         let Phase::Opening {
             mode,
             generation: current,
@@ -529,7 +539,7 @@ impl Lifecycle {
                     generation,
                     revision: Some(revision),
                 };
-                out.push(Action::Register { generation });
+                out.push(Step::Do(Action::Register { generation }));
             }
             ClientKind::Window => {
                 self.finish_opening(mode, generation, revision, Registration::Unregistered, out);
@@ -541,7 +551,7 @@ impl Lifecycle {
         &mut self,
         generation: u64,
         registration: Registration,
-        out: &mut Vec<Action>,
+        out: &mut Vec<Step<Failure>>,
     ) {
         if let Phase::Opening {
             mode,
@@ -555,7 +565,7 @@ impl Lifecycle {
         }
     }
 
-    fn on_step_failed(&mut self, generation: u64, out: &mut Vec<Action>) {
+    fn on_step_failed(&mut self, generation: u64, out: &mut Vec<Step<Failure>>) {
         if let Some(mode) = self.unfinished_attempt(generation) {
             self.failed_to_open(mode, generation, out);
         }
@@ -581,7 +591,7 @@ impl Lifecycle {
 
     /// Applies an answer the generation took before it ended, as its step's
     /// own result is applied.
-    fn take(&mut self, generation: u64, taken: TakenAnswer, out: &mut Vec<Action>) {
+    fn take(&mut self, generation: u64, taken: TakenAnswer, out: &mut Vec<Step<Failure>>) {
         match taken {
             TakenAnswer::Revision(revision) => self.on_probed(generation, revision, out),
             TakenAnswer::Registration(registration) => {
@@ -598,19 +608,19 @@ impl Lifecycle {
         generation: u64,
         revision: u32,
         registration: Registration,
-        out: &mut Vec<Action>,
+        out: &mut Vec<Step<Failure>>,
     ) {
-        out.push(Action::AnnounceStart { generation });
-        out.push(Action::ResendPalettes { generation });
-        out.push(Action::Open { generation });
+        out.push(Step::Do(Action::AnnounceStart { generation }));
+        out.push(Step::Do(Action::ResendPalettes { generation }));
+        out.push(Step::Do(Action::Open { generation }));
         self.answer_where(Ok(()), Some(generation), |_| true, out);
         let restore = self.chain.as_ref().and_then(|chain| chain.restore.clone());
         match restore {
             Some(window_id) => {
-                out.push(Action::RestoreAttach {
+                out.push(Step::Do(Action::RestoreAttach {
                     generation,
                     window_id,
-                });
+                }));
                 self.phase = Phase::Restoring {
                     mode,
                     generation,
@@ -635,7 +645,7 @@ impl Lifecycle {
         kind: EndKind,
         window_id: Option<String>,
         taken: Option<TakenAnswer>,
-        out: &mut Vec<Action>,
+        out: &mut Vec<Step<Failure>>,
     ) {
         // Whether this end or a result of the generation arrives first, the
         // latest connection's end is what was last seen of the daemon.
@@ -654,12 +664,12 @@ impl Lifecycle {
         let unfinished = self.unfinished_attempt(generation);
 
         if kind == EndKind::Superseded {
-            out.push(Action::End { generation });
+            out.push(Step::Do(Action::End { generation }));
             if let Some(window_id) = window_id {
-                out.push(Action::MoveLink {
+                out.push(Step::Do(Action::MoveLink {
                     window_id,
                     to: LinkState::Superseded,
-                });
+                }));
             }
             // A superseded session must not fight the new GUI for the daemon.
             self.chain = None;
@@ -677,7 +687,7 @@ impl Lifecycle {
             return;
         }
 
-        out.push(Action::End { generation });
+        out.push(Step::Do(Action::End { generation }));
         self.phase = Phase::Idle;
         let restore = match (self.kind, window_id) {
             (ClientKind::Control, _) => None,
@@ -686,10 +696,10 @@ impl Lifecycle {
             (ClientKind::Window, None) => return,
         };
         if let Some(window_id) = &restore {
-            out.push(Action::MoveLink {
+            out.push(Step::Do(Action::MoveLink {
                 window_id: window_id.clone(),
                 to: LinkState::Connecting,
-            });
+            }));
         }
         self.chain = Some(Chain {
             attempts: 1,
@@ -699,15 +709,15 @@ impl Lifecycle {
         self.start(mode, out);
     }
 
-    fn failed_to_open(&mut self, mode: ConnectMode, generation: u64, out: &mut Vec<Action>) {
-        out.push(Action::End { generation });
+    fn failed_to_open(&mut self, mode: ConnectMode, generation: u64, out: &mut Vec<Step<Failure>>) {
+        out.push(Step::Do(Action::End { generation }));
         self.attempt_failed(mode, Failure::NotConnected, out);
     }
 
     /// Answers the wants the failed attempt covers and starts the next attempt:
     /// the chain's next one while it has budget, then one for the strongest
     /// want the failed attempt did not cover.
-    fn attempt_failed(&mut self, mode: ConnectMode, error: Failure, out: &mut Vec<Action>) {
+    fn attempt_failed(&mut self, mode: ConnectMode, error: Failure, out: &mut Vec<Step<Failure>>) {
         self.answer_where(Err(error), None, |want| covers(mode, want.mode), out);
         self.phase = Phase::Idle;
         if let Some(chain) = self.chain.take() {
@@ -721,10 +731,10 @@ impl Lifecycle {
                 return;
             }
             if let Some(window_id) = chain.restore {
-                out.push(Action::MoveLink {
+                out.push(Step::Do(Action::MoveLink {
                     window_id,
                     to: LinkState::Lost(LinkLostReason::ReconnectFailed),
-                });
+                }));
             }
         }
         if let Some(mode) = self.strongest_want() {
@@ -747,11 +757,11 @@ impl Lifecycle {
             .max_by_key(|mode| strength(*mode))
     }
 
-    fn start(&mut self, mode: ConnectMode, out: &mut Vec<Action>) {
+    fn start(&mut self, mode: ConnectMode, out: &mut Vec<Step<Failure>>) {
         let attempt = self.next_attempt;
         self.next_attempt += 1;
         self.phase = Phase::Connecting { attempt, mode };
-        out.push(Action::Attempt { attempt, mode });
+        out.push(Step::Do(Action::Attempt { attempt, mode }));
     }
 
     fn answer_where(
@@ -759,13 +769,13 @@ impl Lifecycle {
         result: Result<(), Failure>,
         opened: Option<u64>,
         answered: impl Fn(&Want) -> bool,
-        out: &mut Vec<Action>,
+        out: &mut Vec<Step<Failure>>,
     ) {
         let (now, kept): (Vec<_>, Vec<_>) = std::mem::take(&mut self.wants)
             .into_iter()
             .partition(|want| answered(want));
         self.wants = kept;
-        out.extend(now.into_iter().map(|want| Action::Answer {
+        out.extend(now.into_iter().map(|want| Step::Answer {
             id: want.id,
             result,
             opened,
@@ -1701,17 +1711,6 @@ impl Shared {
     }
 }
 
-/// One of the owner's steps, in the order the lifecycle returned them.
-enum Step {
-    Do(Action),
-    /// `opened_by` names the generation whose opening the answer waits for.
-    Answer {
-        id: WantId,
-        result: Result<(), IpcError>,
-        opened_by: Option<u64>,
-    },
-}
-
 /// What a stage brought back.
 enum StageOutcome {
     Reached {
@@ -1799,7 +1798,7 @@ struct Owner<H> {
     next_want: u64,
     acks: Vec<oneshot::Sender<()>>,
     boots: HashMap<u64, Option<StatusBoot>>,
-    queue: VecDeque<Step>,
+    queue: VecDeque<Step<IpcError>>,
     palettes: Option<OwnedMutexGuard<SentDefaultPalettes>>,
 }
 
@@ -1952,15 +1951,15 @@ impl<H: GuiHost> Owner<H> {
         let transition = self.lifecycle.on(event);
         self.public = transition.public;
         self.publish();
-        for action in transition.actions {
-            let step = match action {
-                Action::Answer { id, result, opened } => Step::Answer {
+        for step in transition.actions {
+            let step = match step {
+                Step::Do(action) => Step::Do(action),
+                Step::Answer { id, result, opened } => Step::Answer {
                     id,
-                    opened_by: opened,
+                    opened,
                     result: result
                         .map_err(|failure| failure_error(failure, attempt_error.as_ref())),
                 },
-                other => Step::Do(other),
             };
             if urgent && self.runs_at_once(&step) {
                 let _ = self.execute(step);
@@ -1970,16 +1969,13 @@ impl<H: GuiHost> Owner<H> {
         }
     }
 
-    fn runs_at_once(&self, step: &Step) -> bool {
+    fn runs_at_once(&self, step: &Step<IpcError>) -> bool {
         match step {
             Step::Do(Action::End { .. } | Action::AckRetire | Action::Discard { .. }) => true,
             Step::Do(_) => false,
-            Step::Answer { result: Err(_), .. }
-            | Step::Answer {
-                opened_by: None, ..
-            } => true,
+            Step::Answer { result: Err(_), .. } | Step::Answer { opened: None, .. } => true,
             Step::Answer {
-                opened_by: Some(generation),
+                opened: Some(generation),
                 ..
             } => self.opened == Some(*generation),
         }
@@ -2001,14 +1997,10 @@ impl<H: GuiHost> Owner<H> {
         self.publisher.send_replace(Published { public, open });
     }
 
-    fn execute(&mut self, step: Step) -> Option<Stage> {
+    fn execute(&mut self, step: Step<IpcError>) -> Option<Stage> {
         match step {
-            Step::Answer {
-                id,
-                result,
-                opened_by,
-            } => {
-                self.answer(id, result, opened_by);
+            Step::Answer { id, result, opened } => {
+                self.answer(id, result, opened);
                 None
             }
             Step::Do(action) => self.act(action),
@@ -2093,8 +2085,6 @@ impl<H: GuiHost> Owner<H> {
                 }
                 None
             }
-            // `feed` lines every answer up as a `Step::Answer`, with its error.
-            Action::Answer { .. } => None,
         }
     }
 
@@ -2414,7 +2404,7 @@ mod tests {
             }
         }
 
-        fn feed(&mut self, event: Event) -> Vec<Action> {
+        fn feed(&mut self, event: Event) -> Vec<Step<Failure>> {
             let transition = self.lifecycle.on(event);
             self.public = Some(transition.public);
             transition.actions
@@ -2424,7 +2414,7 @@ mod tests {
             self.public.as_ref().expect("an event was fed")
         }
 
-        fn want(&mut self, mode: ConnectMode, until: Until) -> (WantId, Vec<Action>) {
+        fn want(&mut self, mode: ConnectMode, until: Until) -> (WantId, Vec<Step<Failure>>) {
             self.wants += 1;
             let id = WantId(self.wants);
             (id, self.feed(Event::Want { id, mode, until }))
@@ -2439,14 +2429,14 @@ mod tests {
         }
 
         /// Hands over the connection `attempt` brought; returns the generation.
-        fn reach(&mut self, attempt: u64) -> (u64, Vec<Action>) {
+        fn reach(&mut self, attempt: u64) -> (u64, Vec<Step<Failure>>) {
             let actions = self.feed(Event::Connected { attempt });
             let generation = begun(&actions).expect("the attempt's connection begins a generation");
             (generation, actions)
         }
 
         /// Answers every opening step of `generation` so that it opens.
-        fn settle(&mut self, generation: u64, registration: Registration) -> Vec<Action> {
+        fn settle(&mut self, generation: u64, registration: Registration) -> Vec<Step<Failure>> {
             let mut actions = self.feed(Event::Probed {
                 generation,
                 revision: REVISION,
@@ -2466,7 +2456,7 @@ mod tests {
             let (generation, _) = self.reach(attempt);
             let actions = self.settle(generation, Registration::Accepted);
             assert!(
-                actions.contains(&Action::Open { generation }),
+                actions.contains(&Step::Do(Action::Open { generation })),
                 "{actions:?}"
             );
             generation
@@ -2493,9 +2483,9 @@ mod tests {
         /// Returns how many attempts ran and the last transition's actions.
         fn exhaust(
             &mut self,
-            first: Vec<Action>,
-            mut fail: impl FnMut(&mut Run, u64) -> Vec<Action>,
-        ) -> (u32, Vec<Action>) {
+            first: Vec<Step<Failure>>,
+            mut fail: impl FnMut(&mut Run, u64) -> Vec<Step<Failure>>,
+        ) -> (u32, Vec<Step<Failure>>) {
             let mut tried = 0;
             let mut last = first;
             while let Some((attempt, mode)) = attempt_in(&last) {
@@ -2531,34 +2521,34 @@ mod tests {
         }
     }
 
-    fn attempts(actions: &[Action]) -> Vec<(u64, ConnectMode)> {
+    fn attempts(actions: &[Step<Failure>]) -> Vec<(u64, ConnectMode)> {
         actions
             .iter()
             .filter_map(|action| match action {
-                Action::Attempt { attempt, mode } => Some((*attempt, *mode)),
+                Step::Do(Action::Attempt { attempt, mode }) => Some((*attempt, *mode)),
                 _ => None,
             })
             .collect()
     }
 
-    fn attempt_in(actions: &[Action]) -> Option<(u64, ConnectMode)> {
+    fn attempt_in(actions: &[Step<Failure>]) -> Option<(u64, ConnectMode)> {
         let all = attempts(actions);
         assert!(all.len() <= 1, "one attempt at a time: {actions:?}");
         all.first().copied()
     }
 
-    fn begun(actions: &[Action]) -> Option<u64> {
+    fn begun(actions: &[Step<Failure>]) -> Option<u64> {
         actions.iter().find_map(|action| match action {
-            Action::Begin { generation, .. } => Some(*generation),
+            Step::Do(Action::Begin { generation, .. }) => Some(*generation),
             _ => None,
         })
     }
 
-    fn answer_to(actions: &[Action], id: WantId) -> Option<Result<(), Failure>> {
+    fn answer_to(actions: &[Step<Failure>], id: WantId) -> Option<Result<(), Failure>> {
         let answers: Vec<_> = actions
             .iter()
             .filter_map(|action| match action {
-                Action::Answer {
+                Step::Answer {
                     id: answered,
                     result,
                     ..
@@ -2571,9 +2561,9 @@ mod tests {
     }
 
     /// The generation the answer to `id` waits to see open, when it is answered.
-    fn opened_of(actions: &[Action], id: WantId) -> Option<Option<u64>> {
+    fn opened_of(actions: &[Step<Failure>], id: WantId) -> Option<Option<u64>> {
         actions.iter().find_map(|action| match action {
-            Action::Answer {
+            Step::Answer {
                 id: answered,
                 opened,
                 ..
@@ -2583,30 +2573,29 @@ mod tests {
     }
 
     /// The actions that open a generation, in the order they were returned.
-    fn opening(actions: &[Action]) -> Vec<Action> {
+    fn opening(actions: &[Step<Failure>]) -> Vec<Action> {
         actions
             .iter()
-            .filter(|action| {
-                matches!(
-                    action,
-                    Action::Begin { .. }
-                        | Action::ProbeRevision { .. }
-                        | Action::Register { .. }
-                        | Action::AnnounceStart { .. }
-                        | Action::ResendPalettes { .. }
-                        | Action::Open { .. }
-                        | Action::RestoreAttach { .. }
-                )
+            .filter_map(|step| match step {
+                Step::Do(
+                    action @ (Action::Begin { .. }
+                    | Action::ProbeRevision { .. }
+                    | Action::Register { .. }
+                    | Action::AnnounceStart { .. }
+                    | Action::ResendPalettes { .. }
+                    | Action::Open { .. }
+                    | Action::RestoreAttach { .. }),
+                ) => Some(action.clone()),
+                _ => None,
             })
-            .cloned()
             .collect()
     }
 
-    fn lost_link(window_id: &str) -> Action {
-        Action::MoveLink {
+    fn lost_link(window_id: &str) -> Step<Failure> {
+        Step::Do(Action::MoveLink {
             window_id: window_id.to_owned(),
             to: LinkState::Lost(LinkLostReason::ReconnectFailed),
-        }
+        })
     }
 
     fn is_open(public: &Public) -> bool {
@@ -2742,13 +2731,13 @@ mod tests {
         let (_, current) = run.start(ConnectMode::Once, Until::Open);
 
         let actions = run.feed(Event::Connected { attempt: over });
-        assert_eq!(actions, vec![Action::Discard { attempt: over }]);
+        assert_eq!(actions, vec![Step::Do(Action::Discard { attempt: over })]);
         assert_eq!(run.public().state, PublicState::Absent);
 
         let (generation, _) = run.reach(current);
         run.settle(generation, Registration::Accepted);
         let actions = run.feed(Event::Connected { attempt: over });
-        assert_eq!(actions, vec![Action::Discard { attempt: over }]);
+        assert_eq!(actions, vec![Step::Do(Action::Discard { attempt: over })]);
         assert!(is_open(run.public()));
     }
 
@@ -2758,7 +2747,7 @@ mod tests {
             for (label, mut run, generation, window) in finished_generations() {
                 let actions = run.feed(ended(generation, kind, window));
                 assert!(
-                    actions.contains(&Action::End { generation }),
+                    actions.contains(&Step::Do(Action::End { generation })),
                     "{label} {kind:?}: {actions:?}"
                 );
                 let (_, mode) = attempt_in(&actions)
@@ -2780,16 +2769,16 @@ mod tests {
         for (label, mut run, generation, window) in finished_generations() {
             let actions = run.feed(ended(generation, EndKind::Superseded, window));
             assert!(
-                actions.contains(&Action::End { generation }),
+                actions.contains(&Step::Do(Action::End { generation })),
                 "{label}: {actions:?}"
             );
             assert_eq!(attempts(&actions), Vec::new(), "{label}");
             if let Some(window_id) = window {
                 assert!(
-                    actions.contains(&Action::MoveLink {
+                    actions.contains(&Step::Do(Action::MoveLink {
                         window_id: window_id.to_owned(),
                         to: LinkState::Superseded,
-                    }),
+                    })),
                     "{label}: {actions:?}"
                 );
             }
@@ -2802,10 +2791,13 @@ mod tests {
         for (label, mut run, generation, _) in finished_generations() {
             let actions = run.feed(Event::Retire);
             assert!(
-                actions.contains(&Action::End { generation }),
+                actions.contains(&Step::Do(Action::End { generation })),
                 "{label}: {actions:?}"
             );
-            assert!(actions.contains(&Action::AckRetire), "{label}: {actions:?}");
+            assert!(
+                actions.contains(&Step::Do(Action::AckRetire)),
+                "{label}: {actions:?}"
+            );
             assert_eq!(attempts(&actions), Vec::new(), "{label}");
             assert_eq!(run.public().state, PublicState::Retired, "{label}");
         }
@@ -2831,7 +2823,7 @@ mod tests {
                 None => assert!(
                     !last
                         .iter()
-                        .any(|action| matches!(action, Action::MoveLink { .. })),
+                        .any(|action| matches!(action, Step::Do(Action::MoveLink { .. }))),
                     "{last:?}"
                 ),
             }
@@ -2987,7 +2979,10 @@ mod tests {
         for kind in [EndKind::Eof, EndKind::UnreadableAnswer] {
             let (mut run, id, generation) = opening_control();
             let actions = run.feed(ended(generation, kind, None));
-            assert!(actions.contains(&Action::End { generation }), "{kind:?}");
+            assert!(
+                actions.contains(&Step::Do(Action::End { generation })),
+                "{kind:?}"
+            );
             assert_eq!(answer_to(&actions, id), Some(Err(Failure::NotConnected)));
             assert_eq!(attempts(&actions), Vec::new(), "{kind:?}");
 
@@ -3032,10 +3027,10 @@ mod tests {
                 Some(TakenAnswer::Restore),
             ));
             assert!(
-                actions.contains(&Action::MoveLink {
+                actions.contains(&Step::Do(Action::MoveLink {
                     window_id: WINDOW.to_owned(),
                     to: LinkState::Connecting,
-                }),
+                })),
                 "{kind:?}: {actions:?}"
             );
             let (_, mode) = attempt_in(&actions).expect("a restored window that is lost chains");
@@ -3253,7 +3248,7 @@ mod tests {
                     assert_eq!(
                         actions
                             .iter()
-                            .filter(|action| **action == Action::End { generation })
+                            .filter(|action| **action == Step::Do(Action::End { generation }))
                             .count(),
                         1,
                         "{what}: {actions:?}"
@@ -3261,10 +3256,10 @@ mod tests {
 
                     let moves_to = |to: LinkState| {
                         window.is_some_and(|window_id| {
-                            actions.contains(&Action::MoveLink {
+                            actions.contains(&Step::Do(Action::MoveLink {
                                 window_id: window_id.to_owned(),
                                 to,
-                            })
+                            }))
                         })
                     };
                     let lost =
@@ -3293,9 +3288,10 @@ mod tests {
                         }
                         (None, EndKind::Superseded, true) if wants == ConnectMode::Retry => {
                             assert!(
-                                !actions
-                                    .iter()
-                                    .any(|action| matches!(action, Action::MoveLink { .. })),
+                                !actions.iter().any(|action| matches!(
+                                    action,
+                                    Step::Do(Action::MoveLink { .. })
+                                )),
                                 "{what}: {actions:?}"
                             );
                             assert!(!tries, "{what}: {actions:?}");
@@ -3379,7 +3375,7 @@ mod tests {
     fn a_retired_lifecycle_answers_wants_with_not_connected_and_opens_nothing() {
         let mut run = Run::window();
         let actions = run.feed(Event::Retire);
-        assert!(actions.contains(&Action::AckRetire));
+        assert!(actions.contains(&Step::Do(Action::AckRetire)));
         assert_eq!(run.public().state, PublicState::Retired);
         let (id, actions) = run.want(ConnectMode::Retry, Until::Open);
         assert_eq!(answer_to(&actions, id), Some(Err(Failure::NotConnected)));
@@ -3388,13 +3384,13 @@ mod tests {
         let mut run = Run::window();
         let (waiting, attempt) = run.start(ConnectMode::Retry, Until::Open);
         let actions = run.feed(Event::Retire);
-        assert!(actions.contains(&Action::AckRetire));
+        assert!(actions.contains(&Step::Do(Action::AckRetire)));
         assert_eq!(
             answer_to(&actions, waiting),
             Some(Err(Failure::NotConnected))
         );
         let actions = run.feed(Event::Connected { attempt });
-        assert_eq!(actions, vec![Action::Discard { attempt }]);
+        assert_eq!(actions, vec![Step::Do(Action::Discard { attempt })]);
         assert_eq!(run.public().state, PublicState::Retired);
         let (id, actions) = run.want(ConnectMode::Retry, Until::Open);
         assert_eq!(answer_to(&actions, id), Some(Err(Failure::NotConnected)));
@@ -3427,21 +3423,24 @@ mod tests {
         let (generation, _) = run.reach(attempt);
         let actions = run.settle(generation, Registration::Unregistered);
         assert!(
-            actions.contains(&Action::RestoreAttach {
+            actions.contains(&Step::Do(Action::RestoreAttach {
                 generation,
                 window_id: OTHER_WINDOW.to_owned(),
-            }),
+            })),
             "{actions:?}"
         );
         run.feed(Event::Restored { generation });
 
         let actions = run.feed(ended(generation, EndKind::Eof, None));
-        assert!(actions.contains(&Action::End { generation }), "{actions:?}");
+        assert!(
+            actions.contains(&Step::Do(Action::End { generation })),
+            "{actions:?}"
+        );
         assert_eq!(attempts(&actions), Vec::new());
         assert!(
             !actions
                 .iter()
-                .any(|action| matches!(action, Action::MoveLink { .. })),
+                .any(|action| matches!(action, Step::Do(Action::MoveLink { .. }))),
             "{actions:?}"
         );
     }
@@ -3582,10 +3581,9 @@ mod connect_tests {
 
 #[cfg(test)]
 mod request_tests {
-    //! A request ends with its answer or with its generation, and with
-    //! nothing else, so no time that passes can turn "not answered yet" into a
-    //! failure. The connection is in memory so the paused clock moves in one
-    //! order everywhere.
+    //! A request that waits a day of virtual time for its answer still ends
+    //! with that answer, not with a failure. The connection is in memory so
+    //! the paused clock moves in one order everywhere.
 
     use std::time::Duration;
 
@@ -3596,12 +3594,11 @@ mod request_tests {
     use crate::host::fake::{Reaction, ScriptedDaemon};
     use crate::pool_outcomes::{DecideApprovalOutcome, map_decide_approval_result};
 
-    // Longer than any finite limit the product could hold; the value is not
-    // tied to one, as a limit that cannot be named cannot be tuned away.
+    // The daemon holds its answer back for this long of virtual time.
     const A_DAY: Duration = Duration::from_secs(24 * 60 * 60);
 
     #[tokio::test(start_paused = true)]
-    async fn a_decision_the_daemon_has_not_answered_stays_pending_however_long_it_takes() {
+    async fn a_decision_the_daemon_answers_after_a_day_settles_with_that_answer() {
         let reached = Arc::new(Notify::new());
         let gate = Arc::new(Notify::new());
         let daemon = ScriptedDaemon::new({
@@ -3830,7 +3827,7 @@ mod owner_tests {
         );
     }
 
-    fn describe(step: &Step) -> String {
+    fn describe(step: &Step<IpcError>) -> String {
         match step {
             Step::Do(action) => format!("{action:?}"),
             Step::Answer { id, result, .. } => format!("Answer({id:?}, {result:?})"),
@@ -3902,7 +3899,7 @@ mod owner_tests {
             self.owner.receive(OwnerEvent::Want { mode, until, reply });
         }
 
-        fn pop(&mut self, what: &str) -> Step {
+        fn pop(&mut self, what: &str) -> Step<IpcError> {
             self.owner
                 .queue
                 .pop_front()
@@ -3986,7 +3983,7 @@ mod owner_tests {
 
         /// Carries out what is queued, except the steps that start something
         /// the scene runs itself: those are returned.
-        async fn carry_out(&mut self) -> Vec<Step> {
+        async fn carry_out(&mut self) -> Vec<Step<IpcError>> {
             let mut held = Vec::new();
             while let Some(step) = self.owner.queue.pop_front() {
                 if matches!(
@@ -4078,7 +4075,7 @@ mod owner_tests {
         }
     }
 
-    fn attempt_of(step: Step) -> u64 {
+    fn attempt_of(step: Step<IpcError>) -> u64 {
         match step {
             Step::Do(Action::Attempt { attempt, .. }) => attempt,
             other => panic!("expected an attempt, got {}", describe(&other)),
@@ -4380,10 +4377,6 @@ mod owner_tests {
         let mut items: Vec<Item> = vec![Item::Result(outcome)];
         items.extend(std::mem::take(&mut rig.news).into_iter().map(Item::End));
         let count = items.len();
-        eprintln!(
-            "window of the generation when the owner hears of its end: {:?}",
-            restoring.generation.window_id()
-        );
         rig.deliver(arrangement(items, order));
         rig.observe(count, notes)
     }
@@ -4677,16 +4670,19 @@ mod owner_tests {
                 .await,
             ),
         ];
-        let mut failed = Vec::new();
-        for (name, result) in &results {
-            match result {
-                Ok(()) => eprintln!("scene passed: {name}"),
-                Err(problem) => {
-                    eprintln!("scene FAILED: {name}\n  {problem}");
-                    failed.push(*name);
-                }
-            }
-        }
-        assert!(failed.is_empty(), "scenes that failed: {failed:?}");
+        let failed: Vec<String> = results
+            .iter()
+            .filter_map(|(name, result)| {
+                result
+                    .as_ref()
+                    .err()
+                    .map(|problem| format!("{name}\n  {problem}"))
+            })
+            .collect();
+        assert!(
+            failed.is_empty(),
+            "scenes that failed:\n{}",
+            failed.join("\n")
+        );
     }
 }
