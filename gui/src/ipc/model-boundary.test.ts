@@ -135,11 +135,15 @@ describe('narrowModelChoicesPayload', () => {
     ]);
   });
 
-  it('carries the error text through untouched', () => {
+  it('folds the error text onto one line and caps it at the external text limit', () => {
     const result = narrowModelChoicesPayload(
-      modelChoicesPayloadWire({ source: undefined, choices: [], error: 'output too large' })
+      modelChoicesPayloadWire({
+        source: undefined,
+        choices: [],
+        error: `output\r\n\ttoo large: ${'x'.repeat(300)}`,
+      })
     );
-    expect(result.error).toBe('output too large');
+    expect(result.error).toBe(`output too large: ${'x'.repeat(182)}…`);
   });
 
   it('rejects an unrecognized source kind', () => {

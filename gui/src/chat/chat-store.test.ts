@@ -16,6 +16,7 @@ import {
   emptyChatRoom,
   foldChatPage,
   mergeChatMessages,
+  namedRooms,
   resolveDisplayName,
   roomAfterRemoval,
   type ChatHistory,
@@ -436,6 +437,31 @@ describe('applyRoomsList', () => {
     const second = applyRoomsList([roomInfo({ room_id: 'main' })]);
     expect(second.has('r-old')).toBe(false);
     expect(second.size).toBe(1);
+  });
+});
+
+describe('namedRooms', () => {
+  it('keeps the rooms with a name to draw, under that name, and drops the unnamed and empty-named ones', () => {
+    const rows = [
+      roomInfo({ room_id: 'r-new', name: '', displayName: null }),
+      roomInfo({
+        room_id: 'r-yagura',
+        name: 'yagura',
+        displayName: formatPathForDisplay('yagura'),
+      }),
+      roomInfo({ room_id: 'r-blank', name: '', displayName: sanitizeForDisplay('') }),
+    ];
+    expect(namedRooms(rows)).toEqual([
+      {
+        room_id: 'r-yagura',
+        name: 'yagura',
+        displayName: 'yagura',
+        participant_count: 0,
+        needs_user: false,
+        halted: null,
+        last_at_ms: null,
+      },
+    ]);
   });
 });
 

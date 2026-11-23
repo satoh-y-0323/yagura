@@ -36,6 +36,7 @@ import {
   describeRestoreSelectionCount,
   describeRestoreConfirm,
   describeRoomTitle,
+  describeJoinedParts,
   describeUnknownReasonSuffix,
   describeStatusLabel,
   describeUnknownExplanation,
@@ -254,6 +255,22 @@ function undeliveredUnknown(reason: UnknownReason | null): ChatDeliveryOutcome {
 
 /** A detection-load warning as the registry carries it. */
 const NO_REASON_WARNING = sanitizeForDisplay('a warning with no reason');
+
+describe('describeJoinedParts', () => {
+  it('joins the parts that are there with " · ", skipping the missing and empty ones, and is null when none is there', () => {
+    const empty = sanitizeForDisplay('');
+    expect(
+      describeJoinedParts(english, [
+        null,
+        sanitizeForDisplay('reviewer'),
+        empty,
+        sanitizeForDisplay('claude-code'),
+        null,
+      ])
+    ).toBe('reviewer · claude-code');
+    expect(describeJoinedParts(english, [null, empty])).toBeNull();
+  });
+});
 
 describe('describeUnknownReasonSuffix', () => {
   it('returns null for an unknown status carrying no reason (no reason to show)', () => {
