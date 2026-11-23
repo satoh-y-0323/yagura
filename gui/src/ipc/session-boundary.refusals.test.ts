@@ -13,6 +13,7 @@ import {
   formatOutputBlock,
   formatPathForDisplay,
   joinDisplayBlocks,
+  MAX_BLOCK_TEXT_CHARS,
   MAX_DISPLAY_FIELD_CHARS,
   sanitizeForDisplay,
 } from '../display/untrusted-text';
@@ -585,8 +586,8 @@ describe('the restore candidates', () => {
     expect(entry).toMatchObject({
       vendor: 'v\u0007x',
       detection: 'd\u001bz',
-      displayVendor: 'vx',
-      displayDetection: 'dz',
+      displayVendor: 'v x',
+      displayDetection: 'd z',
     });
     const [bare] = narrowRestoreCandidateList([candidate()]);
     expect(bare).toMatchObject({
@@ -677,32 +678,32 @@ function escapeOf(char: string): string {
 }
 
 describe('sanitizeForDisplay', () => {
-  it('strips control characters and the characters a label may not hold, and keeps everything else', () => {
-    expect(sanitizeForDisplay('a\u0000b\u007fc\u009fd\ne')).toBe('abcde');
-    // The set the daemon refuses in a label (`is_forbidden_label_char`).
-    const forbidden = [
-      '\u061c',
-      '\u2028',
-      '\u2029',
-      '\u200B',
-      '\u200E',
-      '\u200F',
-      '\u2060',
-      '\uFEFF',
-      '\u202A',
-      '\u202B',
-      '\u202C',
-      '\u202D',
-      '\u202E',
-      '\u2066',
-      '\u2067',
-      '\u2068',
-      '\u2069',
-    ];
-    for (const char of forbidden) {
-      expect(sanitizeForDisplay(`exe.${char}txt`)).toBe('exe.txt');
-    }
-    expect(sanitizeForDisplay('a\u200Cb\u200Dc')).toBe('a\u200Cb\u200Dc');
+  it('makes each control one space, writes out every invisible character but an emoji shape, and caps after writing out', () => {
+    expect(sanitizeForDisplay('a\nb')).toBe('a b');
+    expect(sanitizeForDisplay('a\tb')).toBe('a b');
+    expect(sanitizeForDisplay('a\u0000b\u007fc\u009fd\u2028e\u2029f')).toBe('a b c d e f');
+    expect(sanitizeForDisplay(' a\r\n\nb ')).toBe(' a   b ');
+
+    expect(sanitizeForDisplay('a\u{E0100}b')).toBe('a\\u{E0100}b');
+    expect(sanitizeForDisplay('a\uFE0Fb')).toBe('a\\u{FE0F}b');
+    expect(sanitizeForDisplay('a\u3164b')).toBe('a\\u{3164}b');
+    expect(sanitizeForDisplay('a\u034Fb')).toBe('a\\u{034F}b');
+    expect(sanitizeForDisplay('a\u180Bb')).toBe('a\\u{180B}b');
+    expect(sanitizeForDisplay('a\u17B4b')).toBe('a\\u{17B4}b');
+    expect(sanitizeForDisplay('a\uFFF9b')).toBe('a\\u{FFF9}b');
+    expect(sanitizeForDisplay('a\u{13430}b')).toBe('a\\u{13430}b');
+    expect(sanitizeForDisplay('exe.\u202Etxt')).toBe('exe.\\u{202E}txt');
+    expect(sanitizeForDisplay('a\u200Cb\u200Dc')).toBe('a\\u{200C}b\\u{200D}c');
+
+    expect(sanitizeForDisplay('\u26A0\uFE0F')).toBe('\u26A0\uFE0F');
+    expect(sanitizeForDisplay('\u2764\uFE0F\u200D\u{1F525}')).toBe('\u2764\uFE0F\u200D\u{1F525}');
+    expect(sanitizeForDisplay('a\u3000b')).toBe('a\u3000b');
+    expect(sanitizeForDisplay('a\u00A0b')).toBe('a\u00A0b');
+    expect(sanitizeForDisplay('a\u2800b')).toBe('a\u2800b');
+
+    // The longest one-line field the daemon accepts, written out, still fits.
+    expect(sanitizeForDisplay('\u00AD'.repeat(512))).toBe('\\u{00AD}'.repeat(512));
+    expect(sanitizeForDisplay(`x${'\u00AD'.repeat(512)}`)).toBe(`x${'\\u{00AD}'.repeat(511)}…`);
   });
 
   it('keeps a text of exactly the limit whole', () => {
@@ -718,7 +719,6 @@ describe('sanitizeForDisplay', () => {
 
   it('keeps an empty text empty', () => {
     expect(sanitizeForDisplay('')).toBe('');
-    expect(sanitizeForDisplay('\u0007')).toBe('');
   });
 });
 
@@ -762,6 +762,10 @@ describe('formatPathForDisplay', () => {
     }
     expect(formatPathForDisplay('C:\\re\u0000po\n\t')).toBe('C:\\re\\u{0000}po\\u{000A}\\u{0009}');
     expect(formatPathForDisplay('C:\\work\\yagura')).toBe('C:\\work\\yagura');
+    expect(formatPathForDisplay('C:\\a\u00A0b')).toBe('C:\\a\\u{00A0}b');
+    expect(formatPathForDisplay('C:\\a\u3000b')).toBe('C:\\a\\u{3000}b');
+    expect(formatPathForDisplay('C:\\a\u2800b')).toBe('C:\\a\\u{2800}b');
+    expect(formatPathForDisplay('C:\\a b')).toBe('C:\\a b');
     const shown = formatPathForDisplay(`${'a'.repeat(MAX_DISPLAY_FIELD_CHARS - 1)}\u202Etail`);
     expect(shown).toBe(`${'a'.repeat(MAX_DISPLAY_FIELD_CHARS - 1)}\\u{202E}…`);
   });
@@ -776,9 +780,11 @@ describe('formatCommandLine', () => {
     expect(formatCommandLine(['say "hi"'])).toBe('"say \\u{0022}hi\\u{0022}"');
   });
 
-  it('quotes an element that holds a space, an ideographic space, or nothing', () => {
+  it('quotes an element that holds a space or nothing, and writes every other blank out unquoted', () => {
     expect(formatCommandLine(['C:\\Program Files\\x.exe'])).toBe('"C:\\Program Files\\x.exe"');
-    expect(formatCommandLine(['a\u3000b'])).toBe('"a\u3000b"');
+    expect(formatCommandLine(['a\u3000b'])).toBe('a\\u{3000}b');
+    expect(formatCommandLine(['a\u00A0b'])).toBe('a\\u{00A0}b');
+    expect(formatCommandLine(['a\u2800b'])).toBe('a\\u{2800}b');
     expect(formatCommandLine([''])).toBe('""');
   });
 
@@ -829,6 +835,13 @@ describe('formatChatBody', () => {
     );
     expect(formatChatBody('\u26A0\uFE0F')).toBe('\u26A0\uFE0F');
     expect(formatChatBody('1\uFE0F\u20E3')).toBe('1\uFE0F\u20E3');
+    expect(formatChatBody('\u{1F3F4}\u{E0067}\u{E0062}\u{E0065}\u{E006E}\u{E0067}\u{E007F}')).toBe(
+      '\u{1F3F4}\u{E0067}\u{E0062}\u{E0065}\u{E006E}\u{E0067}\u{E007F}'
+    );
+    expect(formatChatBody('\u{1F3F4}\u{E0061}\u{E0062}\u{E007F}')).toBe(
+      '\u{1F3F4}\\u{E0061}\\u{E0062}\\u{E007F}'
+    );
+    expect(formatChatBody('a\u{E0067}\u{E007F}')).toBe('a\\u{E0067}\\u{E007F}');
   });
 
   it('cuts at the display limit in code points before writing out', () => {
@@ -855,8 +868,9 @@ describe('formatOutputBlock', () => {
   });
 
   it('cuts at the display limit in code points before writing out', () => {
-    expect(formatOutputBlock(`${'a'.repeat(MAX_DISPLAY_FIELD_CHARS - 1)}\u202Etail`)).toBe(
-      `${'a'.repeat(MAX_DISPLAY_FIELD_CHARS - 1)}\\u{202E}…`
+    expect(MAX_BLOCK_TEXT_CHARS).toBe(16 * 1024);
+    expect(formatOutputBlock(`${'a'.repeat(MAX_BLOCK_TEXT_CHARS - 1)}\u202Etail`)).toBe(
+      `${'a'.repeat(MAX_BLOCK_TEXT_CHARS - 1)}\\u{202E}…`
     );
   });
 });
@@ -866,22 +880,6 @@ describe('joinDisplayBlocks', () => {
     expect(joinDisplayBlocks([sanitizeForDisplay('a'), formatApprovalBody('b\nc')])).toBe(
       'a\nb\nc'
     );
-  });
-
-  it('cuts the whole at the display limit and marks the cut', () => {
-    const joined = joinDisplayBlocks([
-      sanitizeForDisplay('x'.repeat(MAX_DISPLAY_FIELD_CHARS)),
-      sanitizeForDisplay('tail'),
-    ]);
-    expect(joined).toBe(`${'x'.repeat(MAX_DISPLAY_FIELD_CHARS)}…`);
-  });
-
-  it('never cuts a written-out character in half: the cut moves before it', () => {
-    const joined = joinDisplayBlocks([
-      sanitizeForDisplay('a'.repeat(MAX_DISPLAY_FIELD_CHARS - 3)),
-      formatPathForDisplay('\u202E'),
-    ]);
-    expect(joined).toBe(`${'a'.repeat(MAX_DISPLAY_FIELD_CHARS - 3)}\n…`);
   });
 });
 

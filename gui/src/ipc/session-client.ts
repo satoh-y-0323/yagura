@@ -21,7 +21,6 @@ import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 
 import { invokeDaemonCommand, invokeLocalCommand } from './command-invoke';
 import {
-  foldExternalText,
   formatCommandLine,
   formatPathForDisplay,
   sanitizeForDisplay,
@@ -802,12 +801,13 @@ function narrowProfileEntry(value: unknown, context: string): ProfileEntry {
     displayName: sanitizeForDisplay(displayName),
     detection,
     displayDetection: detection === null ? null : sanitizeForDisplay(detection),
-    displayDetectionWarning: detectionWarning === null ? null : foldExternalText(detectionWarning),
+    displayDetectionWarning:
+      detectionWarning === null ? null : sanitizeForDisplay(detectionWarning),
     cwd,
     command,
     displayCommand: formatCommandLine(command),
     available,
-    reason: reason === null ? null : foldExternalText(reason),
+    reason: reason === null ? null : sanitizeForDisplay(reason),
     unavailableKind: narrowUnavailableKind(readOptionalString(record, 'unavailable_kind', context)),
     guidance: narrowProfileGuidance(
       readOwnField(record, 'unavailable_guidance'),
@@ -837,7 +837,7 @@ function narrowProfileLimits(value: unknown, context: string): ProfileLimit[] {
       capability: PROFILE_CAPABILITIES.has(capability)
         ? (capability as ProfileCapability)
         : 'unknown',
-      reason: foldExternalText(requireString(record, 'reason', context)),
+      reason: sanitizeForDisplay(requireString(record, 'reason', context)),
       guidance: narrowProfileGuidance(readOwnField(record, 'guidance'), `${context}.guidance`),
     };
   });
@@ -859,7 +859,7 @@ function narrowProfileGuidance(value: unknown, guidanceContext: string): Profile
   const url = page !== null && page.startsWith('https://') ? page : null;
   // What is copied is run or opened, so the shown form writes out every hidden character in it.
   return {
-    text: foldExternalText(requireString(record, 'text', guidanceContext)),
+    text: sanitizeForDisplay(requireString(record, 'text', guidanceContext)),
     command,
     displayCommand: command === null ? null : formatPathForDisplay(command),
     url,

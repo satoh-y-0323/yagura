@@ -153,7 +153,7 @@ describe('createWindowRegistry: renameWindow', () => {
     const a = state.windows.find((w) => w.windowId === 'w-a');
     const b = state.windows.find((w) => w.windowId === 'w-b');
     expect(a?.name).toBe('renamed\u202E-a\u0007');
-    expect(a?.displayName).toBe('renamed-a');
+    expect(a?.displayName).toBe('renamed\\u{202E}-a ');
     expect(b?.name).toBe('codex');
     expect(b?.displayName).toBe('codex');
   });
@@ -297,7 +297,7 @@ describe('createWindowRegistry: the room a window belongs to', () => {
 });
 
 describe('createWindowRegistry: what the view draws of a newly opened window', () => {
-  it('keeps the daemon values raw, strips what hides in a label and writes it out of a place', () => {
+  it('keeps the daemon values raw, and writes out what hides in a label and in a place', () => {
     const registry = createWindowRegistry();
     const rawCwd = `C:\\work\\\u202E${'a'.repeat(MAX_DISPLAY_FIELD_CHARS)}`;
 
@@ -315,16 +315,16 @@ describe('createWindowRegistry: what the view draws of a newly opened window', (
 
     const a = entryOf(registry, 'w-a');
     expect(a?.name).toBe('cl\u202Eaude\u0007');
-    expect(a?.displayName).toBe('claude');
+    expect(a?.displayName).toBe('cl\\u{202E}aude ');
     expect(a?.vendor).toBe('claude\u2066-code\u0085');
-    expect(a?.displayVendor).toBe('claude-code');
+    expect(a?.displayVendor).toBe('claude\\u{2066}-code ');
     expect(a?.cwd).toBe(rawCwd);
     expect(a?.displayCwd).toBe(`C:\\work\\\\u{202E}${'a'.repeat(MAX_DISPLAY_FIELD_CHARS - 9)}…`);
     expect(a?.room).toEqual({
       roomId: 'r-alpha',
       displayName: 'ya\\u{200B}gura\\u{FEFF}',
     });
-    expect(a?.displayDetectionWarning).toBe('the profile did not resolve');
+    expect(a?.displayDetectionWarning).toBe('the profile  did not  resolve');
     expect(entryOf(registry, 'w-b')?.displayVendor).toBeNull();
   });
 });
@@ -832,12 +832,12 @@ describe('createWindowRegistry: an older generation costs the pair alone', () =>
 
     const entry = entryOf(registry, 'w-a');
     expect(entry?.name).toBe('re\u2067named\u0000');
-    expect(entry?.displayName).toBe('renamed');
+    expect(entry?.displayName).toBe('re\\u{2067}named ');
     expect(entry?.room).toEqual({
       roomId: 'r-beta',
       displayName: 'oth\\u{202D}er\\u{2060}',
     });
-    expect(entry?.displayDetectionWarning).toBe('second warning');
+    expect(entry?.displayDetectionWarning).toBe('second\\u{200F} warning ');
     expect(entry?.detected).toEqual({ status: 'waiting_input' });
   });
 

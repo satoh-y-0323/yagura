@@ -44,7 +44,6 @@ const FOLDED_CHARACTERS: Array<[string, string]> = [
   ['a NUL (Cc)', '\u0000'],
   ['an escape, the lead-in of an ANSI sequence (Cc)', '\u001b'],
   ['a delete (Cc)', '\u007f'],
-  ['a zero-width space (Cf)', '​'],
   ['a line separator (Zl)', ' '],
   ['a paragraph separator (Zp)', ' '],
   ['a no-break space (Zs)', ' '],
@@ -99,6 +98,13 @@ describe('foldExternalText: caps by code point', () => {
   it('applies the cap after folding, so folded runs do not consume the budget', () => {
     const input = `${'x'.repeat(EXTERNAL_TEXT_MAX_CODE_POINTS)}${'\n'.repeat(50)}`;
     expect(foldExternalText(input)).toBe('x'.repeat(EXTERNAL_TEXT_MAX_CODE_POINTS));
+  });
+
+  it('writes out an invisible character but an emoji shape, and caps after writing out without cutting a written-out character', () => {
+    expect(foldExternalText('a\u{E0100}b')).toBe('a\\u{E0100}b');
+    expect(foldExternalText('\u26A0\uFE0F')).toBe('\u26A0\uFE0F');
+    expect(foldExternalText('a\u{E0100}'.repeat(200))).toBe(`${'a\\u{E0100}'.repeat(20)}…`);
+    expect(foldExternalText(`x${'a\u{E0100}'.repeat(200)}`)).toBe(`x${'a\\u{E0100}'.repeat(19)}a…`);
   });
 });
 

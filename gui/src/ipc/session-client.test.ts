@@ -507,7 +507,7 @@ describe('invokeListProfiles', () => {
     expect(result.profiles[0]).toMatchObject({ available: false, reason: 'executable not found' });
   });
 
-  it('folds an unavailable reason into one trimmed line, and caps it at 200 characters', async () => {
+  it('makes each control in an unavailable reason one space, writes out a hidden character, and keeps a long reason whole', async () => {
     invokeMock.mockResolvedValueOnce({
       profiles: [
         {
@@ -520,7 +520,7 @@ describe('invokeListProfiles', () => {
           ...RAW_PROFILE,
           id: 'zz-long',
           available: false,
-          unavailable_reason: 'a'.repeat(250),
+          unavailable_reason: 'a'.repeat(300),
         },
       ],
       warnings: [],
@@ -528,8 +528,8 @@ describe('invokeListProfiles', () => {
 
     const result = await invokeListProfiles();
 
-    expect(result.profiles[0]?.reason).toBe('first line second line end');
-    expect(result.profiles[1]?.reason).toBe(`${'a'.repeat(200)}…`);
+    expect(result.profiles[0]?.reason).toBe('  first line  \\u{202E}second   line\\u{200B} end  ');
+    expect(result.profiles[1]?.reason).toBe('a'.repeat(300));
   });
 
   it('reads a kind of reason this build does not know as unknown, keeping the reason text', async () => {
@@ -792,7 +792,7 @@ describe('invokeListProfiles', () => {
       ]);
     });
 
-    it('folds a limit reason into one trimmed line, and caps it at 200 characters', async () => {
+    it('makes each control in a limit reason one space, writes out a hidden character, and keeps a long reason whole', async () => {
       invokeMock.mockResolvedValueOnce({
         profiles: [
           {
@@ -804,7 +804,7 @@ describe('invokeListProfiles', () => {
                 reason: '  the launcher\r\n‮drops   quotes​\tonly  ',
                 guidance: null,
               },
-              { capability: 'launch_prompt', reason: 'b'.repeat(250), guidance: null },
+              { capability: 'launch_prompt', reason: 'b'.repeat(300), guidance: null },
             ],
           },
         ],
@@ -813,8 +813,10 @@ describe('invokeListProfiles', () => {
 
       const result = await invokeListProfiles();
 
-      expect(result.profiles[0]?.limits[0]?.reason).toBe('the launcher drops quotes only');
-      expect(result.profiles[0]?.limits[1]?.reason).toBe(`${'b'.repeat(200)}…`);
+      expect(result.profiles[0]?.limits[0]?.reason).toBe(
+        '  the launcher  \\u{202E}drops   quotes\\u{200B} only  '
+      );
+      expect(result.profiles[0]?.limits[1]?.reason).toBe('b'.repeat(300));
     });
 
     it('keeps launch_context as a known capability, not unknown', async () => {

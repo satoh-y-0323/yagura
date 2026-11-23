@@ -91,9 +91,12 @@ describe('foldedFailureReason: the one display line a caught value is told by', 
       new CommandFailureError({ ...REJECTED, text: 'first line\r\nsecond\u001b[31m\u202Eline' }),
     ],
     ['a thrown string', 'first line\r\nsecond\u001b[31m\u202Eline'],
-  ])('folds the line breaks and control characters of %s', (_label, caught) => {
-    expect(foldedFailureReason(caught)).toBe('first line second [31m line');
-  });
+  ])(
+    'folds the line breaks and control characters of %s, and writes out a format character',
+    (_label, caught) => {
+      expect(foldedFailureReason(caught)).toBe('first line second [31m\\u{202E}line');
+    }
+  );
 });
 
 describe('commandFailureLine: the line is picked by the kind of failure', () => {

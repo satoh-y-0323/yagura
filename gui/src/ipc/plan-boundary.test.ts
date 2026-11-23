@@ -12,7 +12,7 @@
  */
 import { describe, it, expect } from 'vitest';
 
-import { foldExternalText, formatPathForDisplay } from '../display/untrusted-text';
+import { formatPathForDisplay, sanitizeForDisplay } from '../display/untrusted-text';
 import {
   BoundaryError,
   narrowPlanChanged,
@@ -321,11 +321,13 @@ describe('TaskReport', () => {
   it('keeps every field of a well-formed report as the wire carried it', () => {
     const expected: TaskReport = {
       outcome: 'failed',
-      summary: foldExternalText('Two cases still fail on Linux.'),
+      summary: sanitizeForDisplay('Two cases still fail on Linux.'),
       path: formatPathForDisplay('reports/confirm.md'),
       reported_at: 1_790_000_123,
     };
     expect(narrowedReport(taskReportWire({ ...expected }))).toEqual(expected);
+    const longSummary = 'x'.repeat(1000);
+    expect(narrowedReport(taskReportWire({ summary: longSummary }))?.summary).toBe(longSummary);
   });
 
   it('accepts a report whose path is null', () => {
@@ -705,10 +707,12 @@ describe('the values a plan reply keeps', () => {
     expect(info.tasks[0]?.resolved).toEqual({ source: 'unassigned', assignment: null });
   });
 
-  it('strips the hidden characters from a plan title in the detail and in the list', () => {
+  it('makes a line break one space and writes out the hidden characters of a plan title, in the detail and in the list', () => {
     const title = 'Ship\nthe ‮fix​';
-    expect(narrowPlanInfo(planInfoWire({ title })).title).toBe('Shipthe fix');
-    expect(narrowPlanList({ plans: [planSummaryWire({ title })] })[0]?.title).toBe('Shipthe fix');
+    expect(narrowPlanInfo(planInfoWire({ title })).title).toBe('Ship the \\u{202E}fix\\u{200B}');
+    expect(narrowPlanList({ plans: [planSummaryWire({ title })] })[0]?.title).toBe(
+      'Ship the \\u{202E}fix\\u{200B}'
+    );
   });
 
   it('writes out the hidden characters of a task write path instead of dropping them', () => {

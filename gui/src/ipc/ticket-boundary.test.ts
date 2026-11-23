@@ -12,7 +12,7 @@ import { describe, it, expect } from 'vitest';
 
 import {
   MAX_DISPLAY_FIELD_CHARS,
-  MAX_TICKET_TEXT_CHARS,
+  MAX_BLOCK_TEXT_CHARS,
   formatApprovalBody,
   formatPathForDisplay,
   formatTicketText,
@@ -277,15 +277,15 @@ describe('formatTicketText', () => {
   });
 
   it('holds a body as long as the body limit and cuts beyond it in code points', () => {
-    expect(MAX_TICKET_TEXT_CHARS).toBeGreaterThan(MAX_DISPLAY_FIELD_CHARS);
-    const whole = '😀'.repeat(MAX_TICKET_TEXT_CHARS);
+    expect(MAX_BLOCK_TEXT_CHARS).toBeGreaterThan(MAX_DISPLAY_FIELD_CHARS);
+    const whole = '😀'.repeat(MAX_BLOCK_TEXT_CHARS);
     expect(formatTicketText(whole)).toBe(whole);
     expect(formatTicketText(`${whole}\u202Etail`)).toBe(`${whole}…`);
   });
 
   it('never cuts an escape in half at the limit', () => {
-    const shown = formatTicketText(`${'a'.repeat(MAX_TICKET_TEXT_CHARS - 1)}\u202Etail`);
-    expect(shown).toBe(`${'a'.repeat(MAX_TICKET_TEXT_CHARS - 1)}\\u{202E}…`);
+    const shown = formatTicketText(`${'a'.repeat(MAX_BLOCK_TEXT_CHARS - 1)}\u202Etail`);
+    expect(shown).toBe(`${'a'.repeat(MAX_BLOCK_TEXT_CHARS - 1)}\\u{202E}…`);
   });
 
   it('escapes everything formatApprovalBody does, so the rule has one source', () => {
@@ -314,8 +314,8 @@ describe('the one-line fields of a ticket', () => {
 
     expect(summary.title).toBe(sanitizeForDisplay('a\u0000b\u202Ec'));
     expect(summary.title).not.toContain('\u0000');
-    expect(summary.displayState).toBe('todo');
-    expect(summary.displayMilestone).toBe('v1');
+    expect(summary.displayState).toBe('to do');
+    expect(summary.displayMilestone).toBe('v 1');
   });
 
   it('labels a ticket by its number', () => {

@@ -238,10 +238,10 @@ describe('integrationGroups: buttons per state', () => {
     expect(view.reason).toBe('the status output could not be read');
   });
 
-  it('folds the line breaks and control characters of the reason', () => {
+  it('folds the line breaks and control characters of the reason, and writes out a format character', () => {
     expect(
       viewOf('unknown', { reason: foldExternalText('status\r\nunreadable\u202E') }).reason
-    ).toBe('status unreadable');
+    ).toBe('status unreadable\\u{202E}');
   });
 
   it('carries no reason for a row whose state was read', () => {
@@ -459,6 +459,17 @@ describe('resultLines', () => {
     expect(lines.isFailure).toBe(true);
     expect(lines.text).toContain('the add step exited with 1');
     expect(lines.text).toContain('$ alpha mcp add yagura -- "C:\\Program Files\\y.exe"');
+
+    const longOutput = 'o'.repeat(8000);
+    const long = resultLines(
+      result({
+        steps: [step(['launcher', 'alpha', 'mcp', 'add', 'yagura'], 1, 1, longOutput)],
+        error: formatOutputBlock('the add step exited with 1'),
+      })
+    );
+    expect(long.text).toBe(
+      ['$ alpha mcp add yagura', longOutput, 'the add step exited with 1'].join('\n')
+    );
   });
 });
 

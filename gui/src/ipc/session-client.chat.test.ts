@@ -189,7 +189,7 @@ describe('narrowChatMessages', () => {
     });
   });
 
-  it('keeps the poster and participant names raw and strips what they may not show', () => {
+  it('keeps the poster and participant names raw and writes out what they may not show', () => {
     const messages = narrowChatMessages(
       chatMessagesWire({
         messages: [chatMessageWire({ from_name: 'win\u202Edow\u200B a\u0007' })],
@@ -197,13 +197,13 @@ describe('narrowChatMessages', () => {
       })
     );
     expect(messages.messages[0]?.from_name).toBe('win\u202Edow\u200B a\u0007');
-    expect(messages.messages[0]?.displayFromName).toBe('window a');
+    expect(messages.messages[0]?.displayFromName).toBe('win\\u{202E}dow\\u{200B} a ');
     expect(messages.roster).toEqual([
       {
         window_id: 'w-a',
         displayWindowId: 'w-a',
         name: 'win\u2066dow\uFEFF a',
-        displayName: 'window a',
+        displayName: 'win\\u{2066}dow\\u{FEFF} a',
       },
     ]);
   });

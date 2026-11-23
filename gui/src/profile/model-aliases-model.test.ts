@@ -401,7 +401,7 @@ describe('choicesFailureLine', () => {
   it('folds the line breaks and control characters of a reported reason', () => {
     expect(
       choicesFailureLine({ kind: 'reported', reason: foldedFailureReason('cli\r\nmissing\u202E') })
-    ).toBe(plans.modelChoicesFailed(foldExternalText('cli missing')));
+    ).toBe(plans.modelChoicesFailed(foldExternalText('cli missing\u202E')));
   });
 
   it('says the request timed out for an overdue list', () => {

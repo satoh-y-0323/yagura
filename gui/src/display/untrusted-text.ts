@@ -29,33 +29,34 @@ export type DisplayBlock = string & { readonly [displayBlockBrand]: true };
 export const MAX_DISPLAY_FIELD_CHARS = 4096;
 
 /**
- * Longest ticket body or result kept for display, in code points. The daemon
- * caps a body at 16 KiB of UTF-8, which is never more code points than this.
+ * Longest text of several lines the daemon sends kept for display, in code
+ * points: a ticket's body (`TICKET_BODY_MAX_BYTES`) and what an integration
+ * step printed (`STEP_OUTPUT_MAX_BYTES`). A UTF-8 cap in bytes is never more
+ * code points than this.
  */
-export const MAX_TICKET_TEXT_CHARS = 16 * 1024;
+export const MAX_BLOCK_TEXT_CHARS = 16 * 1024;
 
 /** Longest externally supplied reason kept on one line, in code points. */
 export const EXTERNAL_TEXT_MAX_CODE_POINTS = 200;
 
-/** The one list of hidden characters, as the body of a regular expression class. */
-const HIDDEN_CLASS =
-  '\\p{Cc}\\u061C\\u200B\\u200E\\u200F\\u2028\\u2029\\u2060\\uFEFF\\u202A-\\u202E\\u2066-\\u2069';
+/**
+ * The characters written out rather than drawn, taken from Unicode properties:
+ * controls, format characters, line and paragraph separators, and every default
+ * ignorable code point. They break a line, reorder what is drawn, or show
+ * nothing, so removing them would make one value look like another.
+ */
+const WRITTEN_OUT_CHARS = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}\p{Default_Ignorable_Code_Point}]/gu;
 
 /**
- * The hidden characters: the Unicode `Cc` category (C0, DEL, C1), the rest of
- * the daemon's forbidden label characters (`is_forbidden_label_char` in
- * `yagura-protocol`) and U+061C. They break a line, reorder what is drawn, or
- * have no width. ZWNJ and ZWJ are not among them: labels in some scripts and
- * emoji sequences need them.
+ * The characters written out in a value that points at a place: those of
+ * {@link WRITTEN_OUT_CHARS}, every space but U+0020, and U+2800, which all look
+ * like a plain space and would make one place look like another.
  */
-const HIDDEN_CHARS = new RegExp(`[${HIDDEN_CLASS}]`, 'gu');
+const PLACE_WRITTEN_OUT_CHARS =
+  /(?! )[\p{Cc}\p{Cf}\p{Zl}\p{Zp}\p{Default_Ignorable_Code_Point}\p{Zs}\u2800]/gu;
 
-/**
- * The characters written out rather than drawn: {@link HIDDEN_CHARS} plus every
- * default ignorable code point. Removing them is no defence where two values
- * must not look alike, since the removed form equals another value.
- */
-const WRITTEN_OUT_CHARS = new RegExp(`[${HIDDEN_CLASS}\\p{Default_Ignorable_Code_Point}]`, 'gu');
+/** The characters one line shows as a space each. */
+const LINE_SPACES = /[\p{Cc}\p{Zl}\p{Zp}]/gu;
 
 /** The form {@link writtenOut} gives a character. */
 const WRITTEN_OUT_FORM = /\\u\{[0-9A-F]{4,6}\}/g;
@@ -75,6 +76,23 @@ const COMBINING_KEYCAP = 0x20e3;
 const PICTOGRAPH = /^\p{Extended_Pictographic}$/u;
 const EMOJI_MODIFIER = /^\p{Emoji_Modifier}$/u;
 const KEYCAP_BASE = /^[0-9#*]$/;
+const BLACK_FLAG = 0x1f3f4;
+const TAG_FIRST = 0xe0020;
+const TAG_LAST_SPEC = 0xe007e;
+const CANCEL_TAG = 0xe007f;
+// A bound on the walk, not a rule: every RGI tag spec is far shorter.
+const MAX_TAG_SPEC_CHARS = 32;
+const RGI_EMOJI_TAG_SEQUENCE = rgiEmojiTagSequence();
+
+// The `v` flag is past the ES2020 target, so the pattern is built at run time.
+// Where a WebView cannot build it, tag characters stay written out.
+function rgiEmojiTagSequence(): RegExp | null {
+  try {
+    return new RegExp('^\\p{RGI_Emoji_Tag_Sequence}$', 'v');
+  } catch {
+    return null;
+  }
+}
 
 function capCodePoints(value: string, maxChars: number): string {
   const codePoints = Array.from(value);
@@ -100,14 +118,55 @@ function codePointAfter(text: string, offset: number): string {
   return codePoint === undefined ? '' : String.fromCodePoint(codePoint);
 }
 
+function isTagSpec(codePoint: number | undefined): boolean {
+  return codePoint !== undefined && codePoint >= TAG_FIRST && codePoint <= TAG_LAST_SPEC;
+}
+
+/**
+ * True where the tag character at `offset` belongs to an RGI emoji tag
+ * sequence (a flag such as England's). Any other run of tags draws as its base
+ * alone while carrying text no reader sees.
+ */
+function inRgiTagSequence(offset: number, text: string): boolean {
+  if (RGI_EMOJI_TAG_SEQUENCE === null) {
+    return false;
+  }
+  let start = offset;
+  for (let walked = 0; isTagSpec(codePointBefore(text, start).codePointAt(0)); walked += 1) {
+    if (walked === MAX_TAG_SPEC_CHARS) {
+      return false;
+    }
+    start -= 2;
+  }
+  const base = codePointBefore(text, start);
+  if (base.codePointAt(0) !== BLACK_FLAG) {
+    return false;
+  }
+  let end = start;
+  for (let walked = 0; isTagSpec(text.codePointAt(end)); walked += 1) {
+    if (walked === MAX_TAG_SPEC_CHARS) {
+      return false;
+    }
+    end += 2;
+  }
+  if (text.codePointAt(end) !== CANCEL_TAG) {
+    return false;
+  }
+  return RGI_EMOJI_TAG_SEQUENCE.test(text.slice(start - base.length, end + 2));
+}
+
 /**
  * True where `char`, at `offset` in `text`, gives an emoji its shape: a
- * presentation selector right after a pictograph, the U+FE0F of a keycap, or a
- * ZWJ between two pictographs. Anywhere else such a character shows nothing,
- * so drawing it would let a writer carry text no reader sees.
+ * presentation selector right after a pictograph, the U+FE0F of a keycap, a
+ * ZWJ between two pictographs, or a tag of an RGI emoji tag sequence.
+ * Anywhere else such a character shows nothing, so drawing it would let a
+ * writer carry text no reader sees.
  */
 function shapesEmoji(char: string, offset: number, text: string): boolean {
   const codePoint = char.codePointAt(0);
+  if (codePoint !== undefined && codePoint >= TAG_FIRST && codePoint <= CANCEL_TAG) {
+    return inRgiTagSequence(offset, text);
+  }
   const before = codePointBefore(text, offset);
   const after = codePointAfter(text, offset + char.length);
   if (codePoint === VARIATION_SELECTOR_TEXT || codePoint === VARIATION_SELECTOR_EMOJI) {
@@ -134,35 +193,57 @@ function shapesNothing(): boolean {
 }
 
 /**
- * Caps `value` at `maxChars` code points, then writes out every hidden or
- * default ignorable character outside `keptControls`, and outside what
- * `drawn` keeps. Capping first never cuts an escape in half. Private, so no
- * caller can pick which characters stay unseen.
+ * Caps `value` at `maxChars` code points, then writes out every character of
+ * `writtenOutChars` outside `keptControls`, and outside what `drawn` keeps.
+ * Capping first keeps all of what the daemon accepted and never cuts an escape
+ * in half. Private, so no caller can pick which characters stay unseen.
  */
 function formatMultilineText(
   value: string,
   maxChars: number,
   keptControls: ReadonlySet<string>,
-  drawn: (char: string, offset: number, text: string) => boolean = shapesNothing
+  drawn: (char: string, offset: number, text: string) => boolean = shapesNothing,
+  writtenOutChars: RegExp = WRITTEN_OUT_CHARS
 ): string {
   return capCodePoints(value, maxChars).replace(
-    WRITTEN_OUT_CHARS,
+    writtenOutChars,
     (char: string, offset: number, text: string) =>
       keptControls.has(char) || drawn(char, offset, text) ? char : writtenOut(char)
   );
 }
 
 /**
- * Prepares one line of a label or of prose for display: strips the hidden
- * characters and caps the result at {@link MAX_DISPLAY_FIELD_CHARS} code
- * points. Use it for labels the daemon refuses these characters in at every
- * entry point, and for prose that names nothing. Never use it for a value
- * that points at a place (a path, a room name taken from a path): use
- * {@link formatPathForDisplay}.
+ * One line to read: each control or separator becomes one space, every other
+ * written-out character but an emoji shape is written out, and only then is
+ * the line capped at `maxChars` code points, so a line that grows by writing
+ * out still fits its place. A cut moves before a written-out character or a
+ * code point it would split, and is marked with `…` after the cap.
+ */
+function prepareLine(value: string, maxChars: number): DisplayLine {
+  const written = value
+    .replace(LINE_SPACES, ' ')
+    .replace(WRITTEN_OUT_CHARS, (char: string, offset: number, text: string) =>
+      shapesEmoji(char, offset, text) ? char : writtenOut(char)
+    );
+  const codePoints = Array.from(written);
+  if (codePoints.length <= maxChars) {
+    return written as DisplayLine;
+  }
+  const kept = codePoints.slice(0, maxChars).join('');
+  return `${written.slice(0, unsplitIndex(written, kept.length))}…` as DisplayLine;
+}
+
+/**
+ * Prepares one line of a label or of prose for display: each control or
+ * separator becomes one space, every invisible character but an emoji shape is
+ * written out (`\u{200C}`), and the result is capped at
+ * {@link MAX_DISPLAY_FIELD_CHARS} code points after writing out. Never use it
+ * for a value that points at a place (a path, a room name taken from a path):
+ * use {@link formatPathForDisplay}.
  * @param value the text to display
  */
 export function sanitizeForDisplay(value: string): DisplayLine {
-  return capCodePoints(value.replace(HIDDEN_CHARS, ''), MAX_DISPLAY_FIELD_CHARS) as DisplayLine;
+  return prepareLine(value, MAX_DISPLAY_FIELD_CHARS);
 }
 
 /**
@@ -184,13 +265,17 @@ export function formatApprovalBody(value: string): DisplayBlock {
  * Prepares one line that points at a place (a path, or a room name taken
  * from a path) for display. The daemon cannot refuse hidden characters in
  * such a value, and removing them would make it look like another place while
- * drawing them could reorder it, so every one, line breaks included, is
- * written out. Capped at {@link MAX_DISPLAY_FIELD_CHARS} code points before
- * escaping.
+ * drawing them could reorder it, so every one, line breaks and every space but
+ * U+0020 included, is written out. Capped at {@link MAX_DISPLAY_FIELD_CHARS}
+ * code points before escaping.
  * @param value the path or path-derived name to display
  */
 export function formatPathForDisplay(value: string): DisplayLine {
-  return formatMultilineText(value, MAX_DISPLAY_FIELD_CHARS, NO_CONTROLS) as DisplayLine;
+  return formatPlace(value, MAX_DISPLAY_FIELD_CHARS) as DisplayLine;
+}
+
+function formatPlace(value: string, maxChars: number): string {
+  return formatMultilineText(value, maxChars, NO_CONTROLS, shapesNothing, PLACE_WRITTEN_OUT_CHARS);
 }
 
 /**
@@ -212,13 +297,13 @@ export function formatChatBody(value: string): DisplayBlock {
 /**
  * Prepares a ticket's body, a result, or other ticket text of several lines,
  * by the chat body's rule except that tabs stay instead of carriage returns.
- * Capped at {@link MAX_TICKET_TEXT_CHARS} code points before escaping.
+ * Capped at {@link MAX_BLOCK_TEXT_CHARS} code points before escaping.
  * @param value the text to display
  */
 export function formatTicketText(value: string): DisplayBlock {
   return formatMultilineText(
     value,
-    MAX_TICKET_TEXT_CHARS,
+    MAX_BLOCK_TEXT_CHARS,
     TICKET_TEXT_KEPT_CONTROLS,
     shapesEmoji
   ) as DisplayBlock;
@@ -227,20 +312,20 @@ export function formatTicketText(value: string): DisplayBlock {
 /**
  * Prepares what an integration step printed, or its error, by the chat
  * body's rule except that tabs stay instead of carriage returns. Capped at
- * {@link MAX_DISPLAY_FIELD_CHARS} code points before escaping.
+ * {@link MAX_BLOCK_TEXT_CHARS} code points before escaping.
  * @param value the output to display
  */
 export function formatOutputBlock(value: string): DisplayBlock {
   return formatMultilineText(
     value,
-    MAX_DISPLAY_FIELD_CHARS,
+    MAX_BLOCK_TEXT_CHARS,
     OUTPUT_KEPT_CONTROLS,
     shapesEmoji
   ) as DisplayBlock;
 }
 
 function formatArgument(argument: string): string {
-  const written = formatMultilineText(argument, Infinity, NO_CONTROLS).replace(/"/g, '\\u{0022}');
+  const written = formatPlace(argument, Infinity).replace(/"/g, '\\u{0022}');
   // A space drawn as a space would hide where the element ends; an empty one would vanish.
   return written === '' || /\s/u.test(written) ? `"${written}"` : written;
 }
@@ -282,17 +367,18 @@ export function formatCommandLine(argv: readonly string[]): DisplayLine {
 }
 
 /**
- * Reduces text that came from outside the WebView to one display line: line
- * breaks, control characters and non-breaking whitespace are folded into
- * single spaces, the ends are trimmed, and the rest is capped at
- * {@link EXTERNAL_TEXT_MAX_CODE_POINTS} so that one message cannot take over
- * the notice area. Use it for reasons and notes; it changes how a name looks,
- * so names go through {@link sanitizeForDisplay}.
+ * Reduces a failure's reason to one display line: runs of line breaks,
+ * control characters and whitespace are folded into single spaces, the ends
+ * are trimmed, the rest is written out as {@link sanitizeForDisplay} writes
+ * it, and the result is capped at {@link EXTERNAL_TEXT_MAX_CODE_POINTS} code
+ * points after writing out, so that one message cannot take over the notice
+ * area. It changes how a name looks, so names go through
+ * {@link sanitizeForDisplay}.
  * @param text the external text, as it arrived
  */
 export function foldExternalText(text: string): DisplayLine {
-  const flattened = text.replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}\p{Zs}]+/gu, ' ').trim();
-  return capCodePoints(flattened, EXTERNAL_TEXT_MAX_CODE_POINTS) as DisplayLine;
+  const folded = text.replace(/[\p{Cc}\p{Zl}\p{Zp}\s]+/gu, ' ').trim();
+  return prepareLine(folded, EXTERNAL_TEXT_MAX_CODE_POINTS);
 }
 
 /** `index`, moved back to the start of a written-out character or a code point it falls inside. */
@@ -346,21 +432,14 @@ export function sliceUiText(text: UiText, start: number, end?: number): DisplayL
 
 /**
  * Lines of prepared text and of the UI's own text, joined by one line feed
- * each into one block. The whole is capped at {@link MAX_DISPLAY_FIELD_CHARS}
- * code points and marked with `…` when cut; a cut that would fall inside a
- * written-out character moves before it.
+ * each into one block. Nothing is cut: each part already holds its own cap,
+ * and cutting the whole would drop the last parts first.
  * @param parts the lines, in order
  */
 export function joinDisplayBlocks(
   parts: readonly (UiText | DisplayLine | DisplayBlock)[]
 ): DisplayBlock {
-  const joined = parts.join('\n');
-  const codePoints = Array.from(joined);
-  if (codePoints.length <= MAX_DISPLAY_FIELD_CHARS) {
-    return joined as DisplayBlock;
-  }
-  const kept = codePoints.slice(0, MAX_DISPLAY_FIELD_CHARS).join('');
-  return `${joined.slice(0, unsplitIndex(joined, kept.length))}…` as DisplayBlock;
+  return parts.join('\n') as DisplayBlock;
 }
 
 /**

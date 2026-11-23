@@ -219,7 +219,7 @@ describe('render.ts: unknown external keys fall back safely (contract (10), Engl
   it('describeThemeName: returns the name of an unrecognized (user-defined) theme, prepared for display', () => {
     expect(describeThemeName(english, 'my-custom-theme')).toBe('my-custom-theme');
     const hidden = String.fromCodePoint(0x202e);
-    expect(describeThemeName(english, `my-${hidden}theme`)).toBe('my-theme');
+    expect(describeThemeName(english, `my-${hidden}theme`)).toBe('my-\\u{202E}theme');
   });
 });
 

@@ -8,7 +8,6 @@
  * through an ownership test.
  */
 import {
-  foldExternalText,
   formatPathForDisplay,
   sanitizeForDisplay,
   type DisplayLine,
@@ -313,7 +312,7 @@ function readOptionalReport(record: UntrustedRecord, context: string): TaskRepor
   const path = readOptionalString(report, 'path', reportContext);
   return {
     outcome: requireReportOutcome(report, reportContext),
-    summary: foldExternalText(requireString(report, 'summary', reportContext)),
+    summary: sanitizeForDisplay(requireString(report, 'summary', reportContext)),
     path: path === null ? null : formatPathForDisplay(path),
     reported_at: requireNonNegativeInteger(report, 'reported_at', reportContext),
   };

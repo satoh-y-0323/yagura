@@ -36,7 +36,7 @@ describe('themeMarkOf', () => {
   it('falls back to the theme name, prepared for display, when no option carries it', () => {
     expect(themeMarkOf('gone', OPTIONS)).toEqual({ icon: 'palette', tooltip: 'Theme: gone' });
     const hidden = String.fromCodePoint(0x202e);
-    expect(themeMarkOf(`go${hidden}ne`, OPTIONS).tooltip).toBe('Theme: gone');
+    expect(themeMarkOf(`go${hidden}ne`, OPTIONS).tooltip).toBe('Theme: go\\u{202E}ne');
   });
 });
 

@@ -280,8 +280,7 @@ export function integrationGroups(
 
 /**
  * The text an operation's result leaves in the row's result area, and whether
- * it failed. The whole is capped, since every step's output is capped only on
- * its own.
+ * it failed.
  */
 export function resultLines(result: McpRegistrationResultPayload): {
   text: DisplayBlock;
