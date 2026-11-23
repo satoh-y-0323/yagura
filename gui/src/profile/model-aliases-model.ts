@@ -7,15 +7,21 @@
 import type { LaunchOptionAlias, ModelChoice, ModelChoiceSource } from '../ipc/model-boundary';
 import type { ProfileDetail } from '../ipc/profile-detail-boundary';
 import type { ProfileEntry } from '../ipc/session-client';
-import { foldExternalText, plans } from '../ui-messages';
+import type { UiText } from '../display/ui-text';
+import { sanitizeForDisplay, type DisplayLine } from '../display/untrusted-text';
+import { plans } from '../ui-messages';
 
 /** One alias as the editor shows it. */
 export interface AliasRow {
   alias: string;
+  /** `alias` for display. */
+  displayAlias: DisplayLine;
   /** The value shown, including an edit not yet saved. */
   value: string;
   /** The value the shipped profile gives the alias, `null` when it gives none. */
   shippedValue: string | null;
+  /** `shippedValue` for display, `null` exactly when `shippedValue` is. */
+  displayShippedValue: DisplayLine | null;
   /** Whether `value` differs from `shippedValue`. */
   edited: boolean;
   /**
@@ -27,8 +33,8 @@ export interface AliasRow {
 
 /** Why no model list can be shown. */
 export type ChoicesFailure =
-  /** A reason given by the daemon or the core, shown as it was given. */
-  | { kind: 'reported'; reason: string }
+  /** A reason given by the daemon or the core, prepared where it was received. */
+  | { kind: 'reported'; reason: DisplayLine }
   /** The requested list did not arrive within {@link CHOICES_FETCH_TIMEOUT_MS}. */
   | { kind: 'overdue' }
   /** A whole line chosen when the request failed, shown in place of the list as it is. */
@@ -43,7 +49,7 @@ export type ModelChoicesEntry =
       kind: 'answered';
       source: ModelChoiceSource | null;
       choices: ModelChoice[];
-      error: string | null;
+      error: DisplayLine | null;
       fetchedAtMs: number;
     }
   /** The request was refused or the answer did not arrive in time. */
@@ -142,19 +148,13 @@ export function isChoicesFetchOverdue(startedAtMs: number, nowMs: number): boole
   return nowMs - startedAtMs >= CHOICES_FETCH_TIMEOUT_MS;
 }
 
-/**
- * The line shown in place of the model list when none could be read. A
- * reported reason is the daemon's words, from its push or from a caught
- * value, so it is folded here for both.
- */
+/** The line shown in place of the model list when none could be read. */
 export function choicesFailureLine(failure: ChoicesFailure): string {
   if (failure.kind === 'line') {
     return failure.line;
   }
-  const reason =
-    failure.kind === 'reported'
-      ? foldExternalText(failure.reason)
-      : plans.modelChoicesOverdueReason;
+  const reason: UiText | DisplayLine =
+    failure.kind === 'reported' ? failure.reason : plans.modelChoicesOverdueReason;
   return plans.modelChoicesFailed(reason);
 }
 
@@ -166,8 +166,10 @@ function aliasRow(
 ): AliasRow {
   return {
     alias,
+    displayAlias: sanitizeForDisplay(alias),
     value,
     shippedValue,
+    displayShippedValue: shippedValue === null ? null : sanitizeForDisplay(shippedValue),
     edited: isEdited(value, shippedValue),
     valueMissingFromChoices: choices.length > 0 && !choices.some((choice) => choice.id === value),
   };

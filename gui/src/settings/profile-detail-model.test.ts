@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 
+import { formatPathForDisplay } from '../display/untrusted-text';
 import type { ProfileDetail, ProfileDetailEntry } from '../ipc/profile-detail-boundary';
+import { settings } from '../ui-messages';
 import {
   canSaveCommand,
   detailSections,
@@ -44,10 +46,22 @@ describe('detailSections', () => {
       ['model.args', '-m {value}'],
     ]);
     expect(sections.aliases).toEqual([
-      { key: 'model strong', text: 'my-model', shippedText: 'gpt-6-astra', changed: true },
+      {
+        key: 'model strong',
+        displayKey: formatPathForDisplay('model strong'),
+        text: 'my-model',
+        shippedText: 'gpt-6-astra',
+        changed: true,
+      },
     ]);
     expect(sections.environment).toEqual([
-      { key: 'TOKEN', text: 'x', shippedText: null, changed: true },
+      {
+        key: 'TOKEN',
+        displayKey: formatPathForDisplay('TOKEN'),
+        text: 'x',
+        shippedText: null,
+        changed: true,
+      },
     ]);
   });
 
@@ -170,7 +184,15 @@ describe('detailSections rows', () => {
     const sections = detailSections(
       detail([entry(['mcp', 'a'], 1, { changed: true }), entry(['mcp', 'b'], 2)])
     );
-    expect(sections.provided).toEqual([{ key: 'mcp', text: '', shippedText: null, changed: true }]);
+    expect(sections.provided).toEqual([
+      {
+        key: 'mcp',
+        displayKey: settings.profileProvidedLabels.mcp,
+        text: '',
+        shippedText: null,
+        changed: true,
+      },
+    ]);
   });
 
   it('marks a provided line changed when only a later value of the table is', () => {

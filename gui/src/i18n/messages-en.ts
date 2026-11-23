@@ -73,6 +73,9 @@ const EVENT_TIME = new Intl.DateTimeFormat('en', {
   hourCycle: 'h23',
 });
 
+// Hours and minutes as the system's locale writes them.
+const CLOCK_TIME = new Intl.DateTimeFormat(undefined, { hour: '2-digit', minute: '2-digit' });
+
 const NOTIFICATIONS_IN_APP_COLUMN = 'In app';
 
 /** One settings row per notice kind; a kind added to `NoticeCategory` fails to compile until it is named here. */
@@ -754,10 +757,14 @@ export const messagesEn = {
     modelShippedColumn: 'Shipped',
     modelChoicesFromProfile: 'Choices from this profile',
     modelChoicesFromCommand: 'Models from',
-    modelChoicesFetchedAt: (time: string): string => `· fetched ${time}`,
+    modelChoicesFetchedAt: (fetchedAtMs: number): string =>
+      `· fetched ${CLOCK_TIME.format(fetchedAtMs)}`,
     modelChoicesFetching: 'Fetching…',
-    modelChoicesFailed: (reason: string): string =>
+    modelChoicesFailed: (reason: UiText | DisplayLine): string =>
       `Could not read the model list: ${reason}. You can still type model names.`,
+    /** One model of the list: its id, then its display name when the list gives one. */
+    modelChoiceOption: (id: DisplayLine, label: DisplayLine | null): string =>
+      label === null ? `${id}` : `${id} · ${label}`,
     modelChoicesOverdueReason: 'the request timed out',
     modelOtherOption: 'Other…',
     modelEditedMark: 'edited',
@@ -765,7 +772,7 @@ export const messagesEn = {
     discardModelAliasesButton: 'Discard',
     refreshModelChoicesLabel: 'Refresh the model list',
     resetToShippedLabel: 'Reset to the shipped value',
-    modelForAliasLabel: (alias: string): string => `Model for ${alias}`,
+    modelForAliasLabel: (alias: DisplayLine): string => `Model for ${alias}`,
   },
 
   // The Tickets tab of the plans panel: the board of one repository and one
@@ -854,34 +861,38 @@ export const messagesEn = {
     profileShowDetails: 'Details',
     profileHideDetails: 'Hide details',
     profileDetailLoading: 'Reading the profile…',
-    profileDetailFailed: (reason: string): string => `Could not read this profile: ${reason}`,
+    profileDetailFailed: (reason: DisplayLine): string => `Could not read this profile: ${reason}`,
     profileChanged: 'Changed',
     profileShipped: 'Shipped',
-    profileShippedValue: (value: string): string => `shipped: ${value}`,
-    profileCommandHeading: (os: string): string => `Command on ${os}`,
+    profileShippedValue: (value: DisplayLine): string => `shipped: ${value}`,
+    profileCommandHeading: (os: UiText): string => `Command on ${os}`,
+    /** The operating system a command heading names, by keyboard platform. */
+    profilePlatformNames: { windows: 'Windows', mac: 'macOS', linux: 'Linux' },
     profileArgumentLabel: (index: number): string => `Argument ${index}`,
     profileRemoveArgument: (index: number): string => `Remove argument ${index}`,
     profileAddArgument: 'Add argument',
     profileSaveCommand: 'Save',
     profileDiscardCommand: 'Discard',
-    profileResetCommand: (shipped: string): string => `Reset to shipped (${shipped})`,
-    profileCommandFailed: (reason: string): string => `Could not save the command: ${reason}`,
+    profileResetCommand: (shipped: DisplayLine): string => `Reset to shipped (${shipped})`,
+    profileCommandFailed: (reason: DisplayLine): string => `Could not save the command: ${reason}`,
     profileAliasesHeading: 'Model aliases',
     profileEditInModels: 'Edit in Plans → Models',
     profileLaunchHeading: 'Launch',
     profileEnvironmentHeading: 'Environment',
     profileShowValues: 'Show',
     profileHideValues: 'Hide',
+    /** Stands in for an environment value while the values are hidden. */
+    profileHiddenValue: '••••••••',
     profileProvidedHeading: 'Provided by yagura',
     profileProvidedIncluded: 'Included',
-    profileProvidedLabel: (table: string): string =>
-      ({
-        mcp: 'MCP server',
-        hooks: 'Status hooks',
-        mcp_registration: 'MCP registration',
-        'model.choices': 'Model list',
-        'effort.choices': 'Effort list',
-      })[table] ?? table,
+    /** The name of each table yagura provides; any other table is shown by its own name. */
+    profileProvidedLabels: {
+      mcp: 'MCP server',
+      hooks: 'Status hooks',
+      mcp_registration: 'MCP registration',
+      'model.choices': 'Model list',
+      'effort.choices': 'Effort list',
+    },
 
     approvalsTab: 'Approvals',
     approvalsDescription:

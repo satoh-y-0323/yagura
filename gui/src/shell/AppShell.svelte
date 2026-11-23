@@ -89,7 +89,7 @@
   import { writeClipboardText } from '../ipc/clipboard';
   import { pickFolder, subscribeFolderDrop } from '../ipc/folder-picker';
   import { startFramePull, type FramePull } from '../ipc/frame-pull';
-  import { caughtValueText, sanitizeForDisplay } from '../display/untrusted-text';
+  import { sanitizeForDisplay } from '../display/untrusted-text';
   import type { UiText } from '../display/ui-text';
   import {
     type ApprovalRequest,
@@ -1613,9 +1613,8 @@
           kind: 'failed',
           failure: {
             kind: 'line',
-            // choicesFailureLine folds the reason, as it does for a pushed error.
             line: commandFailureLine(error, () =>
-              choicesFailureLine({ kind: 'reported', reason: caughtValueText(error) })
+              choicesFailureLine({ kind: 'reported', reason: foldedFailureReason(error) })
             ),
           },
         });

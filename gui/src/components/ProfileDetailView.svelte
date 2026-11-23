@@ -4,15 +4,21 @@
    * with a Shipped / Changed chip, and the editor for this host's command.
    * No IPC: the shell reads and writes, and hands the results back here.
    */
+  import type { UiText } from '../display/ui-text';
   import type { ProfileDetail } from '../ipc/profile-detail-boundary';
-  import { canSaveCommand, detailSections, isCommandDirty } from '../settings/profile-detail-model';
+  import {
+    canSaveCommand,
+    detailSections,
+    isCommandDirty,
+    shippedCommandLine,
+  } from '../settings/profile-detail-model';
   import { settings } from '../ui-messages';
   import Icon from './Icon.svelte';
   import IconButton from './IconButton.svelte';
 
   export let detail: ProfileDetail | null;
   export let failure: string | null;
-  export let platformName: string;
+  export let platformName: UiText;
   export let isSavingCommand: boolean;
   export let commandFailure: string | null;
   export let onSaveCommand: (argv: string[]) => void;
@@ -30,7 +36,7 @@
   }
   $: sections = detail === null ? null : detailSections(detail);
   $: saved = detail?.command.argv ?? [];
-  $: shippedCommand = detail?.command.shipped ?? null;
+  $: shippedCommand = detail === null ? null : shippedCommandLine(detail.command);
 
   function updateArgument(index: number, value: string): void {
     edited = edited.map((item, at) => (at === index ? value : item));
@@ -105,8 +111,7 @@
             type="button"
             class="profile-detail__link"
             disabled={isSavingCommand}
-            on:click={onResetCommand}
-            >{settings.profileResetCommand(shippedCommand.join(' '))}</button
+            on:click={onResetCommand}>{settings.profileResetCommand(shippedCommand)}</button
           >
         {/if}
       </div>
@@ -128,7 +133,7 @@
           </h4>
           <div class="profile-detail__values">
             {#each group.rows as row (row.key)}
-              <span class="profile-detail__key">{row.key}</span>
+              <span class="profile-detail__key">{row.displayKey}</span>
               <span class="profile-detail__value"
                 >{row.text}{#if row.shippedText !== null}
                   <span class="profile-detail__hint">
@@ -163,8 +168,10 @@
         </h4>
         <div class="profile-detail__values">
           {#each sections.environment as row (row.key)}
-            <span class="profile-detail__key">{row.key}</span>
-            <span class="profile-detail__value">{showEnvironment ? row.text : '••••••••'}</span>
+            <span class="profile-detail__key">{row.displayKey}</span>
+            <span class="profile-detail__value"
+              >{showEnvironment ? row.text : settings.profileHiddenValue}</span
+            >
             <span>
               {#if detail.shippedBase}
                 <span class="profile-detail__chip" class:profile-detail__chip--changed={row.changed}
@@ -182,7 +189,7 @@
         <h4 class="profile-detail__heading">{settings.profileProvidedHeading}</h4>
         <div class="profile-detail__values">
           {#each sections.provided as row (row.key)}
-            <span class="profile-detail__key">{settings.profileProvidedLabel(row.key)}</span>
+            <span class="profile-detail__key">{row.displayKey}</span>
             <span class="profile-detail__value profile-detail__value--dim"
               >{settings.profileProvidedIncluded}</span
             >

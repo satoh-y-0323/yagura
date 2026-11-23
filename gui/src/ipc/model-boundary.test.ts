@@ -11,6 +11,7 @@
  */
 import { describe, it, expect } from 'vitest';
 
+import { formatCommandLine, sanitizeForDisplay } from '../display/untrusted-text';
 import {
   BoundaryError,
   narrowModelAliasesSaved,
@@ -90,7 +91,11 @@ describe('narrowModelChoicesPayload', () => {
     const result = narrowModelChoicesPayload(
       modelChoicesPayloadWire({ source: { kind: 'command', argv: ['codex', 'debug', 'models'] } })
     );
-    expect(result.source).toEqual({ kind: 'command', argv: ['codex', 'debug', 'models'] });
+    expect(result.source).toEqual({
+      kind: 'command',
+      argv: ['codex', 'debug', 'models'],
+      displayCommand: formatCommandLine(['codex', 'debug', 'models']),
+    });
   });
 
   it('defaults source to null when the key is absent', () => {
@@ -111,8 +116,8 @@ describe('narrowModelChoicesPayload', () => {
       })
     );
     expect(result.choices).toEqual([
-      { id: 'haiku', label: 'Haiku' },
-      { id: 'opus', label: null },
+      { id: 'haiku', displayId: sanitizeForDisplay('haiku'), label: 'Haiku' },
+      { id: 'opus', displayId: sanitizeForDisplay('opus'), label: null },
     ]);
   });
 
@@ -126,7 +131,9 @@ describe('narrowModelChoicesPayload', () => {
   it('defaults a choice label to null when the key is absent', () => {
     const wire = modelChoicesPayloadWire({ choices: [{ id: 'haiku' }] });
     const result = narrowModelChoicesPayload(wire);
-    expect(result.choices).toEqual([{ id: 'haiku', label: null }]);
+    expect(result.choices).toEqual([
+      { id: 'haiku', displayId: sanitizeForDisplay('haiku'), label: null },
+    ]);
   });
 
   it('carries the error text through untouched', () => {

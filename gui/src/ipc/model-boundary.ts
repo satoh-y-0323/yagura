@@ -8,6 +8,12 @@
  * through an ownership test.
  */
 import {
+  foldExternalText,
+  formatCommandLine,
+  sanitizeForDisplay,
+  type DisplayLine,
+} from '../display/untrusted-text';
+import {
   BoundaryError,
   readOptionalString,
   readOwnField,
@@ -32,14 +38,17 @@ export interface LaunchOptionAlias {
  * Where a profile's model list came from. A closed set, like the Rust enum it
  * mirrors: a `kind` outside it is refused rather than guessed at.
  */
-export type ModelChoiceSource = { kind: 'values' } | { kind: 'command'; argv: string[] };
+export type ModelChoiceSource =
+  { kind: 'values' } | { kind: 'command'; argv: string[]; displayCommand: DisplayLine };
 
 /** One model an alias may be set to. */
 export interface ModelChoice {
   /** The value stored for the alias. */
   id: string;
+  /** `id` for display. */
+  displayId: DisplayLine;
   /** A display name, `null` when the source offers none. */
-  label: string | null;
+  label: DisplayLine | null;
 }
 
 /** The immediate reply to `list_model_choices`: the request was accepted. */
@@ -55,8 +64,8 @@ export interface ModelChoicesPayload {
   /** Where the list came from, `null` when the profile declares no source. */
   source: ModelChoiceSource | null;
   choices: ModelChoice[];
-  /** Why the list could not be taken, `null` on success. */
-  error: string | null;
+  /** Why the list could not be taken, folded onto one line; `null` on success. */
+  error: DisplayLine | null;
 }
 
 /** The reply to `save_model_aliases`: the aliases as stored. */
@@ -103,13 +112,20 @@ export function narrowModelChoicesPayload(value: unknown): ModelChoicesPayload {
     source: readOptionalSource(record, context),
     choices: requireArray(readOwnField(record, 'choices'), choicesContext).map((entry) => {
       const choice = requireRecord(entry, choicesContext);
+      const id = requireString(choice, 'id', choicesContext);
+      const label = readOptionalString(choice, 'label', choicesContext);
       return {
-        id: requireString(choice, 'id', choicesContext),
-        label: readOptionalString(choice, 'label', choicesContext),
+        id,
+        displayId: sanitizeForDisplay(id),
+        label: label === null ? null : sanitizeForDisplay(label),
       };
     }),
-    error: readOptionalString(record, 'error', context),
+    error: foldedOrNull(readOptionalString(record, 'error', context)),
   };
+}
+
+function foldedOrNull(text: string | null): DisplayLine | null {
+  return text === null ? null : foldExternalText(text);
 }
 
 /**
@@ -148,8 +164,10 @@ function readOptionalSource(record: UntrustedRecord, context: string): ModelChoi
   switch (kind) {
     case 'values':
       return { kind };
-    case 'command':
-      return { kind, argv: requireStringArray(source, 'argv', sourceContext) };
+    case 'command': {
+      const argv = requireStringArray(source, 'argv', sourceContext);
+      return { kind, argv, displayCommand: formatCommandLine(argv) };
+    }
     default:
       throw new BoundaryError(`${sourceContext}.kind: unrecognized kind "${kind}"`);
   }

@@ -8,9 +8,9 @@
 import { describe, it, expect } from 'vitest';
 
 import type { LaunchOptionAlias, ModelChoice } from '../ipc/model-boundary';
-import { formatCommandLine, sanitizeForDisplay } from '../display/untrusted-text';
+import { foldExternalText, formatCommandLine, sanitizeForDisplay } from '../display/untrusted-text';
 import type { ProfileEntry } from '../ipc/session-client';
-import { plans } from '../ui-messages';
+import { foldedFailureReason, plans } from '../ui-messages';
 import {
   acceptsChoicesPush,
   aliasesToSave,
@@ -66,7 +66,7 @@ function alias(name: string, value: string): LaunchOptionAlias {
 }
 
 function choice(id: string): ModelChoice {
-  return { id, label: null };
+  return { id, displayId: sanitizeForDisplay(id), label: null };
 }
 
 /** The row for `alias`, or a thrown assertion failure when there is none. */
@@ -297,8 +297,10 @@ describe('model list edge cases', () => {
     expect(rows).toEqual([
       {
         alias: 'mine',
+        displayAlias: sanitizeForDisplay('mine'),
         value: 'x',
         shippedValue: null,
+        displayShippedValue: null,
         edited: false,
         valueMissingFromChoices: false,
       },
@@ -392,15 +394,15 @@ describe('isChoicesFetchOverdue boundary', () => {
 
 describe('choicesFailureLine', () => {
   it('shows the reason that was reported', () => {
-    expect(choicesFailureLine({ kind: 'reported', reason: 'cli missing' })).toBe(
-      plans.modelChoicesFailed('cli missing')
+    expect(choicesFailureLine({ kind: 'reported', reason: foldExternalText('cli missing') })).toBe(
+      plans.modelChoicesFailed(foldExternalText('cli missing'))
     );
   });
 
   it('folds the line breaks and control characters of a reported reason', () => {
-    expect(choicesFailureLine({ kind: 'reported', reason: 'cli\r\nmissing\u202E' })).toBe(
-      plans.modelChoicesFailed('cli missing')
-    );
+    expect(
+      choicesFailureLine({ kind: 'reported', reason: foldedFailureReason('cli\r\nmissing\u202E') })
+    ).toBe(plans.modelChoicesFailed(foldExternalText('cli missing')));
   });
 
   it('says the request timed out for an overdue list', () => {
@@ -408,7 +410,7 @@ describe('choicesFailureLine', () => {
       plans.modelChoicesFailed(plans.modelChoicesOverdueReason)
     );
     expect(choicesFailureLine({ kind: 'overdue' })).not.toBe(
-      choicesFailureLine({ kind: 'reported', reason: 'cli missing' })
+      choicesFailureLine({ kind: 'reported', reason: foldExternalText('cli missing') })
     );
   });
 });

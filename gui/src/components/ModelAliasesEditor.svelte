@@ -146,10 +146,6 @@
     rows = freshRows(selectedId);
     typedAliases = [];
   }
-
-  function fetchedTime(ms: number): string {
-    return new Date(ms).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-  }
 </script>
 
 <div class="model-aliases">
@@ -190,8 +186,8 @@
   {:else if listedSource?.kind === 'command'}
     <p class="model-aliases__source">
       <span>{plans.modelChoicesFromCommand}</span>
-      <code>{listedSource.argv.join(' ')}</code>
-      <span>{plans.modelChoicesFetchedAt(fetchedTime(fetchedAtMs))}</span>
+      <code>{listedSource.displayCommand}</code>
+      <span>{plans.modelChoicesFetchedAt(fetchedAtMs)}</span>
       <IconButton
         class="model-aliases__icon"
         label={plans.refreshModelChoicesLabel}
@@ -217,7 +213,7 @@
         {#each rows as row (row.alias)}
           <tr>
             <td class="model-aliases__alias">
-              {row.alias}
+              {row.displayAlias}
               {#if row.edited}
                 <span class="model-aliases__edited">{plans.modelEditedMark}</span>
               {/if}
@@ -225,14 +221,12 @@
             <td class="model-aliases__value">
               {#if listedChoices.length > 0 && !row.valueMissingFromChoices && !typedAliases.includes(row.alias)}
                 <select
-                  aria-label={plans.modelForAliasLabel(row.alias)}
+                  aria-label={plans.modelForAliasLabel(row.displayAlias)}
                   on:change={(event) => chooseValue(row.alias, event.currentTarget.value)}
                 >
                   {#each listedChoices as choice (choice.id)}
                     <option value={choice.id} selected={choice.id === row.value}
-                      >{choice.label === null
-                        ? choice.id
-                        : `${choice.id} · ${choice.label}`}</option
+                      >{plans.modelChoiceOption(choice.displayId, choice.label)}</option
                     >
                   {/each}
                   <option value="">{plans.modelOtherOption}</option>
@@ -240,7 +234,7 @@
               {:else}
                 <input
                   value={row.value}
-                  aria-label={plans.modelForAliasLabel(row.alias)}
+                  aria-label={plans.modelForAliasLabel(row.displayAlias)}
                   spellcheck="false"
                   on:input={(event) => editValue(row.alias, event.currentTarget.value)}
                 />
@@ -256,7 +250,7 @@
                 >
               </IconButton>
             </td>
-            <td class="model-aliases__shipped">{row.shippedValue ?? ''}</td>
+            <td class="model-aliases__shipped">{row.displayShippedValue}</td>
           </tr>
         {/each}
       </tbody>

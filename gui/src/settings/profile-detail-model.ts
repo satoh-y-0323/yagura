@@ -3,16 +3,29 @@
  * section each value belongs to, how it reads, and whether an edited command
  * may be saved. No IPC, no DOM.
  */
-import type { ProfileDetail, ProfileDetailEntry } from '../ipc/profile-detail-boundary';
+import {
+  formatCommandLine,
+  formatPathForDisplay,
+  type DisplayLine,
+} from '../display/untrusted-text';
+import type { UiText } from '../display/ui-text';
+import type {
+  ProfileCommandDetail,
+  ProfileDetail,
+  ProfileDetailEntry,
+} from '../ipc/profile-detail-boundary';
+import { settings } from '../ui-messages';
 
 /** One line of the details. */
 export interface DetailRow {
   /** What the line is about, as the profile file names it. */
   key: string;
+  /** What the line is about, for display: a provided table by its name, any other key as it is. */
+  displayKey: UiText | DisplayLine;
   /** The value in use, as text. */
-  text: string;
+  text: DisplayLine;
   /** The shipped value, only when the user's own value differs from it. */
-  shippedText: string | null;
+  shippedText: DisplayLine | null;
   /** Whether the user's own file sets the value. */
   changed: boolean;
 }
@@ -35,20 +48,32 @@ const SHOWN_ELSEWHERE = new Set(['schema', 'enabled', 'command']);
 /** Tables that describe what yagura hands the CLI rather than how it starts. */
 const PROVIDED_TABLES = new Set(['mcp', 'hooks', 'mcp_registration']);
 
-/** A JSON value as one line of text. */
-export function valueText(value: unknown): string {
+/**
+ * A JSON value as one display line. A profile's values are often paths and
+ * argv, so every hidden character is written out rather than dropped.
+ */
+export function valueText(value: unknown): DisplayLine {
   if (typeof value === 'string') {
-    return value;
+    return formatPathForDisplay(value);
   }
   if (Array.isArray(value) && value.every((item) => typeof item === 'string')) {
-    return value.join(' ');
+    return formatCommandLine(value);
   }
-  return JSON.stringify(value) ?? '';
+  return formatPathForDisplay(JSON.stringify(value) ?? '');
+}
+
+/** A provided table by the name yagura gives it, or by its own name when it has none. */
+function providedLabel(table: string): UiText | DisplayLine {
+  // Table names come from the profile file, so the lookup must not reach the prototype.
+  const labels: Readonly<Record<string, UiText>> = settings.profileProvidedLabels;
+  const label = Object.prototype.hasOwnProperty.call(labels, table) ? labels[table] : undefined;
+  return label ?? formatPathForDisplay(table);
 }
 
 function row(key: string, entry: ProfileDetailEntry): DetailRow {
   return {
     key,
+    displayKey: formatPathForDisplay(key),
     text: valueText(entry.value),
     shippedText:
       entry.changed && entry.shipped !== undefined && entry.shipped !== null
@@ -85,7 +110,14 @@ export function detailSections(detail: ProfileDetail): DetailSections {
     if (table !== null) {
       const existing = provided.get(table);
       if (existing === undefined) {
-        const line: DetailRow = { key: table, text: '', shippedText: null, changed: entry.changed };
+        const line: DetailRow = {
+          key: table,
+          displayKey: providedLabel(table),
+          // A provided line names its table and shows no value.
+          text: formatPathForDisplay(''),
+          shippedText: null,
+          changed: entry.changed,
+        };
         provided.set(table, line);
         sections.provided.push(line);
       } else {
@@ -100,6 +132,11 @@ export function detailSections(detail: ProfileDetail): DetailSections {
     }
   }
   return sections;
+}
+
+/** The shipped argv as one display line, `null` when there is no shipped profile. */
+export function shippedCommandLine(command: ProfileCommandDetail): DisplayLine | null {
+  return command.shipped === null ? null : formatCommandLine(command.shipped);
 }
 
 /** Whether an edited argv differs from the saved one. */
@@ -130,7 +167,7 @@ export interface ProfileDetailsState {
   /** The line shown when the last command save or reset failed. */
   commandFailure: string | null;
   /** The host operating system's name, as the command heading says it. */
-  platformName: string;
+  platformName: UiText;
 }
 
 /** What the Profiles tab reports back about details. */
@@ -144,6 +181,6 @@ export interface ProfileDetailActions {
 }
 
 /** The operating system name a keyboard platform stands for. */
-export function platformName(platform: 'windows' | 'mac' | 'linux'): string {
-  return { windows: 'Windows', mac: 'macOS', linux: 'Linux' }[platform];
+export function platformName(platform: 'windows' | 'mac' | 'linux'): UiText {
+  return settings.profilePlatformNames[platform];
 }
