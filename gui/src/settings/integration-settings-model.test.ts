@@ -317,7 +317,9 @@ describe('integrationGroups: state wording and tone', () => {
   it('names the key when only another key differs', () => {
     const view = viewOf('differs', { differsIn: ['call_timeout'] });
 
-    expect(view.stateLabel).toBe(text(settings.integrationDiffersIn('call_timeout')));
+    expect(view.stateLabel).toBe(
+      text(settings.integrationDiffersIn(sanitizeForDisplay('call_timeout')))
+    );
     expect(view.stateLabel).toContain('call_timeout');
     expect(view.stateLabel).not.toBe(text(settings.integrationDiffers));
     expect(view.stateTone).toBe('warn');
@@ -530,9 +532,11 @@ describe('integrationGroups: details of the state and the notes', () => {
 
   it('names the key that differs, or an empty one when the daemon named none', () => {
     expect(viewOf('differs', { differsIn: ['args'] }).stateLabel).toBe(
-      settings.integrationDiffersIn('args')
+      settings.integrationDiffersIn(sanitizeForDisplay('args'))
     );
-    expect(viewOf('differs', { differsIn: [] }).stateLabel).toBe(settings.integrationDiffersIn(''));
+    expect(viewOf('differs', { differsIn: [] }).stateLabel).toBe(
+      settings.integrationDiffersIn(sanitizeForDisplay(''))
+    );
   });
 
   it('lists each hook entry on a line of its own in the title', () => {

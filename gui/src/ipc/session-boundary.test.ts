@@ -1077,6 +1077,17 @@ describe('narrowApprovalRequest', () => {
       'test'
     );
     expect(request.text).toBe('hello from the requester');
+
+    // An approver sees every character that will run: unlike a chat body, even an emoji's ZWJ and
+    // presentation selector are written out.
+    const hidden = narrowApprovalRequest(
+      approvalRequestWire({
+        tool: 'send_message',
+        text: 'a\nb\u202Ec\u26A0\uFE0F\u200D\u26A0\uFE0Fd',
+      }),
+      'test'
+    );
+    expect(hidden.text).toBe('a\nb\\u{202E}c\u26A0\\u{FE0F}\\u{200D}\u26A0\\u{FE0F}d');
   });
 
   it('rejects a non-object value', () => {

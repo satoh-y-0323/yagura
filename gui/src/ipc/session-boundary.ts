@@ -9,8 +9,12 @@
  */
 import {
   caughtValueText,
+  formatApprovalBody,
+  formatChatBody,
   formatPathForDisplay,
   sanitizeForDisplay,
+  type DisplayBlock,
+  type DisplayLine,
 } from '../display/untrusted-text';
 import { parseLayoutJson, type LayoutV1 } from '../session/restore-model';
 import type { ApprovalRequesterKind, WithdrawReason } from '../session/approval-types';
@@ -321,16 +325,16 @@ export interface ApprovalRequester {
   kind: ApprovalRequesterKind;
   /** The requesting window's id, `null` when it did not come from one. */
   window_id: string | null;
-  /** The requesting window's display name, `null` when it has none. */
-  name: string | null;
+  /** The requesting window's display name, prepared for display; `null` when it has none. */
+  name: DisplayLine | null;
 }
 
 /** The window a pending approval request would act on. */
 export interface ApprovalTarget {
   /** The target window's id. */
   window_id: string;
-  /** The target window's display name. */
-  name: string;
+  /** The target window's display name, prepared for display. */
+  name: DisplayLine;
   /** The target's status when the request was submitted, not a live value. */
   status: WindowStatus;
 }
@@ -355,8 +359,11 @@ export interface ApprovalRequest {
    * exist yet (`exactOptionalPropertyTypes`).
    */
   target?: ApprovalTarget;
-  /** The message body, `null` for the operations that carry none. */
-  text: string | null;
+  /**
+   * The message body, prepared for display with every hidden character
+   * written out; `null` for the operations that carry none.
+   */
+  text: DisplayBlock | null;
   /**
    * The chat room a post is addressed to. `Some` only for `send_chat` /
    * `broadcast_chat`; omitted from the wire -- and from this object as an own
@@ -451,7 +458,7 @@ export interface ChatParticipant {
   /** The participant window's display name, as the daemon sent it. */
   name: string;
   /** `name` with the characters it must not draw removed, for rendering. */
-  displayName: string;
+  displayName: DisplayLine;
 }
 
 /** What kind of party posted a chat message. */
@@ -496,9 +503,10 @@ export type ChatDeliveryOutcome =
       /**
        * When the post is handed over, read off the window as it is now. The
        * boundary always sets it, `null` when the daemon sent none; a value
-       * built in-process may leave it off, which reads the same.
+       * built in-process may leave it off, which reads the same. Prepared for
+       * display.
        */
-      note?: string | null;
+      note?: DisplayLine | null;
     }
   | { state: 'undelivered_unknown'; reason: UnknownReason | null };
 
@@ -521,9 +529,9 @@ export interface ChatMessage {
   /** The poster's display name, as the daemon sent it. */
   from_name: string;
   /** `from_name` with the characters it must not draw removed, for rendering. */
-  displayFromName: string;
-  /** The message body, verbatim. */
-  body: string;
+  displayFromName: DisplayLine;
+  /** The message body, prepared for display by {@link formatChatBody}. */
+  body: DisplayBlock;
   /** Resolved window ids this message mentioned, plus `"user"` for `@user`. */
   mentions: string[];
   /** Whether this message was posted to every participant. */
@@ -550,8 +558,8 @@ export interface ChatPosted {
   targets: string[];
   /** Whether the post counts as addressed to (or from) the human user. */
   user: boolean;
-  /** Raw mention text that did not resolve to exactly one participant. */
-  unresolved: string[];
+  /** The mention text that did not resolve to exactly one participant, prepared for display. */
+  unresolved: DisplayLine[];
   /** Whether the room is halted as of this post. */
   halted: boolean;
 }
@@ -586,7 +594,7 @@ export interface ChatRoomInfo {
   /** The room's display name (the last path segment), as the daemon sent it. */
   name: string;
   /** `name` with its hidden characters written out visibly, for rendering. */
-  displayName: string;
+  displayName: DisplayLine;
   /** How many of the daemon's current participants belong to this room. */
   participant_count: number;
   /** Whether the room currently needs a human's attention. */
@@ -1363,7 +1371,13 @@ export function narrowApprovalRequest(
   const room =
     rawRoom === null || rawRoom === undefined ? null : narrowRoomRef(rawRoom, `${context}.room`);
   const text = readOptionalString(record, 'text', context);
-  const base: ApprovalRequest = { request_id, tool, requester, text };
+  const base: ApprovalRequest = {
+    request_id,
+    tool,
+    requester,
+    // An approver must see everything that will run, so the body's hidden characters are written out.
+    text: text === null ? null : formatApprovalBody(text),
+  };
   const withTarget = target === null ? base : { ...base, target };
   return room === null ? withTarget : { ...withTarget, room };
 }
@@ -1409,7 +1423,7 @@ function narrowApprovalRequester(value: unknown, context: string): ApprovalReque
   return {
     kind,
     window_id: requireString(record, 'window_id', context),
-    name: requireString(record, 'name', context),
+    name: sanitizeForDisplay(requireString(record, 'name', context)),
   };
 }
 
@@ -1434,7 +1448,7 @@ function narrowApprovalTarget(value: unknown, context: string): ApprovalTarget {
   const record = requireRecord(value, context);
   return {
     window_id: requireString(record, 'window_id', context),
-    name: requireString(record, 'name', context),
+    name: sanitizeForDisplay(requireString(record, 'name', context)),
     status: requireWindowStatus(record, 'status', context),
   };
 }
@@ -1453,7 +1467,7 @@ export function narrowChatPosted(value: unknown): ChatPosted {
     seq: requireInteger(record, 'seq', context),
     targets: requireStringArray(record, 'targets', context),
     user: requireBoolean(record, 'user', context),
-    unresolved: requireStringArray(record, 'unresolved', context),
+    unresolved: requireStringArray(record, 'unresolved', context).map(sanitizeForDisplay),
     halted: requireBoolean(record, 'halted', context),
   };
 }
@@ -1571,7 +1585,7 @@ function narrowChatMessage(value: unknown, context: string): ChatMessage {
     from_window_id: readOptionalString(record, 'from_window_id', context),
     from_name: fromName,
     displayFromName: sanitizeForDisplay(fromName),
-    body: requireString(record, 'body', context),
+    body: formatChatBody(requireString(record, 'body', context)),
     mentions: requireStringArray(record, 'mentions', context),
     broadcast: requireBoolean(record, 'broadcast', context),
     deliveries: requireArray(readOwnField(record, 'deliveries'), deliveriesContext).map((entry) =>
@@ -2278,7 +2292,8 @@ function readChatDeliveryOutcome(record: UntrustedRecord, context: string): Chat
     return { state, reason };
   }
   if (state === 'queued') {
-    return { state, note: readOptionalString(record, 'note', context) };
+    const note = readOptionalString(record, 'note', context);
+    return { state, note: note === null ? null : sanitizeForDisplay(note) };
   }
   return { state };
 }

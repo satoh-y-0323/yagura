@@ -5,6 +5,8 @@
  * behind. No IPC, no DOM: the component renders these values and hands the
  * switch back to its caller.
  */
+import { sanitizeForDisplay, type DisplayLine } from '../display/untrusted-text';
+import type { UiText } from '../display/ui-text';
 import type { ApprovalSettingsInfo } from '../ipc/session-client';
 import { settings } from '../ui-messages';
 
@@ -14,22 +16,27 @@ type KnownApprovalTool = keyof typeof settings.approvalToolInfo;
 /** The playbook key of the plan gate, shown as the plan row's id: the gate has no per-item id on the wire. */
 export const PLAN_REVIEW_GATE_ID = 'require_approval';
 
+/** {@link PLAN_REVIEW_GATE_ID}, prepared for display. */
+export const PLAN_REVIEW_GATE_DISPLAY_ID = sanitizeForDisplay(PLAN_REVIEW_GATE_ID);
+
 const KNOWN_APPROVAL_TOOLS: ReadonlySet<string> = new Set(Object.keys(settings.approvalToolInfo));
 
 /** What one row of the Approvals tab's tool list shows. */
 export interface ApprovalToolRow {
   /** The tool's wire name. */
   id: string;
+  /** `id`, prepared for display. */
+  displayId: DisplayLine;
   /** The tool's display name, or its id when this build does not know it. */
-  name: string;
+  name: UiText | DisplayLine;
   /** What the tool does, `null` for a tool this build does not know. */
-  description: string | null;
+  description: UiText | null;
   /** What can happen once the tool runs automatically, `null` when unknown. */
-  risk: string | null;
+  risk: UiText | null;
   /** Whether this tool currently runs without waiting for approval. */
   autoApprove: boolean;
   /** "Runs automatically" / "Waits for approval". */
-  stateLabel: string;
+  stateLabel: UiText;
   /** Whether the risk line should be shown in its emphasized color. */
   isRiskEmphasized: boolean;
 }
@@ -39,9 +46,9 @@ export interface PlanReviewRow {
   /** Whether a newly created plan currently waits for review before it runs. */
   required: boolean;
   /** "Review first" / "Runs without review". */
-  stateLabel: string;
+  stateLabel: UiText;
   /** What can happen once a plan is not reviewed, `null` while it is. */
-  risk: string | null;
+  risk: UiText | null;
 }
 
 /**
@@ -63,7 +70,8 @@ export function approvalToolRows(info: ApprovalSettingsInfo): ApprovalToolRow[] 
     const known = knownToolInfo(tool.tool);
     return {
       id: tool.tool,
-      name: known?.name ?? tool.tool,
+      displayId: tool.displayTool,
+      name: known?.name ?? tool.displayTool,
       description: known?.description ?? null,
       risk: known?.risk ?? null,
       autoApprove: tool.autoApprove,
@@ -90,7 +98,7 @@ export function planReviewRow(info: ApprovalSettingsInfo): PlanReviewRow {
  * The one line explaining why the Approvals tab cannot be trusted or edited
  * right now, `null` when there is nothing to say.
  */
-export function approvalSettingsNotice(info: ApprovalSettingsInfo | null): string | null {
+export function approvalSettingsNotice(info: ApprovalSettingsInfo | null): UiText | null {
   if (info === null) {
     return null;
   }
@@ -117,11 +125,12 @@ export function isApprovalSettingsReadOnly(info: ApprovalSettingsInfo | null): b
  */
 export function approvalUpdateFailure(
   id: string,
-  reason: string,
+  reason: DisplayLine,
   wasOn: boolean,
   kind: 'tool' | 'plan'
-): string {
+): UiText {
+  const shownId = sanitizeForDisplay(id);
   return kind === 'tool'
-    ? settings.approvalToolUpdateFailure(id, reason, wasOn)
-    : settings.planUpdateFailure(id, reason, wasOn);
+    ? settings.approvalToolUpdateFailure(shownId, reason, wasOn)
+    : settings.planUpdateFailure(shownId, reason, wasOn);
 }

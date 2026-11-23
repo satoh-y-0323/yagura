@@ -3,6 +3,7 @@
  * told when the daemon refuses to remove one.
  */
 import { commandFailureLine, commandRejectionCode } from '../command-failure-model';
+import type { UiText } from '../display/ui-text';
 import { MAIN_CHAT_ROOM_ID, ROOM_IN_USE_CODE, type ChatRoomInfo } from '../ipc/session-boundary';
 import { chat, describeOperationFailure } from '../ui-messages';
 
@@ -15,7 +16,7 @@ const INVALID_ARGUMENT_CODE = 'invalid_argument';
  *
  * @param room the row the menu was opened on
  */
-export function roomDeleteNote(room: ChatRoomInfo): string | null {
+export function roomDeleteNote(room: ChatRoomInfo): UiText | null {
   if (room.room_id === MAIN_CHAT_ROOM_ID) {
     return chat.deleteMainRoomNote;
   }

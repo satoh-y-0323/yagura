@@ -132,12 +132,6 @@ describe('ApprovalDialog.svelte: decide_approval invocation', () => {
   });
 });
 
-describe('ApprovalDialog.svelte: body display (full text, sanitized, no remaining-time display)', () => {
-  it('passes the body text through a sanitize call before display', () => {
-    expect(source).toMatch(/sanitize\w*\(/);
-  });
-});
-
 describe('AppShell.svelte: the approval gate goes through isApprovalDialogAllowed', () => {
   it('the isOpen expression passed to <ApprovalDialog> calls isApprovalDialogAllowed(', () => {
     const tag = openingTag(appSource, '<ApprovalDialog');

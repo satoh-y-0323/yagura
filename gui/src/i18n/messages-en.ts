@@ -78,6 +78,8 @@ const CLOCK_TIME = new Intl.DateTimeFormat(undefined, { hour: '2-digit', minute:
 
 const NOTIFICATIONS_IN_APP_COLUMN = 'In app';
 
+const APPROVAL_TITLE = 'Approval required';
+
 /** One settings row per notice kind; a kind added to `NoticeCategory` fails to compile until it is named here. */
 const NOTIFICATION_ROWS: Readonly<Record<NoticeCategory, { name: string; description: string }>> = {
   'needs-approval': {
@@ -256,11 +258,16 @@ export const messagesEn = {
     closeConfirm: 'This window will be closed. Continue?',
     interruptConfirm: 'This process will be interrupted. Continue?',
     renameTitle: 'Rename window',
-    approvalTitle: 'Approval required',
+    approvalTitle: APPROVAL_TITLE,
+    /** The approval dialog's title while more than one request waits. */
+    approvalTitleCount: (count: number): string => `${APPROVAL_TITLE} (${count})`,
     approvalRequesterExternal: 'External client',
 
     /** Shown when the requesting window is no longer in the window list. */
-    approvalRequesterGone: (name: string): string => `Window ${name} (closed)`,
+    approvalRequesterGone: (name: DisplayLine): string => `Window ${name} (closed)`,
+
+    /** Names a request's target window with its status when the request was submitted. */
+    approvalTargetWindow: (name: DisplayLine, status: UiText): string => `${name} (${status})`,
 
     /** Stands in for a target window when the request names no room either. */
     approvalTargetRoom: 'the chat room',
@@ -269,7 +276,7 @@ export const messagesEn = {
     approvalTargetNewWindow: 'a new window',
 
     /** Names the chat room a request is addressed to, when it names one. */
-    describeApprovalRoom: (name: string): string => `the chat room “${name}”`,
+    describeApprovalRoom: (name: DisplayLine): string => `the chat room “${name}”`,
   },
 
   forms: {
@@ -521,6 +528,8 @@ export const messagesEn = {
   formats: {
     /** When a notification event was recorded, `HH:mm` in local time. */
     eventTime: (date: Date): string => EVENT_TIME.format(date),
+    /** When a chat message was posted, in the system locale's hours and minutes. */
+    chatPostedAt: (atMs: number): string => CLOCK_TIME.format(atMs),
     windowListTitle: (label: string, count: number): string => `${label} (${count})`,
 
     /** Plural form policy lives with the resource, not the machinery. */
@@ -632,7 +641,7 @@ export const messagesEn = {
     haltedUnknown: 'The room stopped. Write something to start it again.',
 
     /** `mentions` arrive written as mentions (`@name`), in the order the daemon reported them. */
-    unresolvedMentions: (mentions: readonly string[]): string =>
+    unresolvedMentions: (mentions: readonly DisplayLine[]): string =>
       `Not delivered to ${englishList(mentions)}: no one in this room has ${
         mentions.length === 1 ? 'that name' : 'those names'
       }. The message stays in the room.`,
@@ -642,7 +651,7 @@ export const messagesEn = {
     deliveryTaken: 'Delivered',
     deliveryUndeliveredUnknown: 'Not sent (status unknown)',
     /** The reason-aware variant, shown when the daemon reported why the addressed window's status is unknown. */
-    deliveryUndeliveredUnknownReason: (word: string): string =>
+    deliveryUndeliveredUnknownReason: (word: UiText): string =>
       `Not sent (status unknown: ${word})`,
     deliveryUndeliveredHalted: 'Not sent (room halted)',
     deliveryUndeliveredExhausted: 'Not sent (too many deliveries)',
@@ -660,7 +669,7 @@ export const messagesEn = {
       count === 0 ? 'no windows' : count === 1 ? '1 participant' : `${count} participants`,
     roomStoppedLabel: 'Room stopped',
     roomNeedsYouLabel: 'This room needs you',
-    broadcastConfirmRoomMessage: (name: string): string =>
+    broadcastConfirmRoomMessage: (name: DisplayLine): string =>
       `This message goes to every participant in the chat room “${name}”. Continue?`,
 
     // The room rail's per-room menu and its confirmations.
@@ -946,7 +955,8 @@ export const messagesEn = {
       },
     },
 
-    approvalToolSwitchLabel: (name: string): string => `Automatically approve: ${name}`,
+    approvalToolSwitchLabel: (name: UiText | DisplayLine): string =>
+      `Automatically approve: ${name}`,
     planReviewSwitchLabel: 'Review new plans before they run',
     planReviewDescription:
       'A new plan waits for you to approve it before any of its task windows can open.',
@@ -975,11 +985,11 @@ export const messagesEn = {
      * duplicate a literal already used elsewhere as code, and those two words
      * are already in use as field names at the IPC boundary).
      */
-    approvalToolUpdateFailure: (id: string, reason: string, wasOn: boolean): string =>
+    approvalToolUpdateFailure: (id: DisplayLine, reason: DisplayLine, wasOn: boolean): string =>
       `Could not update ${id}: ${reason}. ${
         wasOn ? APPROVAL_STILL_RUNS_AUTOMATICALLY : APPROVAL_STILL_WAITS_FOR_APPROVAL
       }`,
-    planUpdateFailure: (id: string, reason: string, wasOn: boolean): string =>
+    planUpdateFailure: (id: DisplayLine, reason: DisplayLine, wasOn: boolean): string =>
       `Could not update ${id}: ${reason}. ${
         wasOn ? PLAN_STILL_REVIEWS_FIRST : PLAN_STILL_RUNS_WITHOUT_REVIEW
       }`,
@@ -1001,7 +1011,7 @@ export const messagesEn = {
     integrationUnknown: 'Unknown',
     integrationChecking: 'Checking…',
     // `args` is a wire key, not an English noun, so it gets a phrase of its own.
-    integrationDiffersIn: (key: string): string =>
+    integrationDiffersIn: (key: DisplayLine): string =>
       key === 'args' ? 'Registered with different arguments' : `Registered with a different ${key}`,
     integrationRegisterButton: 'Register',
     integrationUpdateButton: 'Update',

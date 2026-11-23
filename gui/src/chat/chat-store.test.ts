@@ -20,6 +20,11 @@ import {
   roomAfterRemoval,
   type ChatHistory,
 } from './chat-store';
+import {
+  formatChatBody,
+  formatPathForDisplay,
+  sanitizeForDisplay,
+} from '../display/untrusted-text';
 import { chat, describeDeliveryState } from '../ui-messages';
 import type {
   ChatChanged,
@@ -37,8 +42,8 @@ function message(seq: number, overrides: Partial<ChatMessage> = {}): ChatMessage
     from_kind: 'window',
     from_window_id: 'w-a',
     from_name: 'builder',
-    displayFromName: 'builder',
-    body: `body ${seq}`,
+    displayFromName: sanitizeForDisplay('builder'),
+    body: formatChatBody(`body ${seq}`),
     mentions: [],
     broadcast: false,
     deliveries: [],
@@ -60,8 +65,8 @@ function page(overrides: Partial<ChatMessages> = {}): ChatMessages {
 }
 
 const ROSTER: ChatParticipant[] = [
-  { window_id: 'w-a', name: 'builder', displayName: 'builder' },
-  { window_id: 'w-b', name: 'reviewer', displayName: 'reviewer' },
+  { window_id: 'w-a', name: 'builder', displayName: sanitizeForDisplay('builder') },
+  { window_id: 'w-b', name: 'reviewer', displayName: sanitizeForDisplay('reviewer') },
 ];
 
 /** A `chat_changed` payload for the room `main`. */
@@ -74,7 +79,7 @@ function roomInfo(overrides: Partial<ChatRoomInfo> = {}): ChatRoomInfo {
   return {
     room_id: 'main',
     name: 'main',
-    displayName: 'main',
+    displayName: formatPathForDisplay('main'),
     participant_count: 0,
     needs_user: false,
     halted: null,
@@ -148,7 +153,10 @@ describe('mergeChatMessages: message list', () => {
     const merged = mergeChatMessages(
       emptyChatRoom('main'),
       page({
-        messages: [message(1, { body: 'first' }), message(1, { body: 'second' })],
+        messages: [
+          message(1, { body: formatChatBody('first') }),
+          message(1, { body: formatChatBody('second') }),
+        ],
         next_after_seq: 1,
       })
     );
@@ -327,7 +335,7 @@ describe('resolveDisplayName', () => {
           message(1, {
             from_window_id: 'w-c',
             from_name: 'closed-window',
-            displayFromName: 'closed-window',
+            displayFromName: sanitizeForDisplay('closed-window'),
           }),
         ],
         next_after_seq: 1,
@@ -345,7 +353,7 @@ describe('resolveDisplayName', () => {
           message(1, {
             from_window_id: 'w-a',
             from_name: 'stale-name',
-            displayFromName: 'stale-name',
+            displayFromName: sanitizeForDisplay('stale-name'),
           }),
         ],
         next_after_seq: 1,
@@ -368,11 +376,13 @@ describe('resolveDisplayName', () => {
           message(1, {
             from_window_id: 'w-c',
             from_name: 'clo\u202Esed\u200B',
-            displayFromName: 'closed',
+            displayFromName: sanitizeForDisplay('closed'),
           }),
         ],
         next_after_seq: 1,
-        roster: [{ window_id: 'w-a', name: 'bui\u2066lder', displayName: 'builder' }],
+        roster: [
+          { window_id: 'w-a', name: 'bui\u2066lder', displayName: sanitizeForDisplay('builder') },
+        ],
       })
     );
     expect(resolveDisplayName(state, 'w-a')).toBe('builder');
@@ -451,7 +461,7 @@ describe('applyChatChangedToRooms: a room already in the list', () => {
       roomInfo({
         room_id: 'r-yagura',
         name: 'yagura',
-        displayName: 'yagura',
+        displayName: formatPathForDisplay('yagura'),
         participant_count: 3,
         needs_user: false,
         halted: { reason: 'monologue', since_ms: 1_700_000_000_000 },
@@ -555,14 +565,22 @@ describe('resolveDisplayName: the most recent message wins', () => {
           message(1, {
             from_window_id: 'w-c',
             from_name: 'first-name',
-            displayFromName: 'first-name',
+            displayFromName: sanitizeForDisplay('first-name'),
           }),
-          message(2, { from_window_id: 'w-d', from_name: 'other', displayFromName: 'other' }),
-          message(3, { from_window_id: 'w-c', from_name: 'renamed', displayFromName: 'renamed' }),
+          message(2, {
+            from_window_id: 'w-d',
+            from_name: 'other',
+            displayFromName: sanitizeForDisplay('other'),
+          }),
+          message(3, {
+            from_window_id: 'w-c',
+            from_name: 'renamed',
+            displayFromName: sanitizeForDisplay('renamed'),
+          }),
           message(4, {
             from_window_id: 'w-d',
             from_name: 'other-later',
-            displayFromName: 'other-later',
+            displayFromName: sanitizeForDisplay('other-later'),
           }),
         ],
         next_after_seq: 4,

@@ -1,9 +1,12 @@
 <script lang="ts">
-  import { formatApprovalBody, sanitizeForDisplay } from '../display/untrusted-text';
   import type { ApprovalRequest } from '../ipc/session-boundary';
   import { isWithinGuard } from '../session/approval-queue';
-  import { describeUntargeted } from '../session/approval-target';
-  import { buttons, dialogs, describeStatus } from '../ui-messages';
+  import {
+    approvalToolName,
+    describeApprovalRequester,
+    describeApprovalTarget,
+  } from '../session/approval-target';
+  import { buttons, dialogs } from '../ui-messages';
   import Icon from './Icon.svelte';
   import ModalDialog from './ModalDialog.svelte';
 
@@ -25,26 +28,10 @@
   const failureNoteId = 'approval-decision-failed';
   $: describedBy = decisionFailure !== null ? failureNoteId : undefined;
 
-  $: requesterName = sanitizeForDisplay(request.requester.name ?? '');
-  $: requesterLabel =
-    request.requester.kind === 'window'
-      ? isRequesterOpen
-        ? requesterName
-        : dialogs.approvalRequesterGone(requesterName)
-      : dialogs.approvalRequesterExternal;
-  $: targetLabel = describeTarget(request);
-  // The body is lines of what will run; hidden characters are shown escaped.
-  $: body = request.text === null ? '' : formatApprovalBody(request.text);
-  $: title =
-    pendingCount > 1 ? `${dialogs.approvalTitle} (${pendingCount})` : dialogs.approvalTitle;
-
-  function describeTarget(pending: ApprovalRequest): string {
-    const target = pending.target;
-    if (target !== undefined) {
-      return `${sanitizeForDisplay(target.name)} (${describeStatus(target.status)})`;
-    }
-    return describeUntargeted(pending);
-  }
+  $: requesterLabel = describeApprovalRequester(request, isRequesterOpen);
+  $: toolLabel = approvalToolName(request);
+  $: targetLabel = describeApprovalTarget(request);
+  $: title = pendingCount > 1 ? dialogs.approvalTitleCount(pendingCount) : dialogs.approvalTitle;
 
   function handleDeny(): void {
     if (isWithinGuard(openedAt, Date.now())) {
@@ -80,9 +67,9 @@
         {decisionFailure}
       </p>
     {/if}
-    <p class="dialog-message">{requesterLabel} → {request.tool} → {targetLabel}</p>
-    {#if body !== ''}
-      <pre class="approval-body">{body}</pre>
+    <p class="dialog-message">{requesterLabel} → {toolLabel} → {targetLabel}</p>
+    {#if request.text !== null && request.text !== ''}
+      <pre class="approval-body">{request.text}</pre>
     {/if}
     <div class="dialog-actions">
       <!-- The dialog focusing steps pick the autofocus element, so initial focus is always the

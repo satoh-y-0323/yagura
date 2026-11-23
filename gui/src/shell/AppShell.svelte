@@ -39,6 +39,7 @@
     emptyChatRoom,
     foldChatPage,
     roomAfterRemoval,
+    roomDisplayName,
     type ChatHistory,
     type ChatRoomState,
   } from '../chat/chat-store';
@@ -89,7 +90,6 @@
   import { writeClipboardText } from '../ipc/clipboard';
   import { pickFolder, subscribeFolderDrop } from '../ipc/folder-picker';
   import { startFramePull, type FramePull } from '../ipc/frame-pull';
-  import { sanitizeForDisplay } from '../display/untrusted-text';
   import type { UiText } from '../display/ui-text';
   import {
     type ApprovalRequest,
@@ -234,7 +234,7 @@
   import * as approvalQueue from '../session/approval-queue';
   import { appHidden } from '../session/app-visibility';
   import { isApprovalDialogAllowed } from '../session/modal-state';
-  import { describeUntargeted } from '../session/approval-target';
+  import { approvalTargetName, approvalToolName } from '../session/approval-target';
   import type { WithdrawReason } from '../session/approval-types';
   import {
     plansAttention,
@@ -908,7 +908,7 @@
     })),
   ];
 
-  $: currentRoomName = chatRooms.get(currentRoomId)?.displayName ?? currentRoomId;
+  $: currentRoomName = roomDisplayName(chatRooms.get(currentRoomId), currentRoomId);
   $: confirmWording =
     confirmDialog.operation === 'broadcast'
       ? {
@@ -2049,14 +2049,9 @@
         approvalQueue.wasShown(approvals, requestId),
         reason,
         {
-          requester: sanitizeForDisplay(
-            request.requester.name ?? dialogs.approvalRequesterExternal
-          ),
-          tool: request.tool,
-          target:
-            request.target !== undefined
-              ? sanitizeForDisplay(request.target.name)
-              : describeUntargeted(request),
+          requester: request.requester.name ?? dialogs.approvalRequesterExternal,
+          tool: approvalToolName(request),
+          target: approvalTargetName(request),
         }
       );
     }

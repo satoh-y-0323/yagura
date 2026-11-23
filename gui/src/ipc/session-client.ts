@@ -611,6 +611,8 @@ export interface ToolAutoApprove {
    * still a row the user can switch on or off.
    */
   tool: string;
+  /** `tool`, prepared for display. */
+  displayTool: DisplayLine;
   /** Whether this tool currently runs without waiting for approval. */
   autoApprove: boolean;
 }
@@ -643,8 +645,10 @@ function narrowPlaybookState(record: UntrustedRecord, context: string): Playbook
  */
 function narrowToolAutoApprove(value: unknown, context: string): ToolAutoApprove {
   const record = requireRecord(value, context);
+  const tool = requireString(record, 'tool', context);
   return {
-    tool: requireString(record, 'tool', context),
+    tool,
+    displayTool: sanitizeForDisplay(tool),
     autoApprove: requireBoolean(record, 'auto_approve', context),
   };
 }

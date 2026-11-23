@@ -31,6 +31,7 @@ import {
   windowsAwaitingPermission,
   type ApprovalQueueState,
 } from './approval-queue';
+import { sanitizeForDisplay } from '../display/untrusted-text';
 import type { ApprovalRequest } from '../ipc/session-boundary';
 
 /** The line a failed decision is shown with; passed through untouched. */
@@ -40,8 +41,16 @@ function makeRequest(requestId: string, overrides: Partial<ApprovalRequest> = {}
   return {
     request_id: requestId,
     tool: 'close_window',
-    requester: { kind: 'window', window_id: 'w-req', name: 'requester window' },
-    target: { window_id: 'w-target', name: 'target window', status: 'running' },
+    requester: {
+      kind: 'window',
+      window_id: 'w-req',
+      name: sanitizeForDisplay('requester window'),
+    },
+    target: {
+      window_id: 'w-target',
+      name: sanitizeForDisplay('target window'),
+      status: 'running',
+    },
     text: null,
     ...overrides,
   };

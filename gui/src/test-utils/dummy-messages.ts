@@ -69,15 +69,17 @@ export const dummyMessages = {
     // The approval dialog's title and the two requester-display states
     // that are not the requester's own window.
     approvalTitle: 'DUMMY_approvalTitle',
+    approvalTitleCount: (count: number) => `DUMMY_approvalTitleCount(${count})`,
     approvalRequesterExternal: 'DUMMY_approvalRequesterExternal',
-    approvalRequesterGone: (name: string) => `DUMMY_approvalRequesterGone(${name})`,
+    approvalRequesterGone: (name) => `DUMMY_approvalRequesterGone(${name})`,
+    approvalTargetWindow: (name, status) => `DUMMY_approvalTargetWindow(${name},${status})`,
     // Shown in place of a target window's name when a request carries none
     // (a chat-room-wide approval has no single target window).
     approvalTargetRoom: 'DUMMY_approvalTargetRoom',
     // Shown in place of a target window's name when the request is to open one.
     approvalTargetNewWindow: 'DUMMY_approvalTargetNewWindow',
     // Names the chat room a post would go to, when the request carries one.
-    describeApprovalRoom: (name: string) => `DUMMY_describeApprovalRoom(${name})`,
+    describeApprovalRoom: (name) => `DUMMY_describeApprovalRoom(${name})`,
   },
   forms: {
     commandLabel: 'DUMMY_commandLabel',
@@ -267,6 +269,7 @@ export const dummyMessages = {
       `DUMMY_windowHeaderVendorCwd(${vendor}, ${cwd})`,
     windowHeaderCwd: (cwd: string) => `DUMMY_windowHeaderCwd(${cwd})`,
     eventTime: (date: Date) => `DUMMY_eventTime(${date.toISOString()})`,
+    chatPostedAt: (atMs: number) => `DUMMY_chatPostedAt(${atMs})`,
     sentences: (parts: readonly string[]) => `DUMMY_sentences(${parts.join('|')})`,
   },
 
@@ -424,7 +427,7 @@ export const dummyMessages = {
         risk: 'DUMMY_settings_approvalToolInfo_close_window_risk',
       },
     },
-    approvalToolSwitchLabel: (name: string) => `DUMMY_settings_approvalToolSwitchLabel(${name})`,
+    approvalToolSwitchLabel: (name) => `DUMMY_settings_approvalToolSwitchLabel(${name})`,
     planReviewSwitchLabel: 'DUMMY_settings_planReviewSwitchLabel',
     planReviewDescription: 'DUMMY_settings_planReviewDescription',
     approvalRunsAutomatically: 'DUMMY_settings_approvalRunsAutomatically',
@@ -435,9 +438,9 @@ export const dummyMessages = {
     approvalPlaybookFailed: 'DUMMY_settings_approvalPlaybookFailed',
     approvalPlaybookNotConfigured: 'DUMMY_settings_approvalPlaybookNotConfigured',
     approvalPlaybookUnknown: 'DUMMY_settings_approvalPlaybookUnknown',
-    approvalToolUpdateFailure: (id: string, reason: string, wasOn: boolean) =>
+    approvalToolUpdateFailure: (id, reason, wasOn) =>
       `DUMMY_settings_approvalToolUpdateFailure(${id},${reason},${wasOn})`,
-    planUpdateFailure: (id: string, reason: string, wasOn: boolean) =>
+    planUpdateFailure: (id, reason, wasOn) =>
       `DUMMY_settings_planUpdateFailure(${id},${reason},${wasOn})`,
 
     integrationsTab: 'DUMMY_settings_integrationsTab',
@@ -449,7 +452,7 @@ export const dummyMessages = {
     integrationNotInstalled: 'DUMMY_settings_integrationNotInstalled',
     integrationUnknown: 'DUMMY_settings_integrationUnknown',
     integrationChecking: 'DUMMY_settings_integrationChecking',
-    integrationDiffersIn: (key: string) => `DUMMY_settings_integrationDiffersIn(${key})`,
+    integrationDiffersIn: (key) => `DUMMY_settings_integrationDiffersIn(${key})`,
     integrationRegisterButton: 'DUMMY_settings_integrationRegisterButton',
     integrationUpdateButton: 'DUMMY_settings_integrationUpdateButton',
     integrationRemoveButton: 'DUMMY_settings_integrationRemoveButton',
@@ -610,7 +613,7 @@ export const dummyMessages = {
     deliveryUndeliveredUnknown: 'DUMMY_chat_deliveryUndeliveredUnknown',
     // The reason-aware variant, shown when the daemon reported why
     // the addressed window's status is unknown.
-    deliveryUndeliveredUnknownReason: (word: string) =>
+    deliveryUndeliveredUnknownReason: (word) =>
       `DUMMY_chat_deliveryUndeliveredUnknownReason(${word})`,
     deliveryUndeliveredHalted: 'DUMMY_chat_deliveryUndeliveredHalted',
     deliveryUndeliveredExhausted: 'DUMMY_chat_deliveryUndeliveredExhausted',
@@ -625,8 +628,7 @@ export const dummyMessages = {
     roomParticipantCount: (count: number) => `DUMMY_chat_roomParticipantCount(${count})`,
     roomStoppedLabel: 'DUMMY_chat_roomStoppedLabel',
     roomNeedsYouLabel: 'DUMMY_chat_roomNeedsYouLabel',
-    broadcastConfirmRoomMessage: (name: string) =>
-      `DUMMY_chat_broadcastConfirmRoomMessage(${name})`,
+    broadcastConfirmRoomMessage: (name) => `DUMMY_chat_broadcastConfirmRoomMessage(${name})`,
     roomActionsLabel: 'DUMMY_chat_roomActionsLabel',
     clearHistoryItem: 'DUMMY_chat_clearHistoryItem',
     deleteRoomItem: 'DUMMY_chat_deleteRoomItem',
@@ -638,8 +640,7 @@ export const dummyMessages = {
     deleteRoomConfirmTitle: (name: string) => `DUMMY_chat_deleteRoomConfirmTitle(${name})`,
     deleteRoomConfirmMessage: 'DUMMY_chat_deleteRoomConfirmMessage',
     deleteRoomConfirmLabel: 'DUMMY_chat_deleteRoomConfirmLabel',
-    unresolvedMentions: (mentions: readonly string[]) =>
-      `DUMMY_chat_unresolvedMentions(${mentions.join(',')})`,
+    unresolvedMentions: (mentions) => `DUMMY_chat_unresolvedMentions(${mentions.join(',')})`,
   },
 
   /**

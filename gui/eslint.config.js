@@ -50,6 +50,7 @@ const DISPLAY_TEXT_TEMPLATES = [
   'src/components/PlansPanel.svelte',
   'src/components/RolesEditor.svelte',
   'src/components/PlansAttentionMark.svelte',
+  'src/components/ChatPanel.svelte',
 ];
 
 // Text reaching the DOM goes through Svelte's escaping; `{@html}` is refused by svelte/no-at-html-tags.

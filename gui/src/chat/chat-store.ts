@@ -8,6 +8,11 @@
  */
 
 import {
+  formatPathForDisplay,
+  sanitizeForDisplay,
+  type DisplayLine,
+} from '../display/untrusted-text';
+import {
   MAIN_CHAT_ROOM_ID,
   type ChatChanged,
   type ChatHalt,
@@ -96,7 +101,7 @@ export function mergeChatMessages(state: ChatRoomState, page: ChatMessages): Cha
  * @param state what the panel holds now
  * @param windowId the window to name
  */
-export function resolveDisplayName(state: ChatRoomState, windowId: string): string {
+export function resolveDisplayName(state: ChatRoomState, windowId: string): DisplayLine {
   const participant = state.roster.find((entry) => entry.window_id === windowId);
   if (participant !== undefined) {
     return participant.displayName;
@@ -104,7 +109,23 @@ export function resolveDisplayName(state: ChatRoomState, windowId: string): stri
   const latest = [...state.messages]
     .reverse()
     .find((message) => message.from_window_id === windowId);
-  return latest?.displayFromName ?? windowId;
+  return latest?.displayFromName ?? sanitizeForDisplay(windowId);
+}
+
+/** A participant's window id, prepared for display beside its name. */
+export function participantWindowId(participant: ChatParticipant): DisplayLine {
+  return sanitizeForDisplay(participant.window_id);
+}
+
+/**
+ * The name to show for a room: its listed display name, or its id, written
+ * out like a room name, while the list does not carry it.
+ *
+ * @param room the room's row, `undefined` when the list does not carry it
+ * @param roomId the room to name
+ */
+export function roomDisplayName(room: ChatRoomInfo | undefined, roomId: string): DisplayLine {
+  return room?.displayName ?? formatPathForDisplay(roomId);
 }
 
 /**
@@ -199,7 +220,7 @@ export function applyChatChangedToRooms(
     next.set(changed.room_id, {
       room_id: changed.room_id,
       name: '',
-      displayName: '',
+      displayName: formatPathForDisplay(''),
       participant_count: 0,
       needs_user: changed.needs_user,
       last_at_ms: null,

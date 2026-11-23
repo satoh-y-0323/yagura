@@ -6,6 +6,11 @@
 import { describe, it, expect } from 'vitest';
 
 import { describeUntargeted } from './approval-target';
+import {
+  formatApprovalBody,
+  sanitizeForDisplay,
+  type DisplayLine,
+} from '../display/untrusted-text';
 import type { ApprovalRequest } from '../ipc/session-boundary';
 import { dialogs } from '../ui-messages';
 
@@ -13,7 +18,7 @@ function request(overrides: Partial<ApprovalRequest>): ApprovalRequest {
   return {
     request_id: 'a1-test',
     tool: 'send_chat',
-    requester: { kind: 'window', window_id: 'w1', name: 'builder' },
+    requester: { kind: 'window', window_id: 'w1', name: sanitizeForDisplay('builder') },
     text: null,
     ...overrides,
   };
@@ -23,10 +28,12 @@ describe('describeUntargeted', () => {
   it('names the room a request carries', () => {
     const named = request({ room: { room_id: 'main', name: 'Main' } });
 
-    expect(describeUntargeted(named)).toBe(dialogs.describeApprovalRoom('Main'));
+    expect(describeUntargeted(named)).toBe(dialogs.describeApprovalRoom('Main' as DisplayLine));
     // A room's name is the last name of a path, so a reordering control is written out.
     const reordered = request({ room: { room_id: 'r', name: 'ya\u202Egura' } });
-    expect(describeUntargeted(reordered)).toBe(dialogs.describeApprovalRoom('ya\\u{202E}gura'));
+    expect(describeUntargeted(reordered)).toBe(
+      dialogs.describeApprovalRoom('ya\\u{202E}gura' as DisplayLine)
+    );
   });
 
   it('names a new window for a request to open one', () => {
@@ -36,7 +43,10 @@ describe('describeUntargeted', () => {
   });
 
   it('names a new window for a handoff that opens one from a profile', () => {
-    const opening = request({ tool: 'send_handoff', text: 'profile: claude-code\n\nenvelope' });
+    const opening = request({
+      tool: 'send_handoff',
+      text: formatApprovalBody('profile: claude-code\n\nenvelope'),
+    });
 
     expect(describeUntargeted(opening)).toBe(dialogs.approvalTargetNewWindow);
   });

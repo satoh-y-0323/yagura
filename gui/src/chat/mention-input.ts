@@ -8,17 +8,20 @@
  * inserted quoted so it stays one target.
  */
 
+import { sanitizeForDisplay, type DisplayLine } from '../display/untrusted-text';
 import type { ChatParticipant } from '../ipc/session-boundary';
 
 /** The reserved mention that stands for the human user. */
 export const MENTION_USER_NAME = 'user';
+
+const MENTION_USER_DISPLAY_NAME = sanitizeForDisplay(MENTION_USER_NAME);
 
 /** One entry the completion offers. */
 export interface MentionCandidate {
   /** The name that would be inserted and matched on, as the daemon knows it. */
   name: string;
   /** `name` with the characters it must not draw removed, for rendering. */
-  displayName: string;
+  displayName: DisplayLine;
   /** The participant's window id, `null` for the reserved entry. */
   windowId: string | null;
 }
@@ -93,7 +96,7 @@ export function filterMentionCandidates(
       displayName: participant.displayName,
       windowId: participant.window_id,
     })),
-    { name: MENTION_USER_NAME, displayName: MENTION_USER_NAME, windowId: null },
+    { name: MENTION_USER_NAME, displayName: MENTION_USER_DISPLAY_NAME, windowId: null },
   ];
   const prefix = normalize(query);
   return candidates.filter((candidate) => normalize(candidate.name).startsWith(prefix));

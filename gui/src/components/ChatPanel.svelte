@@ -18,8 +18,13 @@
   import { pointerDrag, type PointerDragOptions } from './pointer-drag';
   import { tooltip } from './tooltip';
   import { isImeKey } from '../keymap/key-chord';
-  import { resolveDisplayName, type ChatRoomState } from '../chat/chat-store';
-  import { splitForMiddleEllipsis } from '../chat/middle-ellipsis';
+  import {
+    participantWindowId,
+    resolveDisplayName,
+    roomDisplayName,
+    type ChatRoomState,
+  } from '../chat/chat-store';
+  import { splitPreparedForMiddleEllipsis } from '../chat/middle-ellipsis';
   import { describeUnresolved } from '../chat/unresolved-notice';
   import {
     dismissMention,
@@ -41,6 +46,8 @@
     readStoredChatPanelRect,
     type ChatPanelRect,
   } from '../chat/chat-panel-rect';
+  import { sliceDisplayText, type DisplayBlock, type DisplayLine } from '../display/untrusted-text';
+  import type { UiText } from '../display/ui-text';
   import type {
     ChatDeliveryState,
     ChatParticipant,
@@ -52,6 +59,7 @@
   import { createGuardedLocalStorage } from '../storage/guarded-storage';
   import {
     chat,
+    describeChatPostedAt,
     describeDeliveryState,
     describeHaltReason,
     describeUndeliveredUnknownReason,
@@ -60,7 +68,7 @@
 
   /** One run of the message body: a mention, or the plain text around it. */
   interface BodyRun {
-    text: string;
+    text: DisplayBlock;
     isMention: boolean;
   }
 
@@ -107,7 +115,7 @@
   let candidates: MentionCandidate[] = [];
   let activeCandidate = 0;
   /** The last post's mentions that reached no one, kept with the room it went to. */
-  let unresolvedNotice: { roomId: string; text: string } | null = null;
+  let unresolvedNotice: { roomId: string; text: UiText } | null = null;
   /** The room the room menu is open on, `null` while it is closed. */
   let menuRoomId: string | null = null;
   let menuAnchor: Rect | null = null;
@@ -123,8 +131,10 @@
   $: isMentionOpen = mention !== null && candidates.length > 0;
   $: canPost = draft.trim() !== '' && !isPosting;
   /** The current room's display name, from the room list rather than its raw id. */
-  $: currentRoomName =
-    rooms.find((entry) => entry.room_id === currentRoomId)?.displayName ?? currentRoomId;
+  $: currentRoomName = roomDisplayName(
+    rooms.find((entry) => entry.room_id === currentRoomId),
+    currentRoomId
+  );
   $: shownRect = clampChatPanelRect(chosenRect, viewport);
   $: maxPanelSize = chatPanelMaxSize(shownRect, viewport);
   $: roomRailWidth = clampRoomRailWidth(storedRoomRailWidth, shownRect.width);
@@ -192,7 +202,7 @@
     },
   };
 
-  function describeFromKind(kind: ChatMessageFromKind): string {
+  function describeFromKind(kind: ChatMessageFromKind): UiText {
     switch (kind) {
       case 'user':
         return chat.fromKindUser;
@@ -222,29 +232,30 @@
   }
 
   /** The participant's name for a delivery, falling back to the window id. */
-  function deliveryTarget(windowId: string): string {
+  function deliveryTarget(windowId: string): DisplayLine {
     return resolveDisplayName(room, windowId);
   }
 
-  function formatPostedAt(atMs: number): string {
-    return new Date(atMs).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
-  }
-
-  /** Splits a body so its mentions can be drawn apart from the text. */
-  function bodyRuns(body: string): BodyRun[] {
+  /**
+   * Splits a prepared body so its mentions can be drawn apart from the text.
+   * No written-out character holds `@`, `"` or a space, so a mention never
+   * starts or ends inside one.
+   */
+  function bodyRuns(body: DisplayBlock): BodyRun[] {
     const runs: BodyRun[] = [];
     let cursor = 0;
     MENTION_PATTERN.lastIndex = 0;
     let match: RegExpExecArray | null;
     while ((match = MENTION_PATTERN.exec(body)) !== null) {
+      const end = match.index + match[0].length;
       if (match.index > cursor) {
-        runs.push({ text: body.slice(cursor, match.index), isMention: false });
+        runs.push({ text: sliceDisplayText(body, cursor, match.index), isMention: false });
       }
-      runs.push({ text: match[0], isMention: true });
-      cursor = match.index + match[0].length;
+      runs.push({ text: sliceDisplayText(body, match.index, end), isMention: true });
+      cursor = end;
     }
     if (cursor < body.length) {
-      runs.push({ text: body.slice(cursor), isMention: false });
+      runs.push({ text: sliceDisplayText(body, cursor), isMention: false });
     }
     return runs;
   }
@@ -436,7 +447,7 @@
     <div class="room-rail__head">{chat.roomsHeading}</div>
     <ul class="room-rail__list">
       {#each rooms.filter((row) => row.name !== '') as row (row.room_id)}
-        {@const name = splitForMiddleEllipsis(row.displayName)}
+        {@const name = splitPreparedForMiddleEllipsis(row.displayName)}
         <li
           class="room-row"
           data-selected={row.room_id === currentRoomId}
@@ -577,7 +588,7 @@
           {#each room.roster as participant (participant.window_id)}
             <li>
               <span class="roster-list__name">{participant.displayName}</span>
-              <span class="roster-list__id">{participant.window_id}</span>
+              <span class="roster-list__id">{participantWindowId(participant)}</span>
             </li>
           {/each}
         </ul>
@@ -595,7 +606,7 @@
             {#if message.broadcast}
               <span class="msg__broadcast">{chat.broadcastMarker}</span>
             {/if}
-            <span class="msg__time">{formatPostedAt(message.at_ms)}</span>
+            <span class="msg__time">{describeChatPostedAt(message.at_ms)}</span>
           </div>
           <p class="msg__body">
             {#each bodyRuns(message.body) as run, index (index)}

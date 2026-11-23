@@ -21,6 +21,7 @@ vi.mock('@tauri-apps/api/event', () => ({
   listen: listenMock,
 }));
 
+import { sanitizeForDisplay } from '../display/untrusted-text';
 import { BoundaryError, SESSION_EVENT } from './session-boundary';
 import {
   invokeAttachWindow,
@@ -901,8 +902,8 @@ describe('approval settings', () => {
   const NARROWED: ApprovalSettingsInfo = {
     playbook: 'loaded',
     tools: [
-      { tool: 'send_chat', autoApprove: true },
-      { tool: 'close_window', autoApprove: false },
+      { tool: 'send_chat', displayTool: sanitizeForDisplay('send_chat'), autoApprove: true },
+      { tool: 'close_window', displayTool: sanitizeForDisplay('close_window'), autoApprove: false },
     ],
     plansRequireApproval: true,
   };
@@ -985,7 +986,9 @@ describe('approval settings', () => {
 
     const afterTool: ApprovalSettingsInfo = await invokeSetAutoApprove('interrupt_window', true);
 
-    expect(afterTool.tools).toEqual([{ tool: 'interrupt_window', autoApprove: false }]);
+    expect(afterTool.tools).toEqual([
+      { tool: 'interrupt_window', displayTool: 'interrupt_window', autoApprove: false },
+    ]);
 
     invokeMock.mockResolvedValueOnce(approvalReply({ plans_require_approval: true }));
 

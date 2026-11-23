@@ -10,7 +10,7 @@
   import {
     approvalToolRows,
     planReviewRow,
-    PLAN_REVIEW_GATE_ID,
+    PLAN_REVIEW_GATE_DISPLAY_ID,
   } from '../settings/approval-settings-model';
   import { settings } from '../ui-messages';
 
@@ -42,7 +42,7 @@
         <div class="approval-settings__row">
           <div class="approval-settings__name">
             <b>{row.name}</b>
-            <span class="approval-settings__id">{row.id}</span>
+            <span class="approval-settings__id">{row.displayId}</span>
           </div>
           <div class="approval-settings__switch-slot">
             <SettingsSwitch
@@ -70,7 +70,7 @@
       <div class="approval-settings__row">
         <div class="approval-settings__name">
           <b>{settings.planReviewSwitchLabel}</b>
-          <span class="approval-settings__id">{PLAN_REVIEW_GATE_ID}</span>
+          <span class="approval-settings__id">{PLAN_REVIEW_GATE_DISPLAY_ID}</span>
         </div>
         <div class="approval-settings__switch-slot">
           <SettingsSwitch

@@ -408,6 +408,19 @@ describe('the chat replies', () => {
     expect(room.needs_user).toBe(true);
     expect(room.roster).toEqual([{ window_id: 'w1', name: 'one', displayName: 'one' }]);
     expect(room.messages[0]?.from_window_id).toBeNull();
+
+    const spoken = narrowChatMessages(
+      chatMessagesWire({
+        messages: [
+          chatMessageWire({
+            body: 'a\r\nb\u202Ec\u200Bd\u{E0041}e\u200Cf\u26A0\uFE0Fg',
+          }),
+        ],
+      })
+    );
+    expect(spoken.messages[0]?.body).toBe(
+      'a\r\nb\\u{202E}c\\u{200B}d\\u{E0041}e\\u{200C}f\u26A0\uFE0Fg'
+    );
   });
 
   it.each(['window', 'user', 'external', 'system'])('keeps the sender kind %s', (from_kind) => {

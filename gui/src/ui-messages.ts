@@ -7,6 +7,7 @@ import {
   describeActionBlock as renderDescribeActionBlock,
   describeAnnouncement as renderDescribeAnnouncement,
   describeAttentionBadge as renderDescribeAttentionBadge,
+  describeChatPostedAt as renderDescribeChatPostedAt,
   describeDeliveryState as renderDescribeDeliveryState,
   describeDetectionWarning as renderDescribeDetectionWarning,
   describeDiscardedKeymapEntries as renderDescribeDiscardedKeymapEntries,
@@ -183,6 +184,14 @@ export function describeNoticeAndMore(sentence: string, count: number): UiText {
  */
 export function describeEventTime(date: Date): UiText {
   return renderDescribeEventTime(messages, date);
+}
+
+/**
+ * Describes when a chat message was posted.
+ * @param atMs the moment it was posted, in Unix epoch milliseconds
+ */
+export function describeChatPostedAt(atMs: number): UiText {
+  return renderDescribeChatPostedAt(messages, atMs);
 }
 
 /**

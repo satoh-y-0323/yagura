@@ -7,6 +7,7 @@
 import { render } from 'svelte/server';
 import { describe, it, expect } from 'vitest';
 
+import { formatApprovalBody, sanitizeForDisplay } from '../display/untrusted-text';
 import type { ApprovalRequest } from '../ipc/session-boundary';
 import { buttons } from '../ui-messages';
 
@@ -67,9 +68,9 @@ function renderApproval(request: ApprovalRequest, pendingCount: number): Rendere
 const WINDOW_REQUEST: ApprovalRequest = {
   request_id: 'r1',
   tool: 'send_message',
-  requester: { kind: 'window', window_id: 'w-a', name: 'alpha' },
-  target: { window_id: 'w-b', name: 'beta', status: 'idle' },
-  text: 'hello',
+  requester: { kind: 'window', window_id: 'w-a', name: sanitizeForDisplay('alpha') },
+  target: { window_id: 'w-b', name: sanitizeForDisplay('beta'), status: 'idle' },
+  text: formatApprovalBody('hello'),
 };
 
 const EXTERNAL_NO_BODY: ApprovalRequest = {
@@ -82,7 +83,7 @@ const EXTERNAL_NO_BODY: ApprovalRequest = {
 const HTML_LOOKING_BODY: ApprovalRequest = {
   ...WINDOW_REQUEST,
   request_id: 'r3',
-  text: '<button>Approve now</button> <a href="#">x</a>',
+  text: formatApprovalBody('<button>Approve now</button> <a href="#">x</a>'),
 };
 
 describe('ApprovalDialog: where the dialog puts focus on opening', () => {

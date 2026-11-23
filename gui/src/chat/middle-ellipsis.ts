@@ -1,4 +1,5 @@
 import { createGraphemeSegmenter } from '../display/graphemes';
+import { sliceDisplayText, type DisplayBlock, type DisplayLine } from '../display/untrusted-text';
 
 /** Names up to this many graphemes are shown whole. */
 const SPLIT_THRESHOLD = 16;
@@ -27,6 +28,15 @@ function graphemes(text: string): string[] {
     .flatMap((part, index) => (index % 2 === 1 ? [part] : segmentGraphemes(part)));
 }
 
+/** Where the visible tail of `name` starts, as a UTF-16 index; its length when it is shown whole. */
+function tailStart(name: string): number {
+  const parts = graphemes(name);
+  if (parts.length <= SPLIT_THRESHOLD) {
+    return name.length;
+  }
+  return parts.slice(0, parts.length - TAIL_LENGTH).join('').length;
+}
+
 /**
  * Splits a name for an ellipsis in the middle: `head` shrinks behind the
  * ellipsis while `tail` stays visible. Names of more than 16 graphemes keep
@@ -35,10 +45,17 @@ function graphemes(text: string): string[] {
  * written-out character (`\u{200B}`) is ever split; the latter counts as one.
  */
 export function splitForMiddleEllipsis(name: string): { head: string; tail: string } {
-  const parts = graphemes(name);
-  if (parts.length <= SPLIT_THRESHOLD) {
-    return { head: name, tail: '' };
-  }
-  const cut = parts.length - TAIL_LENGTH;
-  return { head: parts.slice(0, cut).join(''), tail: parts.slice(cut).join('') };
+  const cut = tailStart(name);
+  return { head: name.slice(0, cut), tail: name.slice(cut) };
+}
+
+/**
+ * {@link splitForMiddleEllipsis} for text prepared for display: both parts
+ * keep the kind of `name`.
+ */
+export function splitPreparedForMiddleEllipsis<T extends DisplayLine | DisplayBlock>(
+  name: T
+): { head: T; tail: T } {
+  const cut = tailStart(name);
+  return { head: sliceDisplayText(name, 0, cut), tail: sliceDisplayText(name, cut) };
 }

@@ -111,6 +111,11 @@ export function describeEventTime(messages: Messages, date: Date): UiText {
   return messages.formats.eventTime(date);
 }
 
+/** Describes when a chat message was posted. */
+export function describeChatPostedAt(messages: Messages, atMs: number): UiText {
+  return messages.formats.chatPostedAt(atMs);
+}
+
 /** Joins what one update reads out into one text. */
 export function describeAnnouncement(messages: Messages, sentences: readonly string[]): UiText {
   return messages.formats.sentences(sentences);

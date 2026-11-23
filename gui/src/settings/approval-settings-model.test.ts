@@ -17,8 +17,14 @@ import {
   type ApprovalToolRow,
   type PlanReviewRow,
 } from './approval-settings-model';
-import type { ApprovalSettingsInfo, PlaybookState } from '../ipc/session-client';
+import { sanitizeForDisplay } from '../display/untrusted-text';
+import type { ApprovalSettingsInfo, PlaybookState, ToolAutoApprove } from '../ipc/session-client';
 import { settings } from '../ui-messages';
+
+/** One tool's switch as the boundary hands it on. */
+function setting(tool: string, autoApprove: boolean): ToolAutoApprove {
+  return { tool, displayTool: sanitizeForDisplay(tool), autoApprove };
+}
 
 /** The tools the daemon gates, as it names them on the wire. */
 const GATED_TOOLS = [
@@ -44,7 +50,7 @@ function text(value: unknown): string {
 function info(overrides: Partial<ApprovalSettingsInfo> = {}): ApprovalSettingsInfo {
   return {
     playbook: 'loaded',
-    tools: GATED_TOOLS.map((tool) => ({ tool, autoApprove: tool === 'send_chat' })),
+    tools: GATED_TOOLS.map((tool) => setting(tool, tool === 'send_chat')),
     plansRequireApproval: true,
     ...overrides,
   };
@@ -61,7 +67,7 @@ describe('approvalToolRows', () => {
       'send_handoff',
     ];
     const rows: ApprovalToolRow[] = approvalToolRows(
-      info({ tools: order.map((tool) => ({ tool, autoApprove: false })) })
+      info({ tools: order.map((tool) => setting(tool, false)) })
     );
 
     expect(rows.map((row) => row.id)).toEqual(order);
@@ -69,7 +75,7 @@ describe('approvalToolRows', () => {
 
   it('builds one row per tool the daemon sent and no more', () => {
     const rows: ApprovalToolRow[] = approvalToolRows(
-      info({ tools: [{ tool: 'interrupt_window', autoApprove: true }] })
+      info({ tools: [setting('interrupt_window', true)] })
     );
 
     expect(rows.map((row) => row.id)).toEqual(['interrupt_window']);
@@ -82,9 +88,7 @@ describe('approvalToolRows', () => {
   });
 
   it.each(GATED_TOOLS)('gives the known tool %s a name, a description and a risk', (tool) => {
-    const rows: ApprovalToolRow[] = approvalToolRows(
-      info({ tools: [{ tool, autoApprove: false }] })
-    );
+    const rows: ApprovalToolRow[] = approvalToolRows(info({ tools: [setting(tool, false)] }));
     const row = rows[0];
 
     expect(row?.id).toBe(tool);
@@ -95,7 +99,7 @@ describe('approvalToolRows', () => {
 
   it('describes every known tool in its own words', () => {
     const rows: ApprovalToolRow[] = approvalToolRows(
-      info({ tools: GATED_TOOLS.map((tool) => ({ tool, autoApprove: false })) })
+      info({ tools: GATED_TOOLS.map((tool) => setting(tool, false)) })
     );
 
     expect(new Set(rows.map((row) => row.name)).size).toBe(GATED_TOOLS.length);
@@ -105,13 +109,12 @@ describe('approvalToolRows', () => {
   it.each(['a_newer_tool', 'toString', 'constructor', '__proto__'])(
     'shows the unknown tool %s by its id alone',
     (tool) => {
-      const rows: ApprovalToolRow[] = approvalToolRows(
-        info({ tools: [{ tool, autoApprove: true }] })
-      );
+      const rows: ApprovalToolRow[] = approvalToolRows(info({ tools: [setting(tool, true)] }));
 
       expect(rows).toEqual([
         {
           id: tool,
+          displayId: tool,
           name: tool,
           description: null,
           risk: null,
@@ -127,9 +130,9 @@ describe('approvalToolRows', () => {
     const rows: ApprovalToolRow[] = approvalToolRows(
       info({
         tools: [
-          { tool: 'interrupt_window', autoApprove: false },
-          { tool: 'a_newer_tool', autoApprove: false },
-          { tool: 'send_chat', autoApprove: false },
+          setting('interrupt_window', false),
+          setting('a_newer_tool', false),
+          setting('send_chat', false),
         ],
       })
     );
@@ -140,7 +143,7 @@ describe('approvalToolRows', () => {
 
   it('labels a tool that runs automatically and emphasizes its risk', () => {
     const rows: ApprovalToolRow[] = approvalToolRows(
-      info({ tools: [{ tool: 'interrupt_window', autoApprove: true }] })
+      info({ tools: [setting('interrupt_window', true)] })
     );
 
     expect(rows[0]).toMatchObject({
@@ -152,7 +155,7 @@ describe('approvalToolRows', () => {
 
   it('labels a tool that waits for approval and does not emphasize its risk', () => {
     const rows: ApprovalToolRow[] = approvalToolRows(
-      info({ tools: [{ tool: 'interrupt_window', autoApprove: false }] })
+      info({ tools: [setting('interrupt_window', false)] })
     );
 
     expect(rows[0]).toMatchObject({
@@ -165,10 +168,7 @@ describe('approvalToolRows', () => {
   it('reads each row state from its own entry', () => {
     const rows: ApprovalToolRow[] = approvalToolRows(
       info({
-        tools: [
-          { tool: 'send_message', autoApprove: true },
-          { tool: 'close_window', autoApprove: false },
-        ],
+        tools: [setting('send_message', true), setting('close_window', false)],
       })
     );
 
@@ -180,12 +180,8 @@ describe('approvalToolRows', () => {
   });
 
   it('keeps the same name, description and risk whether the tool is on or off', () => {
-    const [on] = approvalToolRows(
-      info({ tools: [{ tool: 'interrupt_window', autoApprove: true }] })
-    );
-    const [off] = approvalToolRows(
-      info({ tools: [{ tool: 'interrupt_window', autoApprove: false }] })
-    );
+    const [on] = approvalToolRows(info({ tools: [setting('interrupt_window', true)] }));
+    const [off] = approvalToolRows(info({ tools: [setting('interrupt_window', false)] }));
 
     expect([on?.name, on?.description, on?.risk]).toEqual([off?.name, off?.description, off?.risk]);
   });
@@ -213,7 +209,7 @@ describe('planReviewRow', () => {
   });
 
   it('does not take its state from the tools', () => {
-    const allAutomatic = GATED_TOOLS.map((tool) => ({ tool, autoApprove: true }));
+    const allAutomatic = GATED_TOOLS.map((tool) => setting(tool, true));
     const row: PlanReviewRow = planReviewRow(
       info({ tools: allAutomatic, plansRequireApproval: true })
     );
@@ -266,7 +262,7 @@ describe('approvalUpdateFailure', () => {
     ['require_approval', true, 'plan'],
     ['require_approval', false, 'plan'],
   ])('names %s and the reason (was on: %s, %s)', (id, wasOn, kind) => {
-    const reason = 'the playbook could not be written';
+    const reason = sanitizeForDisplay('the playbook could not be written');
     const line: string = approvalUpdateFailure(id, reason, wasOn, kind);
 
     expect(line).toContain(id);
@@ -274,7 +270,7 @@ describe('approvalUpdateFailure', () => {
   });
 
   it('gives each of the four cases its own line', () => {
-    const reason = 'refused';
+    const reason = sanitizeForDisplay('refused');
     const lines = [
       approvalUpdateFailure('interrupt_window', reason, true, 'tool'),
       approvalUpdateFailure('interrupt_window', reason, false, 'tool'),
@@ -293,9 +289,11 @@ describe('approvalUpdateFailure', () => {
  */
 describe('the registration state that names differing arguments', () => {
   it('words differing arguments in a phrase of their own', () => {
-    const templated = settings.integrationDiffersIn('some_key').replace('some_key', 'args');
+    const templated = settings
+      .integrationDiffersIn(sanitizeForDisplay('some_key'))
+      .replace('some_key', 'args');
 
-    expect(settings.integrationDiffersIn('args')).not.toBe(templated);
-    expect(settings.integrationDiffersIn('args')).not.toMatch(/\bargs\b/);
+    expect(settings.integrationDiffersIn(sanitizeForDisplay('args'))).not.toBe(templated);
+    expect(settings.integrationDiffersIn(sanitizeForDisplay('args'))).not.toMatch(/\bargs\b/);
   });
 });

@@ -9,6 +9,7 @@ import {
   readRefusedForRemovedRoom,
   roomDeleteNote,
 } from './room-actions';
+import { formatPathForDisplay } from '../display/untrusted-text';
 import { CommandFailureError, type ChatRoomInfo } from '../ipc/session-boundary';
 import { banners } from '../ui-messages';
 
@@ -19,7 +20,7 @@ function room(overrides: Partial<ChatRoomInfo> = {}): ChatRoomInfo {
   return {
     room_id: 'r-a',
     name: 'yagura',
-    displayName: 'yagura',
+    displayName: formatPathForDisplay('yagura'),
     participant_count: 0,
     needs_user: false,
     halted: null,
