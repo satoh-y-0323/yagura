@@ -31,6 +31,20 @@ const BRANDS = [
     declaredIn: 'src/display/untrusted-text.ts',
     maker: 'src/display/untrusted-text.ts',
   },
+  {
+    type: 'UiText',
+    key: 'uiTextBrand',
+    declaredIn: 'src/display/ui-text.ts',
+    maker: 'src/i18n/messages.ts',
+  },
+];
+
+// The templates whose shown text must be one of the brands; the list grows as each part of
+// the GUI hands its templates prepared text.
+const DISPLAY_TEXT_TEMPLATES = [
+  'src/components/McpMark.svelte',
+  'src/components/StatusReportMark.svelte',
+  'src/components/QueuedMark.svelte',
 ];
 
 // Text reaching the DOM goes through Svelte's escaping; `{@html}` is refused by svelte/no-at-html-tags.
@@ -247,6 +261,13 @@ export default [
     plugins: { yagura },
     rules: {
       'yagura/no-brand-forging': ['error', { brands: BRANDS }],
+    },
+  },
+  {
+    files: DISPLAY_TEXT_TEMPLATES,
+    plugins: { yagura },
+    rules: {
+      'yagura/display-text': ['error', { brands: BRANDS }],
     },
   },
   {

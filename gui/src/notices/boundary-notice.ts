@@ -7,6 +7,7 @@
  * every failure that site can hit, and the cause is whatever the detail says.
  */
 import { describeOperationFailure, errors } from '../ui-messages';
+import type { UiText } from '../display/ui-text';
 
 /** The boundary failures the WebView reports, one member per call site. */
 export type BoundaryOperation =
@@ -32,7 +33,7 @@ export interface BoundaryNotice {
  * The fixed summary per operation. Written as a `Record` over the union so a
  * tenth call site cannot be added without deciding what it says.
  */
-const SUMMARIES: Record<BoundaryOperation, string> = {
+const SUMMARIES: Record<BoundaryOperation, UiText> = {
   sessionEvent: errors.boundarySessionEvent,
   sessionEvents: errors.boundarySessionEvents,
   windowList: errors.boundaryWindowList,
@@ -70,6 +71,6 @@ function collapseDetail(detail: unknown): unknown {
  *
  * @param notice the operation that failed and what was reported about it
  */
-export function describeBoundaryNotice(notice: BoundaryNotice): string {
+export function describeBoundaryNotice(notice: BoundaryNotice): UiText {
   return describeOperationFailure(SUMMARIES[notice.operation], collapseDetail(notice.detail));
 }

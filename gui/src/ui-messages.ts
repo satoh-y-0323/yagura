@@ -17,7 +17,7 @@ import {
   describeHaltReason as renderDescribeHaltReason,
   describeInterruptHint as renderDescribeInterruptHint,
   describeNoticeAndMore as renderDescribeNoticeAndMore,
-  describeOperationFailure,
+  describeOperationFailure as renderDescribeOperationFailure,
   describePaneNotice as renderDescribePaneNotice,
   describePickerActionRow as renderDescribePickerActionRow,
   describePickerEmpty as renderDescribePickerEmpty,
@@ -44,7 +44,8 @@ import {
   type PickerWindowRowFacts,
   type WindowHeaderFacts,
 } from './i18n/render';
-import type { TitleParts } from './i18n/messages-en';
+import type { TitleParts } from './i18n/messages';
+import type { UiText } from './display/ui-text';
 import { EXTERNAL_TEXT_MAX_CODE_POINTS, foldExternalText } from './display/untrusted-text';
 import type { PickerEmpty, PickerMode } from './command-picker/picker-model';
 import type { ChatDeliveryOutcome, DetectedStatusView, WindowStatus } from './ipc/session-boundary';
@@ -53,11 +54,17 @@ import type { ConfirmTarget } from './session/confirm-target';
 
 const messages = resolveMessages();
 
-/** The shape every locale fills, for a locale written outside `i18n/` such as a test's. */
-export type { Messages } from './i18n/messages';
+/**
+ * A resolved locale, and the resource shape a locale written outside `i18n/`
+ * (a test's) fills before it stands in for one.
+ */
+export type { Messages, MessagesSource } from './i18n/messages';
 
 /** A sentence split around the name it holds. */
 export type { TitleParts };
+
+/** The parts as a locale resource writes them, for a locale written outside `i18n/`. */
+export type { TitleParts as TitlePartsSource } from './i18n/messages-en';
 
 /** Status display strings. */
 export const statusLabels = messages.statusLabels;
@@ -116,7 +123,7 @@ export const picker = messages.picker;
  * @param name the window's display name
  * @param exitCode the exit code, or null if not yet determined
  */
-export function describeExitedWindow(name: string, exitCode: number | null): string {
+export function describeExitedWindow(name: string, exitCode: number | null): UiText {
   return renderDescribeExitedWindow(messages, name, exitCode);
 }
 
@@ -133,7 +140,7 @@ export function describeExitedWindowParts(name: string, exitCode: number | null)
  * Describes the button that goes to another window.
  * @param name the window's display name
  */
-export function describeGoToWindow(name: string): string {
+export function describeGoToWindow(name: string): UiText {
   return renderDescribeGoToWindow(messages, name);
 }
 
@@ -145,7 +152,7 @@ export function describeGoToWindow(name: string): string {
 export function describeWindowCall(
   name: string,
   status: Extract<WindowStatus, 'waiting_approval' | 'waiting_input'>
-): string {
+): UiText {
   return renderDescribeWindowCall(messages, name, status);
 }
 
@@ -166,7 +173,7 @@ export function describeWindowCallParts(
  * @param sentence the latest event's sentence
  * @param count how many other events the card holds
  */
-export function describeNoticeAndMore(sentence: string, count: number): string {
+export function describeNoticeAndMore(sentence: string, count: number): UiText {
   return renderDescribeNoticeAndMore(messages, sentence, count);
 }
 
@@ -174,7 +181,7 @@ export function describeNoticeAndMore(sentence: string, count: number): string {
  * Describes when a notification event was recorded.
  * @param date the moment it was recorded
  */
-export function describeEventTime(date: Date): string {
+export function describeEventTime(date: Date): UiText {
   return renderDescribeEventTime(messages, date);
 }
 
@@ -182,7 +189,7 @@ export function describeEventTime(date: Date): string {
  * Joins what one update reads out into one text.
  * @param sentences what is read, in order
  */
-export function describeAnnouncement(sentences: readonly string[]): string {
+export function describeAnnouncement(sentences: readonly string[]): UiText {
   return renderDescribeAnnouncement(messages, sentences);
 }
 
@@ -191,7 +198,7 @@ export function describeAnnouncement(sentences: readonly string[]): string {
  * @param count the number of restore candidates
  * @param timestamp the formatted recording time, `null` when unknown
  */
-export function describeReopenOffer(count: number, timestamp: string | null): string {
+export function describeReopenOffer(count: number, timestamp: string | null): UiText {
   return renderDescribeReopenOffer(messages, count, timestamp);
 }
 
@@ -199,7 +206,7 @@ export function describeReopenOffer(count: number, timestamp: string | null): st
  * Describes how one chat message landed in one addressed window.
  * @param state the delivery state the daemon reported
  */
-export function describeDeliveryState(state: string): string {
+export function describeDeliveryState(state: string): UiText {
   return renderDescribeDeliveryState(messages, state);
 }
 
@@ -207,7 +214,7 @@ export function describeDeliveryState(state: string): string {
  * Describes why a chat room stopped.
  * @param reason the halt reason the daemon reported
  */
-export function describeHaltReason(reason: string): string {
+export function describeHaltReason(reason: string): UiText {
   return renderDescribeHaltReason(messages, reason);
 }
 
@@ -221,22 +228,30 @@ export function describeThemeName(name: string): string {
 }
 
 /**
- * Re-exported so callers reach the failure lines, built in `i18n/`, and the
- * fold they use (`display/untrusted-text.ts`) where they read their messages.
+ * Re-exported so callers reach the failure reason, built in `i18n/`, and the
+ * fold it uses (`display/untrusted-text.ts`) where they read their messages.
  */
-export {
-  describeOperationFailure,
-  EXTERNAL_TEXT_MAX_CODE_POINTS,
-  foldExternalText,
-  foldedFailureReason,
-};
+export { EXTERNAL_TEXT_MAX_CODE_POINTS, foldExternalText, foldedFailureReason };
+
+/**
+ * Builds the notice shown when a window operation fails: the summary, and the
+ * detail the daemon reported when anything survives {@link foldExternalText}.
+ * @param summary the operation-specific message, returned as is when no detail is left
+ * @param detail the rejected value the operation failed with
+ */
+export function describeOperationFailure<S extends string>(
+  summary: S,
+  detail: unknown
+): S | UiText {
+  return renderDescribeOperationFailure(messages, summary, detail);
+}
 
 /**
  * Builds the notice shown when a window opened but its detection definition
  * failed to load, so that window's status stays `Unknown`.
  * @param detail the reason the daemon reported
  */
-export function describeDetectionWarning(detail: unknown): string {
+export function describeDetectionWarning(detail: unknown): UiText {
   return renderDescribeDetectionWarning(messages, detail);
 }
 
@@ -250,7 +265,7 @@ export function describeWindowRow(
   name: string,
   status: string,
   isAwaitingPermission: boolean
-): string {
+): UiText {
   return renderDescribeWindowRow(messages, name, status, isAwaitingPermission);
 }
 
@@ -260,7 +275,7 @@ export type { WindowHeaderFacts };
  * Describes a window header as its accessible description.
  * @param facts where the window runs and which marks its header shows
  */
-export function describeWindowHeader(facts: WindowHeaderFacts): string {
+export function describeWindowHeader(facts: WindowHeaderFacts): UiText {
   return renderDescribeWindowHeader(messages, facts);
 }
 
@@ -268,7 +283,7 @@ export function describeWindowHeader(facts: WindowHeaderFacts): string {
  * Describes where a window runs.
  * @param facts the window's vendor and working directory, prepared for display
  */
-export function describeWindowLocation(facts: Pick<WindowHeaderFacts, 'vendor' | 'cwd'>): string {
+export function describeWindowLocation(facts: Pick<WindowHeaderFacts, 'vendor' | 'cwd'>): UiText {
   return renderDescribeWindowLocation(messages, facts);
 }
 
@@ -276,7 +291,7 @@ export function describeWindowLocation(facts: Pick<WindowHeaderFacts, 'vendor' |
  * Describes a window status for display.
  * @param status the status reported by the daemon
  */
-export function describeStatus(status: string): string {
+export function describeStatus(status: string): UiText {
   return renderDescribeStatus(messages, status);
 }
 
@@ -285,7 +300,7 @@ export function describeStatus(status: string): string {
  * is.
  * @param phase the session phase of that window
  */
-export function describePaneNotice(phase: string): string | null {
+export function describePaneNotice(phase: string): UiText | null {
   return renderDescribePaneNotice(messages, phase);
 }
 
@@ -294,7 +309,7 @@ export function describePaneNotice(phase: string): string | null {
  * effective keymap.
  * @param count the number of discarded entries
  */
-export function describeDiscardedKeymapEntries(count: number): string {
+export function describeDiscardedKeymapEntries(count: number): UiText {
   return renderDescribeDiscardedKeymapEntries(messages, count);
 }
 
@@ -303,7 +318,7 @@ export function describeDiscardedKeymapEntries(count: number): string {
  * user's themes.
  * @param count the number of rejected entries
  */
-export function describeThemeIssues(count: number): string {
+export function describeThemeIssues(count: number): UiText {
   return renderDescribeThemeIssues(messages, count);
 }
 
@@ -311,7 +326,7 @@ export function describeThemeIssues(count: number): string {
  * Describes the count shown at every "needs you" display location.
  * @param count the number of windows that need the user's attention
  */
-export function describeAttentionBadge(count: number): string {
+export function describeAttentionBadge(count: number): UiText {
   return renderDescribeAttentionBadge(messages, count);
 }
 
@@ -321,7 +336,7 @@ export function describeAttentionBadge(count: number): string {
  * @param count the number of restore candidates
  * @param timestamp the formatted recording time, `null` when unknown
  */
-export function describeReopenNotice(count: number, timestamp: string | null): string {
+export function describeReopenNotice(count: number, timestamp: string | null): UiText {
   return renderDescribeReopenNotice(messages, count, timestamp);
 }
 
@@ -330,7 +345,7 @@ export function describeReopenNotice(count: number, timestamp: string | null): s
  * @param selected the number of candidates currently checked
  * @param total the total number of candidates offered
  */
-export function describeRestoreSelectionCount(selected: number, total: number): string {
+export function describeRestoreSelectionCount(selected: number, total: number): UiText {
   return renderDescribeRestoreSelectionCount(messages, selected, total);
 }
 
@@ -338,7 +353,7 @@ export function describeRestoreSelectionCount(selected: number, total: number): 
  * Describes the label of the button that reopens the checked windows.
  * @param count the number of candidates currently checked
  */
-export function describeRestoreConfirm(count: number): string {
+export function describeRestoreConfirm(count: number): UiText {
   return renderDescribeRestoreConfirm(messages, count);
 }
 
@@ -347,12 +362,12 @@ export function describeRestoreConfirm(count: number): string {
  * @param name the room's display name
  * @param count the number of windows in the room
  */
-export function describeRoomTitle(name: string, count: number): string {
+export function describeRoomTitle(name: string, count: number): UiText {
   return renderDescribeRoomTitle(messages, name, count);
 }
 
 /** Describes the tooltip of a window's waiting-messages mark. */
-export function describeQueuedMessages(count: number): string {
+export function describeQueuedMessages(count: number): UiText {
   return renderDescribeQueuedMessages(messages, count);
 }
 
@@ -382,7 +397,7 @@ export function describeUnknownExplanation(
  * `'undelivered_unknown'` arm and carries one.
  * @param outcome how the delivery ended, with the reason that arm carries
  */
-export function describeUndeliveredUnknownReason(outcome: ChatDeliveryOutcome): string {
+export function describeUndeliveredUnknownReason(outcome: ChatDeliveryOutcome): UiText {
   return renderDescribeUndeliveredUnknownReason(messages, outcome);
 }
 
@@ -390,7 +405,7 @@ export function describeUndeliveredUnknownReason(outcome: ChatDeliveryOutcome): 
  * Describes the interrupt button's tooltip, from the gate's own verdict.
  * @param target the gate's verdict for `interrupt` on that window
  */
-export function describeInterruptHint(target: ConfirmTarget): string {
+export function describeInterruptHint(target: ConfirmTarget): UiText {
   return renderDescribeInterruptHint(messages, target);
 }
 
@@ -398,7 +413,7 @@ export function describeInterruptHint(target: ConfirmTarget): string {
  * Describes why an action does nothing right now.
  * @param reason the reason the availability judgment gave
  */
-export function describeActionBlock(reason: ActionBlockReason): string {
+export function describeActionBlock(reason: ActionBlockReason): UiText {
   return renderDescribeActionBlock(messages, reason);
 }
 
@@ -408,7 +423,7 @@ export type { PickerWindowRowFacts };
  * Describes a picker window row as its accessible name.
  * @param facts the window's name, status and place, and whether it is the current one
  */
-export function describePickerWindowRow(facts: PickerWindowRowFacts): string {
+export function describePickerWindowRow(facts: PickerWindowRowFacts): UiText {
   return renderDescribePickerWindowRow(messages, facts);
 }
 
@@ -426,8 +441,8 @@ export function describePickerActionRow(name: string, key: string | null): strin
  * @param empty the picker's empty state
  */
 export function describePickerEmpty(empty: NonNullable<PickerEmpty>): {
-  title: string;
-  hint: string | null;
+  title: UiText;
+  hint: UiText | null;
 } {
   return renderDescribePickerEmpty(messages, empty);
 }
@@ -442,6 +457,6 @@ export function describePickerResults(
   mode: PickerMode,
   rowCount: number,
   empty: PickerEmpty
-): string {
+): UiText {
   return renderDescribePickerResults(messages, mode, rowCount, empty);
 }

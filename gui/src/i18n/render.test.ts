@@ -1,9 +1,10 @@
 /**
  * Message assembly is resource-driven: passing the dummy locale must replace
- * the English wording in every output. `describeOperationFailure` is out of
- * scope, since it takes its summary from the caller and reads no locale.
- * Plural forms and unknown-key fallback are checked against the English
- * locale instead, being properties of `render.ts` rather than of a locale.
+ * the English wording in every output. `describeOperationFailure` takes its
+ * summary from the caller, so it is measured here through
+ * `describeDetectionWarning`, whose summary is the locale's. Plural forms and
+ * unknown-key fallback are checked against the English locale instead, being
+ * properties of `render.ts` rather than of a locale.
  */
 import { describe, it, expect } from 'vitest';
 

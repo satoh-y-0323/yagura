@@ -1,5 +1,5 @@
-import type { Messages } from './messages';
-import type { TitleParts } from './messages-en';
+import type { Messages, TitleParts } from './messages';
+import type { UiText } from '../display/ui-text';
 import type { PickerEmpty, PickerMode } from '../command-picker/picker-model';
 import type {
   ChatDeliveryOutcome,
@@ -22,7 +22,7 @@ function ownEntry<V>(record: Readonly<Record<string, V>>, key: string): V | unde
 }
 
 /** Describes a window status for display. */
-export function describeStatus(messages: Messages, status: string): string {
+export function describeStatus(messages: Messages, status: string): UiText {
   return ownEntry(messages.statusLabels, status) ?? messages.statusLabels.unknown;
 }
 
@@ -30,13 +30,13 @@ export function describeStatus(messages: Messages, status: string): string {
  * Describes the card that stands in for a window that ended without this GUI
  * closing it: the window's name, and its exit code once known.
  *
- * @param name the window's display name, already prepared for display
+ * @param name the window's display name
  */
 export function describeExitedWindow(
   messages: Messages,
   name: string,
   exitCode: number | null
-): string {
+): UiText {
   return exitCode === null
     ? messages.workArea.windowExited(name)
     : messages.workArea.windowExitedWithCode(name, exitCode);
@@ -45,7 +45,7 @@ export function describeExitedWindow(
 /**
  * The exited window's sentence split around its name, for a card that cuts only the name short.
  *
- * @param name the window's display name, already prepared for display
+ * @param name the window's display name
  */
 export function describeExitedWindowParts(
   messages: Messages,
@@ -60,22 +60,22 @@ export function describeExitedWindowParts(
 /**
  * Describes the button that goes to another window.
  *
- * @param name the window's display name, already prepared for display
+ * @param name the window's display name
  */
-export function describeGoToWindow(messages: Messages, name: string): string {
+export function describeGoToWindow(messages: Messages, name: string): UiText {
   return messages.workArea.goToWindow(name);
 }
 
 /**
  * Describes a window that calls the user, as its lane card says it.
  *
- * @param name the window's display name, already prepared for display
+ * @param name the window's display name
  */
 export function describeWindowCall(
   messages: Messages,
   name: string,
   status: Extract<WindowStatus, 'waiting_approval' | 'waiting_input'>
-): string {
+): UiText {
   return status === 'waiting_approval'
     ? messages.banners.windowNeedsApproval(name)
     : messages.banners.windowNeedsInput(name);
@@ -84,7 +84,7 @@ export function describeWindowCall(
 /**
  * A calling window's sentence split around its name, for a card that cuts only the name short.
  *
- * @param name the window's display name, already prepared for display
+ * @param name the window's display name
  */
 export function describeWindowCallParts(
   messages: Messages,
@@ -99,20 +99,20 @@ export function describeWindowCallParts(
 /**
  * Describes a lane card that later events of its kind were folded into.
  *
- * @param sentence the latest event's sentence, already prepared for display
+ * @param sentence the latest event's sentence
  * @param count how many other events the card holds
  */
-export function describeNoticeAndMore(messages: Messages, sentence: string, count: number): string {
+export function describeNoticeAndMore(messages: Messages, sentence: string, count: number): UiText {
   return messages.banners.noticeAndMore(sentence, count);
 }
 
 /** Describes when a notification event was recorded. */
-export function describeEventTime(messages: Messages, date: Date): string {
+export function describeEventTime(messages: Messages, date: Date): UiText {
   return messages.formats.eventTime(date);
 }
 
 /** Joins what one update reads out into one text. */
-export function describeAnnouncement(messages: Messages, sentences: readonly string[]): string {
+export function describeAnnouncement(messages: Messages, sentences: readonly string[]): UiText {
   return messages.formats.sentences(sentences);
 }
 
@@ -121,7 +121,7 @@ export function describeReopenOffer(
   messages: Messages,
   count: number,
   timestamp: string | null
-): string {
+): UiText {
   return messages.workArea.reopenFromLastSession(count, timestamp);
 }
 
@@ -129,23 +129,23 @@ export function describeReopenOffer(
  * Describes a sidebar row as its accessible name: the window's name and its
  * status word, and whether the window waits for the user's permission.
  *
- * @param name the window's display name, already prepared for display
+ * @param name the window's display name
  */
 export function describeWindowRow(
   messages: Messages,
   name: string,
   status: string,
   isAwaitingPermission: boolean
-): string {
+): UiText {
   const label = messages.formats.windowRow(name, describeStatus(messages, status));
   return isAwaitingPermission ? messages.formats.windowRowAwaitingPermission(label) : label;
 }
 
 /** What a window header says beyond what it shows as text; see {@link describeWindowHeader}. */
 export interface WindowHeaderFacts {
-  /** The window's vendor, already prepared for display; `null` when it has none. */
+  /** The window's vendor; `null` when it has none. */
   vendor: string | null;
-  /** The window's working directory, already prepared for display. */
+  /** The window's working directory. */
   cwd: string;
   /** Whether the header shows the MCP connection mark. */
   showsMcpMark: boolean;
@@ -158,7 +158,7 @@ export interface WindowHeaderFacts {
 function windowLocationSentence(
   messages: Messages,
   facts: Pick<WindowHeaderFacts, 'vendor' | 'cwd'>
-): string {
+): UiText {
   return facts.vendor === null
     ? messages.formats.windowHeaderCwd(facts.cwd)
     : messages.formats.windowHeaderVendorCwd(facts.vendor, facts.cwd);
@@ -168,7 +168,7 @@ function windowLocationSentence(
 export function describeWindowLocation(
   messages: Messages,
   facts: Pick<WindowHeaderFacts, 'vendor' | 'cwd'>
-): string {
+): UiText {
   return messages.formats.sentences([windowLocationSentence(messages, facts)]);
 }
 
@@ -176,7 +176,7 @@ export function describeWindowLocation(
  * Describes a window header as its accessible description: where the window
  * runs, then what each mark it shows means, so the marks are not icon-only.
  */
-export function describeWindowHeader(messages: Messages, facts: WindowHeaderFacts): string {
+export function describeWindowHeader(messages: Messages, facts: WindowHeaderFacts): UiText {
   const sentences = [windowLocationSentence(messages, facts)];
   if (facts.showsMcpMark) {
     sentences.push(messages.hints.mcpConnected);
@@ -191,7 +191,7 @@ export function describeWindowHeader(messages: Messages, facts: WindowHeaderFact
 }
 
 /** Describes what is wrong with one window's connection, `null` while nothing is. */
-export function describePaneNotice(messages: Messages, phase: string): string | null {
+export function describePaneNotice(messages: Messages, phase: string): UiText | null {
   if (phase === 'failed') {
     return messages.banners.connectionFailed;
   }
@@ -202,12 +202,12 @@ export function describePaneNotice(messages: Messages, phase: string): string | 
 }
 
 /** Describes how many keymap entries were rejected while resolving the effective keymap. */
-export function describeDiscardedKeymapEntries(messages: Messages, count: number): string {
+export function describeDiscardedKeymapEntries(messages: Messages, count: number): UiText {
   return messages.banners.discardedKeymapEntries(count);
 }
 
 /** Describes how many themes-file entries were rejected while parsing the user's themes. */
-export function describeThemeIssues(messages: Messages, count: number): string {
+export function describeThemeIssues(messages: Messages, count: number): UiText {
   return messages.banners.themeIssues(count);
 }
 
@@ -215,17 +215,17 @@ export function describeThemeIssues(messages: Messages, count: number): string {
  * Describes the count shown at every "needs you" display location:
  * the row indicator, the badges and the rail all read this same rendering.
  */
-export function describeAttentionBadge(messages: Messages, count: number): string {
+export function describeAttentionBadge(messages: Messages, count: number): UiText {
   return messages.formats.attentionBadge(count);
 }
 
 /** Describes a room heading together with how many windows it holds. */
-export function describeRoomTitle(messages: Messages, name: string, count: number): string {
+export function describeRoomTitle(messages: Messages, name: string, count: number): UiText {
   return messages.formats.windowListTitle(name, count);
 }
 
 /** Describes the tooltip of a window's waiting-messages mark. */
-export function describeQueuedMessages(messages: Messages, count: number): string {
+export function describeQueuedMessages(messages: Messages, count: number): UiText {
   return messages.formats.queuedMessages(count);
 }
 
@@ -278,7 +278,7 @@ export function describeUnknownExplanation(
 export function describeUndeliveredUnknownReason(
   messages: Messages,
   outcome: ChatDeliveryOutcome
-): string {
+): UiText {
   if (outcome.state !== 'undelivered_unknown' || outcome.reason === null) {
     return describeDeliveryState(messages, outcome.state);
   }
@@ -295,7 +295,7 @@ export function describeReopenNotice(
   messages: Messages,
   count: number,
   timestamp: string | null
-): string {
+): UiText {
   return messages.banners.restoreAvailable(count, timestamp);
 }
 
@@ -304,12 +304,12 @@ export function describeRestoreSelectionCount(
   messages: Messages,
   selected: number,
   total: number
-): string {
+): UiText {
   return messages.formats.restoreSelectionCount(selected, total);
 }
 
 /** Describes the label of the button that reopens the checked windows. */
-export function describeRestoreConfirm(messages: Messages, count: number): string {
+export function describeRestoreConfirm(messages: Messages, count: number): UiText {
   return messages.formats.restoreConfirm(count);
 }
 
@@ -318,7 +318,7 @@ export function describeRestoreConfirm(messages: Messages, count: number): strin
  * build does not know falls back to the unknown wording, the same way an
  * unrecognized status does.
  */
-export function describeDeliveryState(messages: Messages, state: string): string {
+export function describeDeliveryState(messages: Messages, state: string): UiText {
   switch (state) {
     case 'queued':
       return messages.chat.deliveryPending;
@@ -341,7 +341,7 @@ export function describeDeliveryState(messages: Messages, state: string): string
  * Describes why a chat room stopped. A reason this build does not know still
  * says the room stopped, so a halt never goes unsaid.
  */
-export function describeHaltReason(messages: Messages, reason: string): string {
+export function describeHaltReason(messages: Messages, reason: string): UiText {
   switch (reason) {
     case 'repetition':
       return messages.chat.haltedRepetition;
@@ -382,12 +382,16 @@ export function foldedFailureReason(error: unknown): DisplayLine {
  * detail the daemon reported (an approval-gate rejection, for one) when
  * anything survives {@link foldExternalText}.
  *
- * @param summary the operation-specific message from `errors`
+ * @param summary the operation-specific message from `errors`, returned as is when no detail is left
  * @param detail the rejected value the operation failed with
  */
-export function describeOperationFailure(summary: string, detail: unknown): string {
+export function describeOperationFailure<S extends string>(
+  messages: Messages,
+  summary: S,
+  detail: unknown
+): S | UiText {
   const folded = foldedFailureReason(detail);
-  return folded === '' ? summary : `${summary}: ${folded}`;
+  return folded === '' ? summary : messages.errors.operationFailure(summary, folded);
 }
 
 /**
@@ -401,8 +405,8 @@ export function describeOperationFailure(summary: string, detail: unknown): stri
  * @param messages the resolved locale, for the `errors.detectionLoadFailed` summary
  * @param detail the reason the daemon reported
  */
-export function describeDetectionWarning(messages: Messages, detail: unknown): string {
-  return describeOperationFailure(messages.errors.detectionLoadFailed, detail);
+export function describeDetectionWarning(messages: Messages, detail: unknown): UiText {
+  return describeOperationFailure(messages, messages.errors.detectionLoadFailed, detail);
 }
 /**
  * Describes the interrupt button's tooltip: what the button does while the
@@ -415,13 +419,13 @@ export function describeDetectionWarning(messages: Messages, detail: unknown): s
  * @param messages the resolved locale
  * @param target the gate's verdict for `interrupt` on that window
  */
-export function describeInterruptHint(messages: Messages, target: ConfirmTarget): string {
+export function describeInterruptHint(messages: Messages, target: ConfirmTarget): UiText {
   return target.allowed
     ? messages.hints.interruptWindow
     : describeInterruptBlock(messages, target.reason);
 }
 
-function describeInterruptBlock(messages: Messages, reason: InterruptBlockReason): string {
+function describeInterruptBlock(messages: Messages, reason: InterruptBlockReason): UiText {
   switch (reason) {
     case 'exited':
       return messages.hints.interruptUnavailableExited;
@@ -441,7 +445,7 @@ function describeInterruptBlock(messages: Messages, reason: InterruptBlockReason
  * @param messages the resolved locale
  * @param reason the reason the availability judgment gave
  */
-export function describeActionBlock(messages: Messages, reason: ActionBlockReason): string {
+export function describeActionBlock(messages: Messages, reason: ActionBlockReason): UiText {
   switch (reason) {
     case 'no-window-on-screen':
       return messages.actionBlocks.noWindowOnScreen;
@@ -465,7 +469,7 @@ export function describeActionBlock(messages: Messages, reason: ActionBlockReaso
 
 /** What a picker window row is read out as; see {@link describePickerWindowRow}. */
 export interface PickerWindowRowFacts {
-  /** The window's display name, already prepared for display. */
+  /** The window's display name. */
   name: string;
   status: string;
   isAwaitingPermission: boolean;
@@ -478,7 +482,7 @@ export interface PickerWindowRowFacts {
  * Describes a picker window row as its accessible name: the sidebar row's name,
  * then where the window is, then whether it is the current one.
  */
-export function describePickerWindowRow(messages: Messages, facts: PickerWindowRowFacts): string {
+export function describePickerWindowRow(messages: Messages, facts: PickerWindowRowFacts): UiText {
   const row = describeWindowRow(messages, facts.name, facts.status, facts.isAwaitingPermission);
   const placed = messages.picker.windowRowPlace(row, facts.place);
   return facts.isCurrent ? messages.picker.windowRowCurrent(placed) : placed;
@@ -505,7 +509,7 @@ export function describePickerActionRow(
 export function describePickerEmpty(
   messages: Messages,
   empty: NonNullable<PickerEmpty>
-): { title: string; hint: string | null } {
+): { title: UiText; hint: UiText | null } {
   switch (empty.kind) {
     case 'no-windows':
       return { title: messages.picker.noWindows, hint: null };
@@ -535,7 +539,7 @@ export function describePickerResults(
   mode: PickerMode,
   rowCount: number,
   empty: PickerEmpty
-): string {
+): UiText {
   if (empty !== null) {
     return describePickerEmpty(messages, empty).title;
   }

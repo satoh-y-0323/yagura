@@ -1,4 +1,5 @@
 import type { NoticeCategory } from '../notices/notice-model';
+import type { DisplayLine } from '../display/untrusted-text';
 
 /**
  * The consequence shared by every message that tells the user to restart the
@@ -356,6 +357,8 @@ export const messagesEn = {
      */
     boundaryDetailWithCount: (count: number, first: string): string =>
       `${count} problems, first: ${first}`,
+    /** A failed operation's summary followed by the reason it failed with. */
+    operationFailure: (summary: string, reason: DisplayLine): string => `${summary}: ${reason}`,
   },
 
   banners: {

@@ -3,7 +3,7 @@
  * leaking past the locale is obvious in a failing assertion. It is a plain module,
  * not a test file, so importing it registers no tests in the importer.
  */
-import type { Messages, TitleParts } from '../ui-messages';
+import type { Messages, MessagesSource, TitlePartsSource as TitleParts } from '../ui-messages';
 
 /** Each dummy sentence with a name is its parts put together, as in the English locale. */
 function joinParts(parts: TitleParts): string {
@@ -31,7 +31,9 @@ const windowExitedWithCodeParts = (name: string, code: number): TitleParts => ({
   after: `,${code})`,
 });
 
-export const dummyMessages: Messages = {
+// Checked against the resource's shape so a missing key stays a type error, then typed as the
+// resolved locale it stands in for.
+export const dummyMessages = {
   statusLabels: {
     running: 'DUMMY_running',
     waiting_input: 'DUMMY_waiting_input',
@@ -148,6 +150,7 @@ export const dummyMessages: Messages = {
     boundaryProfilesList: 'DUMMY_boundaryProfilesList',
     boundaryDetailWithCount: (count: number, first: string) =>
       `DUMMY_boundaryDetailWithCount(${count},${first})`,
+    operationFailure: (summary, reason) => `${summary}: ${reason}`,
   },
   banners: {
     connectionFailed: 'DUMMY_connectionFailed',
@@ -711,4 +714,4 @@ export const dummyMessages: Messages = {
     plansHeading: 'DUMMY_tickets_plansHeading',
     noPlans: 'DUMMY_tickets_noPlans',
   },
-};
+} satisfies MessagesSource as Messages;

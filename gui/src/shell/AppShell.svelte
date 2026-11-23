@@ -86,6 +86,7 @@
   import { pickFolder, subscribeFolderDrop } from '../ipc/folder-picker';
   import { startFramePull, type FramePull } from '../ipc/frame-pull';
   import { caughtValueText, sanitizeForDisplay } from '../display/untrusted-text';
+  import type { UiText } from '../display/ui-text';
   import {
     type ApprovalRequest,
     type ChatChanged,
@@ -2727,7 +2728,7 @@
   }
 
   // Says nothing when the operation succeeds.
-  async function reportIfFailed(summary: string, operation: Promise<void>): Promise<void> {
+  async function reportIfFailed(summary: UiText, operation: Promise<void>): Promise<void> {
     try {
       await operation;
     } catch (error) {
@@ -3133,7 +3134,7 @@
    * failure, including the one the core reports on its own when approver
    * registration has not succeeded yet (`ApproverNotRegistered`).
    */
-  function reportOperationFailure(summary: string, error: unknown): void {
+  function reportOperationFailure(summary: UiText, error: unknown): void {
     console.error(summary, error);
     recordFailure(
       'operation-failure',

@@ -64,6 +64,20 @@ function createBrandReader(program, brands) {
     return undefined;
   }
 
+  /** The brand `type` is a value of: a string type that carries a brand's key. */
+  function brandOfText(type) {
+    if (
+      !type.isIntersection() ||
+      !type.types.some((member) => (member.flags & ts.TypeFlags.StringLike) !== 0)
+    ) {
+      return undefined;
+    }
+    return checker
+      .getPropertiesOfType(type)
+      .map(brandOfProperty)
+      .find((brand) => brand !== undefined);
+  }
+
   // A key declared without a value (`declare const k: unique symbol`) only marks a type:
   // nothing can be stored under it, so what it is typed as is no place for a value.
   function isPhantomKey(property) {
@@ -216,7 +230,7 @@ function createBrandReader(program, brands) {
     );
   }
 
-  return { checker, brandsIn, handedInBy };
+  return { checker, brandsIn, brandOfText, handedInBy };
 }
 
 const BRAND_OPTIONS_SCHEMA = {
@@ -406,9 +420,100 @@ const noBrandForging = {
   },
 };
 
+// What a template may show besides a brand: values that are not text, and nothing at all.
+const NOT_TEXT_FLAGS =
+  ts.TypeFlags.NumberLike |
+  ts.TypeFlags.BigIntLike |
+  ts.TypeFlags.BooleanLike |
+  ts.TypeFlags.Null |
+  ts.TypeFlags.Undefined;
+
+// The attributes of a native element that a person reads or hears.
+const VISIBLE_ATTRIBUTES = /^(aria-label|title|placeholder|alt)$/;
+
+const displayText = {
+  meta: {
+    type: 'problem',
+    docs: {
+      description:
+        'Text a template shows is a brand that says how it was prepared: UiText, DisplayLine or DisplayBlock.',
+    },
+    schema: [BRAND_OPTIONS_SCHEMA],
+    messages: {
+      noTypes: 'yagura/display-text needs type information for this file.',
+      unprepared:
+        'This shows {{type}}, which says nothing of how it was prepared; show the UI text from ui-messages or the prepared text from display/untrusted-text.',
+      untyped:
+        'This shows a value typed {{type}}, so nothing checks how it was prepared; give it the type of the text it holds.',
+    },
+  },
+  create(context) {
+    const [{ brands }] = context.options;
+    const services = context.sourceCode.parserServices;
+    if (services?.program == null || services.esTreeNodeToTSNodeMap === undefined) {
+      return {
+        Program(node) {
+          context.report({ node, messageId: 'noTypes' });
+        },
+      };
+    }
+    const reader = createBrandReader(services.program, brands);
+    const { checker } = reader;
+
+    function membersOf(type) {
+      const resolved =
+        (type.flags & ts.TypeFlags.Instantiable) !== 0
+          ? (checker.getBaseConstraintOfType(type) ?? checker.getUnknownType())
+          : type;
+      return resolved.isUnion() ? resolved.types : [resolved];
+    }
+
+    function check(expression) {
+      const type = checker.getTypeAtLocation(services.esTreeNodeToTSNodeMap.get(expression));
+      const members = membersOf(type);
+      if (members.some((member) => (member.flags & OPAQUE_FLAGS) !== 0)) {
+        context.report({
+          node: expression,
+          messageId: 'untyped',
+          data: { type: checker.typeToString(type) },
+        });
+        return;
+      }
+      const unprepared = members.some(
+        (member) =>
+          (member.flags & NOT_TEXT_FLAGS) === 0 && reader.brandOfText(member) === undefined
+      );
+      if (unprepared) {
+        context.report({
+          node: expression,
+          messageId: 'unprepared',
+          data: { type: checker.typeToString(type) },
+        });
+      }
+    }
+
+    return {
+      'SvelteMustacheTag[kind="text"]:not(SvelteStartTag SvelteMustacheTag)'(node) {
+        check(node.expression);
+      },
+      "SvelteStartTag[parent.kind='html'] > SvelteAttribute > SvelteMustacheTag"(node) {
+        if (VISIBLE_ATTRIBUTES.test(node.parent.key.name)) {
+          check(node.expression);
+        }
+      },
+      "SvelteStartTag[parent.kind='html'] > SvelteShorthandAttribute"(node) {
+        if (VISIBLE_ATTRIBUTES.test(node.key.name)) {
+          check(node.value);
+        }
+      },
+    };
+  },
+};
+
 export default {
   meta: { name: 'eslint-plugin-yagura' },
   rules: {
     'no-brand-forging': noBrandForging,
+    'display-text': displayText,
   },
 };

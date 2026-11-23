@@ -9,6 +9,7 @@
 import { describe, it, expect } from 'vitest';
 
 import { foldExternalText } from '../display/untrusted-text';
+import { resolveMessages } from './messages';
 import { describeOperationFailure } from './render';
 
 const SUMMARY = 'Could not close the window';
@@ -118,7 +119,7 @@ describe('describeOperationFailure: goes through the same treatment rather than 
     (detail) => {
       const folded = foldExternalText(detail);
       const expected = folded === '' ? SUMMARY : `${SUMMARY}: ${folded}`;
-      expect(describeOperationFailure(SUMMARY, detail)).toBe(expected);
+      expect(describeOperationFailure(resolveMessages(), SUMMARY, detail)).toBe(expected);
     }
   );
 });
