@@ -17,6 +17,9 @@ const APPROVAL_STILL_WAITS_FOR_APPROVAL = 'It still waits for your approval.';
 const PLAN_STILL_REVIEWS_FIRST = 'It still reviews new plans before they run.';
 const PLAN_STILL_RUNS_WITHOUT_REVIEW = 'It still runs new plans without review.';
 
+/** What sets the parts of one line apart, held once so every such line is spelled alike. */
+const PART_SEPARATOR = ' · ';
+
 /** A sentence split around the name it holds, so a card can cut the name short and keep the rest. */
 export interface TitleParts {
   before: string;
@@ -288,6 +291,13 @@ export const messagesEn = {
 
     /** Names the chat room a request is addressed to, when it names one. */
     describeApprovalRoom: (name: DisplayLine): string => `the chat room “${name}”`,
+
+    /** The approval dialog's line: who asked, the tool, then what it would act on. A requester with no name is left out. */
+    approvalRoute: (
+      requester: UiText | DisplayLine | null,
+      tool: DisplayLine,
+      target: UiText
+    ): string => [requester, tool, target].filter((part) => part !== null).join(' → '),
   },
 
   forms: {
@@ -562,8 +572,11 @@ export const messagesEn = {
     restoreSelectionCount: (selected: number, total: number): string =>
       `${selected} of ${total} selected`,
 
-    /** Where a restore candidate came from: its profile and its vendor, whichever it recorded. */
-    restoreOrigin: (parts: readonly DisplayLine[]): string => parts.join(' · '),
+    /** The parts that are there, in order, on one line; `null` when none is. */
+    joinedParts: (parts: readonly (UiText | DisplayLine | null)[]): string | null => {
+      const present = parts.filter((part) => part !== null && part !== '');
+      return present.length === 0 ? null : present.join(PART_SEPARATOR);
+    },
 
     /** The label of the button that reopens the checked windows. */
     restoreConfirm: (count: number): string =>
@@ -582,7 +595,8 @@ export const messagesEn = {
     windowHeaderVendorCwd: (vendor: DisplayLine, cwd: DisplayLine): string => `${vendor} in ${cwd}`,
     windowHeaderCwd: (cwd: DisplayLine): string => `In ${cwd}`,
     /** A status word followed by the short reason the status is unknown. */
-    statusWithUnknownReason: (status: UiText, reason: UiText): string => `${status} · ${reason}`,
+    statusWithUnknownReason: (status: UiText, reason: UiText): string =>
+      `${status}${PART_SEPARATOR}${reason}`,
     /** Why a status is unknown, followed by the warning the detection definition left. */
     unknownExplanationWithWarning: (explanation: UiText, warning: DisplayLine): string =>
       `${explanation} (${warning})`,
@@ -757,8 +771,9 @@ export const messagesEn = {
     reportSucceeded: 'Succeeded',
     reportFailed: 'Failed',
     reportPathLabel: 'Result file',
-    /** A task card's assignment: its profile, then its model and effort when set. */
-    assignmentLine: (parts: readonly DisplayLine[]): string => parts.join(' · '),
+    /** A task card's window: its name and its status word. */
+    windowWithStatus: (name: DisplayLine, status: UiText): string =>
+      `${name}${PART_SEPARATOR}${status}`,
     taskWritesLine: (paths: readonly DisplayLine[]): string => paths.join(', '),
     taskDependsOnLine: (taskIds: readonly DisplayLine[]): string => `← ${taskIds.join(', ')}`,
 
@@ -813,13 +828,13 @@ export const messagesEn = {
     modelChoicesFromProfile: 'Choices from this profile',
     modelChoicesFromCommand: 'Models from',
     modelChoicesFetchedAt: (fetchedAtMs: number): string =>
-      `· fetched ${CLOCK_TIME.format(fetchedAtMs)}`,
+      `${PART_SEPARATOR.trimStart()}fetched ${CLOCK_TIME.format(fetchedAtMs)}`,
     modelChoicesFetching: 'Fetching…',
     modelChoicesFailed: (reason: UiText | DisplayLine): string =>
       `Could not read the model list: ${reason}. You can still type model names.`,
     /** One model of the list: its id, then its display name when the list gives one. */
     modelChoiceOption: (id: DisplayLine, label: DisplayLine | null): string =>
-      label === null ? `${id}` : `${id} · ${label}`,
+      label === null ? `${id}` : `${id}${PART_SEPARATOR}${label}`,
     modelChoicesOverdueReason: 'the request timed out',
     modelOtherOption: 'Other…',
     modelEditedMark: 'edited',
@@ -853,9 +868,11 @@ export const messagesEn = {
         : `The ticket settings could not be read: ${reason}`,
     ticketLabel: (ticketNumber: number): string => `T-${ticketNumber}`,
     /** A workspace as the picker lists it: its name, then where it is. */
-    workspaceOption: (name: DisplayLine, path: DisplayLine): string => `${name} · ${path}`,
+    workspaceOption: (name: DisplayLine, path: DisplayLine): string =>
+      `${name}${PART_SEPARATOR}${path}`,
     /** A milestone named with its title, as the picker and a ticket's chip show it. */
-    milestoneWithTitle: (name: DisplayLine, title: DisplayLine): string => `${name} · ${title}`,
+    milestoneWithTitle: (name: DisplayLine, title: DisplayLine): string =>
+      `${name}${PART_SEPARATOR}${title}`,
     columnTruncated: 'More tickets than shown.',
     planCount: (count: number): string => (count === 1 ? '1 plan' : `${count} plans`),
     backButton: 'Back',
@@ -1060,9 +1077,14 @@ export const messagesEn = {
     integrationNotInstalled: 'Not installed',
     integrationUnknown: 'Unknown',
     integrationChecking: 'Checking…',
-    // `args` is a wire key, not an English noun, so it gets a phrase of its own.
-    integrationDiffersIn: (key: DisplayLine): string =>
-      key === 'args' ? 'Registered with different arguments' : `Registered with a different ${key}`,
+    // `args` is a wire key, not an English noun, so it gets a phrase of its own. `null` is a
+    // daemon that names no part.
+    integrationDiffersIn: (key: DisplayLine | null): string =>
+      key === null
+        ? 'Registered with different settings'
+        : key === 'args'
+          ? 'Registered with different arguments'
+          : `Registered with a different ${key}`,
     integrationRegisterButton: 'Register',
     integrationUpdateButton: 'Update',
     integrationRemoveButton: 'Remove',
@@ -1223,8 +1245,8 @@ export const messagesEn = {
     windowsTitle: 'Go to window',
     commandsTitle: 'Commands',
     placeholder: 'Search windows by name, room, folder, or status',
-    windowsFooter: '↑↓ Move · Enter Open · Esc Close · > Commands',
-    commandsFooter: '↑↓ Move · Enter Run · Esc Close',
+    windowsFooter: ['↑↓ Move', 'Enter Open', 'Esc Close', '> Commands'].join(PART_SEPARATOR),
+    commandsFooter: ['↑↓ Move', 'Enter Run', 'Esc Close'].join(PART_SEPARATOR),
     needsYouHeading: 'Needs you',
     otherWindowsHeading: 'Other windows',
     current: 'Current',

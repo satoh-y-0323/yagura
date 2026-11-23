@@ -69,6 +69,8 @@ export const dummyMessages = {
     approvalTargetNewWindow: 'DUMMY_approvalTargetNewWindow',
     // Names the chat room a post would go to, when the request carries one.
     describeApprovalRoom: (name) => `DUMMY_describeApprovalRoom(${name})`,
+    approvalRoute: (requester, tool, target) =>
+      `DUMMY_approvalRoute(${requester},${tool},${target})`,
   },
   forms: {
     commandLabel: 'DUMMY_commandLabel',
@@ -242,7 +244,11 @@ export const dummyMessages = {
     attentionBadge: (count: number) => `DUMMY_attentionBadge(${count})`,
     restoreSelectionCount: (selected: number, total: number) =>
       `DUMMY_restoreSelectionCount(${selected}, ${total})`,
-    restoreOrigin: (parts) => `DUMMY_restoreOrigin(${parts.join(',')})`,
+    // Leaves out the parts the English locale leaves out, so a caller reads `null` alike.
+    joinedParts: (parts) => {
+      const present = parts.filter((part) => part !== null && part !== '');
+      return present.length === 0 ? null : `DUMMY_joinedParts(${present.join(',')})`;
+    },
     restoreConfirm: (count: number) => `DUMMY_restoreConfirm(${count})`,
     // The tooltip of a window's waiting-messages mark.
     queuedMessages: (count: number) => `DUMMY_queuedMessages(${count})`,
@@ -666,7 +672,7 @@ export const dummyMessages = {
     reportSucceeded: 'DUMMY_plans_reportSucceeded',
     reportFailed: 'DUMMY_plans_reportFailed',
     reportPathLabel: 'DUMMY_plans_reportPathLabel',
-    assignmentLine: (parts) => `DUMMY_plans_assignmentLine(${parts.join(',')})`,
+    windowWithStatus: (name, status) => `DUMMY_plans_windowWithStatus(${name},${status})`,
     taskWritesLine: (paths) => `DUMMY_plans_taskWritesLine(${paths.join(',')})`,
     taskDependsOnLine: (taskIds) => `DUMMY_plans_taskDependsOnLine(${taskIds.join(',')})`,
     reviewPendingTitle: 'DUMMY_plans_reviewPendingTitle',

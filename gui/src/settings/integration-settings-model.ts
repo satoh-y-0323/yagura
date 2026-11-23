@@ -171,9 +171,7 @@ function stateView(status: McpRegistrationStatusInfo | undefined): {
       return status.differsIn.includes('command')
         ? { label: settings.integrationDiffers, tone: 'warn' }
         : {
-            label: settings.integrationDiffersIn(
-              status.displayDiffersIn[0] ?? sanitizeForDisplay('')
-            ),
+            label: settings.integrationDiffersIn(status.displayDiffersIn[0] ?? null),
             tone: 'warn',
           };
   }

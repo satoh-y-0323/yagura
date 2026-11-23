@@ -511,20 +511,16 @@ export interface ProfileEntry {
   displayId: DisplayLine;
   /** The profile's declared display name. */
   displayName: DisplayLine;
-  /** The detection definition this profile names, `null` for the default. */
-  detection: string | null;
-  /** `detection` for display, `null` exactly when `detection` is. */
+  /** The detection definition this profile names, for display; `null` for the default. */
   displayDetection: DisplayLine | null;
   /** Why that definition could not be found, folded onto one line; `null` when it was found. */
   displayDetectionWarning: DisplayLine | null;
   /** The profile's own default working directory, `null` when it has none. */
   cwd: string | null;
   /**
-   * The unresolved argv launching this profile would run, empty when the
-   * daemon has none to offer on its operating system.
+   * The unresolved argv launching this profile would run, as one display line;
+   * empty exactly when the daemon has none to offer on its operating system.
    */
-  command: string[];
-  /** `command` as one display line. */
   displayCommand: DisplayLine;
   /** Whether the profile currently resolves to something launchable. */
   available: boolean;
@@ -799,12 +795,10 @@ function narrowProfileEntry(value: unknown, context: string): ProfileEntry {
     id,
     displayId: sanitizeForDisplay(id),
     displayName: sanitizeForDisplay(displayName),
-    detection,
     displayDetection: detection === null ? null : sanitizeForDisplay(detection),
     displayDetectionWarning:
       detectionWarning === null ? null : sanitizeForDisplay(detectionWarning),
     cwd,
-    command,
     displayCommand: formatCommandLine(command),
     available,
     reason: reason === null ? null : sanitizeForDisplay(reason),

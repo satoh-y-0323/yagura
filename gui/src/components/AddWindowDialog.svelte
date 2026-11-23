@@ -200,7 +200,7 @@
         <div class="profile-summary">
           <span>
             {forms.profileSummaryCommandLabel}
-            {selectedProfile !== null && selectedProfile.command.length > 0
+            {selectedProfile !== null && selectedProfile.displayCommand !== ''
               ? selectedProfile.displayCommand
               : forms.profileSummaryCommandUnavailable}
           </span>

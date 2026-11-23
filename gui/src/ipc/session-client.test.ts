@@ -471,7 +471,6 @@ describe('invokeListProfiles', () => {
         id: 'codex-cli',
         displayId: 'codex-cli',
         displayName: 'Codex CLI',
-        detection: 'codex-cli',
         displayDetection: 'codex-cli',
         displayDetectionWarning: null,
         cwd: null,
@@ -479,7 +478,6 @@ describe('invokeListProfiles', () => {
         reason: null,
         unavailableKind: null,
         guidance: null,
-        command: ['codex'],
         displayCommand: 'codex',
         model: null,
         effort: null,
@@ -641,7 +639,7 @@ describe('invokeListProfiles', () => {
    * empty array), so narrowing it is a required field, not an optional one.
    */
   describe('command', () => {
-    it('narrows the command array onto the profile entry', async () => {
+    it('narrows the command array onto the profile entry as one display line', async () => {
       invokeMock.mockResolvedValueOnce({
         profiles: [{ ...RAW_PROFILE, command: ['codex', '--flag'] }],
         warnings: [],
@@ -649,10 +647,10 @@ describe('invokeListProfiles', () => {
 
       const result = await invokeListProfiles();
 
-      expect(result.profiles[0]).toMatchObject({ command: ['codex', '--flag'] });
+      expect(result.profiles[0]).toMatchObject({ displayCommand: 'codex --flag' });
     });
 
-    it('narrows an empty command array (no argv for this operating system, or no default shell resolved)', async () => {
+    it('narrows an empty command array (no argv for this operating system, or no default shell resolved) to an empty line', async () => {
       invokeMock.mockResolvedValueOnce({
         profiles: [{ ...RAW_PROFILE, command: [] }],
         warnings: [],
@@ -660,7 +658,7 @@ describe('invokeListProfiles', () => {
 
       const result = await invokeListProfiles();
 
-      expect(result.profiles[0]).toMatchObject({ command: [] });
+      expect(result.profiles[0]).toMatchObject({ displayCommand: '' });
     });
 
     it('rejects with BoundaryError when a profile entry is missing command', async () => {

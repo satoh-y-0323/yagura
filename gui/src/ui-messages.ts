@@ -16,6 +16,7 @@ import {
   describeExitedWindowParts as renderDescribeExitedWindowParts,
   describeGoToWindow as renderDescribeGoToWindow,
   describeHaltReason as renderDescribeHaltReason,
+  describeJoinedParts as renderDescribeJoinedParts,
   describeInterruptHint as renderDescribeInterruptHint,
   describeNoticeAndMore as renderDescribeNoticeAndMore,
   describeOperationFailure as renderDescribeOperationFailure,
@@ -210,6 +211,17 @@ export function describeChatPostedAt(atMs: number): UiText {
  */
 export function describeAnnouncement(sentences: readonly (UiText | DisplayLine)[]): UiText {
   return renderDescribeAnnouncement(messages, sentences);
+}
+
+/**
+ * Puts the parts that are there on one line, in order, leaving out a `null` or empty one.
+ * @param parts the parts, prepared for display
+ * @returns the line, or `null` when no part is there
+ */
+export function describeJoinedParts(
+  parts: readonly (UiText | DisplayLine | null)[]
+): UiText | null {
+  return renderDescribeJoinedParts(messages, parts);
 }
 
 /**

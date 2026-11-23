@@ -2,11 +2,7 @@
  * What an approval request is addressed to, as the approval dialog and the
  * "expired unseen" notice both name it.
  */
-import {
-  formatPathForDisplay,
-  sanitizeForDisplay,
-  type DisplayLine,
-} from '../display/untrusted-text';
+import { formatPathForDisplay, type DisplayLine } from '../display/untrusted-text';
 import type { UiText } from '../display/ui-text';
 import type { ApprovalRequest } from '../ipc/session-boundary';
 import { describeStatus, dialogs } from '../ui-messages';
@@ -32,7 +28,8 @@ export function describeUntargeted(request: ApprovalRequest): UiText {
 
 /**
  * Names who asked: the requesting window, marked closed once it has left the
- * window list, or an external client.
+ * window list, or an external client. `null` for a window requester that
+ * carries no name, which the boundary never lets through.
  *
  * @param request the request shown
  * @param isRequesterOpen whether the requesting window is still in the window list
@@ -40,14 +37,15 @@ export function describeUntargeted(request: ApprovalRequest): UiText {
 export function describeApprovalRequester(
   request: ApprovalRequest,
   isRequesterOpen: boolean
-): UiText | DisplayLine {
+): UiText | DisplayLine | null {
   const { kind, name } = request.requester;
   if (kind !== 'window') {
     return dialogs.approvalRequesterExternal;
   }
-  // The boundary names every window requester; an empty name stands in if one ever lacks it.
-  const shown = name ?? sanitizeForDisplay('');
-  return isRequesterOpen ? shown : dialogs.approvalRequesterGone(shown);
+  if (name === null) {
+    return null;
+  }
+  return isRequesterOpen ? name : dialogs.approvalRequesterGone(name);
 }
 
 /** Names what a request would act on: its target window, or what {@link describeUntargeted} names. */

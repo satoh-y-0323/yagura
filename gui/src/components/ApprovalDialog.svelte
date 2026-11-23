@@ -65,7 +65,7 @@
         {decisionFailure}
       </p>
     {/if}
-    <p class="dialog-message">{requesterLabel} → {toolLabel} → {targetLabel}</p>
+    <p class="dialog-message">{dialogs.approvalRoute(requesterLabel, toolLabel, targetLabel)}</p>
     {#if request.text !== null && request.text !== ''}
       <pre class="approval-body">{request.text}</pre>
     {/if}

@@ -7,11 +7,7 @@ import type { DisplayLine } from '../display/untrusted-text';
 import type { UiText } from '../display/ui-text';
 import type { ProfileGuidance } from '../ipc/session-client';
 import type { RoleInfo } from '../ipc/plan-boundary';
-import {
-  limitGuidance,
-  unavailableText,
-  type LimitGuidance,
-} from '../profile/launch-profile-choices';
+import { unavailableText } from '../profile/launch-profile-choices';
 import { settings } from '../ui-messages';
 
 /** What a ready profile cannot do on this host, and what its profile says to do instead. */
@@ -19,7 +15,7 @@ export interface ProfileLimitNote {
   /** One line per limit. */
   items: readonly (UiText | DisplayLine)[];
   /** The first guidance a limit carries, `null` when none does. */
-  guidance: LimitGuidance | null;
+  guidance: ProfileGuidance | null;
 }
 
 /** What one row of the Profiles tab shows. */
@@ -84,7 +80,7 @@ function limitNoteOf(profile: ProfileOption): ProfileLimitNote | null {
     items: profile.limits.map((limit) =>
       limit.capability === 'unknown' ? limit.reason : settings.profileLimitItem[limit.capability]
     ),
-    guidance: profile.limits.map(limitGuidance).find((guidance) => guidance !== null) ?? null,
+    guidance: profile.limits.find((limit) => limit.guidance !== null)?.guidance ?? null,
   };
 }
 

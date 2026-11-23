@@ -234,7 +234,10 @@
                 {/if}
                 {#if card.window.kind === 'live'}
                   <div class="plan-card__window">
-                    {card.window.displayName} · {describeStatus(card.window.detected.status)}
+                    {plans.windowWithStatus(
+                      card.window.displayName,
+                      describeStatus(card.window.detected.status)
+                    )}
                   </div>
                 {:else if card.task.window_id !== null}
                   <div class="plan-card__window plan-board__muted">—</div>

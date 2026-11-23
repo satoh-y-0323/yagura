@@ -114,13 +114,31 @@ export function resolveDisplayName(state: ChatRoomState, windowId: string): Disp
 
 /**
  * The name to show for a room: its listed display name, or its id, written
- * out like a room name, while the list does not carry it.
+ * out like a room name, while the list does not name it.
  *
  * @param room the room's row, `undefined` when the list does not carry it
  * @param roomId the room to name
  */
 export function roomDisplayName(room: ChatRoomInfo | undefined, roomId: string): DisplayLine {
   return room?.displayName ?? formatPathForDisplay(roomId);
+}
+
+/** A room the list has named, which the room rail draws and its menu acts on. */
+export type NamedChatRoom = ChatRoomInfo & {
+  displayName: NonNullable<ChatRoomInfo['displayName']>;
+};
+
+/**
+ * The rooms of `rooms` the list has named with something to draw, in order.
+ * Narrowed by value rather than by a type predicate, so the name stays the one the boundary made.
+ *
+ * @param rooms the room rows, in wire order
+ */
+export function namedRooms(rooms: readonly ChatRoomInfo[]): readonly NamedChatRoom[] {
+  return rooms.flatMap((room) => {
+    const { displayName } = room;
+    return displayName === null || displayName === '' ? [] : [{ ...room, displayName }];
+  });
 }
 
 /**
@@ -196,8 +214,8 @@ export function anyNeedsUser(rooms: Map<string, ChatRoomInfo>): boolean {
  *
  * A room `rooms` already lists keeps every field but `needs_user`, which
  * takes the push's value. A room `rooms` has never listed gets a minimal
- * placeholder row -- empty name, so the room rail does not draw it until a
- * full `list_chat_rooms` read names it -- with no `halted` key at all, since
+ * placeholder row -- no display name, so the room rail does not draw it until
+ * a full `list_chat_rooms` read names it -- with no `halted` key at all, since
  * the push carries nothing to set it from.
  *
  * @param rooms the room map held now
@@ -215,7 +233,7 @@ export function applyChatChangedToRooms(
     next.set(changed.room_id, {
       room_id: changed.room_id,
       name: '',
-      displayName: formatPathForDisplay(''),
+      displayName: null,
       participant_count: 0,
       needs_user: changed.needs_user,
       last_at_ms: null,

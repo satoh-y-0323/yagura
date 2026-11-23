@@ -18,7 +18,13 @@
   import { pointerDrag, type PointerDragOptions } from './pointer-drag';
   import { tooltip } from './tooltip';
   import { isImeKey } from '../keymap/key-chord';
-  import { resolveDisplayName, roomDisplayName, type ChatRoomState } from '../chat/chat-store';
+  import {
+    namedRooms,
+    resolveDisplayName,
+    roomDisplayName,
+    type ChatRoomState,
+    type NamedChatRoom,
+  } from '../chat/chat-store';
   import { splitPreparedForMiddleEllipsis } from '../chat/middle-ellipsis';
   import { describeUnresolved } from '../chat/unresolved-notice';
   import {
@@ -82,9 +88,9 @@
   /** Reads the room list again; the room menu waits for it so it decides from fresh rows. */
   export let onRefreshRooms: () => Promise<void>;
   /** Asks to clear the history of the room the menu was opened on. */
-  export let onClearRoom: (room: ChatRoomInfo) => void;
+  export let onClearRoom: (room: NamedChatRoom) => void;
   /** Asks to delete the room the menu was opened on. */
-  export let onDeleteRoom: (room: ChatRoomInfo) => void;
+  export let onDeleteRoom: (room: NamedChatRoom) => void;
 
   const PANEL_STORAGE_KEY = 'yagura.chat-panel-rect';
   const MENTION_PATTERN = /@(?:"[^"]*"|[^\s]+)/g;
@@ -136,8 +142,11 @@
   // The same floor clampChatPanelRect applies, so the drawn size never outgrows the rect it shows.
   $: minPanelWidth = Math.min(CHAT_PANEL_MIN_SIZE.width, viewport.width);
   $: minPanelHeight = Math.min(CHAT_PANEL_MIN_SIZE.height, viewport.height);
+  /** The rooms the rail draws: the ones the list has named. */
+  $: railRooms = namedRooms(rooms);
   // A room that left the list while its menu was open takes the menu with it.
-  $: menuRoom = menuRoomId === null ? undefined : rooms.find((row) => row.room_id === menuRoomId);
+  $: menuRoom =
+    menuRoomId === null ? undefined : railRooms.find((row) => row.room_id === menuRoomId);
   $: deleteNote = menuRoom === undefined ? null : roomDeleteNote(menuRoom);
 
   /** The viewport the panel is kept inside of. */
@@ -305,7 +314,7 @@
     void openRoomMenu(roomId, anchor, undefined);
   }
 
-  function chooseRoomAction(action: (room: ChatRoomInfo) => void): void {
+  function chooseRoomAction(action: (room: NamedChatRoom) => void): void {
     const target = menuRoom;
     closeRoomMenu();
     if (target !== undefined) {
@@ -441,7 +450,7 @@
   <div class="room-rail" style="width: {roomRailWidth}px;">
     <div class="room-rail__head">{chat.roomsHeading}</div>
     <ul class="room-rail__list">
-      {#each rooms.filter((row) => row.name !== '') as row (row.room_id)}
+      {#each railRooms as row (row.room_id)}
         {@const name = splitPreparedForMiddleEllipsis(row.displayName)}
         <li
           class="room-row"

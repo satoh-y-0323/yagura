@@ -125,6 +125,22 @@ describe('narrowChatPosted', () => {
     });
   });
 
+  it('writes each unresolved name as the mention that addresses it, prepared for display', () => {
+    const posted = narrowChatPosted(
+      chatPostedWire({
+        unresolved: ['reviewer', 'code planner', 'a.b', 'code_planner', '名前', 'a\u200Cb'],
+      })
+    );
+    expect(posted.unresolved).toEqual([
+      '@reviewer',
+      '@"code planner"',
+      '@"a.b"',
+      '@code_planner',
+      '@"名前"',
+      '@"a\\u{200C}b"',
+    ]);
+  });
+
   it('rejects a non-object value', () => {
     expect(() => narrowChatPosted(null)).toThrow(BoundaryError);
     expect(() => narrowChatPosted('nope')).toThrow(BoundaryError);

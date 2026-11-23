@@ -42,6 +42,7 @@
     roomDisplayName,
     type ChatHistory,
     type ChatRoomState,
+    type NamedChatRoom,
   } from '../chat/chat-store';
   import { describeRoomRemovalFailure, readRefusedForRemovedRoom } from '../chat/room-actions';
   import { serializeRefresh } from '../chat/refresh-serializer';
@@ -1185,7 +1186,7 @@
    */
   async function removeChatRoom(
     operation: 'clear_room' | 'delete_room',
-    room: ChatRoomInfo
+    room: NamedChatRoom
   ): Promise<void> {
     if (!(await requestConfirmation({ operation, roomName: room.displayName }))) {
       return;
@@ -4047,8 +4048,8 @@
     {currentRoomId}
     onSelectRoom={selectChatRoom}
     onRefreshRooms={refreshChatRooms}
-    onClearRoom={(room: ChatRoomInfo) => void removeChatRoom('clear_room', room)}
-    onDeleteRoom={(room: ChatRoomInfo) => void removeChatRoom('delete_room', room)}
+    onClearRoom={(room: NamedChatRoom) => void removeChatRoom('clear_room', room)}
+    onDeleteRoom={(room: NamedChatRoom) => void removeChatRoom('delete_room', room)}
     onClose={closeChat}
     onSend={(body: string) => postChat(body, false)}
     onBroadcast={broadcastChat}

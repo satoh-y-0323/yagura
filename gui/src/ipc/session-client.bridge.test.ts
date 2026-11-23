@@ -295,11 +295,9 @@ describe('invokeListProfiles', () => {
       id: 'p',
       displayId: 'p',
       displayName: 'P',
-      detection: 'det',
       displayDetection: 'det',
       displayDetectionWarning: 'warn',
       cwd: '/work',
-      command: ['p'],
       displayCommand: 'p',
       available: true,
       reason: 'why',
@@ -322,17 +320,19 @@ describe('invokeListProfiles', () => {
   it.each(['http://example.com/guide', 'javascript:alert(1)', 'file:///etc/passwd'])(
     'shows no page for guidance whose page %s is not https',
     async (url) => {
+      const guidance = { text: 't', command: 'c', url };
       invokeMock.mockResolvedValueOnce({
-        profiles: [profileWire({ unavailable_guidance: { text: 't', command: 'c', url } })],
+        profiles: [
+          profileWire({
+            unavailable_guidance: guidance,
+            limits: [{ capability: 'effort', reason: 'r', guidance }],
+          }),
+        ],
       });
       const result = await invokeListProfiles();
-      expect(result.profiles[0]?.guidance).toEqual({
-        text: 't',
-        command: 'c',
-        displayCommand: 'c',
-        url: null,
-        displayUrl: null,
-      });
+      const shown = { text: 't', command: 'c', displayCommand: 'c', url: null, displayUrl: null };
+      expect(result.profiles[0]?.guidance).toEqual(shown);
+      expect(result.profiles[0]?.limits[0]?.guidance).toEqual(shown);
     }
   );
 

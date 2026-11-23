@@ -18,17 +18,14 @@ import { settings } from '../ui-messages';
 
 function option(overrides: Partial<ProfileOption> = {}): ProfileOption {
   const id = overrides.id ?? 'codex-cli';
-  const command = overrides.command ?? ['codex'];
   return {
     id,
     displayId: sanitizeForDisplay(id),
     displayName: sanitizeForDisplay('Codex CLI'),
-    detection: null,
     displayDetection: null,
     displayDetectionWarning: null,
     cwd: null,
-    command,
-    displayCommand: formatCommandLine(command),
+    displayCommand: formatCommandLine(['codex']),
     available: true,
     reason: null,
     unavailableKind: null,
@@ -89,7 +86,7 @@ describe('profileSettingsRows', () => {
         option({
           id: 'codex-cli',
           displayName: sanitizeForDisplay('Codex CLI'),
-          command: ['codex', '--sandbox', 'workspace-write'],
+          displayCommand: formatCommandLine(['codex', '--sandbox', 'workspace-write']),
           enabled: false,
         }),
       ],
@@ -209,7 +206,12 @@ describe('profileSettingsRows', () => {
 
   it('shows the argv the daemon returned for a profile with no command table of its own', () => {
     const rows = profileSettingsRows(
-      [option({ id: 'shell', command: ['C:\\Windows\\System32\\cmd.exe'] })],
+      [
+        option({
+          id: 'shell',
+          displayCommand: formatCommandLine(['C:\\Windows\\System32\\cmd.exe']),
+        }),
+      ],
       []
     );
 
@@ -217,7 +219,10 @@ describe('profileSettingsRows', () => {
   });
 
   it('shows an empty command line when the daemon returned no argv', () => {
-    const rows = profileSettingsRows([option({ id: 'shell', command: [] })], []);
+    const rows = profileSettingsRows(
+      [option({ id: 'shell', displayCommand: formatCommandLine([]) })],
+      []
+    );
 
     expect(rows[0]?.commandLine).toBe('');
   });
@@ -278,25 +283,6 @@ describe('profileSettingsRows: what a ready profile cannot do here', () => {
     );
 
     expect(row?.limitNote?.items).toEqual(['a newer capability is not carried']);
-  });
-
-  it('links only an https:// page', () => {
-    const [row] = profileSettingsRows(
-      [
-        option({
-          limits: [
-            {
-              capability: 'effort',
-              reason: foldExternalText('no effort here'),
-              guidance: guidance('See the page.', null, 'http://example.com/muse'),
-            },
-          ],
-        }),
-      ],
-      ROLES
-    );
-
-    expect(row?.limitNote?.guidance).toMatchObject({ text: 'See the page.', url: null });
   });
 
   it('has no note for a profile without limits', () => {

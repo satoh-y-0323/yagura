@@ -133,6 +133,14 @@ export function describeAnnouncement(
   return messages.formats.sentences(sentences);
 }
 
+/** Describes the parts that are there on one line, in order; `null` when none is. */
+export function describeJoinedParts(
+  messages: Messages,
+  parts: readonly (UiText | DisplayLine | null)[]
+): UiText | null {
+  return messages.formats.joinedParts(parts);
+}
+
 /**
  * Describes when something was recorded; `null` for a value that is no
  * plausible recording time.
@@ -360,8 +368,7 @@ export function describeRestoreOrigin(
   profile: DisplayLine | null,
   vendor: DisplayLine | null
 ): UiText | null {
-  const parts = [profile, vendor].flatMap((part) => (part === null || part === '' ? [] : [part]));
-  return parts.length === 0 ? null : messages.formats.restoreOrigin(parts);
+  return messages.formats.joinedParts([profile, vendor]);
 }
 
 /** Describes the label of the button that reopens the checked windows. */

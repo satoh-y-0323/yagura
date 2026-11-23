@@ -519,7 +519,7 @@ describe('applyChatChangedToRooms: a room already in the list', () => {
 });
 
 describe('applyChatChangedToRooms: a room not yet in the list', () => {
-  it('adds a minimal row: empty name, zero participants, needs_user from the payload, no halted key', () => {
+  it('adds a minimal row: empty name, no display name, zero participants, needs_user from the payload, no halted key', () => {
     const rooms = applyRoomsList([roomInfo({ room_id: 'main' })]);
     const updated = applyChatChangedToRooms(
       rooms,
@@ -529,7 +529,7 @@ describe('applyChatChangedToRooms: a room not yet in the list', () => {
     expect(added).toEqual({
       room_id: 'r-new',
       name: '',
-      displayName: '',
+      displayName: null,
       participant_count: 0,
       needs_user: true,
       last_at_ms: null,

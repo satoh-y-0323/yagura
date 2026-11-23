@@ -123,32 +123,6 @@ export function launchOptionAxes(
   return axes;
 }
 
-/** A profile's guidance for a limit, as the screens may show it. */
-export interface LimitGuidance {
-  text: DisplayLine;
-  command: string | null;
-  displayCommand: DisplayLine | null;
-  /** An `https://` page only; anything else is dropped. */
-  url: string | null;
-  displayUrl: DisplayLine | null;
-}
-
-/** The guidance of `limit`, with a page that is not `https://` left out. */
-export function limitGuidance(limit: ProfileLimit): LimitGuidance | null {
-  const guidance: ProfileGuidance | null = limit.guidance;
-  if (guidance === null) {
-    return null;
-  }
-  const isSecurePage = guidance.url !== null && guidance.url.startsWith('https://');
-  return {
-    text: guidance.text,
-    command: guidance.command,
-    displayCommand: guidance.displayCommand,
-    url: isSecurePage ? guidance.url : null,
-    displayUrl: isSecurePage ? guidance.displayUrl : null,
-  };
-}
-
 /** The limit `profileId` has on `capability`, `null` for no such limit or an unlisted profile. */
 export function profileLimit(
   profiles: readonly Pick<LaunchProfile, 'id' | 'limits'>[],
@@ -162,7 +136,7 @@ export function profileLimit(
 /** Why a launch-option field cannot be used with the chosen profile here, and what to do instead. */
 export interface LaunchOptionLimit {
   reason: UiText;
-  guidance: LimitGuidance | null;
+  guidance: ProfileGuidance | null;
 }
 
 /** The limit that disables the `key` field of the chosen profile, `null` when the field is usable. */
@@ -177,7 +151,7 @@ export function launchOptionLimit(
   }
   return {
     reason: key === 'model' ? forms.modelLimited : forms.effortLimited,
-    guidance: limitGuidance(limit),
+    guidance: limit.guidance,
   };
 }
 

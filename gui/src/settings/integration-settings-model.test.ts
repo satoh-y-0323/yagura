@@ -579,12 +579,12 @@ describe('integrationGroups: details of the state and the notes', () => {
     expect(viewOf('differs', { differsIn: ['args'] }).stateTone).toBe('warn');
   });
 
-  it('names the key that differs, or an empty one when the daemon named none', () => {
+  it('names the key that differs, or no key when the daemon named none', () => {
     expect(viewOf('differs', { differsIn: ['args'] }).stateLabel).toBe(
       settings.integrationDiffersIn(sanitizeForDisplay('args'))
     );
     expect(viewOf('differs', { differsIn: [] }).stateLabel).toBe(
-      settings.integrationDiffersIn(sanitizeForDisplay(''))
+      settings.integrationDiffersIn(null)
     );
   });
 

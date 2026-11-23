@@ -18,6 +18,7 @@ import {
   type DisplayBlock,
   type DisplayLine,
 } from '../display/untrusted-text';
+import { formatMention } from './mention-syntax';
 import { parseLayoutJson, type LayoutV1 } from '../session/restore-model';
 import type { ApprovalRequesterKind, WithdrawReason } from '../session/approval-types';
 import type {
@@ -564,7 +565,10 @@ export interface ChatPosted {
   targets: string[];
   /** Whether the post counts as addressed to (or from) the human user. */
   user: boolean;
-  /** The mention text that did not resolve to exactly one participant, prepared for display. */
+  /**
+   * The names that did not resolve to exactly one participant, each written as
+   * the mention that addresses it and prepared for display.
+   */
   unresolved: readonly DisplayLine[];
   /** Whether the room is halted as of this post. */
   halted: boolean;
@@ -599,8 +603,11 @@ export interface ChatRoomInfo {
   room_id: string;
   /** The room's display name (the last path segment), as the daemon sent it. */
   name: string;
-  /** `name` with its hidden characters written out visibly, for rendering. */
-  displayName: DisplayLine;
+  /**
+   * `name` with its hidden characters written out visibly, for rendering;
+   * `null` for a room a push named before any list did.
+   */
+  displayName: DisplayLine | null;
   /** How many of the daemon's current participants belong to this room. */
   participant_count: number;
   /** Whether the room currently needs a human's attention. */
@@ -1476,7 +1483,10 @@ export function narrowChatPosted(value: unknown): ChatPosted {
     seq: requireInteger(record, 'seq', context),
     targets: requireStringArray(record, 'targets', context),
     user: requireBoolean(record, 'user', context),
-    unresolved: requireStringArray(record, 'unresolved', context).map(sanitizeForDisplay),
+    // Bare or quoted is decided on the name the daemon parses, not on its written-out form.
+    unresolved: requireStringArray(record, 'unresolved', context).map((name) =>
+      sanitizeForDisplay(formatMention(name))
+    ),
     halted: requireBoolean(record, 'halted', context),
   };
 }

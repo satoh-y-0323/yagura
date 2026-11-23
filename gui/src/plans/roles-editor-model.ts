@@ -1,6 +1,6 @@
 import type { UiText } from '../display/ui-text';
 import { sanitizeForDisplay, type DisplayLine } from '../display/untrusted-text';
-import { limitGuidance, profileLimit, type LaunchProfile } from '../profile/launch-profile-choices';
+import { profileLimit, type LaunchProfile } from '../profile/launch-profile-choices';
 import { plans } from '../ui-messages';
 
 /** One choice of the Default role picker: the row's name and that name for display. */
@@ -23,7 +23,7 @@ export function roleLaunchNote(
   if (limit === null || profile === undefined) {
     return null;
   }
-  return plans.roleLaunchLimited(profile.displayName, limitGuidance(limit)?.text ?? null);
+  return plans.roleLaunchLimited(profile.displayName, limit.guidance?.text ?? null);
 }
 
 /**

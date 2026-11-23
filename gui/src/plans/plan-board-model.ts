@@ -19,8 +19,8 @@ import { commandRejectionCode } from '../command-failure-model';
 import type { UiText } from '../display/ui-text';
 import { sanitizeForDisplay, type DisplayLine } from '../display/untrusted-text';
 import type { DetectedStatusView } from '../ipc/session-boundary';
-import { limitGuidance, profileLimit, type LaunchProfile } from '../profile/launch-profile-choices';
-import { plans } from '../ui-messages';
+import { profileLimit, type LaunchProfile } from '../profile/launch-profile-choices';
+import { describeJoinedParts, plans } from '../ui-messages';
 import type { WindowEntry } from '../stores/window-registry';
 
 /** The least of a window-list entry the board needs to read. */
@@ -240,18 +240,22 @@ export function taskOpenRefusal(
   if (profile === undefined || limit === null) {
     return null;
   }
-  return plans.taskOpenLimited(profile.displayName, limitGuidance(limit)?.text ?? null);
+  return plans.taskOpenLimited(profile.displayName, limit.guidance?.text ?? null);
 }
 
-/** A task card's assignment line, `null` when the task has no assignment. */
+/**
+ * A task card's assignment line: its profile, then its model and effort when
+ * set; `null` when the task has no assignment or none of them is set.
+ */
 export function assignmentLine(assignment: TaskAssignment | null): UiText | null {
   if (assignment === null) {
     return null;
   }
-  const parts = [assignment.profile, assignment.model, assignment.effort]
-    .filter((part): part is string => part !== null && part !== '')
-    .map(sanitizeForDisplay);
-  return plans.assignmentLine(parts);
+  return describeJoinedParts(
+    [assignment.profile, assignment.model, assignment.effort].map((part) =>
+      part === null ? null : sanitizeForDisplay(part)
+    )
+  );
 }
 
 /** The editor's text fields for an assignment; an unset value reads as blank text. */
