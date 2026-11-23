@@ -16,6 +16,8 @@ import type {
   ReviewMark,
 } from '../ipc/plan-boundary';
 import { commandRejectionCode } from '../command-failure-model';
+import type { UiText } from '../display/ui-text';
+import { sanitizeForDisplay } from '../display/untrusted-text';
 import type { DetectedStatusView } from '../ipc/session-boundary';
 import { limitGuidance, profileLimit, type LaunchProfile } from '../profile/launch-profile-choices';
 import { plans } from '../ui-messages';
@@ -231,18 +233,25 @@ export function ownerCandidates(
 export function taskOpenRefusal(
   task: PlanTaskInfo,
   profiles: readonly Pick<LaunchProfile, 'id' | 'displayName' | 'limits'>[]
-): string | null {
+): UiText | null {
   const profileId = task.has_instruction ? task.resolved.assignment?.profile : undefined;
   const profile = profiles.find((entry) => entry.id === profileId);
   const limit = profileId === undefined ? null : profileLimit(profiles, profileId, 'launch_prompt');
   if (profile === undefined || limit === null) {
     return null;
   }
-  const guidance = limitGuidance(limit)?.text ?? null;
-  return plans.taskOpenLimited(
-    profile.displayName,
-    guidance === null ? null : guidance.replace(/\s+/g, ' ').trim()
-  );
+  return plans.taskOpenLimited(profile.displayName, limitGuidance(limit)?.text ?? null);
+}
+
+/** A task card's assignment line, `null` when the task has no assignment. */
+export function assignmentLine(assignment: TaskAssignment | null): UiText | null {
+  if (assignment === null) {
+    return null;
+  }
+  const parts = [assignment.profile, assignment.model, assignment.effort]
+    .filter((part): part is string => part !== null && part !== '')
+    .map(sanitizeForDisplay);
+  return plans.assignmentLine(parts);
 }
 
 /** The editor's text fields for an assignment; an unset value reads as blank text. */

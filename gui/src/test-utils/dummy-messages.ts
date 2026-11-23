@@ -673,6 +673,9 @@ export const dummyMessages = {
     reportSucceeded: 'DUMMY_plans_reportSucceeded',
     reportFailed: 'DUMMY_plans_reportFailed',
     reportPathLabel: 'DUMMY_plans_reportPathLabel',
+    assignmentLine: (parts) => `DUMMY_plans_assignmentLine(${parts.join(',')})`,
+    taskWritesLine: (paths) => `DUMMY_plans_taskWritesLine(${paths.join(',')})`,
+    taskDependsOnLine: (taskIds) => `DUMMY_plans_taskDependsOnLine(${taskIds.join(',')})`,
     reviewPendingTitle: 'DUMMY_plans_reviewPendingTitle',
     reviewPendingDetail: 'DUMMY_plans_reviewPendingDetail',
     reviewApprovedTitle: 'DUMMY_plans_reviewApprovedTitle',
@@ -689,9 +692,9 @@ export const dummyMessages = {
     defaultRoleLabel: 'DUMMY_plans_defaultRoleLabel',
     defaultRoleNone: 'DUMMY_plans_defaultRoleNone',
     defaultRoleHint: 'DUMMY_plans_defaultRoleHint',
-    roleLaunchLimited: (profile: string, guidance: string | null) =>
+    roleLaunchLimited: (profile, guidance) =>
       `DUMMY_plans_roleLaunchLimited(${profile},${guidance ?? ''})`,
-    taskOpenLimited: (profile: string, guidance: string | null) =>
+    taskOpenLimited: (profile, guidance) =>
       `DUMMY_plans_taskOpenLimited(${profile},${guidance ?? ''})`,
     modelsTab: 'DUMMY_plans_modelsTab',
     modelsProfileLabel: 'DUMMY_plans_modelsProfileLabel',

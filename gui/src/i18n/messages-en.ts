@@ -706,6 +706,10 @@ export const messagesEn = {
     reportSucceeded: 'Succeeded',
     reportFailed: 'Failed',
     reportPathLabel: 'Result file',
+    /** A task card's assignment: its profile, then its model and effort when set. */
+    assignmentLine: (parts: readonly DisplayLine[]): string => parts.join(' · '),
+    taskWritesLine: (paths: readonly DisplayLine[]): string => paths.join(', '),
+    taskDependsOnLine: (taskIds: readonly DisplayLine[]): string => `← ${taskIds.join(', ')}`,
 
     // The review banner under the plan picker and the tags on tasks added or
     // changed after approval.
@@ -740,11 +744,11 @@ export const messagesEn = {
     defaultRoleNone: 'None',
     defaultRoleHint: 'Used for any task whose role is missing or not in this table.',
     /** Under a role row, and on a task card: the profile cannot take a task's instruction at launch here. */
-    roleLaunchLimited: (profile: string, guidance: string | null): string =>
+    roleLaunchLimited: (profile: DisplayLine, guidance: DisplayLine | null): string =>
       `On this computer, tasks with this role can't open a ${profile} window, because their instruction is handed over at launch.${
         guidance === null ? '' : ` ${guidance}`
       }`,
-    taskOpenLimited: (profile: string, guidance: string | null): string =>
+    taskOpenLimited: (profile: DisplayLine, guidance: DisplayLine | null): string =>
       `Can't open on this computer: ${profile} takes no instruction at launch here.${
         guidance === null ? '' : ` ${guidance}`
       }`,

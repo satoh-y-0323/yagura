@@ -8,6 +8,12 @@
  * through an ownership test.
  */
 import {
+  foldExternalText,
+  formatPathForDisplay,
+  sanitizeForDisplay,
+  type DisplayLine,
+} from '../display/untrusted-text';
+import {
   BoundaryError,
   readOptionalString,
   readOwnField,
@@ -58,10 +64,10 @@ const REPORT_OUTCOME_VALUES: ReadonlySet<string> = new Set<ReportOutcome>(['succ
 /** The latest report recorded against a task. */
 export interface TaskReport {
   outcome: ReportOutcome;
-  /** The reporting window's account, untrusted text shown only as text. */
-  summary: string;
-  /** Where a longer result was written, `null` when none was named. */
-  path: string | null;
+  /** The reporting window's account, folded onto one line for display. */
+  summary: DisplayLine;
+  /** Where a longer result was written, for display; `null` when none was named. */
+  path: DisplayLine | null;
   /** When the report was recorded, in Unix epoch seconds. */
   reported_at: number;
 }
@@ -87,11 +93,13 @@ export interface ResolvedAssignment {
 /** One task of a stored plan. */
 export interface PlanTaskInfo {
   task_id: string;
-  title: string;
-  /** The role the task names, `null` when it names none. */
-  role: string | null;
-  depends_on: string[];
-  writes: string[];
+  title: DisplayLine;
+  /** The role the task names, for display; `null` when it names none. */
+  role: DisplayLine | null;
+  /** The task ids this task waits for, for display. */
+  depends_on: DisplayLine[];
+  /** The paths the task writes, for display. */
+  writes: DisplayLine[];
   /** The index of the wave the task belongs to, counted from zero. */
   wave: number;
   /** The planning window's proposal, `null` when it made none. */
@@ -112,7 +120,7 @@ export interface PlanTaskInfo {
 /** One stored plan in full, as `get_plan` and every plan update reply with it. */
 export interface PlanInfo {
   plan_id: string;
-  title: string;
+  title: DisplayLine;
   cwd: string;
   /** The owning window, kept even after it closes; `null` when unowned. */
   owner_window: string | null;
@@ -132,7 +140,7 @@ export interface PlanInfo {
 /** One row of the `list_plans` result. */
 export interface PlanSummary {
   plan_id: string;
-  title: string;
+  title: DisplayLine;
   /** The owning window, kept even after it closes; `null` when unowned. */
   owner_window: string | null;
   task_count: number;
@@ -142,7 +150,7 @@ export interface PlanSummary {
   unseen_changes: boolean;
 }
 
-/** One row of the role-to-assignment table. */
+/** One row of the role-to-assignment table, as it is saved. */
 export interface RoleEntry {
   /** The role's name, as tasks refer to it. */
   name: string;
@@ -151,9 +159,15 @@ export interface RoleEntry {
   effort: string | null;
 }
 
+/** One row of the role table as the daemon reported it. */
+export interface RoleInfo extends RoleEntry {
+  /** `name` for display. */
+  displayName: DisplayLine;
+}
+
 /** The role-to-assignment table together with the role used when a task names none. */
 export interface RoleTable {
-  roles: RoleEntry[];
+  roles: RoleInfo[];
   /** The role a task without a role of its own falls back to, `null` when none is set. */
   default_role: string | null;
 }
@@ -176,7 +190,7 @@ export function narrowPlanInfo(value: unknown): PlanInfo {
   const tasksContext = `${context}.tasks`;
   return {
     plan_id: requireString(record, 'plan_id', context),
-    title: requireString(record, 'title', context),
+    title: sanitizeForDisplay(requireString(record, 'title', context)),
     cwd: requireString(record, 'cwd', context),
     owner_window: readOptionalString(record, 'owner_window', context),
     waves: requireArray(readOwnField(record, 'waves'), wavesContext).map((wave) =>
@@ -207,7 +221,7 @@ export function narrowPlanList(value: unknown): PlanSummary[] {
     const row = requireRecord(entry, plansContext);
     return {
       plan_id: requireString(row, 'plan_id', plansContext),
-      title: requireString(row, 'title', plansContext),
+      title: sanitizeForDisplay(requireString(row, 'title', plansContext)),
       owner_window: readOptionalString(row, 'owner_window', plansContext),
       task_count: requireNonNegativeInteger(row, 'task_count', plansContext),
       review: readOptionalClosed(row, 'review', plansContext, PLAN_REVIEW_VALUES),
@@ -229,8 +243,10 @@ export function narrowRoleList(value: unknown): RoleTable {
   const rolesContext = `${context}.roles`;
   const roles = requireArray(readOwnField(record, 'roles'), rolesContext).map((entry) => {
     const row = requireRecord(entry, rolesContext);
+    const name = requireString(row, 'name', rolesContext);
     return {
-      name: requireString(row, 'name', rolesContext),
+      name,
+      displayName: sanitizeForDisplay(name),
       profile: requireString(row, 'profile', rolesContext),
       model: readOptionalString(row, 'model', rolesContext),
       effort: readOptionalString(row, 'effort', rolesContext),
@@ -252,12 +268,13 @@ export function narrowPlanChanged(value: unknown): PlanChanged {
 
 function narrowPlanTaskInfo(value: unknown, context: string): PlanTaskInfo {
   const record = requireRecord(value, context);
+  const role = readOptionalString(record, 'role', context);
   return {
     task_id: requireString(record, 'task_id', context),
-    title: requireString(record, 'title', context),
-    role: readOptionalString(record, 'role', context),
-    depends_on: requireStringArray(record, 'depends_on', context),
-    writes: requireStringArray(record, 'writes', context),
+    title: sanitizeForDisplay(requireString(record, 'title', context)),
+    role: role === null ? null : sanitizeForDisplay(role),
+    depends_on: requireStringArray(record, 'depends_on', context).map(sanitizeForDisplay),
+    writes: requireStringArray(record, 'writes', context).map(formatPathForDisplay),
     wave: requireNonNegativeInteger(record, 'wave', context),
     parent: readOptionalAssignment(record, 'parent', context),
     user: readOptionalAssignment(record, 'user', context),
@@ -293,10 +310,11 @@ function readOptionalReport(record: UntrustedRecord, context: string): TaskRepor
   }
   const reportContext = `${context}.report`;
   const report = requireRecord(value, reportContext);
+  const path = readOptionalString(report, 'path', reportContext);
   return {
     outcome: requireReportOutcome(report, reportContext),
-    summary: requireString(report, 'summary', reportContext),
-    path: readOptionalString(report, 'path', reportContext),
+    summary: foldExternalText(requireString(report, 'summary', reportContext)),
+    path: path === null ? null : formatPathForDisplay(path),
     reported_at: requireNonNegativeInteger(report, 'reported_at', reportContext),
   };
 }

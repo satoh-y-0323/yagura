@@ -1,5 +1,13 @@
+import type { UiText } from '../display/ui-text';
+import { sanitizeForDisplay, type DisplayLine } from '../display/untrusted-text';
 import { limitGuidance, profileLimit, type LaunchProfile } from '../profile/launch-profile-choices';
 import { plans } from '../ui-messages';
+
+/** One choice of the Default role picker: the row's name and that name for display. */
+export interface DefaultRoleChoice {
+  name: string;
+  label: DisplayLine;
+}
 
 /**
  * Why a task of a role that uses `profileId` cannot open a window here,
@@ -9,7 +17,7 @@ import { plans } from '../ui-messages';
 export function roleLaunchNote(
   profiles: readonly Pick<LaunchProfile, 'id' | 'displayName' | 'limits'>[],
   profileId: string
-): string | null {
+): UiText | null {
   const limit = profileLimit(profiles, profileId, 'launch_prompt');
   const profile = profiles.find((entry) => entry.id === profileId);
   if (limit === null || profile === undefined) {
@@ -43,4 +51,9 @@ export function defaultRoleAfterEdit(
   rows: readonly { name: string }[]
 ): string | null {
   return rows.some((row) => row.name === defaultRole) ? defaultRole : null;
+}
+
+/** The Default role picker's choices, one per row in row order; a row's name may be one just typed. */
+export function defaultRoleChoices(rows: readonly { name: string }[]): DefaultRoleChoice[] {
+  return rows.map((row) => ({ name: row.name, label: sanitizeForDisplay(row.name) }));
 }

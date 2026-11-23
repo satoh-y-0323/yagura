@@ -20,6 +20,7 @@
   import { closeOnEscape } from './panel-focus';
   import { observeSize } from './observe-size';
   import { PANEL_MIN_SIZE, type PanelSize } from '../settings/panel-size';
+  import type { UiText } from '../display/ui-text';
   import type { PlansAttention } from '../plans/plan-board-model';
   import type { PlansTab } from '../tickets/ticket-board-model';
   import { buttons, nav, plans } from '../ui-messages';
@@ -73,7 +74,7 @@
   export let maxSize: PanelSize;
   export let onResize: (size: PanelSize) => void;
 
-  const TABS: readonly { tab: PlansTab; label: string }[] = [
+  const TABS: readonly { tab: PlansTab; label: UiText }[] = [
     { tab: 'tickets', label: plans.ticketsTab },
     { tab: 'board', label: plans.boardTab },
     { tab: 'roles', label: plans.rolesTab },

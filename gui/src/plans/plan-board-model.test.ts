@@ -18,7 +18,12 @@ import type {
   PlanTaskInfo,
   TaskAssignment,
 } from '../ipc/plan-boundary';
-import { foldExternalText, formatCommandLine, sanitizeForDisplay } from '../display/untrusted-text';
+import {
+  foldExternalText,
+  formatCommandLine,
+  formatPathForDisplay,
+  sanitizeForDisplay,
+} from '../display/untrusted-text';
 import { CommandFailureError } from '../ipc/session-boundary';
 import type { ProfileEntry, ProfileLimit, WindowInfo } from '../ipc/session-client';
 import { plans } from '../ui-messages';
@@ -66,7 +71,7 @@ const CLAUDE: TaskAssignment = { profile: 'claude', model: 'opus', effort: 'high
 function task(taskId: string, wave: number, overrides: Partial<PlanTaskInfo> = {}): PlanTaskInfo {
   return {
     task_id: taskId,
-    title: `Task ${taskId}`,
+    title: sanitizeForDisplay(`Task ${taskId}`),
     role: null,
     depends_on: [],
     writes: [],
@@ -85,11 +90,11 @@ function task(taskId: string, wave: number, overrides: Partial<PlanTaskInfo> = {
 function plan(overrides: Partial<PlanInfo> = {}): PlanInfo {
   return {
     plan_id: 'plan-a',
-    title: 'Ship the ledger',
+    title: sanitizeForDisplay('Ship the ledger'),
     cwd: 'C:\\work\\repo',
     owner_window: 'w-owner',
     waves: [['alpha'], ['beta']],
-    tasks: [task('alpha', 0), task('beta', 1, { depends_on: ['alpha'] })],
+    tasks: [task('alpha', 0), task('beta', 1, { depends_on: [sanitizeForDisplay('alpha')] })],
     roles_warning: null,
     review: null,
     version: 0,
@@ -124,9 +129,9 @@ describe('wave columns follow the daemon grouping', () => {
 
   it('carries each task as the daemon reported it', () => {
     const beta = task('beta', 1, {
-      role: 'reviewer',
-      writes: ['src/lib.rs'],
-      depends_on: ['alpha'],
+      role: sanitizeForDisplay('reviewer'),
+      writes: [formatPathForDisplay('src/lib.rs')],
+      depends_on: [sanitizeForDisplay('alpha')],
       user: { profile: 'codex', model: null, effort: 'medium' },
       resolved: { source: 'user', assignment: { profile: 'codex', model: null, effort: 'medium' } },
     });
@@ -576,7 +581,7 @@ describe('the plans flag on the rail', () => {
   function summary(planId: string, overrides: Partial<PlanSummary> = {}): PlanSummary {
     return {
       plan_id: planId,
-      title: `Plan ${planId}`,
+      title: sanitizeForDisplay(`Plan ${planId}`),
       owner_window: null,
       task_count: 1,
       review: null,

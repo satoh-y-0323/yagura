@@ -12,6 +12,7 @@
  */
 import { describe, it, expect } from 'vitest';
 
+import { foldExternalText, formatPathForDisplay } from '../display/untrusted-text';
 import {
   BoundaryError,
   narrowPlanChanged,
@@ -320,8 +321,8 @@ describe('TaskReport', () => {
   it('keeps every field of a well-formed report as the wire carried it', () => {
     const expected: TaskReport = {
       outcome: 'failed',
-      summary: 'Two cases still fail on Linux.',
-      path: 'reports/confirm.md',
+      summary: foldExternalText('Two cases still fail on Linux.'),
+      path: formatPathForDisplay('reports/confirm.md'),
       reported_at: 1_790_000_123,
     };
     expect(narrowedReport(taskReportWire({ ...expected }))).toEqual(expected);
@@ -704,6 +705,22 @@ describe('the values a plan reply keeps', () => {
     expect(info.tasks[0]?.resolved).toEqual({ source: 'unassigned', assignment: null });
   });
 
+  it('strips the hidden characters from a plan title in the detail and in the list', () => {
+    const title = 'Ship\nthe ‮fix​';
+    expect(narrowPlanInfo(planInfoWire({ title })).title).toBe('Shipthe fix');
+    expect(narrowPlanList({ plans: [planSummaryWire({ title })] })[0]?.title).toBe('Shipthe fix');
+  });
+
+  it('writes out the hidden characters of a task write path instead of dropping them', () => {
+    const writes = ['gui/src/a‮b.svelte', 'docs/x\ny.md', 'plain/path.ts'];
+    const info = narrowPlanInfo(planInfoWire({ tasks: [planTaskInfoWire({ writes })] }));
+    expect(info.tasks[0]?.writes).toEqual([
+      'gui/src/a\\u{202E}b.svelte',
+      'docs/x\\u{000A}y.md',
+      'plain/path.ts',
+    ]);
+  });
+
   it('keeps the owner window of a plan summary row', () => {
     const [row] = narrowPlanList({ plans: [planSummaryWire({ owner_window: 'window-b' })] });
     expect(row?.owner_window).toBe('window-b');
@@ -713,6 +730,7 @@ describe('the values a plan reply keeps', () => {
     const table = narrowRoleList({ roles: [roleEntryWire({ model: 'm', effort: 'low' })] });
     expect(table.roles[0]).toEqual({
       name: 'review',
+      displayName: 'review',
       profile: 'codex-cli',
       model: 'm',
       effort: 'low',

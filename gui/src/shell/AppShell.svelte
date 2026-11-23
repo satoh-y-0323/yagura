@@ -149,6 +149,7 @@
     PlanSummary,
     ReviewMark,
     RoleEntry,
+    RoleInfo,
     TaskAssignment,
   } from '../ipc/plan-boundary';
   import {
@@ -632,7 +633,7 @@
   let planList: PlanSummary[] = [];
   let selectedPlanId: string | null = null;
   let plan: PlanInfo | null = null;
-  let roles: RoleEntry[] = [];
+  let roles: RoleInfo[] = [];
   // Kept as read so a save does not clear the table's default role.
   let defaultRole: string | null = null;
   let unsubscribePlanChanged: (() => void) | null = null;

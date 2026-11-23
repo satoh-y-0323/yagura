@@ -7,8 +7,11 @@
    * change goes back out through the callbacks the shell supplies. Liveness
    * and the owner candidates come from the window list, not from the plan.
    */
+  import type { UiText } from '../display/ui-text';
+  import type { DisplayLine } from '../display/untrusted-text';
   import {
     assignmentFromEditor,
+    assignmentLine,
     assignmentSourceKey,
     buildWaveColumns,
     editorFieldsOf,
@@ -36,7 +39,7 @@
   /** The least of a plan-list entry the picker reads. */
   interface PlanChoice {
     plan_id: string;
-    title: string;
+    title: DisplayLine;
   }
 
   export let planList: PlanChoice[];
@@ -91,27 +94,18 @@
     drafts = Object.fromEntries(Object.entries(drafts).filter(([key]) => key !== taskId));
   }
 
-  function describeAssignment(assignment: AssignmentView | null): string {
-    if (assignment === null) {
-      return '';
-    }
-    return [assignment.profile, assignment.model, assignment.effort]
-      .filter((part): part is string => part !== null && part !== '')
-      .join(' · ');
-  }
-
   function isPlansKey(key: string): key is keyof typeof plans {
     return Object.prototype.hasOwnProperty.call(plans, key);
   }
 
   // `plans` also holds function-valued entries (e.g. the sidebar badge's
   // tooltip), so a key looked up dynamically here is not always a string.
-  function plansLabel(key: string): string {
+  function plansLabel(key: string): UiText | null {
     if (!isPlansKey(key)) {
-      return '';
+      return null;
     }
     const value = plans[key];
-    return typeof value === 'string' ? value : '';
+    return typeof value === 'string' ? value : null;
   }
 
   async function assignOwner(windowId: string): Promise<void> {
@@ -222,7 +216,7 @@
                   {/if}
                 </div>
                 <div class="plan-card__assignment">
-                  <span>{describeAssignment(card.task.resolved.assignment)}</span>
+                  <span>{assignmentLine(card.task.resolved.assignment)}</span>
                   <span class="plan-card__source" data-source={card.task.resolved.source}
                     >{plansLabel(assignmentSourceKey(card.task.resolved.source))}</span
                   >
@@ -231,10 +225,12 @@
                   <div class="plan-card__refusal">{refusal}</div>
                 {/if}
                 {#if card.task.writes.length > 0}
-                  <div class="plan-card__writes">{card.task.writes.join(', ')}</div>
+                  <div class="plan-card__writes">{plans.taskWritesLine(card.task.writes)}</div>
                 {/if}
                 {#if card.task.depends_on.length > 0}
-                  <div class="plan-card__depends">← {card.task.depends_on.join(', ')}</div>
+                  <div class="plan-card__depends">
+                    {plans.taskDependsOnLine(card.task.depends_on)}
+                  </div>
                 {/if}
                 {#if card.window.kind === 'live'}
                   <div class="plan-card__window">

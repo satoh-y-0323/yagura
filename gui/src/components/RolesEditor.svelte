@@ -11,6 +11,7 @@
   import {
     acceptsRoleTableReload,
     defaultRoleAfterEdit,
+    defaultRoleChoices,
     roleLaunchNote,
   } from '../plans/roles-editor-model';
   import { forms, plans } from '../ui-messages';
@@ -145,8 +146,8 @@
     <!-- eslint-disable-next-line svelte/no-reactive-reassign -- bind:value only ever picks an existing row name or none, both already accepted by defaultRoleAfterEdit, so the reactive statement's own overwrite is a no-op except when a row disappeared -->
     <select bind:value={selectedDefaultRole}>
       <option value={null}>{plans.defaultRoleNone}</option>
-      {#each rows as row (row)}
-        <option value={row.name}>{row.name}</option>
+      {#each defaultRoleChoices(rows) as choice, index (index)}
+        <option value={choice.name}>{choice.label}</option>
       {/each}
     </select>
   </label>
