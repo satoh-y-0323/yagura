@@ -26,6 +26,8 @@ import { settings } from '../ui-messages';
 
 /** The entries a command-less registration writes into one of its CLI's files. */
 export interface IntegrationFileWrite {
+  /** The file as the daemon names it, to tell apart files that read alike. */
+  fileKey: string;
   file: DisplayLine;
   names: DisplayLine[];
 }
@@ -220,13 +222,16 @@ function buildRowView(
 
 /** The entries grouped by file, in the order the files first appear. */
 function fileWrites(entries: readonly McpRegistrationEntry[]): IntegrationFileWrite[] {
-  const namesByFile = new Map<DisplayLine, DisplayLine[]>();
+  const byFile = new Map<string, IntegrationFileWrite>();
   for (const entry of entries) {
-    const names = namesByFile.get(entry.file) ?? [];
-    names.push(entry.name);
-    namesByFile.set(entry.file, names);
+    const write = byFile.get(entry.fileKey);
+    if (write === undefined) {
+      byFile.set(entry.fileKey, { fileKey: entry.fileKey, file: entry.file, names: [entry.name] });
+    } else {
+      write.names.push(entry.name);
+    }
   }
-  return [...namesByFile].map(([file, names]) => ({ file, names }));
+  return [...byFile.values()];
 }
 
 /** One sentence per file the entries go into, in the order the files first appear. */
@@ -250,9 +255,9 @@ export function integrationGroups(
   running: string | null
 ): IntegrationGroup[] {
   const hostRows: IntegrationRowView[] = [];
-  // A Map keeps the order in which each group first appeared. The daemon refuses hidden
-  // characters in a group, so the prepared name groups the rows as the raw one would.
-  const groupRows = new Map<DisplayLine, IntegrationRowView[]>();
+  // Keyed by the raw name, since two names may read alike once prepared; a Map keeps
+  // the order in which each group first appeared.
+  const namedGroups = new Map<string, { heading: DisplayLine; rows: IntegrationRowView[] }>();
 
   for (const row of listed.rows) {
     const view = buildRowView(row, statuses.get(row.profile), running);
@@ -260,20 +265,20 @@ export function integrationGroups(
       hostRows.push(view);
       continue;
     }
-    let bucket = groupRows.get(row.group);
-    if (bucket === undefined) {
-      bucket = [];
-      groupRows.set(row.group, bucket);
+    const named = namedGroups.get(row.group.key);
+    if (named === undefined) {
+      namedGroups.set(row.group.key, { heading: row.group.heading, rows: [view] });
+    } else {
+      named.rows.push(view);
     }
-    bucket.push(view);
   }
 
   const groups: IntegrationGroup[] = [];
   if (hostRows.length > 0) {
     groups.push({ key: HOST_GROUP_KEY, heading: settings.integrationsHostGroup, rows: hostRows });
   }
-  for (const [heading, rows] of groupRows) {
-    groups.push({ key: `${NAMED_GROUP_KEY_PREFIX}${heading}`, heading, rows });
+  for (const [key, { heading, rows }] of namedGroups) {
+    groups.push({ key: `${NAMED_GROUP_KEY_PREFIX}${key}`, heading, rows });
   }
   return groups;
 }

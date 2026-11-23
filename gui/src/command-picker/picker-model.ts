@@ -7,7 +7,11 @@
  */
 
 import { createGraphemeSegmenter } from '../display/graphemes';
-import { sanitizeForDisplay, type DisplayLine } from '../display/untrusted-text';
+import {
+  formatPathForDisplay,
+  sanitizeForDisplay,
+  type DisplayLine,
+} from '../display/untrusted-text';
 import type { ActionBlockReason, ActionVerdict } from '../keymap/action-availability';
 import { ACTION_IDS, type ActionId } from '../keymap/key-binding';
 import { STATUS_PRESENTATION } from '../status-presentation';
@@ -494,23 +498,80 @@ function refreshActionRow<W extends PickerWindow, A extends PickerAction>(
 
 // --- Matching ---
 
+/**
+ * How a typed word is prepared before it is folded, so it takes the form the
+ * field it is matched against shows on screen.
+ */
+const WORD_FORMS = {
+  line: sanitizeForDisplay,
+  path: formatPathForDisplay,
+  typed: (word: string): string => word,
+} as const satisfies Record<string, (word: string) => string>;
+
+type WordForm = keyof typeof WORD_FORMS;
+
+/** The form each window field is shown in; the status words are UI text. */
+const WINDOW_FIELD_FORMS = {
+  name: 'line',
+  vendor: 'line',
+  place: 'path',
+  cwd: 'path',
+  statusWords: 'typed',
+} as const satisfies Record<keyof PickerWindowRow<PickerWindow>['marks'] | 'statusWords', WordForm>;
+
+/** An action's texts are all UI text. */
+const ACTION_FIELD_FORM: WordForm = 'typed';
+
+/** A typed text, prepared and folded in each form. */
+type Forms = Readonly<Record<WordForm, string>>;
+
 interface Query {
   /** What was typed after the `>`, trimmed: the text an empty result quotes back. */
   text: string;
-  /** The folded words, each once. Empty when nothing is typed. */
-  words: string[];
-  /** The folded input with its runs of spaces made one and its ends trimmed. */
-  whole: string;
+  /** The words, each once. Empty when nothing is typed. */
+  words: Forms[];
+  /** The whole input, with its runs of spaces made one and its ends trimmed. */
+  whole: Forms;
 }
 
 function prepareQuery(input: string): Query {
   const bare = input.startsWith(COMMAND_PREFIX) ? input.slice(COMMAND_PREFIX.length) : input;
-  const whole = collapseSpaces(fold(bare).folded);
+  // Split before preparing: a field's maker would turn some spaces into written-out characters.
+  const words = new Map<string, Forms>();
+  for (const typed of bare.split(/\s+/u)) {
+    if (typed !== '') {
+      const word = formsOf(typed);
+      words.set(JSON.stringify([word.line, word.path, word.typed]), word);
+    }
+  }
+  const whole = formsOf(bare);
   return {
     text: bare.trim(),
-    words: whole === '' ? [] : Array.from(new Set(whole.split(' '))),
-    whole,
+    words: Array.from(words.values()),
+    whole: {
+      line: collapseSpaces(whole.line),
+      path: collapseSpaces(whole.path),
+      typed: collapseSpaces(whole.typed),
+    },
   };
+}
+
+function formsOf(text: string): Forms {
+  return {
+    line: fold(WORD_FORMS.line(text)).folded,
+    path: fold(WORD_FORMS.path(text)).folded,
+    typed: fold(WORD_FORMS.typed(text)).folded,
+  };
+}
+
+/** A shown text folded, with the form a typed word takes to match it. */
+interface Field {
+  text: FoldedText;
+  form: WordForm;
+}
+
+function fieldOf(text: string, form: WordForm): Field {
+  return { text: fold(text), form };
 }
 
 function collapseSpaces(text: string): string {
@@ -543,36 +604,40 @@ function matchWindow(
   w: PickerWindow,
   query: Query
 ): Match<PickerWindowRow<PickerWindow>['marks']> | null {
-  const name = fold(w.name);
-  const place = fold(w.place);
-  const cwd = fold(w.cwd);
-  const vendor = w.vendor === null ? null : fold(w.vendor);
-  const others = [place.folded, cwd.folded, vendor?.folded ?? '', fold(w.statusWords).folded];
-  const rank = stageOf(name.folded, others, query);
+  const name = fieldOf(w.name, WINDOW_FIELD_FORMS.name);
+  const place = fieldOf(w.place, WINDOW_FIELD_FORMS.place);
+  const cwd = fieldOf(w.cwd, WINDOW_FIELD_FORMS.cwd);
+  const vendor = w.vendor === null ? null : fieldOf(w.vendor, WINDOW_FIELD_FORMS.vendor);
+  const statusWords = fieldOf(w.statusWords, WINDOW_FIELD_FORMS.statusWords);
+  const others = [place, cwd, ...(vendor === null ? [] : [vendor]), statusWords];
+  const rank = stageOf(name, others, query);
   if (rank === null) {
     return null;
   }
   return {
     ...rank,
     marks: {
-      name: rank.stage === 0 ? [wholeSpan(name)] : marksOf(name, query.words),
-      place: marksOf(place, query.words),
-      cwd: marksOf(cwd, query.words),
-      vendor: vendor === null ? [] : marksOf(vendor, query.words),
+      name: rank.stage === 0 ? [wholeSpan(name.text)] : fieldMarks(name, query),
+      place: fieldMarks(place, query),
+      cwd: fieldMarks(cwd, query),
+      vendor: vendor === null ? [] : fieldMarks(vendor, query),
     },
   };
 }
 
 function matchAction(action: PickerAction, query: Query): Match<{ name: MarkSpan[] }> | null {
-  const name = fold(action.name);
-  const others = [fold(action.keywords).folded, fold(action.section).folded];
-  const rank = stageOf(name.folded, others, query);
+  const name = fieldOf(action.name, ACTION_FIELD_FORM);
+  const others = [
+    fieldOf(action.keywords, ACTION_FIELD_FORM),
+    fieldOf(action.section, ACTION_FIELD_FORM),
+  ];
+  const rank = stageOf(name, others, query);
   if (rank === null) {
     return null;
   }
   return {
     ...rank,
-    marks: { name: rank.stage === 0 ? [wholeSpan(name)] : marksOf(name, query.words) },
+    marks: { name: rank.stage === 0 ? [wholeSpan(name.text)] : fieldMarks(name, query) },
   };
 }
 
@@ -581,22 +646,29 @@ function matchAction(action: PickerAction, query: Query): Match<{ name: MarkSpan
  * whole-name match is stage 0 with no words outside the name; otherwise the
  * row takes the stage of its weakest word and counts the words only another field holds.
  */
-function stageOf(name: string, others: readonly string[], query: Query): Rank | null {
+function stageOf(name: Field, others: readonly Field[], query: Query): Rank | null {
   let worst = 0;
   let outsideNameWords = 0;
   for (const word of query.words) {
-    const inName = nameStage(name, word);
+    const inName = nameStage(name.text.folded, word[name.form]);
     if (inName === null) {
-      if (!others.some((field) => field.includes(word))) {
+      if (!others.some((field) => field.text.folded.includes(word[field.form]))) {
         return null;
       }
       outsideNameWords += 1;
     }
     worst = Math.max(worst, inName ?? OTHER_FIELD_STAGE);
   }
-  return collapseSpaces(name) === query.whole
+  return collapseSpaces(name.text.folded) === query.whole[name.form]
     ? { stage: 0, outsideNameWords: 0 }
     : { stage: worst, outsideNameWords };
+}
+
+function fieldMarks(field: Field, query: Query): MarkSpan[] {
+  return marksOf(
+    field.text,
+    query.words.map((word) => word[field.form])
+  );
 }
 
 function nameStage(name: string, word: string): number | null {

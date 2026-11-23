@@ -147,11 +147,11 @@ describe('narrowMcpRegistrationsListed', () => {
         {
           profile: 'alpha-cli',
           displayName: 'Alpha CLI',
-          group: 'g',
+          group: { key: 'g', heading: 'g' },
           add: { displayCommand: 'mcp add', displayArgv: 'alpha mcp add' },
           remove: { displayCommand: 'mcp remove', displayArgv: 'alpha mcp remove' },
           tomlSet: { file: 'c.toml', table: ['t'], values: [{ key: 'k', value: 'v' }] },
-          entries: [{ file: 'h.json', name: 'n', content: 'c' }],
+          entries: [{ fileKey: 'h.json', file: 'h.json', name: 'n', content: 'c' }],
           notice: null,
         },
       ],
@@ -214,7 +214,9 @@ describe('narrowMcpRegistrationsListed', () => {
       const listed = narrowMcpRegistrationsListed(listedWire({ rows: [row] }));
       expect(listed.rows[0]?.add).toBeNull();
       expect(listed.rows[0]?.remove).toBeNull();
-      expect(listed.rows[0]?.entries).toEqual([{ file: 'h.json', name: 'n', content: 'c' }]);
+      expect(listed.rows[0]?.entries).toEqual([
+        { fileKey: 'h.json', file: 'h.json', name: 'n', content: 'c' },
+      ]);
     }
   });
 

@@ -56,7 +56,7 @@
             {#if row.fileWrites !== null}
               <div class="integration-settings__writes">
                 <span>{settings.integrationFileWritesLead}</span>
-                {#each row.fileWrites as write (write.file)}
+                {#each row.fileWrites as write (write.fileKey)}
                   <span
                     ><code>{write.file}</code> —
                     <code>{settings.integrationFileWriteNames(write.names)}</code></span

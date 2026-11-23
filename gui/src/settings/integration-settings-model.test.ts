@@ -23,15 +23,17 @@ import {
   formatPathForDisplay,
   sanitizeForDisplay,
 } from '../display/untrusted-text';
-import type {
-  McpRegistrationCommand,
-  McpRegistrationEntry,
-  McpRegistrationResultPayload,
-  McpRegistrationRow,
-  McpRegistrationsListed,
-  McpRegistrationState,
-  McpRegistrationStatusInfo,
-  McpRegistrationStep,
+import {
+  narrowMcpRegistrationsListed,
+  type McpRegistrationCommand,
+  type McpRegistrationEntry,
+  type McpRegistrationGroup,
+  type McpRegistrationResultPayload,
+  type McpRegistrationRow,
+  type McpRegistrationsListed,
+  type McpRegistrationState,
+  type McpRegistrationStatusInfo,
+  type McpRegistrationStep,
 } from '../ipc/mcp-registration-boundary';
 import { settings } from '../ui-messages';
 
@@ -56,10 +58,15 @@ function command(argv: string[], programAt = 0): McpRegistrationCommand {
 
 function entry(file: string, name: string, content: string): McpRegistrationEntry {
   return {
+    fileKey: file,
     file: formatPathForDisplay(file),
     name: formatPathForDisplay(name),
     content: formatPathForDisplay(content),
   };
+}
+
+function group(name: string): McpRegistrationGroup {
+  return { key: name, heading: sanitizeForDisplay(name) };
 }
 
 function row(profile: string, overrides: Partial<McpRegistrationRow> = {}): McpRegistrationRow {
@@ -80,6 +87,26 @@ function listed(
   bridge: string | null = BRIDGE
 ): McpRegistrationsListed {
   return { requestId: 1, bridge: bridge === null ? null : formatPathForDisplay(bridge), rows };
+}
+
+/** A listing narrowed by the boundary from rows written as the daemon sends them. */
+function listedFromWire(rows: Record<string, unknown>[]): McpRegistrationsListed {
+  return narrowMcpRegistrationsListed({ request_id: 1, bridge: BRIDGE, rows });
+}
+
+function rowWire(
+  profile: string,
+  overrides: Record<string, unknown> = {}
+): Record<string, unknown> {
+  return {
+    profile,
+    display_name: `${profile} name`,
+    group: null,
+    add: null,
+    remove: null,
+    entries: [],
+    ...overrides,
+  };
 }
 
 function status(
@@ -134,11 +161,11 @@ function hasNoEnabledButton(view: IntegrationRowView): boolean {
 describe('integrationGroups: grouping', () => {
   it('puts the rows without a group first under the host heading, then each group in row order', () => {
     const rows = [
-      row('linux-alpha', { group: sanitizeForDisplay('Linux') }),
+      row('linux-alpha', { group: group('Linux') }),
       row('alpha'),
-      row('other-alpha', { group: sanitizeForDisplay('Other') }),
+      row('other-alpha', { group: group('Other') }),
       row('beta'),
-      row('linux-beta', { group: sanitizeForDisplay('Linux') }),
+      row('linux-beta', { group: group('Linux') }),
     ];
 
     const groups: IntegrationGroup[] = integrationGroups(listed(rows), statuses(), null);
@@ -157,7 +184,7 @@ describe('integrationGroups: grouping', () => {
 
   it('shows no host heading when every row belongs to a group', () => {
     const groups: IntegrationGroup[] = integrationGroups(
-      listed([row('linux-alpha', { group: sanitizeForDisplay('Linux') })]),
+      listed([row('linux-alpha', { group: group('Linux') })]),
       statuses(),
       null
     );
@@ -167,10 +194,7 @@ describe('integrationGroups: grouping', () => {
 
   it('keys a group named like the host heading apart from the host group', () => {
     const groups: IntegrationGroup[] = integrationGroups(
-      listed([
-        row('alpha'),
-        row('named', { group: sanitizeForDisplay(settings.integrationsHostGroup) }),
-      ]),
+      listed([row('alpha'), row('named', { group: group(settings.integrationsHostGroup) })]),
       statuses(),
       null
     );
@@ -178,6 +202,24 @@ describe('integrationGroups: grouping', () => {
     expect(groups.map((group) => group.heading)).toEqual([
       text(settings.integrationsHostGroup),
       text(settings.integrationsHostGroup),
+    ]);
+    expect(new Set(groups.map((group) => group.key)).size).toBe(2);
+  });
+
+  it('keeps two groups apart whose names differ though they read alike', () => {
+    const groups: IntegrationGroup[] = integrationGroups(
+      listedFromWire([
+        rowWire('joined', { group: 'a\u200Cb' }),
+        rowWire('written', { group: 'a\\u{200C}b' }),
+      ]),
+      statuses(),
+      null
+    );
+
+    expect(groups.map((group) => group.heading)).toEqual(['a\\u{200C}b', 'a\\u{200C}b']);
+    expect(groups.map((group) => group.rows.map((view) => view.profile))).toEqual([
+      ['joined'],
+      ['written'],
     ]);
     expect(new Set(groups.map((group) => group.key)).size).toBe(2);
   });
@@ -593,12 +635,37 @@ describe('integrationGroups: a registration that runs no command', () => {
       expect(view.commandTitle).toBeNull();
       expect(view.fileWrites).toEqual([
         {
+          fileKey: '.config/muse/settings.json',
           file: '.config/muse/settings.json',
           names: ['/mcpServers/yagura', '/managed_hooks_path'],
         },
-        { file: '.config/muse/yagura-managed-hooks.json', names: ['/hooks'] },
+        {
+          fileKey: '.config/muse/yagura-managed-hooks.json',
+          file: '.config/muse/yagura-managed-hooks.json',
+          names: ['/hooks'],
+        },
       ]);
     }
+  });
+
+  it('keeps two files apart whose names differ though they read alike', () => {
+    const listed = listedFromWire([
+      rowWire('alpha', {
+        entries: [
+          { file: 'a\u200Cb.json', name: 'one', content: '{}' },
+          { file: 'a\\u{200C}b.json', name: 'two', content: '{}' },
+          { file: 'a\u200Cb.json', name: 'three', content: '{}' },
+        ],
+      }),
+    ]);
+
+    const view = integrationGroups(listed, statuses(status('alpha', 'not_registered')), null)[0]
+      ?.rows[0];
+
+    expect(view?.fileWrites?.map(({ file, names }) => ({ file, names }))).toEqual([
+      { file: 'a\\u{200C}b.json', names: ['one', 'three'] },
+      { file: 'a\\u{200C}b.json', names: ['two'] },
+    ]);
   });
 
   it('does not also describe those entries as an addition to a command', () => {

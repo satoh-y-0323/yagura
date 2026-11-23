@@ -77,16 +77,25 @@ export interface McpRegistrationTomlSet {
 
 /** One entry registration writes into a host file, written out like {@link McpRegistrationTomlSet}. */
 export interface McpRegistrationEntry {
+  /** The file as the daemon names it: tells files apart that read alike once prepared. */
+  fileKey: string;
   file: DisplayLine;
   name: DisplayLine;
   content: DisplayLine;
+}
+
+/** The group a listed row belongs to. */
+export interface McpRegistrationGroup {
+  /** The name as the daemon sends it: tells groups apart that read alike once prepared. */
+  key: string;
+  heading: DisplayLine;
 }
 
 /** One row the daemon lists: a profile that declares an MCP registration table. */
 export interface McpRegistrationRow {
   profile: string;
   displayName: DisplayLine;
-  group: DisplayLine | null;
+  group: McpRegistrationGroup | null;
   /** `null` when the registration only writes files. */
   add: McpRegistrationCommand | null;
   remove: McpRegistrationCommand | null;
@@ -253,12 +262,19 @@ function readEntries(record: UntrustedRecord, context: string): McpRegistrationE
   const entriesContext = `${context}.entries`;
   return requireArray(value, entriesContext).map((entry) => {
     const row = requireRecord(entry, entriesContext);
+    const file = requireString(row, 'file', entriesContext);
     return {
-      file: formatPathForDisplay(requireString(row, 'file', entriesContext)),
+      fileKey: file,
+      file: formatPathForDisplay(file),
       name: formatPathForDisplay(requireString(row, 'name', entriesContext)),
       content: formatPathForDisplay(requireString(row, 'content', entriesContext)),
     };
   });
+}
+
+function readOptionalGroup(record: UntrustedRecord, context: string): McpRegistrationGroup | null {
+  const name = readOptionalString(record, 'group', context);
+  return name === null ? null : { key: name, heading: sanitizeForDisplay(name) };
 }
 
 function narrowMcpRegistrationRow(value: unknown, context: string): McpRegistrationRow {
@@ -266,7 +282,7 @@ function narrowMcpRegistrationRow(value: unknown, context: string): McpRegistrat
   return {
     profile: requireString(record, 'profile', context),
     displayName: sanitizeForDisplay(requireString(record, 'display_name', context)),
-    group: readOptionalLine(record, 'group', context, sanitizeForDisplay),
+    group: readOptionalGroup(record, context),
     add: readOptionalCommand(record, 'add', context),
     remove: readOptionalCommand(record, 'remove', context),
     tomlSet: readOptionalTomlSet(record, context),

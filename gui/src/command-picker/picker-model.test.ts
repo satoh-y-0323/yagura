@@ -7,6 +7,7 @@
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
+import { formatPathForDisplay, sanitizeForDisplay } from '../display/untrusted-text';
 import type { DetectedStatusView, WindowStatus } from '../ipc/session-boundary';
 import type { ActionBlockReason, ActionVerdict } from '../keymap/action-availability';
 import { ACTION_IDS, type ActionId } from '../keymap/key-binding';
@@ -289,6 +290,14 @@ describe('picker-model: the windows as the user types', () => {
         { start: 0, end: 4 },
       ]);
     }
+
+    const hidden = source([
+      win('near', 'waiting_approval', { name: sanitizeForDisplay('a\u200Cbc') }),
+      win('whole', 'idle', { name: sanitizeForDisplay('a\u200Cb') }),
+    ]);
+    const typedHidden = typed(hidden, 'a\u200Cb');
+    expect(idsOf(typedHidden)[0]).toBe('whole');
+    expect(windowRowOf(typedHidden, 'whole').marks.name).toEqual([{ start: 0, end: 10 }]);
   });
 
   it('keeps only the windows every word is found in', () => {
@@ -363,6 +372,15 @@ describe('picker-model: folding what is typed and what is shown', () => {
     const src = source([win('a', 'idle', { name: 'alpha', cwd: '/tmp/\\u{202E}evil' })]);
     expect(windowRowOf(typed(src, 'evil'), 'a').marks.cwd).toEqual([{ start: 13, end: 17 }]);
     expect(windowRowOf(typed(src, '202e'), 'a').marks.cwd).toEqual([{ start: 8, end: 12 }]);
+
+    // The typed hidden character is prepared like the field it is matched against.
+    const zwnj = source([
+      win('a', 'idle', { name: 'alpha', cwd: formatPathForDisplay('C:\\work\\a\u200Cb') }),
+    ]);
+    const typedZwnj = typed(zwnj, 'a\u200Cb');
+    expect(idsOf(typedZwnj)).toEqual(['a']);
+    expect(windowRowOf(typedZwnj, 'a').marks.name).toEqual([]);
+    expect(windowRowOf(typedZwnj, 'a').marks.cwd).toEqual([{ start: 8, end: 18 }]);
   });
 });
 

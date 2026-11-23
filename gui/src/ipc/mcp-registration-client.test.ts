@@ -183,7 +183,7 @@ describe('invokeListMcpRegistrations', () => {
     const listed: McpRegistrationsListed = await invokeListMcpRegistrations(7);
 
     expect(listed.bridge).toBeNull();
-    expect(listed.rows[0]?.group).toBe('Linux');
+    expect(listed.rows[0]?.group).toEqual({ key: 'Linux', heading: 'Linux' });
     expect(listed.rows[0]?.tomlSet).toBeNull();
   });
 

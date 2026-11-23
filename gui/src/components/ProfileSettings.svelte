@@ -104,7 +104,8 @@
           <div class="profile-settings__limits">
             <p class="profile-settings__limits-text">{settings.profileLimitsHeading}</p>
             <ul class="profile-settings__limits-list">
-              {#each note.items as item (item)}
+              <!-- A shown text is not an identity: two limits can read the same. -->
+              {#each note.items as item, index (index)}
                 <li>{item}</li>
               {/each}
             </ul>
