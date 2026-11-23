@@ -134,7 +134,7 @@ export const keyNames = messages.keyNames;
  * @param name the window's display name
  * @param exitCode the exit code, or null if not yet determined
  */
-export function describeExitedWindow(name: string, exitCode: number | null): UiText {
+export function describeExitedWindow(name: DisplayLine, exitCode: number | null): UiText {
   return renderDescribeExitedWindow(messages, name, exitCode);
 }
 
@@ -143,7 +143,7 @@ export function describeExitedWindow(name: string, exitCode: number | null): UiT
  * @param name the window's display name
  * @param exitCode the exit code, or null if not yet determined
  */
-export function describeExitedWindowParts(name: string, exitCode: number | null): TitleParts {
+export function describeExitedWindowParts(name: DisplayLine, exitCode: number | null): TitleParts {
   return renderDescribeExitedWindowParts(messages, name, exitCode);
 }
 
@@ -151,7 +151,7 @@ export function describeExitedWindowParts(name: string, exitCode: number | null)
  * Describes the button that goes to another window.
  * @param name the window's display name
  */
-export function describeGoToWindow(name: string): UiText {
+export function describeGoToWindow(name: DisplayLine): UiText {
   return renderDescribeGoToWindow(messages, name);
 }
 
@@ -161,7 +161,7 @@ export function describeGoToWindow(name: string): UiText {
  * @param status which call it is
  */
 export function describeWindowCall(
-  name: string,
+  name: DisplayLine,
   status: Extract<WindowStatus, 'waiting_approval' | 'waiting_input'>
 ): UiText {
   return renderDescribeWindowCall(messages, name, status);
@@ -173,7 +173,7 @@ export function describeWindowCall(
  * @param status which call it is
  */
 export function describeWindowCallParts(
-  name: string,
+  name: DisplayLine,
   status: Extract<WindowStatus, 'waiting_approval' | 'waiting_input'>
 ): TitleParts {
   return renderDescribeWindowCallParts(messages, name, status);
@@ -184,7 +184,7 @@ export function describeWindowCallParts(
  * @param sentence the latest event's sentence
  * @param count how many other events the card holds
  */
-export function describeNoticeAndMore(sentence: string, count: number): UiText {
+export function describeNoticeAndMore(sentence: UiText | DisplayLine, count: number): UiText {
   return renderDescribeNoticeAndMore(messages, sentence, count);
 }
 
@@ -208,7 +208,7 @@ export function describeChatPostedAt(atMs: number): UiText {
  * Joins what one update reads out into one text.
  * @param sentences what is read, in order
  */
-export function describeAnnouncement(sentences: readonly string[]): UiText {
+export function describeAnnouncement(sentences: readonly (UiText | DisplayLine)[]): UiText {
   return renderDescribeAnnouncement(messages, sentences);
 }
 

@@ -3,6 +3,7 @@
  * failure that repeats, or a window that ends while another is in Focus, is still
  * there to read after the next one arrives. Pure and in memory only.
  */
+import type { UiText } from '../display/ui-text';
 import type { DaemonRecoveryStatus } from '../session/recovery-types';
 import type { WindowGoneEvent } from '../session/shell-state';
 import {
@@ -11,7 +12,7 @@ import {
   describeExitedWindowParts,
   type TitleParts,
 } from '../ui-messages';
-import { classifyNotice } from './notice-model';
+import { classifyNotice, type NoticeText } from './notice-model';
 
 /** The kinds of event the log records. */
 export type EventKey =
@@ -26,7 +27,7 @@ export interface NewEvent {
   key: EventKey;
   tone: 'info' | 'warning' | 'error';
   /** The sentence shown for the event, already resolved for the active locale. */
-  text: string;
+  text: NoticeText;
   /** `text` split around the window's name, so a card cuts only the name short; `null` when it names none. */
   parts: TitleParts | null;
   /** Whether the event may become a card on the notification bar; `false` when something else already shows it. */
@@ -40,7 +41,7 @@ export interface LoggedEvent extends NewEvent {
   /** Unique across the log's lifetime, so a dismissed number is never handed out again. */
   seq: number;
   /** When it was recorded, `HH:mm`, built once by whoever records it; this module reads no clock. */
-  at: string;
+  at: UiText;
 }
 
 /** The recorded events, oldest first. */
@@ -61,7 +62,7 @@ export function appendEvent<M extends { nextSeq: number }>(
   log: EventLog,
   memory: M,
   event: NewEvent,
-  at: string
+  at: UiText
 ): { log: EventLog; memory: M } {
   const entry: LoggedEvent = { ...event, seq: memory.nextSeq, at };
   return {
@@ -96,13 +97,11 @@ export function windowExitEvent(gone: GoneWindow): NewEvent | null {
   if (gone.goneByUser) {
     return null;
   }
-  const name =
-    gone.orderBefore.find((entry) => entry.windowId === gone.windowId)?.name ?? gone.windowId;
   return {
     key: 'window-exit',
     tone: classifyNotice('window-exit', { exitCode: gone.exitCode }).tone,
-    text: describeExitedWindow(name, gone.exitCode),
-    parts: describeExitedWindowParts(name, gone.exitCode),
+    text: describeExitedWindow(gone.name, gone.exitCode),
+    parts: describeExitedWindowParts(gone.name, gone.exitCode),
     toast: !gone.carded,
     windowId: gone.windowId,
   };
@@ -119,7 +118,7 @@ export type FailureEventKey = Extract<
  * @param key which kind of failure it is
  * @param text the sentence to show, already resolved for the active locale
  */
-export function failureEvent(key: FailureEventKey, text: string): NewEvent {
+export function failureEvent(key: FailureEventKey, text: NoticeText): NewEvent {
   return {
     key,
     tone: classifyNotice(key, {}).tone,

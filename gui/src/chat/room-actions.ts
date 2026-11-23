@@ -54,7 +54,7 @@ export function readRefusedForRemovedRoom(
  *
  * @param error the value the command rejected with
  */
-export function describeRoomRemovalFailure(error: unknown): string {
+export function describeRoomRemovalFailure(error: unknown): UiText {
   return commandFailureLine(error, () => {
     const detail =
       commandRejectionCode(error) === ROOM_IN_USE_CODE ? chat.deleteRoomWithWindowsNote : error;

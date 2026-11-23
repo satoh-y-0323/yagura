@@ -39,6 +39,7 @@ interface ShellState {
 type WindowGoneEvent = {
   type: 'windowGone';
   windowId: string;
+  name: string;
   orderBefore: readonly OrderedWindow[];
   exitCode: number | null;
 };
@@ -304,7 +305,7 @@ function gone(
   orderBefore: readonly OrderedWindow[],
   exitCode: number | null = null
 ): WindowGoneEvent {
-  return { type: 'windowGone', windowId, orderBefore, exitCode };
+  return { type: 'windowGone', windowId, name: ordered(windowId).name, orderBefore, exitCode };
 }
 
 /** Runs the events through the reducer, collecting the effects and each `goneByUser`. */

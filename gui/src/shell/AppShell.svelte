@@ -85,6 +85,7 @@
     type NoticeAction,
     type NoticeCategory,
     type NoticeSourceState,
+    type NoticeText,
   } from '../notices/notice-model';
   import type { DropSignal } from '../ipc/folder-drop-model';
   import { writeClipboardText } from '../ipc/clipboard';
@@ -3104,7 +3105,7 @@
   }
 
   /** Records an event that reports an action that did not go through. */
-  function recordFailure(key: FailureEventKey, text: string): void {
+  function recordFailure(key: FailureEventKey, text: NoticeText): void {
     recordEvent(failureEvent(key, text));
   }
 
@@ -3711,10 +3712,10 @@
   function secondLinesOf(
     output: NoticeFeedOutput,
     windows: readonly WindowEntry[]
-  ): ReadonlyMap<string, string> {
+  ): ReadonlyMap<string, NoticeText> {
     const byId = new Map(windows.map((entry) => [entry.windowId, entry]));
     return new Map(
-      output.lane.visible.flatMap((item): [string, string][] => {
+      output.lane.visible.flatMap((item): [string, NoticeText][] => {
         if (item.kind === 'notice') {
           return item.detail === null ? [] : [[item.id, item.detail]];
         }

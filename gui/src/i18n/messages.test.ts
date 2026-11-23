@@ -5,6 +5,7 @@
  */
 import { describe, it, expect } from 'vitest';
 
+import { sanitizeForDisplay } from '../display/untrusted-text';
 import { resolveMessages } from './messages';
 import { describeWindowCall, describeWindowCallParts } from './render';
 
@@ -30,19 +31,24 @@ it('builds the window call titles and the card’s go-to sentence from their par
   const { banners, workArea } = english;
   const joined = (parts: { before: string; name: string; after: string }): string =>
     `${parts.before}${parts.name}${parts.after}`;
+  const reviewer = sanitizeForDisplay('reviewer');
 
   for (const [status, sentence] of [
-    ['waiting_approval', banners.windowNeedsApproval('reviewer')],
-    ['waiting_input', banners.windowNeedsInput('reviewer')],
+    ['waiting_approval', banners.windowNeedsApproval(reviewer)],
+    ['waiting_input', banners.windowNeedsInput(reviewer)],
   ] as const) {
-    const parts = describeWindowCallParts(english, 'reviewer', status);
+    const parts = describeWindowCallParts(english, reviewer, status);
     expect(parts.name).toBe('reviewer');
     expect(joined(parts)).toBe(sentence);
-    expect(describeWindowCall(english, 'reviewer', status)).toBe(sentence);
+    expect(parts.sentence).toBe(`${parts.before}${parts.name}${parts.after}`);
+    expect(parts.sentence).toBe(sentence);
+    expect(describeWindowCall(english, reviewer, status)).toBe(sentence);
   }
 
-  const goTo = banners.goToCallingWindowParts('reviewer');
+  const goTo = banners.goToCallingWindowParts(reviewer);
   expect(goTo.name).toBe('reviewer');
   expect(joined(goTo)).toBe('Go to “reviewer”');
-  expect(workArea.goToWindow('reviewer')).toBe('Go to reviewer');
+  expect(goTo.sentence).toBe(`${goTo.before}${goTo.name}${goTo.after}`);
+  expect(goTo.sentence).toBe('Go to “reviewer”');
+  expect(workArea.goToWindow(reviewer)).toBe('Go to reviewer');
 });

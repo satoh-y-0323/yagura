@@ -16,6 +16,9 @@ const messages = resolveMessages();
 const UNKNOWN_WITH_REASON: DetectedStatusView = { status: 'unknown', reason: 'no_rule_matched' };
 const BLOCKED: ConfirmTarget = { allowed: false, requiresConfirmation: false, reason: 'exited' };
 const REVIEWER = sanitizeForDisplay('reviewer');
+const IMPLEMENTER = sanitizeForDisplay('implementer');
+const BUILDER_EXITED = sanitizeForDisplay('builder exited');
+const ANNOUNCED = [sanitizeForDisplay('one'), sanitizeForDisplay('two')];
 const WARNING = sanitizeForDisplay('a warning');
 const SAVED_AT_EPOCH_S = 1_767_315_840;
 const HEADER_FACTS: render.WindowHeaderFacts = {
@@ -64,33 +67,33 @@ const CASES: ReadonlyArray<[string, () => unknown, () => unknown]> = [
   ],
   [
     'describeExitedWindow',
-    () => facade.describeExitedWindow('reviewer', 1),
-    () => render.describeExitedWindow(messages, 'reviewer', 1),
+    () => facade.describeExitedWindow(REVIEWER, 1),
+    () => render.describeExitedWindow(messages, REVIEWER, 1),
   ],
   [
     'describeGoToWindow',
-    () => facade.describeGoToWindow('implementer'),
-    () => render.describeGoToWindow(messages, 'implementer'),
+    () => facade.describeGoToWindow(IMPLEMENTER),
+    () => render.describeGoToWindow(messages, IMPLEMENTER),
   ],
   [
     'describeWindowCall',
-    () => facade.describeWindowCall('reviewer', 'waiting_approval'),
-    () => render.describeWindowCall(messages, 'reviewer', 'waiting_approval'),
+    () => facade.describeWindowCall(REVIEWER, 'waiting_approval'),
+    () => render.describeWindowCall(messages, REVIEWER, 'waiting_approval'),
   ],
   [
     'describeWindowCallParts',
-    () => facade.describeWindowCallParts('reviewer', 'waiting_input'),
-    () => render.describeWindowCallParts(messages, 'reviewer', 'waiting_input'),
+    () => facade.describeWindowCallParts(REVIEWER, 'waiting_input'),
+    () => render.describeWindowCallParts(messages, REVIEWER, 'waiting_input'),
   ],
   [
     'describeExitedWindowParts',
-    () => facade.describeExitedWindowParts('reviewer', 1),
-    () => render.describeExitedWindowParts(messages, 'reviewer', 1),
+    () => facade.describeExitedWindowParts(REVIEWER, 1),
+    () => render.describeExitedWindowParts(messages, REVIEWER, 1),
   ],
   [
     'describeNoticeAndMore',
-    () => facade.describeNoticeAndMore('builder exited', 3),
-    () => render.describeNoticeAndMore(messages, 'builder exited', 3),
+    () => facade.describeNoticeAndMore(BUILDER_EXITED, 3),
+    () => render.describeNoticeAndMore(messages, BUILDER_EXITED, 3),
   ],
   [
     'describeEventTime',
@@ -99,8 +102,8 @@ const CASES: ReadonlyArray<[string, () => unknown, () => unknown]> = [
   ],
   [
     'describeAnnouncement',
-    () => facade.describeAnnouncement(['one', 'two']),
-    () => render.describeAnnouncement(messages, ['one', 'two']),
+    () => facade.describeAnnouncement(ANNOUNCED),
+    () => render.describeAnnouncement(messages, ANNOUNCED),
   ],
   [
     'describeReopenOffer',

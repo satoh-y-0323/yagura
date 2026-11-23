@@ -3,20 +3,25 @@
    * One ticket's details in the Tickets tab: its description, fields,
    * results and the plans made from it.
    *
-   * It owns no IPC and offers no edits. Ticket text is written by agents, so
-   * every string drawn here goes through the ticket display functions first.
+   * It owns no IPC and offers no edits. Ticket text is written by agents; the
+   * boundary prepares every part drawn here.
    */
-  import { displayTicketSummary } from '../display/ticket-text';
-  import { formatTicketText, sanitizeForDisplay } from '../display/untrusted-text';
   import Icon from './Icon.svelte';
-  import type { Ticket, TicketConfig, TicketMilestone } from '../ipc/ticket-boundary';
+  import type {
+    Ticket,
+    TicketConfig,
+    TicketFieldName,
+    TicketMilestone,
+    TicketPlanRef,
+  } from '../ipc/ticket-boundary';
   import type { UiText } from '../display/ui-text';
+  import type { DisplayBlock, DisplayLine } from '../display/untrusted-text';
   import { describeRecordedTime, tickets as text } from '../ui-messages';
 
   /** The least of a plan-list entry a plan link reads. */
   interface PlanChoice {
     plan_id: string;
-    title: string;
+    title: DisplayLine;
   }
 
   /** `null` while the ticket is being read. */
@@ -28,45 +33,35 @@
   export let onBack: () => void;
   export let onOpenPlan: (planId: string) => void;
 
-  interface FieldRow {
-    name: string;
+  interface FieldRow extends TicketFieldName {
     /** `null` for a field the state requires that has no value. */
-    value: string | null;
+    value: DisplayBlock | null;
   }
 
   $: fields = ticket === null ? [] : fieldRows(ticket, config);
-  $: shown =
-    ticket === null ? null : displayTicketSummary({ ...ticket, plan_count: ticket.plans.length });
 
   // The fields the state requires come first, in the settings' order, then
   // any other value the ticket still carries.
   function fieldRows(current: Ticket, settings: TicketConfig | null): FieldRow[] {
     const required = settings?.states.find((state) => state.name === current.state)?.requires ?? [];
-    const others = Object.keys(current.fields)
-      .filter((name) => !required.includes(name))
-      .sort();
-    return [...required, ...others].map((name) => {
-      const value = Object.prototype.hasOwnProperty.call(current.fields, name)
-        ? current.fields[name]
-        : undefined;
-      return {
-        name: sanitizeForDisplay(name),
-        value: value === undefined ? null : formatTicketText(value),
-      };
-    });
+    const requiredNames = new Set(required.map((field) => field.name));
+    const valueOf = (name: string): DisplayBlock | null =>
+      current.fields.find((field) => field.name === name)?.value ?? null;
+    const others = current.fields
+      .filter((field) => !requiredNames.has(field.name))
+      .sort((left, right) => (left.name < right.name ? -1 : left.name > right.name ? 1 : 0));
+    return [...required.map((field) => ({ ...field, value: valueOf(field.name) })), ...others];
   }
 
-  function milestoneLabel(name: string): string {
+  function milestoneLabel(name: string, shownName: DisplayLine): UiText | DisplayLine {
     const milestone = milestones.find((entry) => entry.name === name);
-    const shownName = sanitizeForDisplay(name);
     return milestone === undefined
       ? shownName
-      : `${shownName} · ${sanitizeForDisplay(milestone.title)}`;
+      : text.milestoneWithTitle(shownName, milestone.title);
   }
 
-  function planLabel(planId: string): string {
-    const entry = planList.find((choice) => choice.plan_id === planId);
-    return sanitizeForDisplay(entry === undefined ? planId : entry.title);
+  function planLabel(plan: TicketPlanRef): DisplayLine {
+    return planList.find((choice) => choice.plan_id === plan.planId)?.title ?? plan.displayPlanId;
   }
 
   function resultTime(at: number): UiText | null {
@@ -81,17 +76,19 @@
 
   {#if ticket !== null}
     <div class="ticket-detail__head">
-      <span class="ticket-detail__number">{shown?.label}</span>
-      <span class="ticket-detail__title">{shown?.title}</span>
-      <span class="ticket-detail__state">{shown?.state}</span>
-      {#if ticket.milestone !== null}
-        <span class="ticket-detail__chip">{milestoneLabel(ticket.milestone)}</span>
+      <span class="ticket-detail__number">{text.ticketLabel(ticket.number)}</span>
+      <span class="ticket-detail__title">{ticket.title}</span>
+      <span class="ticket-detail__state">{ticket.displayState}</span>
+      {#if ticket.milestone !== null && ticket.displayMilestone !== null}
+        <span class="ticket-detail__chip"
+          >{milestoneLabel(ticket.milestone, ticket.displayMilestone)}</span
+        >
       {/if}
     </div>
 
     <section class="ticket-detail__section">
       <h4 class="ticket-detail__heading">{text.descriptionHeading}</h4>
-      <p class="ticket-detail__text">{formatTicketText(ticket.body)}</p>
+      <p class="ticket-detail__text">{ticket.body}</p>
     </section>
 
     <section class="ticket-detail__section">
@@ -101,7 +98,7 @@
       {:else}
         <dl class="ticket-detail__fields">
           {#each fields as row (row.name)}
-            <dt>{row.name}</dt>
+            <dt>{row.displayName}</dt>
             <dd class:ticket-detail__muted={row.value === null}>{row.value ?? text.fieldNotSet}</dd>
           {/each}
         </dl>
@@ -117,7 +114,7 @@
           {#each ticket.results as result (result.seq)}
             <li>
               <time class="ticket-detail__time">{resultTime(result.at)}</time>
-              <span class="ticket-detail__text">{formatTicketText(result.text)}</span>
+              <span class="ticket-detail__text">{result.text}</span>
             </li>
           {/each}
         </ul>
@@ -130,9 +127,11 @@
         <p class="ticket-detail__muted">{text.noPlans}</p>
       {:else}
         <div class="ticket-detail__plans">
-          {#each ticket.plans as planId (planId)}
-            <button type="button" class="ticket-detail__plan" on:click={() => onOpenPlan(planId)}
-              >{planLabel(planId)}</button
+          {#each ticket.plans as plan (plan.planId)}
+            <button
+              type="button"
+              class="ticket-detail__plan"
+              on:click={() => onOpenPlan(plan.planId)}>{planLabel(plan)}</button
             >
           {/each}
         </div>

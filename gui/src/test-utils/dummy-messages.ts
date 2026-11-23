@@ -3,33 +3,22 @@
  * leaking past the locale is obvious in a failing assertion. It is a plain module,
  * not a test file, so importing it registers no tests in the importer.
  */
+import type { DisplayLine } from '../display/untrusted-text';
 import type { Messages, MessagesSource, TitlePartsSource as TitleParts } from '../ui-messages';
 
 /** Each dummy sentence with a name is its parts put together, as in the English locale. */
-function joinParts(parts: TitleParts): string {
-  return `${parts.before}${parts.name}${parts.after}`;
+function titleParts(before: string, name: DisplayLine, after: string): TitleParts {
+  return { before, name, after, sentence: `${before}${name}${after}` };
 }
 
-const windowNeedsApprovalParts = (name: string): TitleParts => ({
-  before: 'DUMMY_windowNeedsApproval(',
-  name,
-  after: ')',
-});
-const windowNeedsInputParts = (name: string): TitleParts => ({
-  before: 'DUMMY_windowNeedsInput(',
-  name,
-  after: ')',
-});
-const windowExitedParts = (name: string): TitleParts => ({
-  before: 'DUMMY_workArea_windowExited(',
-  name,
-  after: ')',
-});
-const windowExitedWithCodeParts = (name: string, code: number): TitleParts => ({
-  before: 'DUMMY_workArea_windowExitedWithCode(',
-  name,
-  after: `,${code})`,
-});
+const windowNeedsApprovalParts = (name: DisplayLine): TitleParts =>
+  titleParts('DUMMY_windowNeedsApproval(', name, ')');
+const windowNeedsInputParts = (name: DisplayLine): TitleParts =>
+  titleParts('DUMMY_windowNeedsInput(', name, ')');
+const windowExitedParts = (name: DisplayLine): TitleParts =>
+  titleParts('DUMMY_workArea_windowExited(', name, ')');
+const windowExitedWithCodeParts = (name: DisplayLine, code: number): TitleParts =>
+  titleParts('DUMMY_workArea_windowExitedWithCode(', name, `,${code})`);
 
 // Checked against the resource's shape so a missing key stays a type error, then typed as the
 // resolved locale it stands in for.
@@ -138,7 +127,7 @@ export const dummyMessages = {
     renameWindowFailed: 'DUMMY_renameWindowFailed',
     shortcutFailed: 'DUMMY_shortcutFailed',
     openWindowFailed: 'DUMMY_openWindowFailed',
-    nameTakenOpenHint: 'DUMMY_nameTakenOpenHint',
+    nameTakenOpenFailure: (reason) => `DUMMY_nameTakenOpenFailure(${reason})`,
     detectionLoadFailed: 'DUMMY_detectionLoadFailed',
     // One summary per boundary-failure call site, plus the prefix that
     // puts the count in front of a multi-diagnosis detail.
@@ -151,8 +140,7 @@ export const dummyMessages = {
     boundaryDetectionsList: 'DUMMY_boundaryDetectionsList',
     boundaryProfilesIncomplete: 'DUMMY_boundaryProfilesIncomplete',
     boundaryProfilesList: 'DUMMY_boundaryProfilesList',
-    boundaryDetailWithCount: (count: number, first: string) =>
-      `DUMMY_boundaryDetailWithCount(${count},${first})`,
+    boundaryDetailWithCount: (count, first) => `DUMMY_boundaryDetailWithCount(${count},${first})`,
     operationFailure: (summary, reason) => `${summary}: ${reason}`,
   },
   banners: {
@@ -193,19 +181,16 @@ export const dummyMessages = {
     // this process's instance.
     invalidInstanceId: 'DUMMY_invalidInstanceId',
     storeOverrideWithNamedInstance: 'DUMMY_storeOverrideWithNamedInstance',
-    restoreNotRestored: (count: number) => `DUMMY_restoreNotRestored(${count})`,
+    restoreNotRestored: (count, lines) => `DUMMY_restoreNotRestored(${count},${lines})`,
+    restoreNotRestoredLines: (lines) => `DUMMY_restoreNotRestoredLines(${lines.join('|')})`,
     restoreNotRestoredMore: (count: number) => `DUMMY_restoreNotRestoredMore(${count})`,
     actionsAvailable: 'DUMMY_actionsAvailable',
-    noticeAndMore: (sentence: string, count: number) => `DUMMY_noticeAndMore(${sentence},${count})`,
+    noticeAndMore: (sentence, count) => `DUMMY_noticeAndMore(${sentence},${count})`,
     windowNeedsApprovalParts,
     windowNeedsInputParts,
-    windowNeedsApproval: (name: string) => joinParts(windowNeedsApprovalParts(name)),
-    windowNeedsInput: (name: string) => joinParts(windowNeedsInputParts(name)),
-    goToCallingWindowParts: (name: string) => ({
-      before: 'DUMMY_goToCallingWindow(',
-      name,
-      after: ')',
-    }),
+    windowNeedsApproval: (name) => windowNeedsApprovalParts(name).sentence,
+    windowNeedsInput: (name) => windowNeedsInputParts(name).sentence,
+    goToCallingWindowParts: (name) => titleParts('DUMMY_goToCallingWindow(', name, ')'),
     waitingForYouMore: (count: number) => `DUMMY_waitingForYouMore(${count})`,
     notificationsMore: (count: number) => `DUMMY_notificationsMore(${count})`,
     waitingForYouMoreAnnouncement: (count: number) =>
@@ -218,7 +203,7 @@ export const dummyMessages = {
     clearNotifications: 'DUMMY_clearNotifications',
     notificationSettings: 'DUMMY_notificationSettings',
     noticeLane: 'DUMMY_noticeLane',
-    laneCardName: (sentence: string, action: string) => `DUMMY_laneCardName(${sentence},${action})`,
+    laneCardName: (sentence, action) => `DUMMY_laneCardName(${sentence},${action})`,
     laneCount: (count: number) => `DUMMY_laneCount(${count})`,
     showInNotifications: 'DUMMY_showInNotifications',
     screenReaderAnnouncements: 'DUMMY_screenReaderAnnouncements',
@@ -272,7 +257,7 @@ export const dummyMessages = {
     eventTime: (date: Date) => `DUMMY_eventTime(${date.toISOString()})`,
     chatPostedAt: (atMs: number) => `DUMMY_chatPostedAt(${atMs})`,
     recordedTime: (epochS: number) => `DUMMY_recordedTime(${epochS})`,
-    sentences: (parts: readonly string[]) => `DUMMY_sentences(${parts.join('|')})`,
+    sentences: (parts) => `DUMMY_sentences(${parts.join('|')})`,
   },
 
   // Why a window's status is Unknown, in the three forms the sidebar
@@ -560,11 +545,10 @@ export const dummyMessages = {
       `DUMMY_workArea_reopenFromLastSession(${count},${String(savedAtEpochS)})`,
     windowExitedParts,
     windowExitedWithCodeParts,
-    windowExited: (name: string) => joinParts(windowExitedParts(name)),
-    windowExitedWithCode: (name: string, code: number) =>
-      joinParts(windowExitedWithCodeParts(name, code)),
+    windowExited: (name) => windowExitedParts(name).sentence,
+    windowExitedWithCode: (name, code) => windowExitedWithCodeParts(name, code).sentence,
     exitedBody: 'DUMMY_workArea_exitedBody',
-    goToWindow: (name: string) => `DUMMY_workArea_goToWindow(${name})`,
+    goToWindow: (name) => `DUMMY_workArea_goToWindow(${name})`,
   },
   actionBlocks: {
     noWindowOnScreen: 'DUMMY_actionBlocks_noWindowOnScreen',
@@ -732,7 +716,10 @@ export const dummyMessages = {
     noWorkspaces: 'DUMMY_tickets_noWorkspaces',
     boardNote: (ticketCount: number, milestoneCount: number) =>
       `DUMMY_tickets_boardNote(${ticketCount},${milestoneCount})`,
-    unconfigured: (reason: string) => `DUMMY_tickets_unconfigured(${reason})`,
+    unconfigured: (reason) => `DUMMY_tickets_unconfigured(${String(reason)})`,
+    ticketLabel: (ticketNumber: number) => `DUMMY_tickets_ticketLabel(${ticketNumber})`,
+    workspaceOption: (name, path) => `DUMMY_tickets_workspaceOption(${name},${path})`,
+    milestoneWithTitle: (name, title) => `DUMMY_tickets_milestoneWithTitle(${name},${title})`,
     columnTruncated: 'DUMMY_tickets_columnTruncated',
     planCount: (count: number) => `DUMMY_tickets_planCount(${count})`,
     backButton: 'DUMMY_tickets_backButton',

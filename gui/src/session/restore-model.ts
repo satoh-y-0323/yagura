@@ -6,6 +6,7 @@
  */
 import { commandFailureOf } from '../command-failure-model';
 import type { DisplayLine } from '../display/untrusted-text';
+import type { UiText } from '../display/ui-text';
 import type {
   CommandFailure,
   OnNameTaken,
@@ -402,9 +403,6 @@ export async function restoreSelected(
   return outcome;
 }
 
-/** Joins the lines of the not-restored notice, the "+M more" count included. */
-const RESTORE_LINE_SEPARATOR = '; ';
-
 /**
  * The one notice naming every window a restore could not open, each with its
  * reason; `null` when nothing failed.
@@ -416,7 +414,7 @@ const RESTORE_LINE_SEPARATOR = '; ';
  *
  * @param failed the windows that could not be opened, in the order tried
  */
-export function restoreNoticeForFailures(failed: readonly RestoreFailure[]): string | null {
+export function restoreNoticeForFailures(failed: readonly RestoreFailure[]): UiText | null {
   const lines = [
     ...new Set(failed.map(({ name, failure }) => describeWindowOpenFailure(name, failure))),
   ];
@@ -424,26 +422,22 @@ export function restoreNoticeForFailures(failed: readonly RestoreFailure[]): str
   if (first === undefined) {
     return null;
   }
-  const lengthOf = (text: string): number => Array.from(text).length;
-  const moreLength = (count: number): number =>
-    count === 0
-      ? 0
-      : RESTORE_LINE_SEPARATOR.length + lengthOf(banners.restoreNotRestoredMore(count));
+  // The lines as the notice joins them, with the count of the ones left out after them.
+  const joined = (shownLines: readonly (UiText | DisplayLine)[]): UiText => {
+    const unshown = lines.length - shownLines.length;
+    return banners.restoreNotRestoredLines(
+      unshown === 0 ? shownLines : [...shownLines, banners.restoreNotRestoredMore(unshown)]
+    );
+  };
 
   const shown = [first];
-  let length = lengthOf(first);
-  for (const [index, line] of rest.entries()) {
-    const unshownAfter = rest.length - index - 1;
-    const grown = length + RESTORE_LINE_SEPARATOR.length + lengthOf(line);
-    if (grown + moreLength(unshownAfter) > EXTERNAL_TEXT_MAX_CODE_POINTS) {
+  for (const line of rest) {
+    if (Array.from(joined([...shown, line])).length > EXTERNAL_TEXT_MAX_CODE_POINTS) {
       break;
     }
     shown.push(line);
-    length = grown;
   }
-  const unshown = lines.length - shown.length;
-  const parts = unshown === 0 ? shown : [...shown, banners.restoreNotRestoredMore(unshown)];
-  return `${banners.restoreNotRestored(lines.length)}: ${parts.join(RESTORE_LINE_SEPARATOR)}`;
+  return banners.restoreNotRestored(lines.length, joined(shown));
 }
 
 /** Applies a layout plan, one target method call per step, in step order. */

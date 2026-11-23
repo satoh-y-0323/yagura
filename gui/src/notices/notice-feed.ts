@@ -21,8 +21,11 @@ import {
   type NoticeCategory,
   type NoticeClass,
   type NoticeDraft,
+  type NoticeText,
   type StateNoticeKey,
 } from './notice-model';
+import type { UiText } from '../display/ui-text';
+import { sanitizeForDisplay, type DisplayLine } from '../display/untrusted-text';
 import type { NotificationPreferences } from './notification-preferences';
 
 type Tone = NoticeClass['tone'];
@@ -31,11 +34,11 @@ type Tone = NoticeClass['tone'];
 interface NoticeBody extends Pick<NoticeClass, 'blocking' | 'tone' | 'dismissible'> {
   /** Unique and only growing, so the list's order and the unseen count need no clock. */
   seq: number;
-  title: string;
-  detail: string | null;
+  title: NoticeText;
+  detail: NoticeText | null;
   action: NoticeAction | null;
   /** When an event was recorded, `HH:mm`; `null` for a state notice. */
-  at: string | null;
+  at: UiText | null;
 }
 
 /** A numbered notice: a state the app is in, or something that happened. */
@@ -80,9 +83,9 @@ export interface LaneState {
 interface LaneItemBody {
   id: string;
   /** The whole sentence, with "and N more" when events are folded in: the name and the tooltip. */
-  title: string;
+  title: NoticeText;
   /** The latest sentence alone, without the folded count: what a card draws when it names no one. */
-  sentence: string;
+  sentence: NoticeText;
   /** The title split around the window's name so only the name is cut short; `null` when it names none. */
   parts: TitleParts | null;
   /** How many other events are folded into the card. */
@@ -103,9 +106,15 @@ export type LaneItem = LaneItemBody &
         action: NoticeAction | null;
         /** The seq of the notice the title, action and detail come from, the latest folded in. */
         titleSeq: number;
-        detail: string | null;
+        detail: NoticeText | null;
       }
-    | { kind: 'needs-you'; windowId: string; status: NeedsYouToastStatus }
+    | {
+        kind: 'needs-you';
+        windowId: string;
+        status: NeedsYouToastStatus;
+        /** A call always names its window. */
+        parts: TitleParts;
+      }
   );
 
 /** What one run is decided from. */
@@ -122,7 +131,7 @@ export interface NoticeFeedInput {
   /** How many cards fit on the lane, `null` until it has been measured. */
   capacity: LaneCapacity | null;
   /** Display names by window id, for the window calls' sentences. */
-  windowNames: ReadonlyMap<string, string>;
+  windowNames: ReadonlyMap<string, DisplayLine>;
 }
 
 /** What the shell draws and keeps. */
@@ -146,7 +155,7 @@ export interface NoticeFeedOutput {
     state: LaneState;
   };
   /** What this run newly reads out, `null` for nothing. */
-  announce: { polite: string | null; assertive: string | null };
+  announce: { polite: UiText | null; assertive: UiText | null };
 }
 
 const CALL_CATEGORIES: Readonly<Record<NeedsYouToastStatus, NoticeCategory>> = {
@@ -255,17 +264,18 @@ function heavier(a: Tone, b: Tone): Tone {
 }
 
 /** How the strip and an event shown elsewhere are read: actions only when there are some. */
-function spoken(notice: Pick<Notice, 'title' | 'action'>): string[] {
+function spoken(notice: Pick<Notice, 'title' | 'action'>): NoticeText[] {
   return notice.action === null ? [notice.title] : [notice.title, banners.actionsAvailable];
 }
 
 /** How a card on the lane is read: the whole card acts, so every card offers an action. */
-function spokenAsCard(title: string): string[] {
+function spokenAsCard(title: NoticeText): NoticeText[] {
   return [title, banners.actionsAvailable];
 }
 
-function nameOf(names: ReadonlyMap<string, string>, windowId: string): string {
-  return names.get(windowId) ?? windowId;
+// A call can arrive before the window list names its window; the id is then shown as a name is.
+function nameOf(names: ReadonlyMap<string, DisplayLine>, windowId: string): DisplayLine {
+  return names.get(windowId) ?? sanitizeForDisplay(windowId);
 }
 
 function entryKey(entry: LaneEntry): string {
@@ -325,8 +335,8 @@ export function noticeFeed(input: NoticeFeedInput): NoticeFeedOutput {
 
   // A modal makes everything behind it inert, so nothing new joins the lane or is read until it closes.
   const held = input.openModalCount > 0;
-  const polite: string[] = [];
-  const assertive: string[] = [];
+  const polite: NoticeText[] = [];
+  const assertive: NoticeText[] = [];
   let nextMark = input.lane.nextMark;
 
   const lane: LaneEntry[] = input.lane.lane.flatMap((entry): LaneEntry[] => {
@@ -396,7 +406,7 @@ export function noticeFeed(input: NoticeFeedInput): NoticeFeedOutput {
   const shown = pickShown(lane, input.capacity, calls);
   // Before the lane is measured nothing shows, so what arrives is read as the card it will be.
   const readAsCard = (key: string): boolean => input.capacity === null || shown.has(key);
-  const callTitle = (toast: NeedsYouToast): string =>
+  const callTitle = (toast: NeedsYouToast): UiText =>
     describeWindowCall(nameOf(input.windowNames, toast.windowId), toast.status);
 
   // Read once on arrival, whether or not it shows; what does not show is only counted.

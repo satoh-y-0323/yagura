@@ -18,7 +18,7 @@ import {
   formatTicketText,
   sanitizeForDisplay,
 } from '../display/untrusted-text';
-import { displayTicketSummary, displayTicketWorkspace } from '../display/ticket-text';
+import { tickets } from '../ui-messages';
 import { BoundaryError } from './session-boundary';
 import {
   narrowTicketChanged,
@@ -83,7 +83,7 @@ function detailWire(overrides: Wire = {}): Wire {
 describe('narrowTicketWorkspaceList', () => {
   it('reads the workspaces of a well-formed reply', () => {
     const rows = narrowTicketWorkspaceList({ workspaces: [workspaceWire()] });
-    expect(rows).toEqual([{ workspace_id: 1, kind: 'git', path: 'C:\\repo' }]);
+    expect(rows).toEqual([{ workspace_id: 1, kind: 'git', name: 'repo', path: 'C:\\repo' }]);
   });
 
   it('rejects a row whose id is not an integer', () => {
@@ -104,7 +104,7 @@ describe('narrowTicketList', () => {
 
     expect(list.workspace_id).toBe(1);
     expect(list.config?.states.map((state) => state.name)).toEqual(['todo', 'on-hold']);
-    expect(list.config?.states[1]?.requires).toEqual(['resume_trigger']);
+    expect(list.config?.states[1]?.requires.map((field) => field.name)).toEqual(['resume_trigger']);
     expect(list.config?.fields[0]?.name).toBe('resume_trigger');
     expect(list.config_error).toBeNull();
     expect(list.milestones[0]?.title).toBe('First release');
@@ -141,7 +141,9 @@ describe('narrowTicketList', () => {
     const summary = narrowTicketList(listWire({ tickets: [wire] })).tickets[0];
 
     expect(summary?.plan_count).toBe(2);
-    expect(summary?.fields).toEqual({ resume_trigger: 'when the daemon lands' });
+    expect(summary?.fields).toEqual([
+      { name: 'resume_trigger', displayName: 'resume_trigger', value: 'when the daemon lands' },
+    ]);
   });
 
   it('rejects a summary without a plan count or with a malformed one', () => {
@@ -193,9 +195,11 @@ describe('narrowTicketDetail', () => {
     expect(ticket.number).toBe(12);
     expect(ticket.body).toBe('line one\nline two');
     expect(ticket.state).toBe('on-hold');
-    expect(ticket.fields).toEqual({ resume_trigger: 'when the daemon lands' });
+    expect(ticket.fields).toEqual([
+      { name: 'resume_trigger', displayName: 'resume_trigger', value: 'when the daemon lands' },
+    ]);
     expect(ticket.results).toEqual([{ seq: 1, at: 1_790_000_100, text: 'merged' }]);
-    expect(ticket.plans).toEqual(['p-abc123']);
+    expect(ticket.plans).toEqual([{ planId: 'p-abc123', displayPlanId: 'p-abc123' }]);
   });
 
   it('keeps a state name the settings no longer know', () => {
@@ -308,56 +312,53 @@ describe('the one-line fields of a ticket', () => {
       throw new Error('the summary was dropped');
     }
 
-    const shown = displayTicketSummary(summary);
-
-    expect(shown.title).toBe(sanitizeForDisplay('a\u0000b\u202Ec'));
-    expect(shown.title).not.toContain('\u0000');
-    expect(shown.state).toBe('todo');
-    expect(shown.milestone).toBe('v1');
+    expect(summary.title).toBe(sanitizeForDisplay('a\u0000b\u202Ec'));
+    expect(summary.title).not.toContain('\u0000');
+    expect(summary.displayState).toBe('todo');
+    expect(summary.displayMilestone).toBe('v1');
   });
 
   it('labels a ticket by its number', () => {
-    const shown = displayTicketSummary({
-      number: 12,
-      title: 't',
-      state: 's',
-      milestone: null,
-      updated_at: 1,
-      plan_count: 0,
-      fields: {},
-    });
-    expect(shown.label).toBe('T-12');
-    expect(shown.milestone).toBeNull();
+    const summary = narrowTicketList(
+      listWire({ tickets: [summaryWire({ number: 12, milestone: null })] })
+    ).tickets[0];
+    expect(tickets.ticketLabel(12)).toBe('T-12');
+    expect(summary?.displayMilestone).toBeNull();
   });
 
   it('caps a long title at the display limit', () => {
-    const shown = displayTicketSummary({
-      number: 1,
-      title: 'x'.repeat(MAX_DISPLAY_FIELD_CHARS + 5),
-      state: 's',
-      milestone: null,
-      updated_at: 1,
-      plan_count: 0,
-      fields: {},
-    });
-    expect(shown.title).toBe(`${'x'.repeat(MAX_DISPLAY_FIELD_CHARS)}…`);
+    const summary = narrowTicketList(
+      listWire({ tickets: [summaryWire({ title: 'x'.repeat(MAX_DISPLAY_FIELD_CHARS + 5) })] })
+    ).tickets[0];
+    expect(summary?.title).toBe(`${'x'.repeat(MAX_DISPLAY_FIELD_CHARS)}…`);
   });
 
   it('writes out control characters and invisible characters in a workspace path', () => {
-    const shown = displayTicketWorkspace({
-      workspace_id: 1,
-      kind: 'git',
-      path: 'C:\\re\u0000po\n',
+    const [shown, joined] = narrowTicketWorkspaceList({
+      workspaces: [
+        workspaceWire({ path: 'C:\\re\u0000po\n' }),
+        workspaceWire({ workspace_id: 2, path: 'C:\\pro\u200Cj' }),
+      ],
     });
-    expect(shown.path).toBe('C:\\re\\u{0000}po\\u{000A}');
-    const joined = displayTicketWorkspace({ workspace_id: 1, kind: 'git', path: 'C:\\pro\u200Cj' });
-    expect(joined.path).toBe('C:\\pro\\u{200C}j');
+    expect(shown?.path).toBe('C:\\re\\u{0000}po\\u{000A}');
+    expect(joined?.path).toBe('C:\\pro\\u{200C}j');
   });
 
   it('writes out a bidirectional control in a workspace path the way every path is shown', () => {
     const path = 'C:\\work\\\u202Egpj.exe';
-    const shown = displayTicketWorkspace({ workspace_id: 1, kind: 'git', path });
-    expect(shown.path).toBe(formatPathForDisplay(path));
-    expect(shown.path).toBe('C:\\work\\\\u{202E}gpj.exe');
+    const [shown] = narrowTicketWorkspaceList({ workspaces: [workspaceWire({ path })] });
+    expect(shown?.path).toBe(formatPathForDisplay(path));
+    expect(shown?.path).toBe('C:\\work\\\\u{202E}gpj.exe');
+  });
+
+  it('takes the last name of the raw path, then writes out what hides in it', () => {
+    const names = narrowTicketWorkspaceList({
+      workspaces: [
+        workspaceWire({ path: 'C:\\src\\ya\u202Egura' }),
+        workspaceWire({ path: '/home/dev/ya\u200Bgura/' }),
+        workspaceWire({ path: 'C:\\src\\yagura' }),
+      ],
+    }).map((workspace) => workspace.name);
+    expect(names).toEqual(['ya\\u{202E}gura', 'ya\\u{200B}gura', 'yagura']);
   });
 });

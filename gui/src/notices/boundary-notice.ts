@@ -8,6 +8,7 @@
  */
 import { describeOperationFailure, errors } from '../ui-messages';
 import type { UiText } from '../display/ui-text';
+import { foldExternalText } from '../display/untrusted-text';
 
 /** The boundary failures the WebView reports, one member per call site. */
 export type BoundaryOperation =
@@ -62,7 +63,10 @@ function collapseDetail(detail: unknown): unknown {
   if (first === undefined) {
     return '';
   }
-  return detail.length === 1 ? first : errors.boundaryDetailWithCount(detail.length, first);
+  // The whole is folded again as the detail; folding the first warning on its own changes nothing.
+  return detail.length === 1
+    ? first
+    : errors.boundaryDetailWithCount(detail.length, foldExternalText(first));
 }
 
 /**

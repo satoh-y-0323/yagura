@@ -38,19 +38,21 @@ const WORKING_DIRECTORY_ARGUMENT = 'cwd';
 export function describeWindowOpenFailure(
   summary: UiText | DisplayLine,
   failure: CommandFailure
-): string {
+): UiText | DisplayLine {
   return lineForFailure(failure, () => describeLaunchFailure(summary, failure));
 }
 
 /** The launch's own line for a failure the daemon's wire revision did not cause. */
-function describeLaunchFailure(summary: UiText | DisplayLine, failure: CommandFailure): string {
+function describeLaunchFailure(
+  summary: UiText | DisplayLine,
+  failure: CommandFailure
+): UiText | DisplayLine {
   if (failure.kind !== 'rejected') {
     return describeOperationFailure(summary, failure.text);
   }
   const line = describeOperationFailure(summary, failure.message);
   const reason = line !== summary ? line : describeOperationFailure(summary, failure.code);
-  // The daemon's reason carries no closing period.
-  return failure.code === NAME_TAKEN_CODE ? `${reason}. ${errors.nameTakenOpenHint}` : reason;
+  return failure.code === NAME_TAKEN_CODE ? errors.nameTakenOpenFailure(reason) : reason;
 }
 
 /**

@@ -6,13 +6,15 @@
    * regions changes. A fresh node per announcement makes the same sentence
    * twice in a row read twice.
    */
+  import type { UiText } from '../display/ui-text';
   import type { NoticeFeedOutput } from '../notices/notice-feed';
   import { banners } from '../ui-messages';
 
   export let announce: NoticeFeedOutput['announce'];
 
-  let polite = '';
-  let assertive = '';
+  // `null` draws an empty region, as nothing has been read out yet.
+  let polite: UiText | null = null;
+  let assertive: UiText | null = null;
   let politeRevision = 0;
   let assertiveRevision = 0;
 

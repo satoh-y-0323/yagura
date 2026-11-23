@@ -619,22 +619,25 @@ describe('describeWindowHeader', () => {
 
 describe('describeExitedWindow', () => {
   it('names the window without an exit code until one is known, and with it after', () => {
-    expect(describeExitedWindow(dummyMessages, 'reviewer', null)).toBe(
-      dummyMessages.workArea.windowExited('reviewer')
+    const reviewer = sanitizeForDisplay('reviewer');
+    expect(describeExitedWindow(dummyMessages, reviewer, null)).toBe(
+      dummyMessages.workArea.windowExited(reviewer)
     );
-    expect(describeExitedWindow(dummyMessages, 'reviewer', 0)).toBe(
-      dummyMessages.workArea.windowExitedWithCode('reviewer', 0)
+    expect(describeExitedWindow(dummyMessages, reviewer, 0)).toBe(
+      dummyMessages.workArea.windowExitedWithCode(reviewer, 0)
     );
 
     // The card draws the title from its parts, so the parts make up the English sentence.
     for (const [exitCode, sentence] of [
-      [null, english.workArea.windowExited('reviewer')],
-      [3, english.workArea.windowExitedWithCode('reviewer', 3)],
+      [null, english.workArea.windowExited(reviewer)],
+      [3, english.workArea.windowExitedWithCode(reviewer, 3)],
     ] as const) {
-      const parts = describeExitedWindowParts(english, 'reviewer', exitCode);
+      const parts = describeExitedWindowParts(english, reviewer, exitCode);
       expect(parts.name).toBe('reviewer');
       expect(`${parts.before}${parts.name}${parts.after}`).toBe(sentence);
-      expect(describeExitedWindow(english, 'reviewer', exitCode)).toBe(sentence);
+      expect(parts.sentence).toBe(`${parts.before}${parts.name}${parts.after}`);
+      expect(parts.sentence).toBe(describeExitedWindow(english, reviewer, exitCode));
+      expect(describeExitedWindow(english, reviewer, exitCode)).toBe(sentence);
     }
   });
 });

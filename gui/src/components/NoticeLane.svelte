@@ -17,6 +17,7 @@
   import { cubicOut } from 'svelte/easing';
 
   import type { LaneItem, NoticeFeedOutput } from '../notices/notice-feed';
+  import type { NoticeText } from '../notices/notice-model';
   import { STATUS_PRESENTATION } from '../status-presentation';
   import { banners } from '../ui-messages';
   import Icon from './Icon.svelte';
@@ -30,7 +31,7 @@
     'visible' | 'moreCalls' | 'moreCallsStatus' | 'moreNotices'
   >;
   /** The tooltip's line under each card's sentence, by card id; the shell decides what it says. */
-  export let secondLines: ReadonlyMap<string, string> = new Map();
+  export let secondLines: ReadonlyMap<string, NoticeText> = new Map();
   /** False while the app is hidden or not focused; the shell decides. */
   export let timersRunning: boolean;
   /** A card's body was pressed; what that does is the shell's. */

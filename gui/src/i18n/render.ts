@@ -39,7 +39,7 @@ export function describeStatus(messages: Messages, status: string): UiText {
  */
 export function describeExitedWindow(
   messages: Messages,
-  name: string,
+  name: DisplayLine,
   exitCode: number | null
 ): UiText {
   return exitCode === null
@@ -54,7 +54,7 @@ export function describeExitedWindow(
  */
 export function describeExitedWindowParts(
   messages: Messages,
-  name: string,
+  name: DisplayLine,
   exitCode: number | null
 ): TitleParts {
   return exitCode === null
@@ -67,7 +67,7 @@ export function describeExitedWindowParts(
  *
  * @param name the window's display name
  */
-export function describeGoToWindow(messages: Messages, name: string): UiText {
+export function describeGoToWindow(messages: Messages, name: DisplayLine): UiText {
   return messages.workArea.goToWindow(name);
 }
 
@@ -78,7 +78,7 @@ export function describeGoToWindow(messages: Messages, name: string): UiText {
  */
 export function describeWindowCall(
   messages: Messages,
-  name: string,
+  name: DisplayLine,
   status: Extract<WindowStatus, 'waiting_approval' | 'waiting_input'>
 ): UiText {
   return status === 'waiting_approval'
@@ -93,7 +93,7 @@ export function describeWindowCall(
  */
 export function describeWindowCallParts(
   messages: Messages,
-  name: string,
+  name: DisplayLine,
   status: Extract<WindowStatus, 'waiting_approval' | 'waiting_input'>
 ): TitleParts {
   return status === 'waiting_approval'
@@ -107,7 +107,11 @@ export function describeWindowCallParts(
  * @param sentence the latest event's sentence
  * @param count how many other events the card holds
  */
-export function describeNoticeAndMore(messages: Messages, sentence: string, count: number): UiText {
+export function describeNoticeAndMore(
+  messages: Messages,
+  sentence: UiText | DisplayLine,
+  count: number
+): UiText {
   return messages.banners.noticeAndMore(sentence, count);
 }
 
@@ -122,7 +126,10 @@ export function describeChatPostedAt(messages: Messages, atMs: number): UiText {
 }
 
 /** Joins what one update reads out into one text. */
-export function describeAnnouncement(messages: Messages, sentences: readonly string[]): UiText {
+export function describeAnnouncement(
+  messages: Messages,
+  sentences: readonly (UiText | DisplayLine)[]
+): UiText {
   return messages.formats.sentences(sentences);
 }
 

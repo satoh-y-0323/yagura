@@ -8,6 +8,7 @@
  */
 import { describe, expect, it } from 'vitest';
 
+import { sanitizeForDisplay } from '../display/untrusted-text';
 import type {
   TicketConfig,
   TicketList,
@@ -15,29 +16,31 @@ import type {
   TicketSummary,
 } from '../ipc/ticket-boundary';
 
-import {
-  buildTicketBoard,
-  ticketColumnQueries,
-  ticketReloadFor,
-  ticketWorkspaceName,
-} from './ticket-board-model';
+import { buildTicketBoard, ticketColumnQueries, ticketReloadFor } from './ticket-board-model';
 
 function summary(number: number, state: string, milestone: string | null = null): TicketSummary {
   return {
     number,
-    title: `ticket ${number}`,
+    title: sanitizeForDisplay(`ticket ${number}`),
     state,
+    displayState: sanitizeForDisplay(state),
     milestone,
+    displayMilestone: milestone === null ? null : sanitizeForDisplay(milestone),
     updated_at: 0,
     plan_count: 0,
-    fields: {},
+    fields: [],
   };
 }
 
 function config(states: string[]): TicketConfig {
   return {
     guide: 'guide',
-    states: states.map((name) => ({ name, description: '', requires: [] })),
+    states: states.map((name) => ({
+      name,
+      displayName: sanitizeForDisplay(name),
+      description: '',
+      requires: [],
+    })),
     fields: [],
   };
 }
@@ -54,7 +57,10 @@ function list(
   return {
     workspace_id: 1,
     config: options.config === undefined ? config(['todo', 'in-progress', 'done']) : options.config,
-    config_error: options.configError ?? null,
+    config_error:
+      options.configError === undefined || options.configError === null
+        ? null
+        : sanitizeForDisplay(options.configError),
     milestones: options.milestones ?? [],
     tickets,
     truncated: options.truncated ?? false,
@@ -62,7 +68,13 @@ function list(
 }
 
 function milestone(name: string, position: number): TicketMilestone {
-  return { name, position, title: name, description: null };
+  return {
+    name,
+    displayName: sanitizeForDisplay(name),
+    position,
+    title: sanitizeForDisplay(name),
+    description: null,
+  };
 }
 
 function readyColumns(board: ReturnType<typeof buildTicketBoard>) {
@@ -252,13 +264,5 @@ describe('ticketReloadFor', () => {
       workspaces: true,
       board: false,
     });
-  });
-});
-
-describe('ticketWorkspaceName', () => {
-  it('takes the last name of the raw path, then writes out what hides in it', () => {
-    expect(ticketWorkspaceName('C:\\src\\ya\u202Egura')).toBe('ya\\u{202E}gura');
-    expect(ticketWorkspaceName('/home/dev/ya\u200Bgura/')).toBe('ya\\u{200B}gura');
-    expect(ticketWorkspaceName('C:\\src\\yagura')).toBe('yagura');
   });
 });

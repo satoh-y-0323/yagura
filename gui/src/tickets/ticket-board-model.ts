@@ -4,7 +4,7 @@
  * inside a column, what a ticket-changed push reads again, and when the plans
  * panel counts as showing the plan board.
  */
-import { formatPathForDisplay } from '../display/untrusted-text';
+import type { DisplayLine } from '../display/untrusted-text';
 import type { TicketListQuery } from '../ipc/ticket-client';
 import type {
   TicketChanged,
@@ -26,6 +26,7 @@ export interface PlansPanelView {
 /** One column of the ticket board. */
 export interface TicketColumn {
   state: string;
+  displayState: DisplayLine;
   /** False for a state the settings do not name, kept so its tickets stay visible. */
   configured: boolean;
   tickets: TicketSummary[];
@@ -35,7 +36,9 @@ export interface TicketColumn {
 
 /** The board as drawn: columns, or the reason there are none. */
 export type TicketBoard =
-  { kind: 'ready'; columns: TicketColumn[] } | { kind: 'unconfigured'; reason: string };
+  | { kind: 'ready'; columns: TicketColumn[] }
+  /** `reason` is `null` when the daemon gave none. */
+  | { kind: 'unconfigured'; reason: DisplayLine | null };
 
 /** What a ticket-changed push reads again. */
 export interface TicketReload {
@@ -75,7 +78,7 @@ export function buildTicketBoard(
 ): TicketBoard {
   const config = overview.config;
   if (config === null) {
-    return { kind: 'unconfigured', reason: overview.config_error ?? '' };
+    return { kind: 'unconfigured', reason: overview.config_error };
   }
   const order = milestoneOrder(overview.milestones);
   const configuredNames = new Set(config.states.map((state) => state.name));
@@ -83,23 +86,31 @@ export function buildTicketBoard(
     const read = columnLists.get(state.name);
     return {
       state: state.name,
+      displayState: state.displayName,
       configured: true,
       tickets: sortColumn(read?.tickets ?? [], order),
       truncated: read?.truncated ?? false,
     };
   });
-  const unnamed = new Map<string, TicketSummary[]>();
+  const unnamed = new Map<string, { displayState: DisplayLine; tickets: TicketSummary[] }>();
   for (const ticket of overview.tickets) {
     if (!configuredNames.has(ticket.state)) {
-      unnamed.set(ticket.state, [...(unnamed.get(ticket.state) ?? []), ticket]);
+      const column = unnamed.get(ticket.state);
+      unnamed.set(ticket.state, {
+        displayState: ticket.displayState,
+        tickets: [...(column?.tickets ?? []), ticket],
+      });
     }
   }
-  const extra = [...unnamed.keys()].sort(compareText).map((state): TicketColumn => ({
-    state,
-    configured: false,
-    tickets: sortColumn(unnamed.get(state) ?? [], order),
-    truncated: overview.truncated,
-  }));
+  const extra = [...unnamed.entries()]
+    .sort(([left], [right]) => compareText(left, right))
+    .map(([state, column]): TicketColumn => ({
+      state,
+      displayState: column.displayState,
+      configured: false,
+      tickets: sortColumn(column.tickets, order),
+      truncated: overview.truncated,
+    }));
   return { kind: 'ready', columns: [...configured, ...extra] };
 }
 
@@ -130,17 +141,6 @@ export function ticketReloadFor(
  */
 export function planBoardBecameVisible(previous: PlansPanelView, next: PlansPanelView): boolean {
   return !showsPlanBoard(previous) && showsPlanBoard(next);
-}
-
-/**
- * The name shown for a workspace, ready to draw: the last segment of its raw
- * path through `formatPathForDisplay`, as a room name is shown. The segment
- * is taken first, since a written-out character starts with a backslash.
- * @param path the workspace's path as the daemon sent it
- */
-export function ticketWorkspaceName(path: string): string {
-  const segments = path.split(/[\\/]/).filter((segment) => segment !== '');
-  return formatPathForDisplay(segments[segments.length - 1] ?? path);
 }
 
 function showsPlanBoard(view: PlansPanelView): boolean {

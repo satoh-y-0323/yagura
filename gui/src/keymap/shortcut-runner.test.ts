@@ -6,7 +6,7 @@
  */
 import { describe, expect, it } from 'vitest';
 
-import { formatPathForDisplay } from '../display/untrusted-text';
+import { formatPathForDisplay, sanitizeForDisplay } from '../display/untrusted-text';
 import type { WindowStatus } from '../ipc/session-boundary';
 import type { PlacedWindow } from '../session/current-window';
 import type { ExitedCard } from '../session/shell-state';
@@ -243,9 +243,9 @@ describe('next and previous window', () => {
 function cardFor(windowId: string, next: Win | null, previous: Win | null): ExitedCard {
   return {
     windowId,
-    name: windowId,
+    name: sanitizeForDisplay(windowId),
     exitCode: 1,
-    next: next?.windowId ?? null,
+    next: next === null ? null : sanitizeForDisplay(next.windowId),
     nextWindowId: next?.windowId ?? null,
     previousWindowId: previous?.windowId ?? null,
   };

@@ -4,17 +4,11 @@
    * column per ticket state with a card per ticket.
    *
    * It owns no IPC and offers no edits: the shell reads the board and hands
-   * it in. Ticket text is written by agents, so every string drawn here goes
-   * through the ticket display functions first.
+   * it in. Ticket text is written by agents; the boundary prepares every part
+   * drawn here.
    */
-  import { displayTicketSummary, displayTicketWorkspace } from '../display/ticket-text';
-  import { formatTicketText, sanitizeForDisplay } from '../display/untrusted-text';
-  import type { TicketMilestone, TicketSummary, TicketWorkspace } from '../ipc/ticket-boundary';
-  import {
-    ticketWorkspaceName,
-    type TicketBoard,
-    type TicketColumn,
-  } from '../tickets/ticket-board-model';
+  import type { TicketMilestone, TicketWorkspace } from '../ipc/ticket-boundary';
+  import type { TicketBoard, TicketColumn } from '../tickets/ticket-board-model';
   import { tickets as text } from '../ui-messages';
 
   export let workspaces: TicketWorkspace[];
@@ -31,25 +25,8 @@
   // An option value cannot be null, and no milestone name is empty.
   const ALL_MILESTONES = '';
 
-  function workspaceOption(workspace: TicketWorkspace): string {
-    return `${ticketWorkspaceName(workspace.path)} · ${displayTicketWorkspace(workspace).path}`;
-  }
-
-  function milestoneOption(milestone: TicketMilestone): string {
-    return `${sanitizeForDisplay(milestone.name)} · ${sanitizeForDisplay(milestone.title)}`;
-  }
-
-  function fieldsOf(summary: TicketSummary): [string, string][] {
-    return Object.entries(summary.fields).map(([name, value]) => [
-      sanitizeForDisplay(name),
-      formatTicketText(value),
-    ]);
-  }
-
   let columns: TicketColumn[];
   $: columns = board !== null && board.kind === 'ready' ? board.columns : [];
-  let unconfiguredReason: string | null;
-  $: unconfiguredReason = board !== null && board.kind === 'unconfigured' ? board.reason : null;
   $: ticketCount = columns.reduce((total, column) => total + column.tickets.length, 0);
 </script>
 
@@ -65,7 +42,9 @@
         on:change={(event) => onSelectWorkspace(Number(event.currentTarget.value))}
       >
         {#each workspaces as workspace (workspace.workspace_id)}
-          <option value={workspace.workspace_id}>{workspaceOption(workspace)}</option>
+          <option value={workspace.workspace_id}
+            >{text.workspaceOption(workspace.name, workspace.path)}</option
+          >
         {/each}
       </select>
       <select
@@ -79,14 +58,16 @@
       >
         <option value={ALL_MILESTONES}>{text.allMilestones}</option>
         {#each milestones as milestone (milestone.name)}
-          <option value={milestone.name}>{milestoneOption(milestone)}</option>
+          <option value={milestone.name}
+            >{text.milestoneWithTitle(milestone.displayName, milestone.title)}</option
+          >
         {/each}
       </select>
     </div>
 
-    {#if unconfiguredReason !== null}
+    {#if board !== null && board.kind === 'unconfigured'}
       <p class="ticket-board__problem" role="status">
-        {text.unconfigured(sanitizeForDisplay(unconfiguredReason))}
+        {text.unconfigured(board.reason)}
       </p>
     {:else if board !== null}
       <p class="ticket-board__note">{text.boardNote(ticketCount, milestones.length)}</p>
@@ -94,12 +75,11 @@
         {#each columns as column (column.state)}
           <section class="ticket-board__column" data-configured={column.configured}>
             <h3 class="ticket-board__state">
-              <span>{sanitizeForDisplay(column.state)}</span>
+              <span>{column.displayState}</span>
               <span class="ticket-board__count">{column.tickets.length}</span>
             </h3>
             <ul class="ticket-board__cards">
               {#each column.tickets as summary (summary.number)}
-                {@const shown = displayTicketSummary(summary)}
                 <li>
                   <button
                     type="button"
@@ -107,18 +87,18 @@
                     on:click={() => onOpenTicket(summary.number)}
                   >
                     <span class="ticket-card__head">
-                      <span class="ticket-card__number">{shown.label}</span>
-                      <span class="ticket-card__title">{shown.title}</span>
+                      <span class="ticket-card__number">{text.ticketLabel(summary.number)}</span>
+                      <span class="ticket-card__title">{summary.title}</span>
                     </span>
-                    {#each fieldsOf(summary) as [name, value] (name)}
+                    {#each summary.fields as field (field.name)}
                       <span class="ticket-card__field"
-                        ><span class="ticket-card__field-name">{name}</span>: {value}</span
+                        ><span class="ticket-card__field-name">{field.displayName}</span>: {field.value}</span
                       >
                     {/each}
-                    {#if shown.milestone !== null || summary.plan_count > 0}
+                    {#if summary.displayMilestone !== null || summary.plan_count > 0}
                       <span class="ticket-card__meta">
-                        {#if shown.milestone !== null}
-                          <span class="ticket-card__chip">{shown.milestone}</span>
+                        {#if summary.displayMilestone !== null}
+                          <span class="ticket-card__chip">{summary.displayMilestone}</span>
                         {/if}
                         {#if summary.plan_count > 0}
                           <span>{text.planCount(summary.plan_count)}</span>

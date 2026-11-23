@@ -5,6 +5,8 @@ import type { OrderedWindow } from '../session/shell-state';
 import type { DaemonRecoveryStatus } from '../session/recovery-types';
 import { describeExitedWindow as renderDescribeExitedWindow } from '../i18n/render';
 import { dummyMessages } from '../test-utils/dummy-messages';
+import type { UiText } from '../display/ui-text';
+import { sanitizeForDisplay } from '../display/untrusted-text';
 import {
   appendEvent,
   daemonReconnectedEvent,
@@ -22,7 +24,12 @@ vi.mock('../i18n/messages', async () => {
 });
 
 function dummyExitSentence(name: string, exitCode: number | null): string {
-  return renderDescribeExitedWindow(dummyMessages, name, exitCode);
+  return renderDescribeExitedWindow(dummyMessages, sanitizeForDisplay(name), exitCode);
+}
+
+/** A recording time as the shell writes it, `minute` past nine. */
+function at(minute: number): UiText {
+  return dummyMessages.formats.eventTime(new Date(Date.UTC(2026, 0, 1, 9, minute)));
 }
 
 /** The card draws the event from its parts: the name alone, and the words around it. */
@@ -39,7 +46,7 @@ function failure(text: string): NewEvent {
   return {
     key: 'operation-failure',
     tone: 'error',
-    text,
+    text: sanitizeForDisplay(text),
     parts: null,
     toast: true,
     windowId: null,
@@ -50,7 +57,7 @@ function appendAll(
   events: readonly NewEvent[],
   start: { log: EventLog; memory: { nextSeq: number } } = { log: [], memory: { nextSeq: 0 } }
 ): { log: EventLog; memory: { nextSeq: number } } {
-  return events.reduce((acc, event) => appendEvent(acc.log, acc.memory, event, '12:00'), start);
+  return events.reduce((acc, event) => appendEvent(acc.log, acc.memory, event, at(0)), start);
 }
 
 function seqsOf(log: EventLog): number[] {
@@ -62,9 +69,9 @@ function failures(count: number): NewEvent[] {
 }
 
 const SIDEBAR: readonly OrderedWindow[] = [
-  { windowId: 'w-1', name: 'planner', exitCode: null },
-  { windowId: 'w-2', name: 'builder', exitCode: 1 },
-  { windowId: 'w-3', name: 'reviewer', exitCode: 0 },
+  { windowId: 'w-1', name: sanitizeForDisplay('planner'), exitCode: null },
+  { windowId: 'w-2', name: sanitizeForDisplay('builder'), exitCode: 1 },
+  { windowId: 'w-3', name: sanitizeForDisplay('reviewer'), exitCode: 0 },
 ];
 
 /** The one window that leaves the sidebar, as the registry removes windows one at a time. */
@@ -120,8 +127,8 @@ describe('event log: numbering', () => {
   it('numbers from the counter it is given and returns the counter moved past the event', () => {
     const memory = { nextSeq: 7, stateSeqs: new Map([['profile-unavailable', 3]]) };
 
-    const first = appendEvent([], memory, failure('a'), '09:41');
-    const second = appendEvent(first.log, first.memory, failure('b'), '09:42');
+    const first = appendEvent([], memory, failure('a'), at(41));
+    const second = appendEvent(first.log, first.memory, failure('b'), at(42));
 
     expect(seqsOf(first.log)).toEqual([7]);
     expect(first.memory.nextSeq).toBe(8);
@@ -129,14 +136,14 @@ describe('event log: numbering', () => {
     expect(second.memory.nextSeq).toBe(9);
     expect(second.memory.stateSeqs).toBe(memory.stateSeqs);
     expect(memory.nextSeq).toBe(7);
-    expect(second.log.map((entry) => entry.at)).toEqual(['09:41', '09:42']);
+    expect(second.log.map((entry) => entry.at)).toEqual([at(41), at(42)]);
   });
 
   it('does not hand out a number again after the log is cleared', () => {
     const added = appendAll([failure('a'), failure('b')]);
     const emptied: EventLog = [];
 
-    const next = appendEvent(emptied, added.memory, failure('c'), '12:00');
+    const next = appendEvent(emptied, added.memory, failure('c'), at(0));
 
     expect(seqsOf(next.log)).toEqual([2]);
     expect(next.memory.nextSeq).toBe(3);
@@ -175,7 +182,7 @@ describe('windowExitEvent', () => {
 
     expect(event.toast).toBe(false);
     expect(
-      appendEvent([], { nextSeq: 0 }, event, '12:00').log.map((entry) => entry.windowId)
+      appendEvent([], { nextSeq: 0 }, event, at(0)).log.map((entry) => entry.windowId)
     ).toEqual(['w-2']);
   });
 
@@ -224,7 +231,7 @@ describe('failureEvent', () => {
     ['restore-load-failed', 'warning'],
     ['restore-not-restored', 'warning'],
   ] as const)('gives %s the %s tone and a pop-up', (key, tone) => {
-    expect(failureEvent(key, 'text')).toEqual({
+    expect(failureEvent(key, sanitizeForDisplay('text'))).toEqual({
       key,
       tone,
       text: 'text',

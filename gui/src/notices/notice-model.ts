@@ -112,12 +112,15 @@ export interface ProfileAvailability extends NamedProfile {
   unavailableKind: string | null;
 }
 
+/** A sentence a notice shows: the UI's own words, or a line built around outside text. */
+export type NoticeText = UiText | DisplayLine;
+
 /** A notice ready to render, before anything numbers it. */
 export interface NoticeDraft extends Pick<NoticeClass, 'blocking' | 'tone' | 'dismissible'> {
   key: StateNoticeKey;
   /** One line. For a blocking notice the sentence under it is `detail`; otherwise this is the sentence. */
-  title: string;
-  detail: string | null;
+  title: NoticeText;
+  detail: NoticeText | null;
   action: NoticeAction | null;
 }
 
@@ -139,12 +142,12 @@ export type NoticeSourceState = {
    * nothing was reported. Carries the launcher's own sentence rather than a
    * flag, so the notice names the mode that was used and what follows from it.
    */
-  daemonSpawnNotice: string | null;
+  daemonSpawnNotice: NoticeText | null;
   /** Already-formatted text of the last detection-load warning. */
-  detectionWarning: string | null;
-  keymapNotice: string | null;
+  detectionWarning: NoticeText | null;
+  keymapNotice: NoticeText | null;
   /** Already-formatted text of the last boundary failure, `null` while none is active. */
-  boundaryNotice: string | null;
+  boundaryNotice: NoticeText | null;
   hasThemeLoadFailure: boolean;
   isThemeLoadFailureDismissed: boolean;
   themeIssueCount: number;
@@ -186,7 +189,7 @@ export type NoticeSourceState = {
   /** Whether the user has dismissed the notice naming them. */
   isProfileUnavailableDismissed: boolean;
   /** What the daemon says keeps it from opening windows, one sentence each. */
-  daemonHealthNotices: readonly string[];
+  daemonHealthNotices: readonly NoticeText[];
   /** The last session's windows, `null` when there are none to reopen. */
   lastSession: ReopenOffer | null;
   /** Whether the user has dismissed the offer to reopen them. */
@@ -272,7 +275,7 @@ export function classifyNotice(key: NoticeKey, facts: NoticeFacts): NoticeClass 
 function draftOf(
   key: StateNoticeKey,
   facts: NoticeFacts,
-  text: { title: string; detail: string | null },
+  text: { title: NoticeText; detail: NoticeText | null },
   action: NoticeAction | null = null
 ): NoticeDraft {
   const { blocking, tone, dismissible } = classifyNotice(key, facts);
@@ -280,11 +283,14 @@ function draftOf(
 }
 
 /** A blocking notice says what is wrong in a line and keeps the long sentence beneath it. */
-function blockingText(title: string, detail: string): { title: string; detail: string } {
+function blockingText(
+  title: NoticeText,
+  detail: NoticeText
+): { title: NoticeText; detail: NoticeText } {
   return { title, detail };
 }
 
-function sentenceText(sentence: string): { title: string; detail: null } {
+function sentenceText(sentence: NoticeText): { title: NoticeText; detail: null } {
   return { title: sentence, detail: null };
 }
 

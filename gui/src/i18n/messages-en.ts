@@ -20,31 +20,24 @@ const PLAN_STILL_RUNS_WITHOUT_REVIEW = 'It still runs new plans without review.'
 /** A sentence split around the name it holds, so a card can cut the name short and keep the rest. */
 export interface TitleParts {
   before: string;
-  name: string;
+  name: DisplayLine;
   after: string;
+  /** The parts joined: the whole sentence, made where the parts are. */
+  sentence: string;
 }
 
-/** The sentence a set of parts makes; each sentence with a name is built from its parts. */
-function joinParts(parts: TitleParts): string {
-  return `${parts.before}${parts.name}${parts.after}`;
+/** Makes a sentence's parts and the sentence they join into, from one set of words. */
+function titleParts(before: string, name: DisplayLine, after: string): TitleParts {
+  return { before, name, after, sentence: `${before}${name}${after}` };
 }
 
-const windowNeedsApprovalParts = (name: string): TitleParts => ({
-  before: '“',
-  name,
-  after: '” needs approval',
-});
-const windowNeedsInputParts = (name: string): TitleParts => ({
-  before: '“',
-  name,
-  after: '” needs input',
-});
-const windowExitedParts = (name: string): TitleParts => ({ before: '“', name, after: '” exited' });
-const windowExitedWithCodeParts = (name: string, code: number): TitleParts => ({
-  before: '“',
-  name,
-  after: `” exited (exit code ${code})`,
-});
+const windowNeedsApprovalParts = (name: DisplayLine): TitleParts =>
+  titleParts('“', name, '” needs approval');
+const windowNeedsInputParts = (name: DisplayLine): TitleParts =>
+  titleParts('“', name, '” needs input');
+const windowExitedParts = (name: DisplayLine): TitleParts => titleParts('“', name, '” exited');
+const windowExitedWithCodeParts = (name: DisplayLine, code: number): TitleParts =>
+  titleParts('“', name, `” exited (exit code ${code})`);
 
 /** `focusNextWindow` -> `focus-next-window`, at the type level. */
 type KebabCase<S extends string> = S extends `${infer Head}${infer Tail}`
@@ -363,8 +356,12 @@ export const messagesEn = {
     renameWindowFailed: 'Could not rename the window',
     shortcutFailed: 'Could not carry out the keyboard shortcut',
     openWindowFailed: 'Could not open the window',
-    /** Follows a `name_taken` refusal when opening a window, whose default name the daemon numbers. */
-    nameTakenOpenHint: 'Choose another name, or leave the name empty to get a numbered one.',
+    /**
+     * A `name_taken` refusal when opening a window, followed by how to get past
+     * it: the default name is one the daemon numbers. The reason carries no closing period.
+     */
+    nameTakenOpenFailure: (reason: UiText | DisplayLine): string =>
+      `${reason}. Choose another name, or leave the name empty to get a numbered one.`,
     detectionLoadFailed: 'Could not load the detection definition',
 
     // One summary per boundary-failure call site. Each names only the
@@ -387,7 +384,7 @@ export const messagesEn = {
      * carries several. Leading rather than trailing: the detail is capped at
      * its tail, so a trailing count would be the first thing cut off.
      */
-    boundaryDetailWithCount: (count: number, first: string): string =>
+    boundaryDetailWithCount: (count: number, first: DisplayLine): string =>
       `${count} problems, first: ${first}`,
     /** A failed operation's summary followed by the reason it failed with. */
     operationFailure: (summary: UiText | DisplayLine, reason: DisplayLine): string =>
@@ -473,21 +470,24 @@ export const messagesEn = {
       'A named instance cannot run while YAGURA_STORE_DB is set, so yagura started without a daemon: both instances would open the same database, and whichever started last would discard the previous session saved by the other. Unset YAGURA_STORE_DB in this terminal and start yagura again.',
 
     // The lead of the one notice listing the windows a restore could not open.
-    restoreNotRestored: (count: number): string =>
-      count === 1 ? 'Not restored' : `Not restored (${count})`,
+    restoreNotRestored: (count: number, lines: UiText): string =>
+      `${count === 1 ? 'Not restored' : `Not restored (${count})`}: ${lines}`,
+    // The lines of that notice, one per window; the external-text cap is measured on this.
+    restoreNotRestoredLines: (lines: readonly (UiText | DisplayLine)[]): string => lines.join('; '),
     // Ends that notice when the lines that did not fit are only counted.
     restoreNotRestoredMore: (count: number): string => `+${count} more`,
 
     // The notice lane, the Notifications list and what is read out.
     actionsAvailable: 'Actions available',
     /** A card that later events of its kind were folded into: the latest event's sentence first. */
-    noticeAndMore: (sentence: string, count: number): string => `${sentence} and ${count} more`,
+    noticeAndMore: (sentence: UiText | DisplayLine, count: number): string =>
+      `${sentence} and ${count} more`,
     windowNeedsApprovalParts,
     windowNeedsInputParts,
-    windowNeedsApproval: (name: string): string => joinParts(windowNeedsApprovalParts(name)),
-    windowNeedsInput: (name: string): string => joinParts(windowNeedsInputParts(name)),
+    windowNeedsApproval: (name: DisplayLine): string => windowNeedsApprovalParts(name).sentence,
+    windowNeedsInput: (name: DisplayLine): string => windowNeedsInputParts(name).sentence,
     // A card's go-to sentence; the arrow beside it is drawn, not said.
-    goToCallingWindowParts: (name: string): TitleParts => ({ before: 'Go to “', name, after: '”' }),
+    goToCallingWindowParts: (name: DisplayLine): TitleParts => titleParts('Go to “', name, '”'),
     waitingForYouMore: (count: number): string => `+${count} waiting for you`,
     notificationsMore: (count: number): string => `+${count} more in Notifications`,
     // Read out, so the count is said as a number rather than the "+N" the chip shows.
@@ -502,7 +502,8 @@ export const messagesEn = {
     // The band at the foot of the work surface; a different word from the bell's list.
     noticeLane: 'Notification bar',
     // A lane card's name: its whole sentence, then what pressing it does.
-    laneCardName: (sentence: string, action: string): string => `${sentence}, ${action}`,
+    laneCardName: (sentence: UiText | DisplayLine, action: UiText | DisplayLine): string =>
+      `${sentence}, ${action}`,
     // The short count on a lane card or a count of cards left over; the whole sentence is the name.
     laneCount: (count: number): string => (count > 99 ? '99+' : `+${count}`),
     showInNotifications: 'Show in Notifications',
@@ -586,7 +587,7 @@ export const messagesEn = {
     unknownExplanationWithWarning: (explanation: UiText, warning: DisplayLine): string =>
       `${explanation} (${warning})`,
     /** Joins sentences into one text, ending each that lacks one with a full stop. */
-    sentences: (parts: readonly string[]): string =>
+    sentences: (parts: readonly (UiText | DisplayLine)[]): string =>
       parts.map((part) => (/[.!?]$/.test(part) ? part : `${part}.`)).join(' '),
   },
 
@@ -846,7 +847,15 @@ export const messagesEn = {
             : ` in ${milestoneCount} milestones`;
       return `Edited by agents through MCP. ${tickets}${milestones}.`;
     },
-    unconfigured: (reason: string): string => `The ticket settings could not be read: ${reason}`,
+    unconfigured: (reason: DisplayLine | null): string =>
+      reason === null
+        ? 'The ticket settings could not be read.'
+        : `The ticket settings could not be read: ${reason}`,
+    ticketLabel: (ticketNumber: number): string => `T-${ticketNumber}`,
+    /** A workspace as the picker lists it: its name, then where it is. */
+    workspaceOption: (name: DisplayLine, path: DisplayLine): string => `${name} · ${path}`,
+    /** A milestone named with its title, as the picker and a ticket's chip show it. */
+    milestoneWithTitle: (name: DisplayLine, title: DisplayLine): string => `${name} · ${title}`,
     columnTruncated: 'More tickets than shown.',
     planCount: (count: number): string => (count === 1 ? '1 plan' : `${count} plans`),
     backButton: 'Back',
@@ -1193,12 +1202,12 @@ export const messagesEn = {
     },
     windowExitedParts,
     windowExitedWithCodeParts,
-    windowExited: (name: string): string => joinParts(windowExitedParts(name)),
-    windowExitedWithCode: (name: string, code: number): string =>
-      joinParts(windowExitedWithCodeParts(name, code)),
+    windowExited: (name: DisplayLine): string => windowExitedParts(name).sentence,
+    windowExitedWithCode: (name: DisplayLine, code: number): string =>
+      windowExitedWithCodeParts(name, code).sentence,
     exitedBody:
       "yagura didn't switch to another window, so nothing you type goes to a different CLI.",
-    goToWindow: (name: string): string => `Go to ${name}`,
+    goToWindow: (name: DisplayLine): string => `Go to ${name}`,
   },
 
   /** Why an action does nothing right now, shown beside it in the palette and the menus. */

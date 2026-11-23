@@ -1,5 +1,7 @@
 import { describe, it, expect, vi } from 'vitest';
 
+import type { UiText } from '../display/ui-text';
+import { sanitizeForDisplay, type DisplayLine } from '../display/untrusted-text';
 import type { WindowStatus } from '../ipc/session-boundary';
 import { dummyMessages } from '../test-utils/dummy-messages';
 import type { TitleParts } from '../ui-messages';
@@ -43,16 +45,20 @@ interface Shell {
   prefs: NotificationPreferences;
   openModalCount: number;
   seenThrough: number;
-  windowNames: ReadonlyMap<string, string>;
+  windowNames: ReadonlyMap<string, DisplayLine>;
 }
 
-const NAMES: ReadonlyMap<string, string> = new Map([
-  ['w-a', 'alpha'],
-  ['w-b', 'bravo'],
-  ['w-c', 'charlie'],
-  ['w-d', 'delta'],
-  ['w-e', 'echo'],
-]);
+const NAMES: ReadonlyMap<string, DisplayLine> = new Map(
+  (
+    [
+      ['w-a', 'alpha'],
+      ['w-b', 'bravo'],
+      ['w-c', 'charlie'],
+      ['w-d', 'delta'],
+      ['w-e', 'echo'],
+    ] as const
+  ).map(([windowId, name]) => [windowId, sanitizeForDisplay(name)])
+);
 
 function shell(): Shell {
   return {
@@ -90,8 +96,13 @@ function run(s: Shell): FeedOutput {
   return out;
 }
 
+/** The time the shell records an event at; one of its own per event number. */
+function atOf(seq: number): UiText {
+  return dummyMessages.formats.eventTime(new Date(seq * 1000));
+}
+
 function record(s: Shell, event: NewEvent): void {
-  const next = appendEvent(s.log, s.memory, event, `at-${event.text}`);
+  const next = appendEvent(s.log, s.memory, event, atOf(s.memory.nextSeq));
   s.log = next.log;
   s.memory = next.memory;
 }
@@ -102,7 +113,15 @@ function setup(
   action: NoticeAction | null = null,
   detail: string | null = null
 ): NoticeDraft {
-  return { key, blocking: false, tone: 'warning', dismissible: true, title, detail, action };
+  return {
+    key,
+    blocking: false,
+    tone: 'warning',
+    dismissible: true,
+    title: sanitizeForDisplay(title),
+    detail: detail === null ? null : sanitizeForDisplay(detail),
+    action,
+  };
 }
 
 function blocking(key: StateNoticeKey, tone: NoticeDraft['tone'], title: string): NoticeDraft {
@@ -111,8 +130,8 @@ function blocking(key: StateNoticeKey, tone: NoticeDraft['tone'], title: string)
     blocking: true,
     tone,
     dismissible: false,
-    title,
-    detail: `${title}-detail`,
+    title: sanitizeForDisplay(title),
+    detail: sanitizeForDisplay(`${title}-detail`),
     action: null,
   };
 }
@@ -126,7 +145,7 @@ function exitOf(
   return {
     key: 'window-exit',
     tone: exitCode === 0 ? 'info' : 'warning',
-    text: `exit-${windowId}`,
+    text: sanitizeForDisplay(`exit-${windowId}`),
     parts,
     toast,
     windowId,
@@ -136,7 +155,7 @@ function exitOf(
 /** The exited window's sentence split around its display name, as the work area builds it. */
 function exitPartsOf(windowId: string, exitCode: number): TitleParts {
   return dummyMessages.workArea.windowExitedWithCodeParts(
-    NAMES.get(windowId) ?? windowId,
+    NAMES.get(windowId) ?? sanitizeForDisplay(windowId),
     exitCode
   );
 }
@@ -216,20 +235,19 @@ function allOff(): NotificationPreferences {
 }
 
 const more = (sentence: string, count: number): string =>
-  dummyMessages.banners.noticeAndMore(sentence, count);
+  dummyMessages.banners.noticeAndMore(sanitizeForDisplay(sentence), count);
 
 /** What a card on the lane reads out: its sentence, then that it can be acted on. */
 const card = (sentence: string): string =>
   dummyMessages.formats
-    .sentences([sentence, dummyMessages.banners.actionsAvailable])
+    .sentences([sanitizeForDisplay(sentence), dummyMessages.banners.actionsAvailable])
     .slice('DUMMY_sentences('.length, -1);
 
-const {
-  windowNeedsApproval,
-  windowNeedsInput,
-  waitingForYouMoreAnnouncement,
-  notificationsMoreAnnouncement,
-} = dummyMessages.banners;
+const windowNeedsApproval = (name: string): string =>
+  dummyMessages.banners.windowNeedsApproval(sanitizeForDisplay(name));
+const windowNeedsInput = (name: string): string =>
+  dummyMessages.banners.windowNeedsInput(sanitizeForDisplay(name));
+const { waitingForYouMoreAnnouncement, notificationsMoreAnnouncement } = dummyMessages.banners;
 
 describe('notice feed: which notices come onto the lane', () => {
   it('puts a state notice on the lane once while it says the same, and again once it says something new, with the detail of the notice it shows', () => {
@@ -386,7 +404,7 @@ describe('notice feed: how many cards the lane shows', () => {
     expect(titles(freed)).toEqual(['s-2', 's-3', 's-4']);
     expect(freed.announce.polite).toBeNull();
 
-    record(s, failureEvent('operation-failure', 'failure-1'));
+    record(s, failureEvent('operation-failure', sanitizeForDisplay('failure-1')));
     const late = run(s);
     expect(titles(late)).toEqual(['s-2', 's-3', 's-4']);
     expect(late.announce.polite).toContain(notificationsMoreAnnouncement(1));
@@ -398,7 +416,7 @@ describe('notice feed: how many cards the lane shows', () => {
     narrow.capacity = { all: 3, withMore: 2 };
     narrow.drafts = ['s-1', 's-2', 's-3'].map((title) => setup('detection-warning', title));
     expect(titles(run(narrow))).toEqual(['s-1', 's-2', 's-3']);
-    record(narrow, failureEvent('operation-failure', 'failure-1'));
+    record(narrow, failureEvent('operation-failure', sanitizeForDisplay('failure-1')));
     const fell = run(narrow);
     expect(titles(fell)).toEqual(['s-1', 's-2']);
     expect(fell.lane.moreNotices).toBe(2);
@@ -507,7 +525,7 @@ describe('notice feed: one card per kind of event', () => {
     const s = shell();
     record(s, exitOf('w-a', 1));
     run(s);
-    record(s, failureEvent('operation-failure', 'failure-1'));
+    record(s, failureEvent('operation-failure', sanitizeForDisplay('failure-1')));
     expect(titles(run(s))).toEqual(['exit-w-a', 'failure-1']);
   });
 
@@ -541,7 +559,7 @@ describe('notice feed: one card per kind of event', () => {
     record(s, exitOf('w-a', 0));
     const first = cardTitled(run(s), 'exit-w-a').restart;
 
-    record(s, failureEvent('operation-failure', 'failure-1'));
+    record(s, failureEvent('operation-failure', sanitizeForDisplay('failure-1')));
     expect(cardTitled(run(s), 'exit-w-a').restart).toBe(first);
     expect(cardTitled(run(s), 'exit-w-a').restart).toBe(first);
 
@@ -705,7 +723,7 @@ describe('notice feed: numbers and the unseen count', () => {
     const s = shell();
     const health = (detail: string): NoticeDraft => ({
       ...blocking('daemon-health', 'error', 'health'),
-      detail,
+      detail: sanitizeForDisplay(detail),
     });
     s.drafts = [health('fact-1')];
     const first = run(s);
@@ -723,13 +741,13 @@ describe('notice feed: numbers and the unseen count', () => {
     const s = shell();
     s.drafts = [setup('detection-warning', 'setup-a')];
     const stateFirst = seqOf(run(s), 'setup-a');
-    record(s, failureEvent('operation-failure', 'failure-1'));
+    record(s, failureEvent('operation-failure', sanitizeForDisplay('failure-1')));
     s.drafts = [setup('detection-warning', 'setup-a'), setup('keymap-notice', 'setup-b')];
     const out = run(s);
     const event = seqOf(out, 'failure-1');
     expect(event).toBeGreaterThan(stateFirst);
     expect(seqOf(out, 'setup-b')).toBeGreaterThan(event);
-    expect(out.center.find((notice) => notice.title === 'failure-1')?.at).toBe('at-failure-1');
+    expect(out.center.find((notice) => notice.title === 'failure-1')?.at).toBe(atOf(event));
     expect(out.center.find((notice) => notice.title === 'setup-a')?.at).toBeNull();
   });
 
@@ -740,7 +758,7 @@ describe('notice feed: numbers and the unseen count', () => {
       setup('detection-warning', 'setup-a'),
     ];
     run(s);
-    record(s, failureEvent('operation-failure', 'failure-1'));
+    record(s, failureEvent('operation-failure', sanitizeForDisplay('failure-1')));
     const out = run(s);
     expect(out.unseen).toBe(2);
 
@@ -768,7 +786,7 @@ describe('notice feed: what is read out', () => {
 
   it('reads any other notice politely, an error one too', () => {
     const s = shell();
-    record(s, failureEvent('operation-failure', 'failure-1'));
+    record(s, failureEvent('operation-failure', sanitizeForDisplay('failure-1')));
     const out = run(s);
     expect(out.announce.polite).toContain('failure-1');
     expect(out.announce.assertive).toBeNull();

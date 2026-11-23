@@ -5,6 +5,7 @@
  * alone is read from injected storage.
  */
 
+import type { DisplayLine } from '../display/untrusted-text';
 import { STATUS_PRESENTATION } from '../status-presentation';
 import { needsYou, type NeedsYouInput } from '../status-tone';
 import type { WorkMode, WorkView } from './current-window';
@@ -14,18 +15,19 @@ const WORK_MODE_KEY = 'yagura.work-mode';
 /** A window as the sidebar listed it, in the sidebar's order. */
 export interface OrderedWindow {
   windowId: string;
-  name: string;
+  /** The name as the sidebar shows it. */
+  name: DisplayLine;
   exitCode: number | null;
 }
 
 /** The card Focus shows in place of a window that ended without this GUI closing it. */
 export interface ExitedCard {
   windowId: string;
-  name: string;
+  name: DisplayLine;
   /** `null` when the code could not be determined. */
   exitCode: number | null;
   /** The name of the window the card offers to go to, which Next window also goes to. */
-  next: string | null;
+  next: DisplayLine | null;
   nextWindowId: string | null;
   /** The window Previous window goes to while the card is shown. */
   previousWindowId: string | null;
@@ -45,6 +47,8 @@ export interface ShellState {
 export interface WindowGoneEvent {
   type: 'windowGone';
   windowId: string;
+  /** Its name as the sidebar showed it. */
+  name: DisplayLine;
   /** The sidebar order before it left, holding it and the windows still listed. */
   orderBefore: readonly OrderedWindow[];
   /** The code the window ended with, `null` when the code could not be determined. */
@@ -114,6 +118,7 @@ export function diffGoneWindows(
     .map((entry) => ({
       type: 'windowGone',
       windowId: entry.windowId,
+      name: entry.name,
       orderBefore: previous.filter(
         (other) => other.windowId === entry.windowId || !goneIds.has(other.windowId)
       ),
@@ -209,14 +214,12 @@ function reduceWindowGone(state: ShellState, event: WindowGoneEvent): ShellStep 
       goneByUser,
     };
   }
-  const name =
-    event.orderBefore.find((entry) => entry.windowId === event.windowId)?.name ?? event.windowId;
   return {
     state: {
       ...base,
       exitedCard: {
         windowId: event.windowId,
-        name,
+        name: event.name,
         exitCode: event.exitCode,
         next: next?.name ?? null,
         nextWindowId: next?.windowId ?? null,

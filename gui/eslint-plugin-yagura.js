@@ -230,7 +230,7 @@ function createBrandReader(program, brands) {
     );
   }
 
-  return { checker, brandsIn, brandOfText, handedInBy };
+  return { checker, brandsIn, brandOfText, handedInBy, isLibraryType };
 }
 
 const BRAND_OPTIONS_SCHEMA = {
@@ -314,17 +314,71 @@ const noBrandForging = {
         return;
       }
       const target = checker.getTypeFromTypeNode(assertion.type);
-      const held = foreignBrandsIn(target);
-      if (held.length === 0) {
-        return;
-      }
       const source = checker.getTypeAtLocation(assertion.expression);
-      if (
-        (source.flags & ts.TypeFlags.Any) !== 0 ||
-        !checker.isTypeAssignableTo(checker.getNonNullableType(source), target)
-      ) {
-        report(node, 'assertion', held);
+      const claimed = claimedBrands(checker.getNonNullableType(source), target, 0);
+      if (claimed.size > 0) {
+        report(node, 'assertion', [...claimed]);
       }
+    }
+
+    /** An object type whose members can be set beside another's, one by one. */
+    function isPlainObject(type) {
+      return (
+        (type.flags & ts.TypeFlags.Object) !== 0 &&
+        !reader.isLibraryType(type) &&
+        !checker.isArrayType(type) &&
+        !checker.isTupleType(type)
+      );
+    }
+
+    /**
+     * The foreign brands an assertion of `source` to `target` claims. Where the
+     * two are plain objects they are set beside each other member by member and
+     * through each signature's result, so a place where the source already holds
+     * the brand claims nothing; any other shape is judged as a whole.
+     */
+    function claimedBrands(source, target, depth) {
+      const held = foreignBrandsIn(target);
+      const isAny = (source.flags & ts.TypeFlags.Any) !== 0;
+      if (held.length === 0 || (!isAny && checker.isTypeAssignableTo(source, target))) {
+        return new Set();
+      }
+      const whole = new Set(held);
+      if (isAny || depth > MAX_DEPTH || !isPlainObject(source) || !isPlainObject(target)) {
+        return whole;
+      }
+      if (
+        checker.getIndexInfosOfType(target).length > 0 ||
+        target.getConstructSignatures().length > 0
+      ) {
+        return whole;
+      }
+      const targetCalls = target.getCallSignatures();
+      const sourceCalls = source.getCallSignatures();
+      if (targetCalls.length > 1 || targetCalls.length !== sourceCalls.length) {
+        return whole;
+      }
+      const claimed = new Set();
+      const add = (inner) => inner.forEach((brand) => claimed.add(brand));
+      for (const property of checker.getPropertiesOfType(target)) {
+        const counterpart = checker.getPropertyOfType(source, property.name);
+        if (counterpart === undefined) {
+          return whole;
+        }
+        add(
+          claimedBrands(
+            checker.getNonNullableType(checker.getTypeOfSymbol(counterpart)),
+            checker.getTypeOfSymbol(property),
+            depth + 1
+          )
+        );
+      }
+      const [targetCall] = targetCalls;
+      const [sourceCall] = sourceCalls;
+      if (targetCall !== undefined && sourceCall !== undefined) {
+        add(claimedBrands(sourceCall.getReturnType(), targetCall.getReturnType(), depth + 1));
+      }
+      return claimed;
     }
 
     function checkReturnTypes(node) {

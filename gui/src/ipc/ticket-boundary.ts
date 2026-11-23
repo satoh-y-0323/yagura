@@ -6,8 +6,17 @@
  * (snake_case). Every reply is accepted as `unknown` and validated here with
  * the same readers `session-boundary` uses, so a field is only ever read
  * through an ownership test. Ticket text is written by an AI and read by a
- * person, so it is drawn only through `display/ticket-text`.
+ * person, so every part that is shown is prepared here, through the makers in
+ * `display/untrusted-text`; a part that is also matched or sent back keeps its
+ * value beside the prepared one.
  */
+import {
+  formatPathForDisplay,
+  formatTicketText,
+  sanitizeForDisplay,
+  type DisplayBlock,
+  type DisplayLine,
+} from '../display/untrusted-text';
 import {
   BoundaryError,
   ownEntries,
@@ -32,16 +41,30 @@ export interface TicketWorkspace {
   workspace_id: number;
   /** How the workspace is keyed (an opaque string, such as `git`). */
   kind: string;
-  /** The workspace's path, for display. */
-  path: string;
+  /** The last name of the workspace's path, as a room name is shown. */
+  name: DisplayLine;
+  /** The workspace's path, written out the way every path is shown. */
+  path: DisplayLine;
+}
+
+/** The name of a ticket field: matched as it is, shown prepared. */
+export interface TicketFieldName {
+  name: string;
+  displayName: DisplayLine;
+}
+
+/** The value a ticket holds for one of its fields. */
+export interface TicketFieldValue extends TicketFieldName {
+  value: DisplayBlock;
 }
 
 /** One state of the user's ticket settings, in board column order. */
 export interface TicketStateInfo {
   name: string;
+  displayName: DisplayLine;
   description: string;
   /** The fields a ticket in this state must have. */
-  requires: string[];
+  requires: TicketFieldName[];
 }
 
 /** One field a ticket may carry. */
@@ -60,10 +83,12 @@ export interface TicketConfig {
 
 /** One milestone of a workspace. */
 export interface TicketMilestone {
+  /** Matched against a ticket's milestone and sent back as the filter. */
   name: string;
+  displayName: DisplayLine;
   /** Where the milestone sorts; equal positions sort by name. */
   position: number;
-  title: string;
+  title: DisplayLine;
   description: string | null;
 }
 
@@ -71,16 +96,18 @@ export interface TicketMilestone {
 export interface TicketSummary {
   /** The ticket's number in its workspace, shown as `T-<n>`. */
   number: number;
-  title: string;
+  title: DisplayLine;
   /** The ticket's state, which may name a state the settings no longer have. */
   state: string;
+  displayState: DisplayLine;
   milestone: string | null;
+  displayMilestone: DisplayLine | null;
   /** When the ticket last changed, in milliseconds since the Unix epoch. */
   updated_at: number;
   /** How many plans were made from the ticket. */
   plan_count: number;
   /** Values of the fields the ticket's current state requires; empty when it has none. */
-  fields: Record<string, string>;
+  fields: TicketFieldValue[];
 }
 
 /** The reply of `list_tickets`. */
@@ -90,7 +117,7 @@ export interface TicketList {
   /** The user's ticket settings, `null` when they could not be read. */
   config: TicketConfig | null;
   /** Why the settings could not be read, `null` when they were. */
-  config_error: string | null;
+  config_error: DisplayLine | null;
   milestones: TicketMilestone[];
   tickets: TicketSummary[];
   /** Whether more tickets matched than were returned. */
@@ -102,22 +129,30 @@ export interface TicketResult {
   seq: number;
   /** When the daemon recorded it, in milliseconds since the Unix epoch. */
   at: number;
-  text: string;
+  text: DisplayBlock;
+}
+
+/** A plan made from a ticket: opened by its id, which is shown when the plan list has no title. */
+export interface TicketPlanRef {
+  planId: string;
+  displayPlanId: DisplayLine;
 }
 
 /** One ticket in full, as `get_ticket` replies with it. */
 export interface Ticket {
   number: number;
-  title: string;
-  body: string;
+  title: DisplayLine;
+  body: DisplayBlock;
   state: string;
+  displayState: DisplayLine;
   milestone: string | null;
-  /** Field values by field name, including fields the settings no longer define. */
-  fields: Record<string, string>;
+  displayMilestone: DisplayLine | null;
+  /** Field values, including fields the settings no longer define. */
+  fields: TicketFieldValue[];
   /** Oldest first. */
   results: TicketResult[];
   /** The plans made from the ticket. */
-  plans: string[];
+  plans: TicketPlanRef[];
   created_at: number;
   updated_at: number;
 }
@@ -141,10 +176,12 @@ export function narrowTicketWorkspaceList(value: unknown): TicketWorkspace[] {
   const rowsContext = `${context}.workspaces`;
   return requireArray(readOwnField(record, 'workspaces'), rowsContext).map((entry) => {
     const row = requireRecord(entry, rowsContext);
+    const path = requireString(row, 'path', rowsContext);
     return {
       workspace_id: requireInteger(row, 'workspace_id', rowsContext),
       kind: requireString(row, 'kind', rowsContext),
-      path: requireString(row, 'path', rowsContext),
+      name: workspaceName(path),
+      path: formatPathForDisplay(path),
     };
   });
 }
@@ -159,6 +196,7 @@ export function narrowTicketList(value: unknown): TicketList {
   const context = 'list_tickets';
   const record = requireRecord(value, context);
   const configValue = readOwnField(record, 'config');
+  const configError = readOptionalString(record, 'config_error', context);
   const milestonesContext = `${context}.milestones`;
   const ticketsContext = `${context}.tickets`;
   return {
@@ -167,7 +205,7 @@ export function narrowTicketList(value: unknown): TicketList {
       configValue === null || configValue === undefined
         ? null
         : narrowTicketConfig(configValue, `${context}.config`),
-    config_error: readOptionalString(record, 'config_error', context),
+    config_error: configError === null ? null : sanitizeForDisplay(configError),
     milestones: requireArray(readOwnField(record, 'milestones'), milestonesContext).map((entry) =>
       narrowMilestone(entry, milestonesContext)
     ),
@@ -189,20 +227,22 @@ export function narrowTicketDetail(value: unknown): Ticket {
   const resultsContext = `${context}.results`;
   return {
     number: requireNonNegativeInteger(record, 'number', context),
-    title: requireString(record, 'title', context),
-    body: requireString(record, 'body', context),
-    state: requireString(record, 'state', context),
-    milestone: readOptionalString(record, 'milestone', context),
+    title: sanitizeForDisplay(requireString(record, 'title', context)),
+    body: formatTicketText(requireString(record, 'body', context)),
+    ...stateAndMilestone(record, context),
     fields: narrowFieldValues(readOwnField(record, 'fields'), `${context}.fields`),
     results: requireArray(readOwnField(record, 'results'), resultsContext).map((entry) => {
       const row = requireRecord(entry, resultsContext);
       return {
         seq: requireNonNegativeInteger(row, 'seq', resultsContext),
         at: requireNonNegativeInteger(row, 'at', resultsContext),
-        text: requireString(row, 'text', resultsContext),
+        text: formatTicketText(requireString(row, 'text', resultsContext)),
       };
     }),
-    plans: requireStringArray(record, 'plans', context),
+    plans: requireStringArray(record, 'plans', context).map((planId) => ({
+      planId,
+      displayPlanId: sanitizeForDisplay(planId),
+    })),
     created_at: requireNonNegativeInteger(record, 'created_at', context),
     updated_at: requireNonNegativeInteger(record, 'updated_at', context),
   };
@@ -219,6 +259,34 @@ export function narrowTicketChanged(value: unknown): TicketChanged {
   return { workspace_id: requireInteger(record, 'workspace_id', context) };
 }
 
+/**
+ * The name shown for a workspace: the last segment of its raw path, written
+ * out as a path is. The segment is taken first, since a written-out character
+ * starts with a backslash.
+ */
+function workspaceName(path: string): DisplayLine {
+  const segments = path.split(/[\\/]/).filter((segment) => segment !== '');
+  return formatPathForDisplay(segments[segments.length - 1] ?? path);
+}
+
+function fieldName(name: string): TicketFieldName {
+  return { name, displayName: sanitizeForDisplay(name) };
+}
+
+function stateAndMilestone(
+  record: UntrustedRecord,
+  context: string
+): Pick<TicketSummary, 'state' | 'displayState' | 'milestone' | 'displayMilestone'> {
+  const state = requireString(record, 'state', context);
+  const milestone = readOptionalString(record, 'milestone', context);
+  return {
+    state,
+    displayState: sanitizeForDisplay(state),
+    milestone,
+    displayMilestone: milestone === null ? null : sanitizeForDisplay(milestone),
+  };
+}
+
 function narrowTicketConfig(value: unknown, context: string): TicketConfig {
   const record = requireRecord(value, context);
   const statesContext = `${context}.states`;
@@ -227,10 +295,12 @@ function narrowTicketConfig(value: unknown, context: string): TicketConfig {
     guide: requireString(record, 'guide', context),
     states: requireArray(readOwnField(record, 'states'), statesContext).map((entry) => {
       const row = requireRecord(entry, statesContext);
+      const name = requireString(row, 'name', statesContext);
       return {
-        name: requireString(row, 'name', statesContext),
+        name,
+        displayName: sanitizeForDisplay(name),
         description: requireString(row, 'description', statesContext),
-        requires: requireStringArray(row, 'requires', statesContext),
+        requires: requireStringArray(row, 'requires', statesContext).map(fieldName),
       };
     }),
     fields: requireArray(readOwnField(record, 'fields'), fieldsContext).map((entry) => {
@@ -245,10 +315,12 @@ function narrowTicketConfig(value: unknown, context: string): TicketConfig {
 
 function narrowMilestone(value: unknown, context: string): TicketMilestone {
   const record = requireRecord(value, context);
+  const name = requireString(record, 'name', context);
   return {
-    name: requireString(record, 'name', context),
+    name,
+    displayName: sanitizeForDisplay(name),
     position: requireInteger(record, 'position', context),
-    title: requireString(record, 'title', context),
+    title: sanitizeForDisplay(requireString(record, 'title', context)),
     description: readOptionalString(record, 'description', context),
   };
 }
@@ -257,9 +329,8 @@ function narrowTicketSummary(value: unknown, context: string): TicketSummary {
   const record = requireRecord(value, context);
   return {
     number: requireNonNegativeInteger(record, 'number', context),
-    title: requireString(record, 'title', context),
-    state: requireString(record, 'state', context),
-    milestone: readOptionalString(record, 'milestone', context),
+    title: sanitizeForDisplay(requireString(record, 'title', context)),
+    ...stateAndMilestone(record, context),
     updated_at: requireNonNegativeInteger(record, 'updated_at', context),
     plan_count: requireNonNegativeInteger(record, 'plan_count', context),
     fields: narrowFieldValues(readOwnField(record, 'fields'), `${context}.fields`),
@@ -267,14 +338,12 @@ function narrowTicketSummary(value: unknown, context: string): TicketSummary {
 }
 
 /** Reads the field-name-to-value map, whose keys are data rather than a fixed contract. */
-function narrowFieldValues(value: unknown, context: string): Record<string, string> {
+function narrowFieldValues(value: unknown, context: string): TicketFieldValue[] {
   const record: UntrustedRecord = requireRecord(value, context);
-  return Object.fromEntries(
-    ownEntries(record).map(([name, fieldValue]) => {
-      if (typeof fieldValue !== 'string') {
-        throw new BoundaryError(`${context}.${name}: expected a string`);
-      }
-      return [name, fieldValue];
-    })
-  );
+  return ownEntries(record).map(([name, fieldValue]) => {
+    if (typeof fieldValue !== 'string') {
+      throw new BoundaryError(`${context}.${name}: expected a string`);
+    }
+    return { ...fieldName(name), value: formatTicketText(fieldValue) };
+  });
 }

@@ -24,8 +24,10 @@ import type {
 import { banners, describeReopenNotice, describeThemeIssues } from '../ui-messages';
 import { sanitizeForDisplay } from '../display/untrusted-text';
 
-const DAEMON_SPAWN_NOTICE = 'spawn-probe: started without the strongest detachment mode';
-const DAEMON_HEALTH_NOTICE = 'health-probe: windows cannot be opened';
+const DAEMON_SPAWN_NOTICE = sanitizeForDisplay(
+  'spawn-probe: started without the strongest detachment mode'
+);
+const DAEMON_HEALTH_NOTICE = sanitizeForDisplay('health-probe: windows cannot be opened');
 
 function baseState(overrides: Partial<NoticeSourceState> = {}): NoticeSourceState {
   return {
@@ -147,17 +149,17 @@ const NOTICES: { label: string; on: Partial<NoticeSourceState>; notice: ShownNot
   },
   {
     label: 'detection-warning',
-    on: { detectionWarning: 'probe: detection warning' },
+    on: { detectionWarning: sanitizeForDisplay('probe: detection warning') },
     notice: { key: 'detection-warning', sentence: 'probe: detection warning', action: null },
   },
   {
     label: 'keymap-notice',
-    on: { keymapNotice: 'probe: keymap notice' },
+    on: { keymapNotice: sanitizeForDisplay('probe: keymap notice') },
     notice: { key: 'keymap-notice', sentence: 'probe: keymap notice', action: null },
   },
   {
     label: 'boundary-error',
-    on: { boundaryNotice: 'probe: boundary notice' },
+    on: { boundaryNotice: sanitizeForDisplay('probe: boundary notice') },
     notice: { key: 'boundary-error', sentence: 'probe: boundary notice', action: null },
   },
   {
@@ -370,7 +372,10 @@ describe('buildNotices', () => {
       const state = baseState({
         startupEnvFailure: 'invalid_instance_id',
         daemonRecovery,
-        daemonHealthNotices: ['health-probe: first', 'health-probe: second'],
+        daemonHealthNotices: [
+          sanitizeForDisplay('health-probe: first'),
+          sanitizeForDisplay('health-probe: second'),
+        ],
         approverRegistrationRefused: true,
         isDaemonIncompatible: true,
       });
@@ -494,7 +499,7 @@ describe('recordApprovalExpiredUnseen', () => {
     const latest = summary();
     const state = baseState({
       daemonSpawnNotice: DAEMON_SPAWN_NOTICE,
-      boundaryNotice: 'probe: boundary notice',
+      boundaryNotice: sanitizeForDisplay('probe: boundary notice'),
     });
     const next = recordApprovalExpiredUnseen(state, false, 'timeout', latest);
     expect(next).toEqual({ ...state, approvalExpiredUnseen: { count: 1, latest } });
@@ -546,7 +551,7 @@ describe('recordApprovalExpiredUnseen', () => {
 describe('dismissApprovalExpiredUnseen', () => {
   it('clears the count and leaves every other notice-relevant field untouched', () => {
     const state = baseState({
-      boundaryNotice: 'probe: boundary notice',
+      boundaryNotice: sanitizeForDisplay('probe: boundary notice'),
       approvalExpiredUnseen: { count: 5, latest: summary() },
     });
     const next = dismissApprovalExpiredUnseen(state);
@@ -592,7 +597,7 @@ describe('applyRecoveryUpdate: generation-ordered adoption', () => {
   it('does not go from idle to idle: the first adopted generation is 1, applied from the initial idle/0 state, and every other field stays untouched', () => {
     const state = baseState({
       daemonSpawnNotice: DAEMON_SPAWN_NOTICE,
-      detectionWarning: 'probe: unrelated warning',
+      detectionWarning: sanitizeForDisplay('probe: unrelated warning'),
       daemonRecovery: 'idle',
       daemonRecoveryRev: 0,
     });
@@ -655,7 +660,9 @@ describe('applyClientConfigFailure', () => {
   // Every reason is kept, including the one no notice is shown for, so an
   // absent file stays distinguishable from an unusable one.
   it('keeps the reason given, including "not_found" which raises no notice, and leaves every other field untouched', () => {
-    const state = baseState({ boundaryNotice: 'wiring-probe: boundary notice' });
+    const state = baseState({
+      boundaryNotice: sanitizeForDisplay('wiring-probe: boundary notice'),
+    });
     const shownFailure = applyClientConfigFailure(state, 'read_failed');
     expect(shownFailure).toEqual({ ...state, clientConfigFailure: 'read_failed' });
     const next = applyClientConfigFailure(shownFailure, 'not_found');

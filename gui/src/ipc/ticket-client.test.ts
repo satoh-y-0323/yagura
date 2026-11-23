@@ -93,7 +93,7 @@ describe('invokeListTicketWorkspaces', () => {
 
     const rows = await invokeListTicketWorkspaces();
 
-    expect(rows).toEqual([{ workspace_id: 4, kind: 'git', path: 'C:\\repo' }]);
+    expect(rows).toEqual([{ workspace_id: 4, kind: 'git', name: 'repo', path: 'C:\\repo' }]);
   });
 
   it('rejects with BoundaryError when the reply fails validation', async () => {

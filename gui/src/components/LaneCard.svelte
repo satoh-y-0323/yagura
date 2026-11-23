@@ -15,6 +15,8 @@
   import { onDestroy } from 'svelte';
 
   import type { LaneItem } from '../notices/notice-feed';
+  import type { UiText } from '../display/ui-text';
+  import type { DisplayLine } from '../display/untrusted-text';
   import { banners, buttons, hints, type TitleParts } from '../ui-messages';
   import Icon from './Icon.svelte';
   import IconButton from './IconButton.svelte';
@@ -24,7 +26,7 @@
 
   export let item: LaneItem;
   /** The tooltip's line under the whole sentence: a notice's detail or where a calling window is; the shell picks it. */
-  export let secondLine: string | null = null;
+  export let secondLine: UiText | DisplayLine | null = null;
   /** False while the app is hidden or not focused; the shell decides. */
   export let timersRunning: boolean;
   /** Called when the body is pressed; what the card does is the shell's. */
@@ -34,7 +36,7 @@
   export let onExpire: () => void;
 
   /** A line the card draws: split around a name that alone is cut short, or one sentence cut at its end. */
-  type Line = { kind: 'split'; parts: TitleParts } | { kind: 'whole'; text: string };
+  type Line = { kind: 'split'; parts: TitleParts } | { kind: 'whole'; text: UiText | DisplayLine };
 
   const LIFETIME_MS = 8000;
   const nameId = `lane-card-name-${instanceCount++}`;
@@ -55,8 +57,7 @@
 
   function cardAction(card: LaneItem): Line {
     if (card.kind === 'needs-you') {
-      // The feed always splits a call around the window's name; its id stands in as the feed's own fallback does.
-      return split(banners.goToCallingWindowParts(card.parts?.name ?? card.windowId));
+      return split(banners.goToCallingWindowParts(card.parts.name));
     }
     return whole(
       card.action === null ? banners.showInNotifications : buttons[card.action.labelKey]
@@ -67,14 +68,12 @@
     return { kind: 'split', parts };
   }
 
-  function whole(text: string): Line {
+  function whole(text: UiText | DisplayLine): Line {
     return { kind: 'whole', text };
   }
 
-  function sentence(line: Line): string {
-    return line.kind === 'whole'
-      ? line.text
-      : `${line.parts.before}${line.parts.name}${line.parts.after}`;
+  function sentence(line: Line): UiText | DisplayLine {
+    return line.kind === 'whole' ? line.text : line.parts.sentence;
   }
 
   function schedule(run: boolean, restart: number): void {
@@ -162,7 +161,8 @@
           <span class="lane-card__keep">{titleLine.parts.before}</span><span class="lane-card__name"
             >{titleLine.parts.name}</span
           ><span class="lane-card__rest">{titleLine.parts.after}</span>
-        {:else}
+        {:else if titleLine.kind === 'whole'}
+          <!-- Named rather than `else`: the lint's type reader does not narrow the union in an `else`. -->
           <span class="lane-card__sentence">{titleLine.text}</span>
         {/if}
         {#if showsCount}
@@ -174,7 +174,7 @@
           <span class="lane-card__keep">{actionLine.parts.before}</span><span
             class="lane-card__name">{actionLine.parts.name}</span
           ><span class="lane-card__rest">{actionLine.parts.after}</span>
-        {:else}
+        {:else if actionLine.kind === 'whole'}
           <span class="lane-card__sentence">{actionLine.text}</span>
         {/if}
         <span class="lane-card__arrow" aria-hidden="true">→</span>
