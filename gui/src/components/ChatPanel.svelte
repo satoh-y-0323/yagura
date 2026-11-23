@@ -18,12 +18,7 @@
   import { pointerDrag, type PointerDragOptions } from './pointer-drag';
   import { tooltip } from './tooltip';
   import { isImeKey } from '../keymap/key-chord';
-  import {
-    participantWindowId,
-    resolveDisplayName,
-    roomDisplayName,
-    type ChatRoomState,
-  } from '../chat/chat-store';
+  import { resolveDisplayName, roomDisplayName, type ChatRoomState } from '../chat/chat-store';
   import { splitPreparedForMiddleEllipsis } from '../chat/middle-ellipsis';
   import { describeUnresolved } from '../chat/unresolved-notice';
   import {
@@ -588,7 +583,7 @@
           {#each room.roster as participant (participant.window_id)}
             <li>
               <span class="roster-list__name">{participant.displayName}</span>
-              <span class="roster-list__id">{participantWindowId(participant)}</span>
+              <span class="roster-list__id">{participant.displayWindowId}</span>
             </li>
           {/each}
         </ul>

@@ -38,9 +38,11 @@ import type { ApprovalRequest } from '../ipc/session-boundary';
 const LINE = 'Could not send the decision.';
 
 function makeRequest(requestId: string, overrides: Partial<ApprovalRequest> = {}): ApprovalRequest {
+  const tool = overrides.tool ?? 'close_window';
   return {
     request_id: requestId,
-    tool: 'close_window',
+    tool,
+    displayTool: sanitizeForDisplay(tool),
     requester: {
       kind: 'window',
       window_id: 'w-req',

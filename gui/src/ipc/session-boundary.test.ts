@@ -1057,6 +1057,7 @@ describe('narrowApprovalRequest', () => {
     expect(request).toEqual({
       request_id: 'appr1',
       tool: 'close_window',
+      displayTool: 'close_window',
       requester: { kind: 'window', window_id: 'w-req', name: 'requester window' },
       target: { window_id: 'w-target', name: 'target window', status: 'running' },
       text: null,
@@ -1548,6 +1549,7 @@ describe('narrowApprovalRequest: the room a chat post is addressed to', () => {
     expect(request).toEqual({
       request_id: 'appr1',
       tool: 'send_chat',
+      displayTool: 'send_chat',
       requester: { kind: 'window', window_id: 'w-req', name: 'requester window' },
       text: 'hello everyone',
       room: { room_id: 'r-2b7c1d', name: 'yagura' },
@@ -1594,6 +1596,7 @@ describe('narrowApprovalRequest: the room a chat post is addressed to', () => {
     expect(payload.request).toEqual({
       request_id: 'appr1',
       tool: 'send_chat',
+      displayTool: 'send_chat',
       requester: { kind: 'window', window_id: 'w-req', name: 'requester window' },
       text: 'hello everyone',
       room: { room_id: 'r-2b7c1d', name: 'yagura' },
@@ -1617,6 +1620,7 @@ describe('a listed window and a pending request read a room the same way', () =>
     expect(request).toEqual({
       request_id: 'appr1',
       tool: 'send_chat',
+      displayTool: 'send_chat',
       requester: { kind: 'window', window_id: 'w-req', name: 'requester window' },
       text: 'hello everyone',
       room: WELL_FORMED_ROOM,

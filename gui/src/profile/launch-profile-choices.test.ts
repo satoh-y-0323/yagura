@@ -41,7 +41,6 @@ function profile(
     displayName: sanitizeForDisplay(displayName),
     detection: null,
     displayDetection: null,
-    detectionWarning: null,
     displayDetectionWarning: null,
     cwd: null,
     command: [id],

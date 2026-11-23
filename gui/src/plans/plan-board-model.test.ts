@@ -841,7 +841,6 @@ function launchProfile(id: string, limits: ProfileLimit['capability'][]): Profil
     displayName: sanitizeForDisplay(`${id} name`),
     detection: null,
     displayDetection: null,
-    detectionWarning: null,
     displayDetectionWarning: null,
     cwd: null,
     command: [id],

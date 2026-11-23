@@ -30,11 +30,6 @@ export function describeUntargeted(request: ApprovalRequest): UiText {
     : dialogs.approvalTargetNewWindow;
 }
 
-/** Names the operation a request would run, by its external name. */
-export function approvalToolName(request: ApprovalRequest): DisplayLine {
-  return sanitizeForDisplay(request.tool);
-}
-
 /**
  * Names who asked: the requesting window, marked closed once it has left the
  * window list, or an external client.

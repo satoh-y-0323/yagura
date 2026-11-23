@@ -35,7 +35,6 @@ function profileEntry(overrides: Partial<ProfileEntry> = {}): ProfileEntry {
     displayName: sanitizeForDisplay('Claude Code'),
     detection: null,
     displayDetection: null,
-    detectionWarning: null,
     displayDetectionWarning: null,
     cwd: null,
     command: [],
@@ -262,7 +261,7 @@ describe('shippedAliasesOf', () => {
     const aliases = shippedAliasesOf({
       profile: 'codex-cli',
       shippedBase: true,
-      command: { argv: ['codex'], shipped: ['codex'], changed: false },
+      command: { argv: ['codex'], displayShipped: formatCommandLine(['codex']), changed: false },
       entries: [
         { path: ['model', 'args'], value: ['-m'], shipped: ['-m'], changed: false },
         { path: ['model', 'aliases', 'fast'], value: 'a', shipped: 'a', changed: false },
@@ -422,7 +421,7 @@ describe('shippedAliasesOf reads only model aliases with a string shipped value'
     return {
       profile: 'p',
       shippedBase: true,
-      command: { argv: ['p'], shipped: ['p'], changed: false },
+      command: { argv: ['p'], displayShipped: formatCommandLine(['p']), changed: false },
       entries: entries.map(({ path, shipped }) => ({ path, value: 'v', shipped, changed: false })),
     };
   }

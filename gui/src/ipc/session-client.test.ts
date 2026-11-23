@@ -473,7 +473,6 @@ describe('invokeListProfiles', () => {
         displayName: 'Codex CLI',
         detection: 'codex-cli',
         displayDetection: 'codex-cli',
-        detectionWarning: null,
         displayDetectionWarning: null,
         cwd: null,
         available: true,

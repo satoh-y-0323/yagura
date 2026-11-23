@@ -68,6 +68,7 @@ function renderApproval(request: ApprovalRequest, pendingCount: number): Rendere
 const WINDOW_REQUEST: ApprovalRequest = {
   request_id: 'r1',
   tool: 'send_message',
+  displayTool: sanitizeForDisplay('send_message'),
   requester: { kind: 'window', window_id: 'w-a', name: sanitizeForDisplay('alpha') },
   target: { window_id: 'w-b', name: sanitizeForDisplay('beta'), status: 'idle' },
   text: formatApprovalBody('hello'),
@@ -76,6 +77,7 @@ const WINDOW_REQUEST: ApprovalRequest = {
 const EXTERNAL_NO_BODY: ApprovalRequest = {
   request_id: 'r2',
   tool: 'open_window',
+  displayTool: sanitizeForDisplay('open_window'),
   requester: { kind: 'external', window_id: null, name: null },
   text: null,
 };

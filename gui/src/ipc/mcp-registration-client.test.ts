@@ -156,14 +156,10 @@ describe('invokeListMcpRegistrations', () => {
           displayName: 'Alpha CLI',
           group: null,
           add: {
-            argv: ['alpha', 'mcp', 'add', 'yagura', '--', 'C:\\bridge\\yagura-mcp.exe'],
-            programAt: 0,
             displayCommand: 'alpha mcp add yagura -- C:\\bridge\\yagura-mcp.exe',
             displayArgv: 'alpha mcp add yagura -- C:\\bridge\\yagura-mcp.exe',
           },
           remove: {
-            argv: ['alpha', 'mcp', 'remove', 'yagura'],
-            programAt: 0,
             displayCommand: 'alpha mcp remove yagura',
             displayArgv: 'alpha mcp remove yagura',
           },
@@ -265,8 +261,6 @@ describe('listenMcpRegistrationStatus', () => {
         displayDiffersIn: ['command'],
         reason: null,
         add: {
-          argv: ['alpha', 'mcp', 'add', 'yagura', '--', 'C:\\bridge\\yagura-mcp.exe'],
-          programAt: 0,
           displayCommand: 'alpha mcp add yagura -- C:\\bridge\\yagura-mcp.exe',
           displayArgv: 'alpha mcp add yagura -- C:\\bridge\\yagura-mcp.exe',
         },
@@ -328,13 +322,11 @@ describe('listenMcpRegistrationResult', () => {
       action: 'register',
       steps: [
         {
-          argv: ['alpha', 'mcp', 'add', 'yagura', '--', 'C:\\bridge\\yagura-mcp.exe'],
-          programAt: 0,
           displayCommand: 'alpha mcp add yagura -- C:\\bridge\\yagura-mcp.exe',
           exitCode: 0,
           output: 'Added.',
         },
-        { argv: [], programAt: 0, displayCommand: '', exitCode: null, output: 'set' },
+        { displayCommand: null, exitCode: null, output: 'set' },
       ],
       error: 'the add step failed',
       status: {
@@ -344,8 +336,6 @@ describe('listenMcpRegistrationResult', () => {
         displayDiffersIn: [],
         reason: null,
         add: {
-          argv: ['alpha', 'mcp', 'add', 'yagura', '--', 'C:\\bridge\\yagura-mcp.exe'],
-          programAt: 0,
           displayCommand: 'alpha mcp add yagura -- C:\\bridge\\yagura-mcp.exe',
           displayArgv: 'alpha mcp add yagura -- C:\\bridge\\yagura-mcp.exe',
         },

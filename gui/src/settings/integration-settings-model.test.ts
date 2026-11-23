@@ -49,8 +49,6 @@ function text(value: unknown): string {
 
 function command(argv: string[], programAt = 0): McpRegistrationCommand {
   return {
-    argv,
-    programAt,
     displayCommand: formatCommandLine(argv.slice(programAt)),
     displayArgv: formatCommandLine(argv),
   };
@@ -412,9 +410,7 @@ describe('resultLines', () => {
     output: string
   ): McpRegistrationStep {
     return {
-      argv,
-      programAt,
-      displayCommand: formatCommandLine(argv.slice(programAt)),
+      displayCommand: argv.length === 0 ? null : formatCommandLine(argv.slice(programAt)),
       exitCode,
       output: formatOutputBlock(output),
     };

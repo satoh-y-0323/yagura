@@ -297,7 +297,6 @@ describe('invokeListProfiles', () => {
       displayName: 'P',
       detection: 'det',
       displayDetection: 'det',
-      detectionWarning: 'warn',
       displayDetectionWarning: 'warn',
       cwd: '/work',
       command: ['p'],
@@ -337,7 +336,7 @@ describe('invokeListProfiles', () => {
     }
   );
 
-  it('keeps the detection warning raw and strips what it may not show for display', async () => {
+  it('keeps the detection warning only as display text, stripped of what it may not show', async () => {
     invokeMock.mockResolvedValueOnce({
       profiles: [
         profileWire({ detection_warning: 'definition \u202Eexe.txt\u200B was\u0007 not found' }),
@@ -345,7 +344,6 @@ describe('invokeListProfiles', () => {
       ],
     });
     const [warned, clean] = (await invokeListProfiles()).profiles;
-    expect(warned?.detectionWarning).toBe('definition \u202Eexe.txt\u200B was\u0007 not found');
     expect(warned?.displayDetectionWarning).toBe('definition exe.txt was not found');
     expect(clean?.displayDetectionWarning).toBeNull();
   });

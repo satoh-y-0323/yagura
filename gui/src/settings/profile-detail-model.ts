@@ -9,11 +9,7 @@ import {
   type DisplayLine,
 } from '../display/untrusted-text';
 import type { UiText } from '../display/ui-text';
-import type {
-  ProfileCommandDetail,
-  ProfileDetail,
-  ProfileDetailEntry,
-} from '../ipc/profile-detail-boundary';
+import type { ProfileDetail, ProfileDetailEntry } from '../ipc/profile-detail-boundary';
 import { settings } from '../ui-messages';
 
 /** One line of the details. */
@@ -22,8 +18,8 @@ export interface DetailRow {
   key: string;
   /** What the line is about, for display: a provided table by its name, any other key as it is. */
   displayKey: UiText | DisplayLine;
-  /** The value in use, as text. */
-  text: DisplayLine;
+  /** The value in use, as text; `null` for a provided line, which shows no value. */
+  text: DisplayLine | null;
   /** The shipped value, only when the user's own value differs from it. */
   shippedText: DisplayLine | null;
   /** Whether the user's own file sets the value. */
@@ -113,8 +109,7 @@ export function detailSections(detail: ProfileDetail): DetailSections {
         const line: DetailRow = {
           key: table,
           displayKey: providedLabel(table),
-          // A provided line names its table and shows no value.
-          text: formatPathForDisplay(''),
+          text: null,
           shippedText: null,
           changed: entry.changed,
         };
@@ -132,11 +127,6 @@ export function detailSections(detail: ProfileDetail): DetailSections {
     }
   }
   return sections;
-}
-
-/** The shipped argv as one display line, `null` when there is no shipped profile. */
-export function shippedCommandLine(command: ProfileCommandDetail): DisplayLine | null {
-  return command.shipped === null ? null : formatCommandLine(command.shipped);
 }
 
 /** Whether an edited argv differs from the saved one. */

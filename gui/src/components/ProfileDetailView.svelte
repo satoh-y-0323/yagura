@@ -6,12 +6,7 @@
    */
   import type { UiText } from '../display/ui-text';
   import type { ProfileDetail } from '../ipc/profile-detail-boundary';
-  import {
-    canSaveCommand,
-    detailSections,
-    isCommandDirty,
-    shippedCommandLine,
-  } from '../settings/profile-detail-model';
+  import { canSaveCommand, detailSections, isCommandDirty } from '../settings/profile-detail-model';
   import { settings } from '../ui-messages';
   import Icon from './Icon.svelte';
   import IconButton from './IconButton.svelte';
@@ -36,7 +31,7 @@
   }
   $: sections = detail === null ? null : detailSections(detail);
   $: saved = detail?.command.argv ?? [];
-  $: shippedCommand = detail === null ? null : shippedCommandLine(detail.command);
+  $: shippedCommand = detail?.command.displayShipped ?? null;
 
   function updateArgument(index: number, value: string): void {
     edited = edited.map((item, at) => (at === index ? value : item));

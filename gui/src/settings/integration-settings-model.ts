@@ -289,7 +289,7 @@ export function resultLines(result: McpRegistrationResultPayload): {
 } {
   const lines: (UiText | DisplayBlock)[] = [];
   for (const step of result.steps) {
-    if (step.argv.length > 0) {
+    if (step.displayCommand !== null) {
       lines.push(settings.integrationResultCommand(step.displayCommand));
     }
     if (step.output !== '') {

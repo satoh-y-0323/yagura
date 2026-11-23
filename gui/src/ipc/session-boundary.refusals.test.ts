@@ -406,7 +406,9 @@ describe('the chat replies', () => {
     );
     expect(room.halted).toEqual({ reason: 'loop', since_ms: 5 });
     expect(room.needs_user).toBe(true);
-    expect(room.roster).toEqual([{ window_id: 'w1', name: 'one', displayName: 'one' }]);
+    expect(room.roster).toEqual([
+      { window_id: 'w1', displayWindowId: 'w1', name: 'one', displayName: 'one' },
+    ]);
     expect(room.messages[0]?.from_window_id).toBeNull();
 
     const spoken = narrowChatMessages(

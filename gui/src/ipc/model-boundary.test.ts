@@ -87,13 +87,12 @@ describe('narrowModelChoicesPayload', () => {
     expect(result.source).toEqual({ kind: 'values' });
   });
 
-  it('narrows the command source with its argv', () => {
+  it('narrows the command source to its argv as one display line', () => {
     const result = narrowModelChoicesPayload(
       modelChoicesPayloadWire({ source: { kind: 'command', argv: ['codex', 'debug', 'models'] } })
     );
     expect(result.source).toEqual({
       kind: 'command',
-      argv: ['codex', 'debug', 'models'],
       displayCommand: formatCommandLine(['codex', 'debug', 'models']),
     });
   });

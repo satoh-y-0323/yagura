@@ -8,16 +8,18 @@ import { describe, it, expect } from 'vitest';
 import { describeUntargeted } from './approval-target';
 import {
   formatApprovalBody,
+  formatPathForDisplay,
   sanitizeForDisplay,
-  type DisplayLine,
 } from '../display/untrusted-text';
 import type { ApprovalRequest } from '../ipc/session-boundary';
 import { dialogs } from '../ui-messages';
 
 function request(overrides: Partial<ApprovalRequest>): ApprovalRequest {
+  const tool = overrides.tool ?? 'send_chat';
   return {
     request_id: 'a1-test',
-    tool: 'send_chat',
+    tool,
+    displayTool: sanitizeForDisplay(tool),
     requester: { kind: 'window', window_id: 'w1', name: sanitizeForDisplay('builder') },
     text: null,
     ...overrides,
@@ -28,12 +30,15 @@ describe('describeUntargeted', () => {
   it('names the room a request carries', () => {
     const named = request({ room: { room_id: 'main', name: 'Main' } });
 
-    expect(describeUntargeted(named)).toBe(dialogs.describeApprovalRoom('Main' as DisplayLine));
+    expect(describeUntargeted(named)).toBe(
+      dialogs.describeApprovalRoom(formatPathForDisplay('Main'))
+    );
     // A room's name is the last name of a path, so a reordering control is written out.
     const reordered = request({ room: { room_id: 'r', name: 'ya\u202Egura' } });
     expect(describeUntargeted(reordered)).toBe(
-      dialogs.describeApprovalRoom('ya\\u{202E}gura' as DisplayLine)
+      dialogs.describeApprovalRoom(formatPathForDisplay(reordered.room?.name ?? ''))
     );
+    expect(describeUntargeted(reordered)).toContain('ya\\u{202E}gura');
   });
 
   it('names a new window for a request to open one', () => {

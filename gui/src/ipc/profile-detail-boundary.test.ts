@@ -40,7 +40,7 @@ describe('narrowProfileDetail', () => {
     expect(narrowProfileDetail(detailWire())).toEqual({
       profile: 'claude-code',
       shippedBase: true,
-      command: { argv: ['claude', '--x'], shipped: ['claude'], changed: true },
+      command: { argv: ['claude', '--x'], displayShipped: 'claude', changed: true },
       entries: [
         { path: ['model', 'aliases', 'fast'], value: 'haiku', shipped: 'sonnet', changed: true },
       ],
@@ -58,13 +58,17 @@ describe('narrowProfileDetail', () => {
     expect(detail.entries[0]?.changed).toBe(false);
   });
 
-  it('reads an absent or null shipped argv as null, and an empty one as empty', () => {
+  it('shows the shipped argv as one command line, and an absent or null one as none', () => {
+    const quoted = narrowProfileDetail(
+      detailWire({ command: commandWire({ shipped: ['my tool', '--flag'] }) })
+    );
+    expect(quoted.command.displayShipped).toBe('"my tool" --flag');
     const absent = narrowProfileDetail(detailWire({ command: { argv: ['a'], changed: false } }));
-    expect(absent.command.shipped).toBeNull();
+    expect(absent.command.displayShipped).toBeNull();
     const nulled = narrowProfileDetail(detailWire({ command: commandWire({ shipped: null }) }));
-    expect(nulled.command.shipped).toBeNull();
+    expect(nulled.command.displayShipped).toBeNull();
     const empty = narrowProfileDetail(detailWire({ command: commandWire({ shipped: [] }) }));
-    expect(empty.command.shipped).toEqual([]);
+    expect(empty.command.displayShipped).toBe('');
   });
 
   it('accepts a profile with no entries and a false shipped_base', () => {
@@ -143,7 +147,7 @@ describe('narrowProfileCommandSet', () => {
   it('keeps the profile and the argv in use', () => {
     expect(narrowProfileCommandSet({ profile: 'p', command: commandWire() })).toEqual({
       profile: 'p',
-      command: { argv: ['claude', '--x'], shipped: ['claude'], changed: true },
+      command: { argv: ['claude', '--x'], displayShipped: 'claude', changed: true },
     });
   });
 
@@ -152,7 +156,7 @@ describe('narrowProfileCommandSet', () => {
       profile: 'p',
       command: { argv: ['a'], changed: false },
     });
-    expect(set.command.shipped).toBeNull();
+    expect(set.command.displayShipped).toBeNull();
   });
 
   it.each([

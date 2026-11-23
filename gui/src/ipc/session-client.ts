@@ -516,9 +516,7 @@ export interface ProfileEntry {
   detection: string | null;
   /** `detection` for display, `null` exactly when `detection` is. */
   displayDetection: DisplayLine | null;
-  /** Why that definition could not be found, `null` when it was. */
-  detectionWarning: string | null;
-  /** `detectionWarning` folded onto one line for display. */
+  /** Why that definition could not be found, folded onto one line; `null` when it was found. */
   displayDetectionWarning: DisplayLine | null;
   /** The profile's own default working directory, `null` when it has none. */
   cwd: string | null;
@@ -804,7 +802,6 @@ function narrowProfileEntry(value: unknown, context: string): ProfileEntry {
     displayName: sanitizeForDisplay(displayName),
     detection,
     displayDetection: detection === null ? null : sanitizeForDisplay(detection),
-    detectionWarning,
     displayDetectionWarning: detectionWarning === null ? null : foldExternalText(detectionWarning),
     cwd,
     command,

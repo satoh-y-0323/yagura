@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { formatPathForDisplay } from '../display/untrusted-text';
+import { formatCommandLine, formatPathForDisplay } from '../display/untrusted-text';
 import type { ProfileDetail, ProfileDetailEntry } from '../ipc/profile-detail-boundary';
 import { settings } from '../ui-messages';
 import {
@@ -19,7 +19,7 @@ function detail(entries: ProfileDetailEntry[]): ProfileDetail {
   return {
     profile: 'codex-cli',
     shippedBase: true,
-    command: { argv: ['codex'], shipped: ['codex'], changed: false },
+    command: { argv: ['codex'], displayShipped: formatCommandLine(['codex']), changed: false },
     entries,
   };
 }
@@ -188,7 +188,7 @@ describe('detailSections rows', () => {
       {
         key: 'mcp',
         displayKey: settings.profileProvidedLabels.mcp,
-        text: '',
+        text: null,
         shippedText: null,
         changed: true,
       },

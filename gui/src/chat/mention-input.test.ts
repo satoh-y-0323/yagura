@@ -23,7 +23,12 @@ import type { ChatParticipant } from '../ipc/session-boundary';
 
 /** A roster entry whose display name is prepared from `displayName`. */
 function participant(windowId: string, name: string, displayName: string): ChatParticipant {
-  return { window_id: windowId, name, displayName: sanitizeForDisplay(displayName) };
+  return {
+    window_id: windowId,
+    displayWindowId: sanitizeForDisplay(windowId),
+    name,
+    displayName: sanitizeForDisplay(displayName),
+  };
 }
 
 const ROSTER: ChatParticipant[] = [

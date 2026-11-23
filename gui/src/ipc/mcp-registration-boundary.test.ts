@@ -91,15 +91,8 @@ describe('the registration state of a status push', () => {
     });
     expect(status.differsIn).toEqual(['command', 'args', 'a-part-this-build-does-not-name']);
     expect(status.reason).toBe('why');
-    expect(status.add).toEqual({
-      argv: ['alpha', 'mcp', 'add'],
-      programAt: 1,
-      displayCommand: 'mcp add',
-      displayArgv: 'alpha mcp add',
-    });
+    expect(status.add).toEqual({ displayCommand: 'mcp add', displayArgv: 'alpha mcp add' });
     expect(status.remove).toEqual({
-      argv: ['alpha', 'mcp', 'add'],
-      programAt: 0,
       displayCommand: 'alpha mcp add',
       displayArgv: 'alpha mcp add',
     });
@@ -155,18 +148,8 @@ describe('narrowMcpRegistrationsListed', () => {
           profile: 'alpha-cli',
           displayName: 'Alpha CLI',
           group: 'g',
-          add: {
-            argv: ['alpha', 'mcp', 'add'],
-            programAt: 1,
-            displayCommand: 'mcp add',
-            displayArgv: 'alpha mcp add',
-          },
-          remove: {
-            argv: ['alpha', 'mcp', 'remove'],
-            programAt: 1,
-            displayCommand: 'mcp remove',
-            displayArgv: 'alpha mcp remove',
-          },
+          add: { displayCommand: 'mcp add', displayArgv: 'alpha mcp add' },
+          remove: { displayCommand: 'mcp remove', displayArgv: 'alpha mcp remove' },
           tomlSet: { file: 'c.toml', table: ['t'], values: [{ key: 'k', value: 'v' }] },
           entries: [{ file: 'h.json', name: 'n', content: 'c' }],
           notice: null,
@@ -278,7 +261,7 @@ describe('narrowMcpRegistrationResultPayload', () => {
       requestId: 4,
       profile: 'alpha-cli',
       action: 'update',
-      steps: [{ argv: ['a'], programAt: 0, displayCommand: 'a', exitCode: 2, output: 'o' }],
+      steps: [{ displayCommand: 'a', exitCode: 2, output: 'o' }],
       error: 'boom',
       status: {
         profile: 'alpha-cli',
@@ -309,11 +292,11 @@ describe('narrowMcpRegistrationResultPayload', () => {
     expect(payload.steps.map((step) => step.output)).toEqual([prepared, 'plain\nline']);
   });
 
-  it('reads a step without an exit code as having none', () => {
+  it('reads a step without an exit code or a command as having none', () => {
     const step = { argv: [], program_at: 0, output: '' };
-    expect(
-      narrowMcpRegistrationResultPayload(resultWire({ steps: [step] })).steps[0]?.exitCode
-    ).toBeNull();
+    const [read] = narrowMcpRegistrationResultPayload(resultWire({ steps: [step] })).steps;
+    expect(read?.exitCode).toBeNull();
+    expect(read?.displayCommand).toBeNull();
   });
 
   it('names the part of the push that is wrong', () => {

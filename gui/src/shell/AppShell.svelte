@@ -234,7 +234,7 @@
   import * as approvalQueue from '../session/approval-queue';
   import { appHidden } from '../session/app-visibility';
   import { isApprovalDialogAllowed } from '../session/modal-state';
-  import { approvalTargetName, approvalToolName } from '../session/approval-target';
+  import { approvalTargetName } from '../session/approval-target';
   import type { WithdrawReason } from '../session/approval-types';
   import {
     plansAttention,
@@ -2050,7 +2050,7 @@
         reason,
         {
           requester: request.requester.name ?? dialogs.approvalRequesterExternal,
-          tool: approvalToolName(request),
+          tool: request.displayTool,
           target: approvalTargetName(request),
         }
       );

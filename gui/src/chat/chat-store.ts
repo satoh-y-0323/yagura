@@ -112,11 +112,6 @@ export function resolveDisplayName(state: ChatRoomState, windowId: string): Disp
   return latest?.displayFromName ?? sanitizeForDisplay(windowId);
 }
 
-/** A participant's window id, prepared for display beside its name. */
-export function participantWindowId(participant: ChatParticipant): DisplayLine {
-  return sanitizeForDisplay(participant.window_id);
-}
-
 /**
  * The name to show for a room: its listed display name, or its id, written
  * out like a room name, while the list does not carry it.

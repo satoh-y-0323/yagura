@@ -70,6 +70,7 @@ describe('invokeSyncApprovals: a registered outcome', () => {
         {
           request_id: 'appr1',
           tool: 'close_window',
+          displayTool: 'close_window',
           requester: { kind: 'window', window_id: 'w-req', name: 'requester window' },
           target: { window_id: 'w-target', name: 'target window', status: 'running' },
           text: null,
@@ -77,6 +78,7 @@ describe('invokeSyncApprovals: a registered outcome', () => {
         {
           request_id: 'appr2',
           tool: 'interrupt_window',
+          displayTool: 'interrupt_window',
           requester: { kind: 'window', window_id: 'w-req', name: 'requester window' },
           target: { window_id: 'w-target', name: 'target window', status: 'running' },
           text: null,

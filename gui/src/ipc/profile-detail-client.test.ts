@@ -25,7 +25,7 @@ describe('invokeGetProfileDetail', () => {
     expect(detail).toEqual({
       profile: 'p',
       shippedBase: false,
-      command: { argv: ['claude'], shipped: null, changed: false },
+      command: { argv: ['claude'], displayShipped: null, changed: false },
       entries: [],
     });
   });

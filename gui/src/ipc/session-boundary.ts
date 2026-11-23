@@ -349,6 +349,8 @@ export interface ApprovalRequest {
   request_id: string;
   /** The gated operation's external name. */
   tool: string;
+  /** `tool` for display. */
+  displayTool: DisplayLine;
   /** Who asked. */
   requester: ApprovalRequester;
   /**
@@ -455,6 +457,8 @@ export type ApprovalRegistrationRefusedPayload = Record<string, never>;
 export interface ChatParticipant {
   /** The participant window's id. */
   window_id: string;
+  /** `window_id` for display beside the name. */
+  displayWindowId: DisplayLine;
   /** The participant window's display name, as the daemon sent it. */
   name: string;
   /** `name` with the characters it must not draw removed, for rendering. */
@@ -1374,6 +1378,7 @@ export function narrowApprovalRequest(
   const base: ApprovalRequest = {
     request_id,
     tool,
+    displayTool: sanitizeForDisplay(tool),
     requester,
     // An approver must see everything that will run, so the body's hidden characters are written out.
     text: text === null ? null : formatApprovalBody(text),
@@ -1614,9 +1619,11 @@ function narrowChatDeliveryInfo(value: unknown, context: string): ChatDeliveryIn
  */
 function narrowChatParticipant(value: unknown, context: string): ChatParticipant {
   const record = requireRecord(value, context);
+  const windowId = requireString(record, 'window_id', context);
   const name = requireString(record, 'name', context);
   return {
-    window_id: requireString(record, 'window_id', context),
+    window_id: windowId,
+    displayWindowId: sanitizeForDisplay(windowId),
     name,
     displayName: sanitizeForDisplay(name),
   };

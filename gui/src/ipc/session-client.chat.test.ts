@@ -183,7 +183,9 @@ describe('narrowChatMessages', () => {
       next_after_seq: 1,
       halted: null,
       needs_user: false,
-      roster: [{ window_id: 'w-a', name: 'window a', displayName: 'window a' }],
+      roster: [
+        { window_id: 'w-a', displayWindowId: 'w-a', name: 'window a', displayName: 'window a' },
+      ],
     });
   });
 
@@ -197,7 +199,12 @@ describe('narrowChatMessages', () => {
     expect(messages.messages[0]?.from_name).toBe('win\u202Edow\u200B a\u0007');
     expect(messages.messages[0]?.displayFromName).toBe('window a');
     expect(messages.roster).toEqual([
-      { window_id: 'w-a', name: 'win\u2066dow\uFEFF a', displayName: 'window a' },
+      {
+        window_id: 'w-a',
+        displayWindowId: 'w-a',
+        name: 'win\u2066dow\uFEFF a',
+        displayName: 'window a',
+      },
     ]);
   });
 
@@ -389,7 +396,7 @@ describe('invokeReadChat', () => {
     const messages: ChatMessages = await invokeReadChat();
 
     expect(messages.roster).toEqual([
-      { window_id: 'w-a', name: 'window a', displayName: 'window a' },
+      { window_id: 'w-a', displayWindowId: 'w-a', name: 'window a', displayName: 'window a' },
     ]);
   });
 

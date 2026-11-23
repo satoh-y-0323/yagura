@@ -7,6 +7,7 @@
  * the readers `session-boundary` uses. A value is any JSON the profile holds;
  * it is kept as `unknown` and only ever turned into text for display.
  */
+import { formatCommandLine, type DisplayLine } from '../display/untrusted-text';
 import {
   BoundaryError,
   readOwnField,
@@ -23,8 +24,8 @@ export { BoundaryError };
 /** The argv a profile launches on the daemon's host, with its layer. */
 export interface ProfileCommandDetail {
   argv: string[];
-  /** The shipped profile's argv; absent when there is no shipped profile. */
-  shipped: string[] | null;
+  /** The shipped profile's argv as one display line; `null` when there is no shipped profile. */
+  displayShipped: DisplayLine | null;
   /** Whether the user's own file has a `[command]` table. */
   changed: boolean;
 }
@@ -60,10 +61,10 @@ function narrowCommand(value: unknown, context: string): ProfileCommandDetail {
   const shipped = readOwnField(record, 'shipped');
   return {
     argv: requireStringArray(record, 'argv', context),
-    shipped:
+    displayShipped:
       shipped === undefined || shipped === null
         ? null
-        : requireStringArray(record, 'shipped', context),
+        : formatCommandLine(requireStringArray(record, 'shipped', context)),
     changed: requireBoolean(record, 'changed', context),
   };
 }

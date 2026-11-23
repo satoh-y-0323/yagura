@@ -65,8 +65,18 @@ function page(overrides: Partial<ChatMessages> = {}): ChatMessages {
 }
 
 const ROSTER: ChatParticipant[] = [
-  { window_id: 'w-a', name: 'builder', displayName: sanitizeForDisplay('builder') },
-  { window_id: 'w-b', name: 'reviewer', displayName: sanitizeForDisplay('reviewer') },
+  {
+    window_id: 'w-a',
+    displayWindowId: sanitizeForDisplay('w-a'),
+    name: 'builder',
+    displayName: sanitizeForDisplay('builder'),
+  },
+  {
+    window_id: 'w-b',
+    displayWindowId: sanitizeForDisplay('w-b'),
+    name: 'reviewer',
+    displayName: sanitizeForDisplay('reviewer'),
+  },
 ];
 
 /** A `chat_changed` payload for the room `main`. */
@@ -381,7 +391,12 @@ describe('resolveDisplayName', () => {
         ],
         next_after_seq: 1,
         roster: [
-          { window_id: 'w-a', name: 'bui\u2066lder', displayName: sanitizeForDisplay('builder') },
+          {
+            window_id: 'w-a',
+            displayWindowId: sanitizeForDisplay('w-a'),
+            name: 'bui\u2066lder',
+            displayName: sanitizeForDisplay('builder'),
+          },
         ],
       })
     );

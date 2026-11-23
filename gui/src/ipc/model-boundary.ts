@@ -39,7 +39,7 @@ export interface LaunchOptionAlias {
  * mirrors: a `kind` outside it is refused rather than guessed at.
  */
 export type ModelChoiceSource =
-  { kind: 'values' } | { kind: 'command'; argv: string[]; displayCommand: DisplayLine };
+  { kind: 'values' } | { kind: 'command'; displayCommand: DisplayLine };
 
 /** One model an alias may be set to. */
 export interface ModelChoice {
@@ -165,8 +165,10 @@ function readOptionalSource(record: UntrustedRecord, context: string): ModelChoi
     case 'values':
       return { kind };
     case 'command': {
-      const argv = requireStringArray(source, 'argv', sourceContext);
-      return { kind, argv, displayCommand: formatCommandLine(argv) };
+      return {
+        kind,
+        displayCommand: formatCommandLine(requireStringArray(source, 'argv', sourceContext)),
+      };
     }
     default:
       throw new BoundaryError(`${sourceContext}.kind: unrecognized kind "${kind}"`);

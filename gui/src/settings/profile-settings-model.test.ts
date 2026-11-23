@@ -25,7 +25,6 @@ function option(overrides: Partial<ProfileOption> = {}): ProfileOption {
     displayName: sanitizeForDisplay('Codex CLI'),
     detection: null,
     displayDetection: null,
-    detectionWarning: null,
     displayDetectionWarning: null,
     cwd: null,
     command,

@@ -56,13 +56,11 @@ const MCP_REGISTRATION_ACTION_VALUES: ReadonlySet<string> = new Set<McpRegistrat
   'remove',
 ]);
 
-/** A CLI invocation, sliced at the element the display should start from. */
+/** A CLI invocation as the row shows it. The GUI never runs or sends it back, so no raw argv is kept. */
 export interface McpRegistrationCommand {
-  argv: string[];
-  programAt: number;
-  /** `argv` from `programAt` on, for display. */
+  /** The wire `argv` from its `program_at` on, for display. */
   displayCommand: DisplayLine;
-  /** The whole `argv`, for display. */
+  /** The whole wire `argv`, for display. */
   displayArgv: DisplayLine;
 }
 
@@ -142,10 +140,8 @@ export interface McpRegistrationRequested {
 
 /** One step of an operation `run_mcp_registration` carried out. */
 export interface McpRegistrationStep {
-  argv: string[];
-  programAt: number;
-  /** `argv` from `programAt` on, for display. */
-  displayCommand: DisplayLine;
+  /** The wire `argv` from its `program_at` on, for display; `null` for a step that ran no command. */
+  displayCommand: DisplayLine | null;
   exitCode: number | null;
   output: DisplayBlock;
 }
@@ -194,8 +190,6 @@ function narrowMcpRegistrationCommand(value: unknown, context: string): McpRegis
   const argv = requireStringArray(record, 'argv', context);
   const programAt = requireNonNegativeInteger(record, 'program_at', context);
   return {
-    argv,
-    programAt,
     displayCommand: formatCommandLine(argv.slice(programAt)),
     displayArgv: formatCommandLine(argv),
   };
@@ -353,9 +347,7 @@ function narrowMcpRegistrationStep(value: unknown, context: string): McpRegistra
   const argv = requireStringArray(record, 'argv', context);
   const programAt = requireNonNegativeInteger(record, 'program_at', context);
   return {
-    argv,
-    programAt,
-    displayCommand: formatCommandLine(argv.slice(programAt)),
+    displayCommand: argv.length === 0 ? null : formatCommandLine(argv.slice(programAt)),
     exitCode: readOptionalInteger(record, 'exit_code', context),
     output: formatOutputBlock(requireString(record, 'output', context)),
   };

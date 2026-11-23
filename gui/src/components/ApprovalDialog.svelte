@@ -1,11 +1,7 @@
 <script lang="ts">
   import type { ApprovalRequest } from '../ipc/session-boundary';
   import { isWithinGuard } from '../session/approval-queue';
-  import {
-    approvalToolName,
-    describeApprovalRequester,
-    describeApprovalTarget,
-  } from '../session/approval-target';
+  import { describeApprovalRequester, describeApprovalTarget } from '../session/approval-target';
   import { buttons, dialogs } from '../ui-messages';
   import Icon from './Icon.svelte';
   import ModalDialog from './ModalDialog.svelte';
@@ -29,7 +25,7 @@
   $: describedBy = decisionFailure !== null ? failureNoteId : undefined;
 
   $: requesterLabel = describeApprovalRequester(request, isRequesterOpen);
-  $: toolLabel = approvalToolName(request);
+  $: toolLabel = request.displayTool;
   $: targetLabel = describeApprovalTarget(request);
   $: title = pendingCount > 1 ? dialogs.approvalTitleCount(pendingCount) : dialogs.approvalTitle;
 
