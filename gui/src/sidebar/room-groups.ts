@@ -24,7 +24,7 @@ export interface RoomGroup<T> {
   /** Display name of the room, or the displayed working directory when it has no room. */
   name: DisplayLine;
   /** The room's windows, ordered by their position in `tabOrder` (absent ids last). */
-  entries: T[];
+  entries: readonly T[];
   /** Number of minimized windows. */
   minimized: number;
   /** Whether the room's windows are hidden behind its heading. */

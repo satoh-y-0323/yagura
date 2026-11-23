@@ -3,6 +3,7 @@
    * One window in the sidebar, on one line. Display only: what the row says and
    * how loud it is come from its props and the shared "needs you" decision.
    */
+  import type { UiText } from '../display/ui-text';
   import type { WindowEntry } from '../stores/window-registry';
   import { isProminentWindow } from '../status-tone';
   import {
@@ -45,6 +46,7 @@
   // The card repeats what the window's header says: where it runs and why its
   // status is unknown.
   $: location = describeWindowLocation({ vendor: entry.displayVendor, cwd: entry.displayCwd });
+  let cardDetails: readonly UiText[];
   $: cardDetails = explanation === null ? [location] : [location, explanation];
   $: nameId = `navigator-row-name-${entry.windowId}`;
   $: whyId = `navigator-row-why-${entry.windowId}`;

@@ -30,6 +30,7 @@ const BRANDS = [
     key: 'displayBlockBrand',
     declaredIn: 'src/display/untrusted-text.ts',
     maker: 'src/display/untrusted-text.ts',
+    multiline: true,
   },
   {
     type: 'UiText',
@@ -41,6 +42,20 @@ const BRANDS = [
 
 // Every template's shown text must be one of the brands.
 const DISPLAY_TEXT_TEMPLATES = ['src/**/*.svelte'];
+
+/** The rules that together keep a brand from being claimed for text no maker prepared. */
+export const BRAND_GUARD_RULES = [
+  'yagura/no-brand-forging',
+  'yagura/display-text',
+  '@typescript-eslint/ban-ts-comment',
+  '@typescript-eslint/no-unsafe-assignment',
+  '@typescript-eslint/no-unsafe-argument',
+  '@typescript-eslint/no-unsafe-return',
+  '@typescript-eslint/no-unsafe-call',
+  '@typescript-eslint/no-unsafe-member-access',
+  '@typescript-eslint/no-explicit-any',
+  '@typescript-eslint/consistent-type-assertions',
+];
 
 // Text reaching the DOM goes through Svelte's escaping; `{@html}` is refused by svelte/no-at-html-tags.
 const RAW_HTML_MESSAGE = 'Render text through Svelte expressions, not raw HTML.';
@@ -73,6 +88,39 @@ const NO_RAW_HTML = [
   {
     selector: "SvelteDirective[kind='Binding'][key.name.name=/^(innerHTML|outerHTML)$/]",
     message: RAW_HTML_MESSAGE,
+  },
+];
+
+// The template is the one place text is drawn, so yagura/display-text sees every shown value.
+const DOM_TEXT_MESSAGE =
+  'Draw text through the template, where its type is checked, not by writing it to the DOM.';
+const DOM_TEXT_PROPERTIES = '/^(textContent|innerText|outerText|nodeValue|title|aria[A-Z]\\w*)$/';
+const NO_DOM_TEXT = [
+  {
+    selector: `AssignmentExpression > MemberExpression.left[property.name=${DOM_TEXT_PROPERTIES}]`,
+    message: DOM_TEXT_MESSAGE,
+  },
+  {
+    selector: `AssignmentExpression > MemberExpression.left[property.value=${DOM_TEXT_PROPERTIES}]`,
+    message: DOM_TEXT_MESSAGE,
+  },
+  {
+    selector:
+      'CallExpression[callee.property.name=/^(setAttribute|setAttributeNS|insertAdjacentText|createTextNode)$/]',
+    message: DOM_TEXT_MESSAGE,
+  },
+  {
+    selector: 'CallExpression[callee.name=/^(alert|confirm|prompt)$/]',
+    message: DOM_TEXT_MESSAGE,
+  },
+  {
+    selector:
+      'CallExpression[callee.object.name=/^(window|globalThis|self)$/][callee.property.name=/^(alert|confirm|prompt)$/]',
+    message: DOM_TEXT_MESSAGE,
+  },
+  {
+    selector: "SvelteDirective[kind='Binding'][key.name.name=/^(textContent|innerText)$/]",
+    message: DOM_TEXT_MESSAGE,
   },
 ];
 
@@ -205,8 +253,14 @@ const NO_DYNAMIC_INVOKE = [
   },
 ];
 
+/** The messages of the selectors that keep text from reaching the screen past the template. */
+export const DISPLAY_SINK_MESSAGES = [
+  ...new Set([...NO_RAW_HTML, ...NO_DOM_TEXT, ...NO_TITLE_ATTRIBUTE].map(({ message }) => message)),
+];
+
 const COMMAND_DOOR_SYNTAX = [
   ...NO_RAW_HTML,
+  ...NO_DOM_TEXT,
   ...NO_JAPANESE_TEXT,
   ...NO_GLOBAL_KEYDOWN,
   ...NO_BARE_LABELLED_BUTTON,
@@ -256,6 +310,11 @@ export default [
     plugins: { yagura },
     rules: {
       'yagura/no-brand-forging': ['error', { brands: BRANDS }],
+      // A silenced type error is a brand claimed with no check, whatever the reason given.
+      '@typescript-eslint/ban-ts-comment': [
+        'error',
+        { 'ts-expect-error': true, 'ts-ignore': true, 'ts-nocheck': true },
+      ],
     },
   },
   {
@@ -268,7 +327,11 @@ export default [
   {
     files: ['**/*.ts', '**/*.svelte'],
     rules: {
-      '@typescript-eslint/no-unused-vars': ['error', { argsIgnorePattern: '^_' }],
+      // svelte-check reads a component's `$$Props` by that name.
+      '@typescript-eslint/no-unused-vars': [
+        'error',
+        { argsIgnorePattern: '^_', varsIgnorePattern: '^\\$\\$Props$' },
+      ],
       '@typescript-eslint/no-non-null-assertion': 'error',
       // An angle-bracket assertion carries no `as`, so the IPC boundary scan cannot see one.
       '@typescript-eslint/consistent-type-assertions': [
@@ -305,6 +368,7 @@ export default [
       'no-restricted-syntax': [
         'error',
         ...NO_RAW_HTML,
+        ...NO_DOM_TEXT,
         ...NO_JAPANESE_TEXT,
         ...NO_BARE_LABELLED_BUTTON,
         ...NO_TEXT_SUBSTITUTION,

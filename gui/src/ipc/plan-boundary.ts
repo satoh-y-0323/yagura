@@ -96,9 +96,9 @@ export interface PlanTaskInfo {
   /** The role the task names, for display; `null` when it names none. */
   role: DisplayLine | null;
   /** The task ids this task waits for, for display. */
-  depends_on: DisplayLine[];
+  depends_on: readonly DisplayLine[];
   /** The paths the task writes, for display. */
-  writes: DisplayLine[];
+  writes: readonly DisplayLine[];
   /** The index of the wave the task belongs to, counted from zero. */
   wave: number;
   /** The planning window's proposal, `null` when it made none. */

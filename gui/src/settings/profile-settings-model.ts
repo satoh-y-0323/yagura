@@ -17,7 +17,7 @@ import { settings } from '../ui-messages';
 /** What a ready profile cannot do on this host, and what its profile says to do instead. */
 export interface ProfileLimitNote {
   /** One line per limit. */
-  items: (UiText | DisplayLine)[];
+  items: readonly (UiText | DisplayLine)[];
   /** The first guidance a limit carries, `null` when none does. */
   guidance: LimitGuidance | null;
 }
@@ -49,7 +49,7 @@ export interface ProfileSettingsRow {
    * while it is disabled: those roles' tasks cannot open windows until it is
    * switched back on.
    */
-  rolesUsing: DisplayLine[];
+  rolesUsing: readonly DisplayLine[];
   /** What this profile cannot do here although it is launchable; `null` when nothing. */
   limitNote: ProfileLimitNote | null;
 }
@@ -58,7 +58,10 @@ export interface ProfileSettingsRow {
 export type ProfileSwitchTarget = Pick<ProfileSettingsRow, 'id' | 'displayId'>;
 
 /** Names the roles whose profile is exactly `profileId`, in table order. */
-export function rolesUsingProfile(roles: readonly RoleInfo[], profileId: string): DisplayLine[] {
+export function rolesUsingProfile(
+  roles: readonly RoleInfo[],
+  profileId: string
+): readonly DisplayLine[] {
   return roles.filter((role) => role.profile === profileId).map((role) => role.displayName);
 }
 

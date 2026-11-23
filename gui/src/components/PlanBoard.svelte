@@ -45,7 +45,7 @@
   export let planList: PlanChoice[];
   export let selectedPlanId: string | null;
   export let plan: PlanView | null;
-  export let windows: BoardWindow[];
+  export let windows: readonly BoardWindow[];
   export let onSelectPlan: (planId: string) => void;
   export let onDeletePlan: (planId: string) => void;
   export let onSetTaskAssignment: (taskId: string, assignment: AssignmentView) => void;

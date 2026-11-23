@@ -21,9 +21,28 @@
    * The `<button>` belongs to this component, so a parent's scoped style
    * reaches it only through `:global(.class)`.
    */
+  import type { HTMLButtonAttributes } from 'svelte/elements';
+
   import type { UiText } from '../display/ui-text';
   import type { DisplayLine } from '../display/untrusted-text';
   import { tooltip } from './tooltip';
+
+  /** What a caller may add to the `<button>`: state, focus order and data, none of it read. */
+  type ButtonStateAttributes = Pick<
+    HTMLButtonAttributes,
+    'aria-current' | 'aria-expanded' | 'aria-haspopup' | 'aria-pressed' | 'tabindex'
+  > & { [data: `data-${string}`]: string | number | boolean | null | undefined };
+
+  // Declaring the props holds every caller to them, so no text reaches the button unchecked.
+  interface $$Props extends ButtonStateAttributes {
+    label: UiText | DisplayLine;
+    hint?: UiText | DisplayLine | undefined;
+    disabled?: boolean;
+    disabledReason?: UiText | DisplayLine | undefined;
+    toggletip?: UiText | DisplayLine | undefined;
+    element?: HTMLButtonElement | undefined;
+    class?: string;
+  }
 
   export let label: UiText | DisplayLine;
   export let hint: UiText | DisplayLine | undefined = undefined;
@@ -36,6 +55,10 @@
   export let element: HTMLButtonElement | undefined = undefined;
   let className = '';
   export { className as class };
+
+  // The lint program types `$$restProps` as any record; the callers' types are `$$Props`.
+  let stateAttributes: ButtonStateAttributes;
+  $: stateAttributes = $$restProps;
 
   const instance = instanceCount++;
   const reasonId = `icon-button-reason-${instance}`;
@@ -62,7 +85,7 @@
 <button
   bind:this={element}
   type="button"
-  {...$$restProps}
+  {...stateAttributes}
   class={className}
   aria-label={label}
   aria-disabled={disabledReason === undefined ? undefined : 'true'}

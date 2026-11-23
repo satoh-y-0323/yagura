@@ -565,7 +565,7 @@ export interface ChatPosted {
   /** Whether the post counts as addressed to (or from) the human user. */
   user: boolean;
   /** The mention text that did not resolve to exactly one participant, prepared for display. */
-  unresolved: DisplayLine[];
+  unresolved: readonly DisplayLine[];
   /** Whether the room is halted as of this post. */
   halted: boolean;
 }

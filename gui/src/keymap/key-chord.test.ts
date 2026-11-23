@@ -229,12 +229,12 @@ describe('formatChord', () => {
     ['Ctrl+Plus', ['Ctrl', 'Plus']],
     ['Ctrl+Shift+Tab', ['Ctrl', 'Shift', 'Tab']],
   ])('shows %s on Windows as %j', (chord, expected) => {
-    const parts: string[] = formatChord(chord, 'windows');
+    const parts: readonly string[] = formatChord(chord, 'windows');
     expect(parts).toEqual(expected);
   });
 
   it('shows Meta as Win on Linux too', () => {
-    const parts: string[] = formatChord('Ctrl+Meta+f', 'linux');
+    const parts: readonly string[] = formatChord('Ctrl+Meta+f', 'linux');
     expect(parts).toEqual(['Ctrl', 'Win', 'F']);
   });
 
@@ -246,7 +246,7 @@ describe('formatChord', () => {
     ['Ctrl+Alt+Shift+Meta+k', ['Cmd', 'Ctrl', 'Option', 'Shift', 'K']],
     ['Ctrl+Tab', ['Ctrl', 'Tab']],
   ])('shows %s on macOS as %j', (chord, expected) => {
-    const parts: string[] = formatChord(chord, 'mac');
+    const parts: readonly string[] = formatChord(chord, 'mac');
     expect(parts).toEqual(expected);
   });
 });

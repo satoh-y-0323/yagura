@@ -69,7 +69,7 @@ function groupsOf(order: readonly Win[]): RoomGroup<Win>[] {
   for (const entry of order) {
     const found = groups.find((group) => group.roomId === entry.roomId);
     if (found !== undefined) {
-      found.entries.push(entry);
+      found.entries = [...found.entries, entry];
     } else {
       groups.push({
         kind: 'folder',

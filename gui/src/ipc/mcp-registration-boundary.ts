@@ -71,7 +71,7 @@ export interface McpRegistrationCommand {
  */
 export interface McpRegistrationTomlSet {
   file: DisplayLine;
-  table: DisplayLine[];
+  table: readonly DisplayLine[];
   values: { key: DisplayLine; value: DisplayLine }[];
 }
 
@@ -125,7 +125,7 @@ export interface McpRegistrationStatusInfo {
   state: McpRegistrationState;
   differsIn: string[];
   /** `differsIn` for display, in the same order. */
-  displayDiffersIn: DisplayLine[];
+  displayDiffersIn: readonly DisplayLine[];
   /** Why the state could not be read, folded onto one line. */
   reason: DisplayLine | null;
   add: McpRegistrationCommand | null;

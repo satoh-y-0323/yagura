@@ -35,6 +35,7 @@
 
   $: newWindowKey = keyLabel(keys, 'open-window-form');
   // A key that is switched off has nothing to show, so its row is left out.
+  let shortcuts: readonly { label: UiText; key: UiText }[];
   $: shortcuts = SHORTCUTS.flatMap(({ action, label }) => {
     const key = keyLabel(keys, action);
     return key === null ? [] : [{ label, key }];

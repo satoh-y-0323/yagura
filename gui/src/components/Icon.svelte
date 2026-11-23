@@ -25,7 +25,6 @@
   role={label === undefined ? undefined : 'img'}
   aria-label={label}
   aria-hidden={label === undefined ? 'true' : undefined}
-  {...$$restProps}
 >
   {#each ICON_SHAPES[name] as shape, index (index)}
     <svelte:element this={shape.tag} {...shape.attrs} />

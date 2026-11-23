@@ -7,6 +7,7 @@
 import { render } from 'svelte/server';
 import { describe, it, expect } from 'vitest';
 
+import { sanitizeForDisplay } from '../display/untrusted-text';
 import IconButton from './IconButton.svelte';
 
 const LABEL = 'Interrupt';
@@ -37,7 +38,9 @@ function textOfElementWithId(html: string, id: string): string | null {
 }
 
 describe('IconButton with disabledReason', () => {
-  const { body } = render(IconButton, { props: { label: LABEL, disabledReason: REASON } });
+  const { body } = render(IconButton, {
+    props: { label: sanitizeForDisplay(LABEL), disabledReason: sanitizeForDisplay(REASON) },
+  });
   const tag = renderedButtonTag(body);
 
   it('stays focusable: aria-disabled is "true" and the disabled attribute is absent', () => {

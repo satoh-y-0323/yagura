@@ -264,12 +264,12 @@ function heavier(a: Tone, b: Tone): Tone {
 }
 
 /** How the strip and an event shown elsewhere are read: actions only when there are some. */
-function spoken(notice: Pick<Notice, 'title' | 'action'>): NoticeText[] {
+function spoken(notice: Pick<Notice, 'title' | 'action'>): readonly NoticeText[] {
   return notice.action === null ? [notice.title] : [notice.title, banners.actionsAvailable];
 }
 
 /** How a card on the lane is read: the whole card acts, so every card offers an action. */
-function spokenAsCard(title: NoticeText): NoticeText[] {
+function spokenAsCard(title: NoticeText): readonly NoticeText[] {
   return [title, banners.actionsAvailable];
 }
 

@@ -92,6 +92,8 @@
   import { pickFolder, subscribeFolderDrop } from '../ipc/folder-picker';
   import { startFramePull, type FramePull } from '../ipc/frame-pull';
   import type { UiText } from '../display/ui-text';
+  import type { DisplayLine } from '../display/untrusted-text';
+  import type { ThemeOption } from '../theme/window-theme-options';
   import {
     type ApprovalRequest,
     type ChatChanged,
@@ -870,6 +872,7 @@
   $: noticeDrafts = buildNotices(sourceState);
   // With no window open the work area makes the offer, so the two never make it together.
   $: restoreOffer = reopenOffer(sourceState);
+  let windowNames: ReadonlyMap<string, DisplayLine>;
   $: windowNames = new Map($registry.windows.map((entry) => [entry.windowId, entry.displayName]));
   // Ahead of the feed, so the measure taken on attaching reaches the same run of it.
   $: trackLane(laneElement);
@@ -893,6 +896,7 @@
   // match) tracks which windows are actually open right now.
   $: restoreOpenWindows = $registry.windows.map((entry) => ({ cwd: entry.cwd, name: entry.name }));
   $: appThemeValue = fromAppThemeSelection($themeStore.selection);
+  let appThemeOptions: readonly ThemeOption[];
   $: appThemeOptions = [
     { value: 'dark', label: describeThemeName('dark') },
     { value: 'light', label: describeThemeName('light') },

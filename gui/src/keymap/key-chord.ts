@@ -103,7 +103,10 @@ const MODIFIER_WORDS: ReadonlyMap<string, UiText> = new Map([
  * the platform, then the key (letters upper-cased). On macOS Cmd comes first.
  * The key comes from `keymap.toml`, so it is prepared for display.
  */
-export function formatChord(chord: string, platform: KeyboardPlatform): (UiText | DisplayLine)[] {
+export function formatChord(
+  chord: string,
+  platform: KeyboardPlatform
+): readonly (UiText | DisplayLine)[] {
   const { names, key } = partsOf(chord);
   const keyLabel = sanitizeForDisplay(isAsciiLetter(key) ? key.toUpperCase() : key);
   if (platform === 'mac') {
@@ -136,8 +139,11 @@ const ARIA_MODIFIER_NAMES: Readonly<Record<string, string>> = {
  * key values in the chord's order, then the key with letters upper-cased. The
  * chord's key names (`Plus`, `Space`, `Enter`) are already the ones WAI-ARIA uses.
  */
-export function ariaKeyShortcutsOf(chord: string): string {
+export function ariaKeyShortcutsOf(chord: string): DisplayLine {
   const { names, key } = partsOf(chord);
   const keyName = isAsciiLetter(key) ? key.toUpperCase() : key;
-  return [...names.map((name) => ARIA_MODIFIER_NAMES[name] ?? name), keyName].join('+');
+  // The key names come from keymap.toml, and assistive technology reads the value out.
+  return sanitizeForDisplay(
+    [...names.map((name) => ARIA_MODIFIER_NAMES[name] ?? name), keyName].join('+')
+  );
 }

@@ -29,7 +29,7 @@ export interface IntegrationFileWrite {
   /** The file as the daemon names it, to tell apart files that read alike. */
   fileKey: string;
   file: DisplayLine;
-  names: DisplayLine[];
+  names: readonly DisplayLine[];
 }
 
 /** What one row of the Integrations tab shows. */
@@ -64,7 +64,7 @@ export interface IntegrationRowView {
    * Every such entry written out in full, one line each; `null` alongside a
    * `null` note. Lines, so that no one-line place can run them together.
    */
-  entriesTitle: UiText[] | null;
+  entriesTitle: readonly UiText[] | null;
   /**
    * The files a registration that runs no command writes, with the entries in
    * each; `null` for a row that runs a command.
@@ -222,16 +222,16 @@ function buildRowView(
 
 /** The entries grouped by file, in the order the files first appear. */
 function fileWrites(entries: readonly McpRegistrationEntry[]): IntegrationFileWrite[] {
-  const byFile = new Map<string, IntegrationFileWrite>();
+  const byFile = new Map<string, [file: DisplayLine, names: DisplayLine[]]>();
   for (const entry of entries) {
-    const write = byFile.get(entry.fileKey);
-    if (write === undefined) {
-      byFile.set(entry.fileKey, { fileKey: entry.fileKey, file: entry.file, names: [entry.name] });
+    const found = byFile.get(entry.fileKey);
+    if (found === undefined) {
+      byFile.set(entry.fileKey, [entry.file, [entry.name]]);
     } else {
-      write.names.push(entry.name);
+      found[1].push(entry.name);
     }
   }
-  return [...byFile.values()];
+  return [...byFile].map(([fileKey, [file, names]]) => ({ fileKey, file, names }));
 }
 
 /** One sentence per file the entries go into, in the order the files first appear. */

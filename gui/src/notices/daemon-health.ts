@@ -12,6 +12,6 @@ const NOTICES: Readonly<Record<DaemonProblemKind, UiText>> = {
 };
 
 /** the sentence the notice shows for each problem the daemon reports. */
-export function daemonProblemNotices(problems: readonly DaemonProblem[]): UiText[] {
+export function daemonProblemNotices(problems: readonly DaemonProblem[]): readonly UiText[] {
   return problems.map((problem) => NOTICES[problem.kind]);
 }

@@ -42,7 +42,7 @@ export interface GlyphRect {
 export class GlyphAtlas<Page> {
   private readonly slots = new Map<string, GlyphSlot<Page>>();
   private readonly layout: AtlasLayout;
-  private pages: Page[] = [];
+  private pages: readonly Page[] = [];
 
   constructor(
     private readonly source: PageSource<Page>,
@@ -76,12 +76,17 @@ export class GlyphAtlas<Page> {
       this.slots.clear();
       this.pages = [];
     }
-    const page = this.pages[placement.page] ?? this.source.createPage();
+    const existing = this.pages[placement.page];
+    const page = existing ?? this.source.createPage();
     if (page === null) {
       this.reset(this.cellWidth, this.cellHeight);
       return null;
     }
-    this.pages[placement.page] = page;
+    if (existing === undefined) {
+      const pages = [...this.pages];
+      pages[placement.page] = page;
+      this.pages = pages;
+    }
     const slot = { page, x: placement.x, y: placement.y, width, height: this.cellHeight };
     this.source.rasterize(page, slot, text, style);
     this.slots.set(key, slot);

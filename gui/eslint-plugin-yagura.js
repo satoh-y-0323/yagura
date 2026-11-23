@@ -4,8 +4,9 @@
  *
  * A brand is a string type made unforgeable by a `unique symbol` key
  * (`DisplayLine` in `src/display/untrusted-text.ts`): only its maker module may
- * claim a value is one. The rules here find a brand by that key's declaration,
- * so a type that merely shares a brand's name is not one.
+ * claim a value is one. The rules here find a brand by that key's symbol, so a
+ * member a mapped type copies from it is the brand too, while a type that merely
+ * shares a brand's name is not one.
  */
 import ts from 'typescript';
 
@@ -29,7 +30,7 @@ function isFile(fileName, relativePath) {
  * What a rule needs to know about brands in one program: which brands a type
  * holds, and the brand types themselves.
  * @param {ts.Program} program
- * @param {{ type: string, key: string, declaredIn: string, maker: string }[]} brands
+ * @param {{ type: string, key: string, declaredIn: string, maker: string, multiline?: boolean }[]} brands
  */
 function createBrandReader(program, brands) {
   const checker = program.getTypeChecker();
@@ -46,22 +47,37 @@ function createBrandReader(program, brands) {
     return brandTypes.get(brand);
   }
 
+  function isKeyDeclaration(declaration, brand) {
+    return (
+      ts.isPropertySignature(declaration) &&
+      ts.isComputedPropertyName(declaration.name) &&
+      ts.isIdentifier(declaration.name.expression) &&
+      declaration.name.expression.text === brand.key &&
+      isFile(declaration.getSourceFile().fileName, brand.declaredIn)
+    );
+  }
+
+  let brandsByKeyName;
+
+  // A `unique symbol` key's member name is unique to that symbol, and a mapped type that
+  // copies the member keeps the name though it has no declaration of its own.
   function brandOfProperty(property) {
-    for (const declaration of property.declarations ?? []) {
-      if (
-        ts.isPropertySignature(declaration) &&
-        ts.isComputedPropertyName(declaration.name) &&
-        ts.isIdentifier(declaration.name.expression)
-      ) {
-        const key = declaration.name.expression.text;
-        const fileName = declaration.getSourceFile().fileName;
-        const brand = brands.find((b) => b.key === key && isFile(fileName, b.declaredIn));
-        if (brand !== undefined) {
-          return brand;
+    if (brandsByKeyName === undefined) {
+      brandsByKeyName = new Map();
+      for (const brand of brands) {
+        const branded = brandType(brand);
+        const key =
+          branded === null
+            ? undefined
+            : checker
+                .getPropertiesOfType(branded)
+                .find((p) => (p.declarations ?? []).some((d) => isKeyDeclaration(d, brand)));
+        if (key !== undefined) {
+          brandsByKeyName.set(key.escapedName, brand);
         }
       }
     }
-    return undefined;
+    return brandsByKeyName.get(property.escapedName);
   }
 
   /** The brand `type` is a value of: a string type that carries a brand's key. */
@@ -131,34 +147,34 @@ function createBrandReader(program, brands) {
     }
   }
 
+  /** The types inside an object type where a value of a brand could sit. */
+  function innerTypesOf(type) {
+    // A library type is walked by what it was instantiated with, not its members.
+    if (isLibraryType(type) || checker.isArrayType(type) || checker.isTupleType(type)) {
+      return typeArgumentsOf(type);
+    }
+    return [
+      ...checker
+        .getPropertiesOfType(type)
+        .filter((property) => !isPhantomKey(property))
+        .map((property) => checker.getTypeOfSymbol(property)),
+      ...checker.getIndexInfosOfType(type).map((info) => info.type),
+      ...[...type.getCallSignatures(), ...type.getConstructSignatures()].map((signature) =>
+        signature.getReturnType()
+      ),
+      ...typeArgumentsOf(type),
+    ];
+  }
+
   function visitObject(type, depth, seen, found) {
-    const properties = checker.getPropertiesOfType(type);
-    for (const property of properties) {
+    for (const property of checker.getPropertiesOfType(type)) {
       const brand = brandOfProperty(property);
       if (brand !== undefined) {
         found.add(brand);
       }
     }
-    // A library type is walked by what it was instantiated with, not its members.
-    if (isLibraryType(type) || checker.isArrayType(type) || checker.isTupleType(type)) {
-      for (const argument of typeArgumentsOf(type)) {
-        visit(argument, depth + 1, seen, found);
-      }
-      return;
-    }
-    for (const property of properties) {
-      if (!isPhantomKey(property)) {
-        visit(checker.getTypeOfSymbol(property), depth + 1, seen, found);
-      }
-    }
-    for (const info of checker.getIndexInfosOfType(type)) {
-      visit(info.type, depth + 1, seen, found);
-    }
-    for (const signature of [...type.getCallSignatures(), ...type.getConstructSignatures()]) {
-      visit(signature.getReturnType(), depth + 1, seen, found);
-    }
-    for (const argument of typeArgumentsOf(type)) {
-      visit(argument, depth + 1, seen, found);
+    for (const inner of innerTypesOf(type)) {
+      visit(inner, depth + 1, seen, found);
     }
   }
 
@@ -190,10 +206,131 @@ function createBrandReader(program, brands) {
     return found;
   }
 
+  /** The element types of an array, tuple, `Set` or `Map` that can be written to. */
+  function writableElementsOf(type) {
+    const name = type.getSymbol()?.escapedName;
+    if (checker.isArrayType(type)) {
+      return name === 'Array' ? checker.getTypeArguments(type) : undefined;
+    }
+    if (checker.isTupleType(type)) {
+      return type.target.readonly ? undefined : checker.getTypeArguments(type);
+    }
+    return (name === 'Set' || name === 'Map') && isLibraryType(type)
+      ? typeArgumentsOf(type)
+      : undefined;
+  }
+
+  // A rest parameter's array is made new for each call and shared with no one, so what it
+  // takes is its elements.
+  function parameterTypesOf(parameter) {
+    const type = checker.getTypeOfSymbol(parameter);
+    const declared = parameter.valueDeclaration;
+    const isRest =
+      declared !== undefined && ts.isParameter(declared) && declared.dotDotDotToken !== undefined;
+    return isRest && (checker.isArrayType(type) || checker.isTupleType(type))
+      ? checker.getTypeArguments(type)
+      : [type];
+  }
+
+  // A declared interface, class or type literal is checked at its own members, so the
+  // container path stops there instead of reporting every place that uses it.
+  function isDeclaredShape(type) {
+    return (type.getSymbol()?.declarations ?? []).some(
+      (declaration) =>
+        ts.isInterfaceDeclaration(declaration) ||
+        ts.isClassLike(declaration) ||
+        ts.isTypeLiteralNode(declaration) ||
+        ts.isEnumDeclaration(declaration)
+    );
+  }
+
+  /**
+   * Walks the container path of a declared type: union and intersection members,
+   * container elements, a library type's type arguments, signatures' parameters
+   * and results, and the members of a type with no declaration of its own.
+   * Brands are counted only inside a writable array, tuple, `Set` or `Map`
+   * (or from the start when `inside`). `generics` counts a type parameter whose
+   * constraint takes a brand; `never` counts `never`.
+   */
+  function walkContainerPath(type, { generics, never, inside }) {
+    const result = { brands: new Set(), tooDeep: false };
+    const seen = [new Set(), new Set()];
+    function reach(current, depth, within) {
+      if (depth > MAX_DEPTH) {
+        result.tooDeep = true;
+        return;
+      }
+      const seenHere = seen[within ? 1 : 0];
+      if (seenHere.has(current)) {
+        return;
+      }
+      seenHere.add(current);
+      if (within) {
+        const brand = brandOfText(current);
+        if (brand !== undefined) {
+          result.brands.add(brand);
+          return;
+        }
+        if ((current.flags & ts.TypeFlags.Never) !== 0 && never) {
+          brands.forEach((b) => result.brands.add(b));
+          return;
+        }
+        if ((current.flags & ts.TypeFlags.Instantiable) !== 0 && generics) {
+          brandsAcceptedBy(current, result.brands);
+          return;
+        }
+      }
+      if ((current.flags & (OPAQUE_FLAGS | STRING_SHAPED_FLAGS)) !== 0) {
+        return;
+      }
+      if (current.isUnionOrIntersection()) {
+        current.types.forEach((member) => reach(member, depth + 1, within));
+        return;
+      }
+      if ((current.flags & ts.TypeFlags.Object) === 0) {
+        return;
+      }
+      const elements = writableElementsOf(current);
+      if (elements !== undefined) {
+        elements.forEach((element) => reach(element, depth + 1, true));
+        return;
+      }
+      if (checker.isArrayType(current) || checker.isTupleType(current) || isLibraryType(current)) {
+        typeArgumentsOf(current).forEach((argument) => reach(argument, depth + 1, within));
+        return;
+      }
+      if (isDeclaredShape(current)) {
+        return;
+      }
+      for (const signature of [
+        ...current.getCallSignatures(),
+        ...current.getConstructSignatures(),
+      ]) {
+        reach(signature.getReturnType(), depth + 1, within);
+        for (const parameter of signature.getParameters()) {
+          for (const taken of parameterTypesOf(parameter)) {
+            reach(taken, depth + 1, within);
+          }
+        }
+      }
+      for (const property of checker.getPropertiesOfType(current)) {
+        if (!isPhantomKey(property)) {
+          reach(checker.getTypeOfSymbol(property), depth + 1, within);
+        }
+      }
+      for (const info of checker.getIndexInfosOfType(current)) {
+        reach(info.type, depth + 1, within);
+      }
+    }
+    reach(type, 0, inside);
+    return result;
+  }
+
   /**
    * True if `parameter` sits where a caller hands a value in: somewhere in an
    * argument's type that is not on the receiving side of a function the
-   * caller passes. Conditional and mapped types are not looked into.
+   * caller passes. What a passed function's type predicate narrows to is its
+   * output, like its result. Conditional and mapped types are not looked into.
    */
   function handedInBy(type, parameter, positive, depth, seen) {
     if (type === parameter) {
@@ -217,6 +354,7 @@ function createBrandReader(program, brands) {
       return checker.getTypeArguments(type).some((argument) => next(argument, positive));
     }
     const signatures = [...type.getCallSignatures(), ...type.getConstructSignatures()];
+    const narrowsTo = (signature) => checker.getTypePredicateOfSignature(signature)?.type;
     return (
       checker
         .getPropertiesOfType(type)
@@ -225,12 +363,22 @@ function createBrandReader(program, brands) {
       signatures.some(
         (signature) =>
           next(signature.getReturnType(), positive) ||
+          (narrowsTo(signature) !== undefined && next(narrowsTo(signature), positive)) ||
           signature.getParameters().some((p) => next(checker.getTypeOfSymbol(p), !positive))
       )
     );
   }
 
-  return { checker, brandsIn, brandOfText, handedInBy, isLibraryType };
+  return {
+    checker,
+    brandsIn,
+    brandOfText,
+    handedInBy,
+    isLibraryType,
+    parameterTypesOf,
+    walkContainerPath,
+    writableElementsOf,
+  };
 }
 
 const BRAND_OPTIONS_SCHEMA = {
@@ -245,6 +393,8 @@ const BRAND_OPTIONS_SCHEMA = {
           key: { type: 'string' },
           declaredIn: { type: 'string' },
           maker: { type: 'string' },
+          // A brand whose text may hold line breaks; a place that shows one line refuses it.
+          multiline: { type: 'boolean' },
         },
         required: ['type', 'key', 'declaredIn', 'maker'],
         additionalProperties: false,
@@ -275,7 +425,13 @@ const noBrandForging = {
       declaration:
         'A declaration without a value naming {{brands}} claims a value no maker made ({{makers}}).',
       typeArgument:
-        "The type argument {{brands}} names a value the callee makes, not one handed in, so nothing checks it; leave it to inference or pass a maker's value ({{makers}}).",
+        "The type argument {{brands}} names a value the callee makes, not one handed in, so nothing checks it; pass a maker's value ({{makers}}) or take it as a type that holds no brand.",
+      writable:
+        'This holds {{brands}} in an array, tuple, Set or Map that can be written to, so seen as one of plain text it takes text no maker made ({{makers}}); hold it readonly.',
+      writableArgument:
+        'This hands {{brands}} in a writable container to a parameter that takes plain text into it, so text no maker made ({{makers}}) can be put in; take the parameter readonly.',
+      writableTooDeep:
+        'The check cannot see to the end of this type, so it cannot tell whether a brand sits in a writable container; give the inner type a name or hold it readonly.',
     },
   },
   create(context) {
@@ -393,42 +549,196 @@ const noBrandForging = {
       }
     }
 
-    function checkTypeArguments(node) {
-      const call = tsNode(node);
-      const explicit = node.typeArguments?.params ?? [];
-      const resolved = checker.getResolvedSignature(call);
-      const declaration = resolved?.getDeclaration();
+    // Written or inferred alike: an inferred type argument the arguments do not carry comes
+    // from the place the result is put, which no maker checked either.
+    function checkTypeArguments(node, resolved) {
+      const declaration = resolved.getDeclaration();
       const generic =
         declaration === undefined ? undefined : checker.getSignatureFromDeclaration(declaration);
       const parameters = generic?.getTypeParameters() ?? [];
-      explicit.forEach((argumentNode, index) => {
-        const argument = checker.getTypeFromTypeNode(tsNode(argumentNode));
-        if ((argument.flags & OPAQUE_FLAGS) !== 0) {
+      if (parameters.length === 0) {
+        return;
+      }
+      const instantiated = checker.getTypeArgumentsForResolvedSignature(resolved) ?? [];
+      const explicit = node.typeArguments?.params ?? [];
+      parameters.forEach((parameter, index) => {
+        const argument = instantiated[index];
+        if (argument === undefined || (argument.flags & OPAQUE_FLAGS) !== 0) {
           return;
         }
         const held = foreignBrandsIn(argument);
         if (held.length === 0) {
           return;
         }
-        const parameter = parameters[index];
-        const handedIn =
-          parameter !== undefined &&
-          generic
-            .getParameters()
-            .some((p) =>
-              reader.handedInBy(checker.getTypeOfSymbol(p), parameter, true, 0, new Map())
-            );
+        const handedIn = generic
+          .getParameters()
+          .some((p) =>
+            reader.handedInBy(checker.getTypeOfSymbol(p), parameter, true, 0, new Map())
+          );
         if (!handedIn) {
-          report(argumentNode, 'typeArgument', held);
+          report(explicit[index] ?? node.callee ?? node.tag, 'typeArgument', held);
         }
       });
+    }
+
+    function foreignOnly(found) {
+      return [...found].filter((brand) => foreign.includes(brand));
+    }
+
+    // A type parameter is counted only at a member: a path that stops at a member never
+    // reaches the place the generic type is given a brand.
+    function checkWritable(node, type, { member }) {
+      const { brands: found, tooDeep } = reader.walkContainerPath(type, {
+        generics: member,
+        never: true,
+        inside: false,
+      });
+      const held = foreignOnly(found);
+      if (held.length > 0) {
+        report(node, 'writable', held);
+      } else if (tooDeep) {
+        context.report({ node, messageId: 'writableTooDeep' });
+      }
+    }
+
+    function writableMembersOf(type) {
+      return (type.isUnion() ? type.types : [type]).filter(
+        (member) => reader.writableElementsOf(member) !== undefined
+      );
+    }
+
+    // A writable container of a brand handed to a parameter that holds no such brand in the
+    // same place lets the callee fill it with plain text.
+    function checkWritableArguments(node, resolved) {
+      const parameters = resolved.getParameters();
+      node.arguments.forEach((argumentNode, index) => {
+        if (argumentNode.type === 'SpreadElement') {
+          return;
+        }
+        const parameter = parameters[Math.min(index, parameters.length - 1)];
+        if (parameter === undefined) {
+          return;
+        }
+        // A new `[]` has no other name to be widened through, so `never` is not counted here.
+        const held = foreignOnly(
+          reader.walkContainerPath(checker.getTypeAtLocation(tsNode(argumentNode)), {
+            generics: true,
+            never: false,
+            inside: false,
+          }).brands
+        );
+        if (held.length === 0) {
+          return;
+        }
+        const takenIn = reader
+          .parameterTypesOf(parameter)
+          .flatMap(writableMembersOf)
+          .flatMap((member) => reader.writableElementsOf(member));
+        const takenBrands = takenIn.map(
+          (element) =>
+            reader.walkContainerPath(element, { generics: true, never: true, inside: true }).brands
+        );
+        const unbranded = held.filter(
+          (brand) => takenIn.length > 0 && !takenBrands.some((found) => found.has(brand))
+        );
+        if (unbranded.length > 0) {
+          report(argumentNode, 'writableArgument', unbranded);
+        }
+      });
+    }
+
+    function checkCall(node) {
+      const resolved = checker.getResolvedSignature(tsNode(node));
+      if (resolved === undefined) {
+        return;
+      }
+      checkTypeArguments(node, resolved);
+      if (node.arguments !== undefined) {
+        checkWritableArguments(node, resolved);
+      }
+    }
+
+    function checkFunction(node, member = false) {
+      const signature = checker.getSignatureFromDeclaration(tsNode(node));
+      if (signature === undefined) {
+        return;
+      }
+      checkWritable(node.returnType ?? node, signature.getReturnType(), { member });
+      const written = node.params.filter(
+        (parameter) => !(parameter.type === 'Identifier' && parameter.name === 'this')
+      );
+      signature.getParameters().forEach((parameter, index) => {
+        for (const taken of reader.parameterTypesOf(parameter)) {
+          checkWritable(written[index] ?? node, taken, { member });
+        }
+      });
+    }
+
+    // A function written straight into a call or a template is typed by what receives it,
+    // and a container it returns ends there or reaches a declaration that is checked.
+    function isNamedFunction(node) {
+      const parent = node.parent;
+      switch (parent?.type) {
+        case 'VariableDeclarator':
+          return parent.init === node;
+        case 'PropertyDefinition':
+        case 'MethodDefinition':
+        case 'TSAbstractMethodDefinition':
+          return parent.value === node;
+        case 'Property':
+          return parent.value === node && (parent.method || parent.kind !== 'init');
+        case 'ExportDefaultDeclaration':
+          return true;
+        default:
+          return false;
+      }
+    }
+
+    function isFunctionExpression(node) {
+      return node?.type === 'FunctionExpression' || node?.type === 'ArrowFunctionExpression';
+    }
+
+    // `$: name = …` declares a component's reactive variable, as a top-level `let` does.
+    function reactiveVariableOf(node) {
+      const { body } = node;
+      return body.type === 'ExpressionStatement' &&
+        body.expression.type === 'AssignmentExpression' &&
+        body.expression.left.type === 'Identifier'
+        ? body.expression.left
+        : undefined;
     }
 
     function isAmbient(node) {
       return node.declare === true || (tsNode(node).flags & ts.NodeFlags.Ambient) !== 0;
     }
 
-    return {
+    // What an ambient member is typed as is claimed with no value behind it.
+    function checkAmbientMember(node) {
+      if (!isAmbient(node)) {
+        return;
+      }
+      const member = tsNode(node);
+      const type =
+        ts.isPropertySignature(member) && member.name !== undefined
+          ? checker.getTypeAtLocation(member.name)
+          : member.type === undefined
+            ? undefined
+            : checker.getTypeFromTypeNode(member.type);
+      const held = type === undefined ? [] : foreignBrandsIn(type);
+      if (held.length > 0) {
+        report(node, 'declaration', held);
+      }
+    }
+
+    function isModuleLevel(node) {
+      const parent =
+        node.parent?.type === 'ExportNamedDeclaration' ? node.parent.parent : node.parent;
+      // A component's instance script is a `SvelteScriptElement`, and its top level is the
+      // component's own state, as a module's is.
+      return parent?.type === 'Program' || parent?.type === 'SvelteScriptElement';
+    }
+
+    const visitors = {
       TSAsExpression: checkAssertion,
       TSTypeAssertion: checkAssertion,
       TSTypePredicate(node) {
@@ -442,35 +752,91 @@ const noBrandForging = {
         }
       },
       VariableDeclaration(node) {
-        if (!isAmbient(node)) {
-          return;
-        }
+        const ambient = isAmbient(node);
+        // A variable inside a function reaches outside only through what the checks of
+        // results, members and arguments already see.
+        const moduleLevel = isModuleLevel(node);
         for (const declarator of node.declarations) {
-          const held = foreignBrandsIn(checker.getTypeAtLocation(tsNode(declarator.id)));
+          const type = checker.getTypeAtLocation(tsNode(declarator.id));
+          const held = ambient ? foreignBrandsIn(type) : [];
           if (held.length > 0) {
             report(declarator, 'declaration', held);
+          } else if (moduleLevel && !isFunctionExpression(declarator.init)) {
+            checkWritable(declarator.id, type, { member: false });
           }
+        }
+      },
+      SvelteReactiveStatement(node) {
+        const variable = reactiveVariableOf(node);
+        if (variable !== undefined && tsNode(variable) === undefined) {
+          context.report({ node: variable, messageId: 'noTypes' });
+        } else if (variable !== undefined) {
+          checkWritable(variable, checker.getTypeAtLocation(tsNode(variable)), { member: false });
         }
       },
       PropertyDefinition(node) {
-        if (node.declare === true) {
-          const held = foreignBrandsIn(checker.getTypeAtLocation(tsNode(node)));
-          if (held.length > 0) {
-            report(node, 'declaration', held);
-          }
+        const type = checker.getTypeAtLocation(tsNode(node));
+        const held = isAmbient(node) ? foreignBrandsIn(type) : [];
+        if (held.length > 0) {
+          report(node, 'declaration', held);
+        } else if (!isFunctionExpression(node.value)) {
+          checkWritable(node, type, { member: true });
         }
       },
+      TSPropertySignature(node) {
+        checkAmbientMember(node);
+        checkWritable(node, checker.getTypeAtLocation(tsNode(node).name), { member: true });
+      },
+      TSIndexSignature(node) {
+        checkAmbientMember(node);
+        const { type } = tsNode(node);
+        if (type !== undefined) {
+          checkWritable(node, checker.getTypeFromTypeNode(type), { member: true });
+        }
+      },
+      TSMethodSignature(node) {
+        checkAmbientMember(node);
+        checkFunction(node, true);
+      },
+      TSCallSignatureDeclaration: checkAmbientMember,
+      TSConstructSignatureDeclaration: checkAmbientMember,
       // A function or method without a body: `declare function`, or an overload's signature.
-      TSDeclareFunction: checkReturnTypes,
+      TSDeclareFunction(node) {
+        checkReturnTypes(node);
+        checkFunction(node);
+      },
       TSEmptyBodyFunctionExpression(node) {
         if (node.parent?.type === 'MethodDefinition') {
           checkReturnTypes(node.parent);
         }
+        checkFunction(node);
       },
-      'CallExpression[typeArguments]': checkTypeArguments,
-      'NewExpression[typeArguments]': checkTypeArguments,
-      'TaggedTemplateExpression[typeArguments]': checkTypeArguments,
+      FunctionDeclaration(node) {
+        checkFunction(node);
+      },
+      'FunctionExpression, ArrowFunctionExpression'(node) {
+        if (isNamedFunction(node)) {
+          checkFunction(node);
+        }
+      },
+      CallExpression: checkCall,
+      NewExpression: checkCall,
+      TaggedTemplateExpression: checkCall,
     };
+    // A node the parser made with no TypeScript counterpart has no type to read. A reactive
+    // statement is Svelte's own node; its visitor reads the variable it declares.
+    return Object.fromEntries(
+      Object.entries(visitors).map(([selector, visit]) => [
+        selector,
+        (node) => {
+          if (node.type !== 'SvelteReactiveStatement' && tsNode(node) === undefined) {
+            context.report({ node, messageId: 'noTypes' });
+          } else {
+            visit(node);
+          }
+        },
+      ])
+    );
   },
 };
 
@@ -482,15 +848,241 @@ const NOT_TEXT_FLAGS =
   ts.TypeFlags.Null |
   ts.TypeFlags.Undefined;
 
-// The attributes of a native element that a person reads or hears.
-const VISIBLE_ATTRIBUTES = /^(aria-label|title|placeholder|alt)$/;
+// Attribute values no one reads or hears, by the value types the HTML attribute index,
+// WAI-ARIA 1.2 and SVG 2 give them. Any attribute not named here is checked.
+const UNREAD_ON_ANY_ELEMENT = new Set([
+  'class',
+  'id',
+  'style',
+  'slot',
+  'role',
+  'tabindex',
+  'dir',
+  'lang',
+  'translate',
+  'hidden',
+  'inert',
+  'draggable',
+  'spellcheck',
+  'autocapitalize',
+  'autocomplete',
+  'inputmode',
+  'enterkeyhint',
+  'popover',
+  // WAI-ARIA states and properties valued by an ID reference, a token, a boolean or a number;
+  // the string-valued ones (aria-label, aria-keyshortcuts, ...) are read out.
+  'aria-activedescendant',
+  'aria-atomic',
+  'aria-autocomplete',
+  'aria-busy',
+  'aria-checked',
+  'aria-colcount',
+  'aria-colindex',
+  'aria-colspan',
+  'aria-controls',
+  'aria-current',
+  'aria-describedby',
+  'aria-details',
+  'aria-disabled',
+  'aria-dropeffect',
+  'aria-errormessage',
+  'aria-expanded',
+  'aria-flowto',
+  'aria-grabbed',
+  'aria-haspopup',
+  'aria-hidden',
+  'aria-invalid',
+  'aria-labelledby',
+  'aria-level',
+  'aria-live',
+  'aria-modal',
+  'aria-multiline',
+  'aria-multiselectable',
+  'aria-orientation',
+  'aria-owns',
+  'aria-posinset',
+  'aria-pressed',
+  'aria-readonly',
+  'aria-relevant',
+  'aria-required',
+  'aria-rowcount',
+  'aria-rowindex',
+  'aria-rowspan',
+  'aria-selected',
+  'aria-setsize',
+  'aria-sort',
+  'aria-valuemax',
+  'aria-valuemin',
+  'aria-valuenow',
+]);
+// Custom data and event handlers.
+const UNREAD_PREFIXES_ON_ANY_ELEMENT = ['data-', 'on'];
+
+const FORM_CONTROLS = ['input', 'button', 'select', 'textarea', 'fieldset', 'output', 'object'];
+const SVG_SHAPE_ELEMENTS = [
+  'svg',
+  'g',
+  'path',
+  'circle',
+  'ellipse',
+  'line',
+  'polyline',
+  'polygon',
+  'rect',
+  'use',
+  'defs',
+  'symbol',
+  'clipPath',
+  'mask',
+  'linearGradient',
+  'radialGradient',
+  'stop',
+];
+// SVG shows text as the content of `<title>` and `<text>`, which the text position checks.
+const SVG_SHAPE_ATTRIBUTES = [
+  'd',
+  'cx',
+  'cy',
+  'r',
+  'rx',
+  'ry',
+  'x',
+  'y',
+  'x1',
+  'y1',
+  'x2',
+  'y2',
+  'width',
+  'height',
+  'points',
+  'pathLength',
+  'viewBox',
+  'preserveAspectRatio',
+  'transform',
+  'offset',
+  'href',
+  'fill',
+  'fill-opacity',
+  'fill-rule',
+  'stroke',
+  'stroke-dasharray',
+  'stroke-dashoffset',
+  'stroke-linecap',
+  'stroke-linejoin',
+  'stroke-miterlimit',
+  'stroke-opacity',
+  'stroke-width',
+  'opacity',
+  'clip-rule',
+  'stop-color',
+  'stop-opacity',
+];
+const UNREAD_BY_ELEMENT = new Map();
+for (const [elements, names] of [
+  [['label', 'output'], ['for']],
+  [FORM_CONTROLS, ['name', 'form', 'disabled', 'required', 'readonly', 'multiple', 'autofocus']],
+  [
+    ['input'],
+    [
+      'type',
+      'list',
+      'min',
+      'max',
+      'step',
+      'minlength',
+      'maxlength',
+      'size',
+      'pattern',
+      'accept',
+      'checked',
+    ],
+  ],
+  // A text area's value is the text being edited, shown as typed.
+  [['textarea'], ['value', 'rows', 'cols']],
+  // A value sent or measured, not drawn; an option shows its content or its `label`.
+  [['select', 'option', 'button', 'data', 'li', 'meter', 'progress'], ['value']],
+  [['option'], ['selected', 'disabled']],
+  [['time', 'del', 'ins'], ['datetime']],
+  // `download` names the saved file in a dialog, so it is checked.
+  [
+    ['a', 'area', 'link'],
+    ['href', 'target', 'rel', 'hreflang', 'type'],
+  ],
+  [
+    ['img', 'source', 'video', 'audio', 'iframe', 'script'],
+    ['src', 'srcset', 'sizes', 'width', 'height', 'type'],
+  ],
+  [['blockquote', 'q', 'del', 'ins'], ['cite']],
+  [['form'], ['action', 'method', 'enctype', 'target']],
+  [SVG_SHAPE_ELEMENTS, SVG_SHAPE_ATTRIBUTES],
+]) {
+  for (const element of elements) {
+    const unread = UNREAD_BY_ELEMENT.get(element) ?? new Set();
+    names.forEach((name) => unread.add(name));
+    UNREAD_BY_ELEMENT.set(element, unread);
+  }
+}
+
+// An input of these types draws its value as its face.
+const BUTTON_INPUT_TYPES = new Set(['button', 'submit', 'reset', 'image']);
+
+// An input's value is the text being edited only when its type is written out and is not a
+// button's; a type from an expression or a spread could be either.
+function isEditedInputValue(startTag) {
+  if (startTag.attributes.some((attribute) => attribute.type === 'SvelteSpreadAttribute')) {
+    return false;
+  }
+  const type = startTag.attributes.find(
+    (attribute) =>
+      (attribute.type === 'SvelteAttribute' || attribute.type === 'SvelteShorthandAttribute') &&
+      attribute.key.name === 'type'
+  );
+  if (type === undefined) {
+    return true;
+  }
+  if (
+    type.type !== 'SvelteAttribute' ||
+    !type.value.every((part) => part.type === 'SvelteLiteral')
+  ) {
+    return false;
+  }
+  return !BUTTON_INPUT_TYPES.has(
+    type.value
+      .map((part) => part.value)
+      .join('')
+      .toLowerCase()
+  );
+}
+
+function isUnreadOn(element, name, startTag) {
+  if (
+    UNREAD_ON_ANY_ELEMENT.has(name) ||
+    UNREAD_PREFIXES_ON_ANY_ELEMENT.some((prefix) => name.startsWith(prefix))
+  ) {
+    return true;
+  }
+  if (element === null) {
+    return false;
+  }
+  if (element === 'input' && name === 'value') {
+    return isEditedInputValue(startTag);
+  }
+  return UNREAD_BY_ELEMENT.get(element)?.has(name) ?? false;
+}
+
+/** True if no one reads attribute `name` on any of `elements` (`null`: not known which). */
+function isUnreadOnAll(elements, name, startTag) {
+  return elements === null
+    ? isUnreadOn(null, name, startTag)
+    : elements.every((element) => isUnreadOn(element, name, startTag));
+}
 
 const displayText = {
   meta: {
     type: 'problem',
     docs: {
       description:
-        'Text a template shows is a brand that says how it was prepared: UiText, DisplayLine or DisplayBlock.',
+        'Text a template shows is a brand that says how it was prepared: UiText, DisplayLine or DisplayBlock, and an attribute shows no multiline brand.',
     },
     schema: [BRAND_OPTIONS_SCHEMA],
     messages: {
@@ -499,6 +1091,8 @@ const displayText = {
         'This shows {{type}}, which says nothing of how it was prepared; show the UI text from ui-messages or the prepared text from display/untrusted-text.',
       untyped:
         'This shows a value typed {{type}}, so nothing checks how it was prepared; give it the type of the text it holds.',
+      multiline:
+        'An attribute shows one line, but {{type}} may hold line breaks; prepare it with a one-line maker from display/untrusted-text.',
     },
   },
   create(context) {
@@ -522,44 +1116,131 @@ const displayText = {
       return resolved.isUnion() ? resolved.types : [resolved];
     }
 
-    function check(expression) {
-      const type = checker.getTypeAtLocation(services.esTreeNodeToTSNodeMap.get(expression));
+    function typeOf(expression) {
+      return checker.getTypeAtLocation(services.esTreeNodeToTSNodeMap.get(expression));
+    }
+
+    /** What is wrong with showing a value of `type`, or undefined when nothing is. */
+    function problemOf(type, oneLine) {
       const members = membersOf(type);
       if (members.some((member) => (member.flags & OPAQUE_FLAGS) !== 0)) {
-        context.report({
-          node: expression,
-          messageId: 'untyped',
-          data: { type: checker.typeToString(type) },
-        });
+        return 'untyped';
+      }
+      const shown = members
+        .filter((member) => (member.flags & NOT_TEXT_FLAGS) === 0)
+        .map((member) => reader.brandOfText(member));
+      if (shown.some((brand) => brand === undefined)) {
+        return 'unprepared';
+      }
+      return oneLine && shown.some((brand) => brand.multiline === true) ? 'multiline' : undefined;
+    }
+
+    function check(expression, oneLine) {
+      const type = typeOf(expression);
+      const messageId = problemOf(type, oneLine);
+      if (messageId !== undefined) {
+        context.report({ node: expression, messageId, data: { type: checker.typeToString(type) } });
+      }
+    }
+
+    /**
+     * The elements a start tag may make: its own name, or for `svelte:element` every string
+     * literal its `this` can be. `null` when that is not known.
+     */
+    function elementsOf(startTag) {
+      const element = startTag.parent;
+      if (element.kind === 'html') {
+        return [element.name.name];
+      }
+      const target = startTag.attributes.find(
+        (attribute) => attribute.type === 'SvelteSpecialDirective' && attribute.kind === 'this'
+      )?.expression;
+      if (target == null) {
+        return null;
+      }
+      if (target.type === 'Literal') {
+        return typeof target.value === 'string' ? [target.value] : null;
+      }
+      // A nullish `this` makes no element.
+      const members = membersOf(typeOf(target)).filter(
+        (member) => (member.flags & (ts.TypeFlags.Null | ts.TypeFlags.Undefined)) === 0
+      );
+      return members.length > 0 &&
+        members.every((member) => (member.flags & ts.TypeFlags.StringLiteral) !== 0)
+        ? members.map((member) => member.value)
+        : null;
+    }
+
+    function isElementTag(startTag) {
+      const element = startTag.parent;
+      return (
+        element.kind === 'html' ||
+        (element.kind === 'special' && element.name.name === 'svelte:element')
+      );
+    }
+
+    function checkAttribute(startTag, name, expression) {
+      if (isElementTag(startTag) && !isUnreadOnAll(elementsOf(startTag), name, startTag)) {
+        check(expression, true);
+      }
+    }
+
+    // An index signature whose every key starts with an unread prefix (`data-${string}`).
+    function isUnreadIndex(keyType) {
+      return (
+        (keyType.flags & ts.TypeFlags.TemplateLiteral) !== 0 &&
+        UNREAD_PREFIXES_ON_ANY_ELEMENT.some((prefix) => keyType.texts[0].startsWith(prefix))
+      );
+    }
+
+    // A spread is checked member by member, as the attributes it writes.
+    function checkSpread(node) {
+      const startTag = node.parent;
+      if (!isElementTag(startTag)) {
         return;
       }
-      const unprepared = members.some(
-        (member) =>
-          (member.flags & NOT_TEXT_FLAGS) === 0 && reader.brandOfText(member) === undefined
-      );
-      if (unprepared) {
-        context.report({
-          node: expression,
-          messageId: 'unprepared',
-          data: { type: checker.typeToString(type) },
-        });
+      const elements = elementsOf(startTag);
+      const type = typeOf(node.argument);
+      const report = (messageId, shown) =>
+        context.report({ node, messageId, data: { type: shown } });
+      for (const member of membersOf(type)) {
+        if ((member.flags & OPAQUE_FLAGS) !== 0) {
+          report('untyped', checker.typeToString(type));
+          return;
+        }
+        for (const property of checker.getPropertiesOfType(member)) {
+          const propertyType = checker.getTypeOfSymbol(property);
+          const messageId = isUnreadOnAll(elements, property.name, startTag)
+            ? undefined
+            : problemOf(propertyType, true);
+          if (messageId !== undefined) {
+            report(messageId, `${property.name}: ${checker.typeToString(propertyType)}`);
+          }
+        }
+        // An index signature's names are not known, so its values are checked as read.
+        for (const info of checker.getIndexInfosOfType(member)) {
+          const messageId = isUnreadIndex(info.keyType) ? undefined : problemOf(info.type, true);
+          if (messageId !== undefined) {
+            report(
+              messageId,
+              `[${checker.typeToString(info.keyType)}]: ${checker.typeToString(info.type)}`
+            );
+          }
+        }
       }
     }
 
     return {
       'SvelteMustacheTag[kind="text"]:not(SvelteStartTag SvelteMustacheTag)'(node) {
-        check(node.expression);
+        check(node.expression, false);
       },
-      "SvelteStartTag[parent.kind='html'] > SvelteAttribute > SvelteMustacheTag"(node) {
-        if (VISIBLE_ATTRIBUTES.test(node.parent.key.name)) {
-          check(node.expression);
-        }
+      'SvelteStartTag > SvelteAttribute > SvelteMustacheTag'(node) {
+        checkAttribute(node.parent.parent, node.parent.key.name, node.expression);
       },
-      "SvelteStartTag[parent.kind='html'] > SvelteShorthandAttribute"(node) {
-        if (VISIBLE_ATTRIBUTES.test(node.key.name)) {
-          check(node.value);
-        }
+      'SvelteStartTag > SvelteShorthandAttribute'(node) {
+        checkAttribute(node.parent, node.key.name, node.value);
       },
+      'SvelteStartTag > SvelteSpreadAttribute': checkSpread,
     };
   },
 };
