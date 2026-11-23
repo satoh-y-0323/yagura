@@ -6,26 +6,24 @@ import type {
   DetectedStatusView,
   WindowStatus,
 } from '../ipc/session-boundary';
-import { caughtValueText } from '../display/untrusted-text';
+import { caughtValueText, foldExternalText, type DisplayLine } from '../display/untrusted-text';
 import type { ActionBlockReason } from '../keymap/action-availability';
 // Type-only: the gate itself reaches this module through `ui-messages.ts`, so
 // a value import here would close that loop at runtime.
 import type { ConfirmTarget, InterruptBlockReason } from '../session/confirm-target';
 
 /**
- * True if `key` is an own key of `record`, narrowing an externally supplied
- * string into that resource object's key set (no index signature, so a
- * plain bracket access would not type-check without this).
+ * The entry `record` holds under `key` when that is an own key, else
+ * `undefined`. An externally supplied string picks an entry this way without
+ * being claimed to be one of the keys.
  */
-function isKeyOf<T extends object>(record: T, key: string): key is Extract<keyof T, string> {
-  return Object.prototype.hasOwnProperty.call(record, key);
+function ownEntry<V>(record: Readonly<Record<string, V>>, key: string): V | undefined {
+  return Object.prototype.hasOwnProperty.call(record, key) ? record[key] : undefined;
 }
 
 /** Describes a window status for display. */
 export function describeStatus(messages: Messages, status: string): string {
-  return isKeyOf(messages.statusLabels, status)
-    ? messages.statusLabels[status]
-    : messages.statusLabels.unknown;
+  return ownEntry(messages.statusLabels, status) ?? messages.statusLabels.unknown;
 }
 
 /**
@@ -361,45 +359,21 @@ export function describeHaltReason(messages: Messages, reason: string): string {
  * name its author gave it; only the built-in ones are translated.
  */
 export function describeThemeName(messages: Messages, name: string): string {
-  return isKeyOf(messages.builtInThemeLabels, name) ? messages.builtInThemeLabels[name] : name;
+  return ownEntry(messages.builtInThemeLabels, name) ?? name;
 }
 
 // ---------------------------------------------------------------------------
 // Sanitization
 // ---------------------------------------------------------------------------
 
-/** Longest externally supplied text kept, in code points. */
-export const EXTERNAL_TEXT_MAX_CODE_POINTS = 200;
-
-/**
- * Reduces text that came from outside the WebView to one display line: line
- * breaks, control characters and non-breaking whitespace are folded into
- * single spaces, the ends are trimmed, and the rest is capped so that one
- * message cannot take over the notice area.
- *
- * The folding here is broader than the characters `sanitizeForDisplay`
- * (`display/untrusted-text.ts`) removes: it folds every control, format and
- * separator character to a space rather than stripping a fixed set.
- *
- * @param text the external text, as it arrived
- */
-export function foldExternalText(text: string): string {
-  const flattened = text.replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}\p{Zs}]+/gu, ' ').trim();
-  // Cut by code point: half of a surrogate pair would render as a stray glyph.
-  const codePoints = Array.from(flattened);
-  return codePoints.length > EXTERNAL_TEXT_MAX_CODE_POINTS
-    ? `${codePoints.slice(0, EXTERNAL_TEXT_MAX_CODE_POINTS).join('')}…`
-    : flattened;
-}
-
 /**
  * The one display line a caught value is told by: its text
- * (`caughtValueText`, `display/untrusted-text.ts`) folded and capped by
- * {@link foldExternalText}, since the reason may carry the daemon's words.
+ * (`caughtValueText`) folded and capped by {@link foldExternalText}, both in
+ * `display/untrusted-text.ts`, since the reason may carry the daemon's words.
  *
  * @param error the value a failed operation threw or rejected with
  */
-export function foldedFailureReason(error: unknown): string {
+export function foldedFailureReason(error: unknown): DisplayLine {
   return foldExternalText(caughtValueText(error));
 }
 

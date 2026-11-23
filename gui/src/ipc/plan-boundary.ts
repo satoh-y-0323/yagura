@@ -40,12 +40,12 @@ const ASSIGNMENT_SOURCE_VALUES: ReadonlySet<string> = new Set<AssignmentSource>(
 /** Where a plan stands in its review: waiting for the user, or approved. */
 export type PlanReview = 'pending' | 'approved';
 
-const PLAN_REVIEW_VALUES: ReadonlySet<string> = new Set<PlanReview>(['pending', 'approved']);
+const PLAN_REVIEW_VALUES: readonly PlanReview[] = ['pending', 'approved'];
 
 /** Why a task of an approved plan asks for another look: added, or edited. */
 export type ReviewMark = 'new' | 'changed';
 
-const REVIEW_MARK_VALUES: ReadonlySet<string> = new Set<ReviewMark>(['new', 'changed']);
+const REVIEW_MARK_VALUES: readonly ReviewMark[] = ['new', 'changed'];
 
 /**
  * Whether a reported piece of work succeeded. A closed set, like the Rust
@@ -186,7 +186,7 @@ export function narrowPlanInfo(value: unknown): PlanInfo {
       narrowPlanTaskInfo(task, tasksContext)
     ),
     roles_warning: readOptionalString(record, 'roles_warning', context),
-    review: readOptionalClosed<PlanReview>(record, 'review', context, PLAN_REVIEW_VALUES),
+    review: readOptionalClosed(record, 'review', context, PLAN_REVIEW_VALUES),
     version: readVersion(record, context),
     ticket: readOptionalTicket(record, context),
   };
@@ -210,7 +210,7 @@ export function narrowPlanList(value: unknown): PlanSummary[] {
       title: requireString(row, 'title', plansContext),
       owner_window: readOptionalString(row, 'owner_window', plansContext),
       task_count: requireNonNegativeInteger(row, 'task_count', plansContext),
-      review: readOptionalClosed<PlanReview>(row, 'review', plansContext, PLAN_REVIEW_VALUES),
+      review: readOptionalClosed(row, 'review', plansContext, PLAN_REVIEW_VALUES),
       unseen_changes: readFlag(row, 'unseen_changes', plansContext),
     };
   });
@@ -264,7 +264,7 @@ function narrowPlanTaskInfo(value: unknown, context: string): PlanTaskInfo {
     resolved: narrowResolvedAssignment(readOwnField(record, 'resolved'), `${context}.resolved`),
     window_id: readOptionalString(record, 'window_id', context),
     report: readOptionalReport(record, context),
-    review_mark: readOptionalClosed<ReviewMark>(record, 'review_mark', context, REVIEW_MARK_VALUES),
+    review_mark: readOptionalClosed(record, 'review_mark', context, REVIEW_MARK_VALUES),
     has_instruction: readOptionalString(record, 'instruction', context) !== null,
   };
 }
@@ -331,18 +331,24 @@ function readOptionalAssignment(
 /**
  * Reads an optional member of a closed string set. The core omits the key or
  * sends `null` when there is none; any other value outside the set is refused.
+ * The member of `allowed` is returned rather than the value read, so the
+ * value is never claimed to be of a type it was not checked against.
  */
 function readOptionalClosed<T extends string>(
   record: UntrustedRecord,
   key: string,
   context: string,
-  allowed: ReadonlySet<string>
+  allowed: readonly T[]
 ): T | null {
   const value = readOptionalString(record, key, context);
-  if (value !== null && !allowed.has(value)) {
+  if (value === null) {
+    return null;
+  }
+  const member = allowed.find((candidate) => candidate === value);
+  if (member === undefined) {
     throw new BoundaryError(`${context}.${key}: unrecognized value "${value}"`);
   }
-  return value as T | null;
+  return member;
 }
 
 /** Reads the plan version; a core that predates versions omits it, read as zero. */

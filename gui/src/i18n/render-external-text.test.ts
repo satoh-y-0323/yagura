@@ -8,12 +8,13 @@
  */
 import { describe, it, expect } from 'vitest';
 
-import { describeOperationFailure, foldExternalText } from './render';
+import { foldExternalText } from '../display/untrusted-text';
+import { describeOperationFailure } from './render';
 
 const SUMMARY = 'Could not close the window';
 
 /**
- * Longest external text kept, in code points: the limit `render.ts` already
+ * Longest external text kept, in code points: the limit `foldExternalText`
  * applies to an operation failure's detail, restated here so a change to
  * either shows up as a mismatch.
  */

@@ -8,7 +8,11 @@ import { describe, it, expect, vi, afterEach } from 'vitest';
 
 import {
   formatApprovalBody,
+  formatChatBody,
+  formatCommandLine,
+  formatOutputBlock,
   formatPathForDisplay,
+  joinDisplayBlocks,
   MAX_DISPLAY_FIELD_CHARS,
   sanitizeForDisplay,
 } from '../display/untrusted-text';
@@ -742,5 +746,147 @@ describe('formatPathForDisplay', () => {
     expect(formatPathForDisplay('C:\\work\\yagura')).toBe('C:\\work\\yagura');
     const shown = formatPathForDisplay(`${'a'.repeat(MAX_DISPLAY_FIELD_CHARS - 1)}\u202Etail`);
     expect(shown).toBe(`${'a'.repeat(MAX_DISPLAY_FIELD_CHARS - 1)}\\u{202E}…`);
+  });
+});
+
+describe('formatCommandLine', () => {
+  it('writes a line break out and does not quote for it', () => {
+    expect(formatCommandLine(['a\nb'])).toBe('a\\u{000A}b');
+  });
+
+  it('writes a double quote inside an element out, and quotes the element when it holds a space', () => {
+    expect(formatCommandLine(['say "hi"'])).toBe('"say \\u{0022}hi\\u{0022}"');
+  });
+
+  it('quotes an element that holds a space, an ideographic space, or nothing', () => {
+    expect(formatCommandLine(['C:\\Program Files\\x.exe'])).toBe('"C:\\Program Files\\x.exe"');
+    expect(formatCommandLine(['a\u3000b'])).toBe('"a\u3000b"');
+    expect(formatCommandLine([''])).toBe('""');
+  });
+
+  it('joins the elements with one space', () => {
+    expect(formatCommandLine(['claude', '--x', 'a b'])).toBe('claude --x "a b"');
+  });
+
+  it('cuts at the limit counting the separators, closes the quote of a cut element, and drops the rest', () => {
+    const shown = formatCommandLine(['ab', `c ${'d'.repeat(5000)}`, 'e']);
+    expect(shown).toBe(`ab "c ${'d'.repeat(4091)}"…`);
+  });
+});
+
+describe('formatChatBody', () => {
+  it('keeps line feeds and carriage returns', () => {
+    expect(formatChatBody('a\r\nb\nc')).toBe('a\r\nb\nc');
+  });
+
+  it('writes the tab, the reordering and zero-width controls and the line separator out', () => {
+    expect(formatChatBody('x\u202Ey')).toBe('x\\u{202E}y');
+    expect(formatChatBody('x\u200By')).toBe('x\\u{200B}y');
+    expect(formatChatBody('x\u2028y')).toBe('x\\u{2028}y');
+    expect(formatChatBody('x\ty')).toBe('x\\u{0009}y');
+  });
+
+  it('writes out the invisible characters that carry no emoji shape', () => {
+    expect(formatChatBody('a\u{E0041}b')).toBe('a\\u{E0041}b');
+    expect(formatChatBody('a\u3164b')).toBe('a\\u{3164}b');
+    expect(formatChatBody('a\u200Db')).toBe('a\\u{200D}b');
+    expect(formatChatBody('a\u200Cb')).toBe('a\\u{200C}b');
+    expect(formatChatBody('a\uFE00')).toBe('a\\u{FE00}');
+    expect(formatChatBody('\u{1F468}\u200Db')).toBe('\u{1F468}\\u{200D}b');
+  });
+
+  it('writes a variation selector out unless it follows a pictograph or completes a keycap', () => {
+    expect(formatChatBody('1\uFE0F')).toBe('1\\u{FE0F}');
+    expect(formatChatBody('#\uFE0F')).toBe('#\\u{FE0F}');
+    expect(formatChatBody('*\uFE0E')).toBe('*\\u{FE0E}');
+    expect(formatChatBody('1\uFE0E\u20E3')).toBe('1\\u{FE0E}\u20E3');
+    expect(formatChatBody('1\uFE0F\uFE0F\u20E3')).toBe('1\\u{FE0F}\\u{FE0F}\u20E3');
+    expect(formatChatBody('\u26A0\uFE0F\uFE0F')).toBe('\u26A0\uFE0F\\u{FE0F}');
+  });
+
+  it('draws the emoji shapes: a joined sequence, a presentation selector and a keycap', () => {
+    expect(formatChatBody('\u{1F468}\u200D\u{1F469}')).toBe('\u{1F468}\u200D\u{1F469}');
+    expect(formatChatBody('\u{1F468}\u{1F3FB}\u200D\u{1F469}')).toBe(
+      '\u{1F468}\u{1F3FB}\u200D\u{1F469}'
+    );
+    expect(formatChatBody('\u26A0\uFE0F')).toBe('\u26A0\uFE0F');
+    expect(formatChatBody('1\uFE0F\u20E3')).toBe('1\uFE0F\u20E3');
+  });
+
+  it('cuts at the display limit in code points before writing out', () => {
+    expect(formatChatBody(`${'a'.repeat(MAX_DISPLAY_FIELD_CHARS - 1)}\u202Etail`)).toBe(
+      `${'a'.repeat(MAX_DISPLAY_FIELD_CHARS - 1)}\\u{202E}…`
+    );
+  });
+});
+
+describe('formatOutputBlock', () => {
+  it('keeps line feeds and tabs', () => {
+    expect(formatOutputBlock('a\n\tb')).toBe('a\n\tb');
+  });
+
+  it('writes the reordering and zero-width controls, the carriage return and tag characters out', () => {
+    expect(formatOutputBlock('x\u202Ey')).toBe('x\\u{202E}y');
+    expect(formatOutputBlock('x\u200By')).toBe('x\\u{200B}y');
+    expect(formatOutputBlock('x\ry')).toBe('x\\u{000D}y');
+    expect(formatOutputBlock('x\u{E0041}y')).toBe('x\\u{E0041}y');
+  });
+
+  it('draws a pictograph with its presentation selector', () => {
+    expect(formatOutputBlock('\u26A0\uFE0F')).toBe('\u26A0\uFE0F');
+  });
+
+  it('cuts at the display limit in code points before writing out', () => {
+    expect(formatOutputBlock(`${'a'.repeat(MAX_DISPLAY_FIELD_CHARS - 1)}\u202Etail`)).toBe(
+      `${'a'.repeat(MAX_DISPLAY_FIELD_CHARS - 1)}\\u{202E}…`
+    );
+  });
+});
+
+describe('joinDisplayBlocks', () => {
+  it('joins a line and a block with one line feed each', () => {
+    expect(joinDisplayBlocks([sanitizeForDisplay('a'), formatApprovalBody('b\nc')])).toBe(
+      'a\nb\nc'
+    );
+  });
+
+  it('cuts the whole at the display limit and marks the cut', () => {
+    const joined = joinDisplayBlocks([
+      sanitizeForDisplay('x'.repeat(MAX_DISPLAY_FIELD_CHARS)),
+      sanitizeForDisplay('tail'),
+    ]);
+    expect(joined).toBe(`${'x'.repeat(MAX_DISPLAY_FIELD_CHARS)}…`);
+  });
+
+  it('never cuts a written-out character in half: the cut moves before it', () => {
+    const joined = joinDisplayBlocks([
+      sanitizeForDisplay('a'.repeat(MAX_DISPLAY_FIELD_CHARS - 3)),
+      formatPathForDisplay('\u202E'),
+    ]);
+    expect(joined).toBe(`${'a'.repeat(MAX_DISPLAY_FIELD_CHARS - 3)}\n…`);
+  });
+});
+
+describe('sliceDisplayText', () => {
+  // The arguments after the text are not fixed by any design line; this reads them as the
+  // start and end of String.prototype.slice, which the chat body split uses today.
+  async function loadSlice(): Promise<(text: string, start: number, end?: number) => string> {
+    const mod: Record<string, unknown> = await import('../display/untrusted-text');
+    return mod['sliceDisplayText'] as (text: string, start: number, end?: number) => string;
+  }
+
+  it('slices ordinary text like String.prototype.slice', async () => {
+    const slice = await loadSlice();
+    expect(slice('hello @bob', 6)).toBe('@bob');
+    expect(slice('hello @bob', 0, 5)).toBe('hello');
+  });
+
+  it('never leaves half of a written-out character at either end of a slice', async () => {
+    const slice = await loadSlice();
+    const text = 'a\\u{202E}b';
+    const head = slice(text, 0, 4);
+    expect(['a', 'a\\u{202E}']).toContain(head);
+    const tail = slice(text, 4);
+    expect(['\\u{202E}b', 'b']).toContain(tail);
   });
 });

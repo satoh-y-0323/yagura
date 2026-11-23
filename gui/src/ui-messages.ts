@@ -40,13 +40,12 @@ import {
   describeWindowHeader as renderDescribeWindowHeader,
   describeWindowLocation as renderDescribeWindowLocation,
   describeWindowRow as renderDescribeWindowRow,
-  EXTERNAL_TEXT_MAX_CODE_POINTS,
-  foldExternalText,
   foldedFailureReason,
   type PickerWindowRowFacts,
   type WindowHeaderFacts,
 } from './i18n/render';
 import type { TitleParts } from './i18n/messages-en';
+import { EXTERNAL_TEXT_MAX_CODE_POINTS, foldExternalText } from './display/untrusted-text';
 import type { PickerEmpty, PickerMode } from './command-picker/picker-model';
 import type { ChatDeliveryOutcome, DetectedStatusView, WindowStatus } from './ipc/session-boundary';
 import type { ActionBlockReason } from './keymap/action-availability';
@@ -222,9 +221,8 @@ export function describeThemeName(name: string): string {
 }
 
 /**
- * Re-exported so callers outside `i18n/` reach the sanitizer through this
- * facade: folding external text is not message resolution, but the boundary
- * contract keeps `i18n/` imports to this one module.
+ * Re-exported so callers reach the failure lines, built in `i18n/`, and the
+ * fold they use (`display/untrusted-text.ts`) where they read their messages.
  */
 export {
   describeOperationFailure,

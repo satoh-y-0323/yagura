@@ -12,16 +12,13 @@ import { describe, it, expect } from 'vitest';
 
 import {
   MAX_DISPLAY_FIELD_CHARS,
+  MAX_TICKET_TEXT_CHARS,
   formatApprovalBody,
   formatPathForDisplay,
+  formatTicketText,
   sanitizeForDisplay,
 } from '../display/untrusted-text';
-import {
-  MAX_TICKET_TEXT_CHARS,
-  displayTicketSummary,
-  displayTicketWorkspace,
-  formatTicketText,
-} from '../display/ticket-text';
+import { displayTicketSummary, displayTicketWorkspace } from '../display/ticket-text';
 import { BoundaryError } from './session-boundary';
 import {
   narrowTicketChanged,
@@ -292,7 +289,12 @@ describe('formatTicketText', () => {
     expect(formatTicketText(sample)).toBe(formatApprovalBody(sample));
   });
 
-  it('differs from the approval body only in keeping the tab', () => {
+  it('draws the emoji form and writes ZWNJ out, by the rule the chat body shares', () => {
+    expect(formatTicketText('\u26A0\uFE0F')).toBe('\u26A0\uFE0F');
+    expect(formatTicketText('a\u200Cb')).toBe('a\\u{200C}b');
+  });
+
+  it('keeps the tab that the approval body writes out', () => {
     expect(formatApprovalBody('a\tb')).toBe('a\\u{0009}b');
     expect(formatTicketText('a\tb')).toBe('a\tb');
   });

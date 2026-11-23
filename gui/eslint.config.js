@@ -3,6 +3,7 @@ import tseslint from 'typescript-eslint';
 import svelte from 'eslint-plugin-svelte';
 import globals from 'globals';
 import svelteConfig from './svelte.config.js';
+import yagura from './eslint-plugin-yagura.js';
 
 // Shared type-aware parserOptions applied to both .ts and .svelte files.
 const typeAwareParserOptions = {
@@ -13,6 +14,24 @@ const typeAwareParserOptions = {
 
 const PRODUCTION_SOURCES = ['src/**/*.ts', 'src/**/*.svelte'];
 const TEST_SOURCES = ['**/*.test.ts'];
+const LOCAL_PLUGIN = 'eslint-plugin-yagura.js';
+
+// Each brand and the one module that may make a value of it. A test's value is never drawn,
+// so tests and their fixtures build brands as they need.
+const BRANDS = [
+  {
+    type: 'DisplayLine',
+    key: 'displayLineBrand',
+    declaredIn: 'src/display/untrusted-text.ts',
+    maker: 'src/display/untrusted-text.ts',
+  },
+  {
+    type: 'DisplayBlock',
+    key: 'displayBlockBrand',
+    declaredIn: 'src/display/untrusted-text.ts',
+    maker: 'src/display/untrusted-text.ts',
+  },
+];
 
 // Text reaching the DOM goes through Svelte's escaping; `{@html}` is refused by svelte/no-at-html-tags.
 const RAW_HTML_MESSAGE = 'Render text through Svelte expressions, not raw HTML.';
@@ -215,6 +234,19 @@ export default [
         ...typeAwareParserOptions,
         svelteConfig,
       },
+    },
+  },
+  {
+    // The local plugin is plain JavaScript with no types to read; its own lint keeps the rest.
+    ...tseslint.configs.disableTypeChecked,
+    files: [LOCAL_PLUGIN],
+  },
+  {
+    files: PRODUCTION_SOURCES,
+    ignores: [...TEST_SOURCES, 'src/test-utils/**'],
+    plugins: { yagura },
+    rules: {
+      'yagura/no-brand-forging': ['error', { brands: BRANDS }],
     },
   },
   {

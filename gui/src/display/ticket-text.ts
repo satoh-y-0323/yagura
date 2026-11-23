@@ -1,15 +1,10 @@
 /**
- * Display preparation for ticket text. A ticket is written by an AI and read
- * by a person, so every part of it is drawn through these functions.
+ * Display preparation for the one-line parts of a ticket. A ticket is written
+ * by an AI and read by a person; its text of several lines goes through
+ * `formatTicketText` (`untrusted-text.ts`).
  */
 import type { TicketSummary, TicketWorkspace } from '../ipc/ticket-boundary';
-import { formatMultilineText, formatPathForDisplay, sanitizeForDisplay } from './untrusted-text';
-
-/**
- * Longest ticket body or result kept for display, in code points. The daemon
- * caps a body at 16 KiB of UTF-8, which is never more code points than this.
- */
-export const MAX_TICKET_TEXT_CHARS = 16 * 1024;
+import { formatPathForDisplay, sanitizeForDisplay } from './untrusted-text';
 
 /** The one-line parts of a ticket summary, ready to draw as text. */
 export interface TicketSummaryDisplay {
@@ -19,18 +14,6 @@ export interface TicketSummaryDisplay {
   state: string;
   milestone: string | null;
   updated_at: number;
-}
-
-const TICKET_TEXT_KEPT_CONTROLS: ReadonlySet<string> = new Set(['\n', '\t']);
-
-/**
- * Prepares a ticket's body, a result, or other text of several lines for
- * display. Escaped like an approval body, except that tabs are kept and the
- * cap is {@link MAX_TICKET_TEXT_CHARS}.
- * @param value the text to display
- */
-export function formatTicketText(value: string): string {
-  return formatMultilineText(value, MAX_TICKET_TEXT_CHARS, TICKET_TEXT_KEPT_CONTROLS);
 }
 
 /**
