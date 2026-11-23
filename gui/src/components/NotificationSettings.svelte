@@ -38,7 +38,7 @@
             <SettingsSwitch
               checked={preferences.inApp[category]}
               label={settings.notificationsSwitchLabel(name)}
-              text=""
+              text={null}
               disabled={false}
               onToggle={() => onSetPreference(category, !preferences.inApp[category])}
             />

@@ -35,7 +35,7 @@ import { sanitizeForDisplay } from '../display/untrusted-text';
 import type { ApprovalRequest } from '../ipc/session-boundary';
 
 /** The line a failed decision is shown with; passed through untouched. */
-const LINE = 'Could not send the decision.';
+const LINE = sanitizeForDisplay('Could not send the decision.');
 
 function makeRequest(requestId: string, overrides: Partial<ApprovalRequest> = {}): ApprovalRequest {
   const tool = overrides.tool ?? 'close_window';

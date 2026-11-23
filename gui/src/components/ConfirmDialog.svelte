@@ -2,11 +2,13 @@
   import { buttons } from '../ui-messages';
   import ModalDialog from './ModalDialog.svelte';
   import type { ConfirmOperation } from '../session/confirm-target';
+  import type { UiText } from '../display/ui-text';
+  import type { DisplayLine } from '../display/untrusted-text';
 
-  export let title: string;
-  export let message: string;
+  export let title: UiText | DisplayLine;
+  export let message: UiText | DisplayLine;
   export let operation: ConfirmOperation;
-  export let confirmLabel: string;
+  export let confirmLabel: UiText | DisplayLine;
   export let isOpen: boolean = false;
   /** The window the operation is about, or null for a room or a broadcast. */
   export let subject: string | null = null;

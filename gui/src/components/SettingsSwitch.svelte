@@ -5,9 +5,13 @@
    * `onToggle`. No IPC, no decision and no text of its own -- the tab that
    * uses it owns all three.
    */
+  import type { UiText } from '../display/ui-text';
+  import type { DisplayLine } from '../display/untrusted-text';
+
   export let checked: boolean;
-  export let label: string;
-  export let text: string;
+  export let label: UiText | DisplayLine;
+  /** Side text; `null` when the row around the switch already says what it does. */
+  export let text: UiText | DisplayLine | null;
   export let disabled: boolean;
   export let onToggle: () => void;
 </script>

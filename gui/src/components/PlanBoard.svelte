@@ -51,7 +51,7 @@
   export let onSetTaskAssignment: (taskId: string, assignment: AssignmentView) => void;
   export let onClearTaskAssignment: (taskId: string) => void;
   /** Names a window as the owner; resolves the line to show when that failed, `null` when accepted. */
-  export let onSetPlanOwner: (windowId: string) => Promise<string | null>;
+  export let onSetPlanOwner: (windowId: string) => Promise<UiText | null>;
   /** Approves the selected plan. */
   export let onApprovePlan: () => void;
   /** The launch profiles an assignment's profile is chosen from. */
@@ -61,7 +61,7 @@
   // are unique within one plan, not across plans.
   let drafts: Record<string, EditorFields> = {};
   let draftsPlanId: string | null = null;
-  let ownerAssignmentFailure: string | null = null;
+  let ownerAssignmentFailure: UiText | null = null;
 
   $: forgetDraftsOnPlanSwitch(plan === null ? null : plan.plan_id);
   $: owner = plan === null ? null : planOwner(plan, windows);

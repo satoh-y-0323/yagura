@@ -7,6 +7,8 @@
  * `isWithinGuard` takes `now` from its caller, so the guard is decided by
  * whoever owns the clock rather than by this module.
  */
+import type { UiText } from '../display/ui-text';
+import type { DisplayLine } from '../display/untrusted-text';
 import type { ApprovalRequest, DecideApprovalOutcome } from '../ipc/session-boundary';
 
 /**
@@ -33,7 +35,7 @@ export interface ApprovalQueueState {
    * daemon, by request id. The failure note is shown only while one of these
    * is the displayed request.
    */
-  readonly decisionFailures: ReadonlyMap<string, string>;
+  readonly decisionFailures: ReadonlyMap<string, UiText | DisplayLine>;
 }
 
 /** A queue holding nothing. */
@@ -226,7 +228,7 @@ export function settleDecision(
 export function failDecision(
   state: ApprovalQueueState,
   requestId: string,
-  line: string
+  line: UiText | DisplayLine
 ): ApprovalQueueState {
   if (!state.inFlightIds.has(requestId)) {
     return state;
@@ -245,7 +247,10 @@ export function failDecision(
  * @param requestId the displayed request's id
  * @returns the line, or `null` when this request's decision did not fail
  */
-export function decisionFailure(state: ApprovalQueueState, requestId: string): string | null {
+export function decisionFailure(
+  state: ApprovalQueueState,
+  requestId: string
+): UiText | DisplayLine | null {
   return state.decisionFailures.get(requestId) ?? null;
 }
 

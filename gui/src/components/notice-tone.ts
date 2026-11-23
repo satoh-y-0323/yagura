@@ -1,3 +1,4 @@
+import type { UiText } from '../display/ui-text';
 import type { IconName } from '../icons/icon-paths';
 import type { Notice } from '../notices/notice-feed';
 import { banners } from '../ui-messages';
@@ -13,6 +14,6 @@ const TONE_ICONS: Readonly<Record<Notice['tone'], IconName>> = {
  * never told by colour alone.
  * @param tone the notice's tone
  */
-export function noticeToneMark(tone: Notice['tone']): { icon: IconName; label: string } {
+export function noticeToneMark(tone: Notice['tone']): { icon: IconName; label: UiText } {
   return { icon: TONE_ICONS[tone], label: banners.noticeTones[tone] };
 }

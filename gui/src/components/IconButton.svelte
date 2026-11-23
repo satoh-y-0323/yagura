@@ -21,15 +21,17 @@
    * The `<button>` belongs to this component, so a parent's scoped style
    * reaches it only through `:global(.class)`.
    */
+  import type { UiText } from '../display/ui-text';
+  import type { DisplayLine } from '../display/untrusted-text';
   import { tooltip } from './tooltip';
 
-  export let label: string;
-  export let hint: string | undefined = undefined;
+  export let label: UiText | DisplayLine;
+  export let hint: UiText | DisplayLine | undefined = undefined;
   export let disabled = false;
   /** Why the button cannot act now; set it instead of `disabled` to keep focus and say why. */
-  export let disabledReason: string | undefined = undefined;
+  export let disabledReason: UiText | DisplayLine | undefined = undefined;
   /** Text of a press-to-open chip; replaces the hover tooltip. */
-  export let toggletip: string | undefined = undefined;
+  export let toggletip: UiText | DisplayLine | undefined = undefined;
   /** The underlying element, for callers that anchor a popup to it. */
   export let element: HTMLButtonElement | undefined = undefined;
   let className = '';

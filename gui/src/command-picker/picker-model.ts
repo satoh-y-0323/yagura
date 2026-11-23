@@ -38,12 +38,12 @@ export interface PickerAction {
 }
 
 /** What the rows are built from. */
-export interface PickerSource<W extends PickerWindow> {
+export interface PickerSource<W extends PickerWindow, A extends PickerAction = PickerAction> {
   /** In sidebar order. */
   windows: readonly W[];
   currentId: string | null;
   /** In any order: rows follow the action order. */
-  actions: readonly PickerAction[];
+  actions: readonly A[];
 }
 
 /** A part of a shown text, in code points; `end` is excluded. */
@@ -60,24 +60,28 @@ export interface PickerWindowRow<W extends PickerWindow> {
   marks: { name: MarkSpan[]; place: MarkSpan[]; cwd: MarkSpan[]; vendor: MarkSpan[] };
 }
 
-export interface PickerActionRow {
+export interface PickerActionRow<A extends PickerAction = PickerAction> {
   kind: 'action';
   key: string;
-  action: PickerAction;
+  action: A;
   blocked: ActionBlockReason | null;
   /** The section name is shown beside the row, once the rows are no longer grouped. */
   showsSection: boolean;
   marks: { name: MarkSpan[] };
 }
 
-export type PickerRow<W extends PickerWindow> = PickerWindowRow<W> | PickerActionRow;
+export type PickerRow<W extends PickerWindow, A extends PickerAction = PickerAction> =
+  PickerWindowRow<W> | PickerActionRow<A>;
 
-export type PickerHeading =
-  { kind: 'needs-you' } | { kind: 'other-windows' } | { kind: 'actions'; name: string } | null;
+export type PickerHeading<A extends PickerAction = PickerAction> =
+  | { kind: 'needs-you' }
+  | { kind: 'other-windows' }
+  | { kind: 'actions'; name: A['section'] }
+  | null;
 
-export interface PickerSection<W extends PickerWindow> {
-  heading: PickerHeading;
-  rows: PickerRow<W>[];
+export interface PickerSection<W extends PickerWindow, A extends PickerAction = PickerAction> {
+  heading: PickerHeading<A>;
+  rows: PickerRow<W, A>[];
 }
 
 /** Why nothing, or only the New window offer, is listed. `query` is what was typed, prepared for display. */
@@ -87,10 +91,10 @@ export type PickerEmpty =
   | { kind: 'no-command-match'; query: DisplayLine }
   | null;
 
-export interface PickerState<W extends PickerWindow> {
+export interface PickerState<W extends PickerWindow, A extends PickerAction = PickerAction> {
   input: string;
   mode: PickerMode;
-  sections: PickerSection<W>[];
+  sections: PickerSection<W, A>[];
   empty: PickerEmpty;
   /** The key of the selected row. */
   selected: string | null;
@@ -106,19 +110,19 @@ export function openingInput(mode: PickerMode): { input: string; caret: number }
 }
 
 /** The picker as it opens in `mode`, with the first row selected. */
-export function openPicker<W extends PickerWindow>(
+export function openPicker<W extends PickerWindow, A extends PickerAction>(
   mode: PickerMode,
-  source: PickerSource<W>
-): PickerState<W> {
+  source: PickerSource<W, A>
+): PickerState<W, A> {
   return build(openingInput(mode).input, source);
 }
 
 /** Builds the rows again for `input`; the mode follows its leading `>`. */
-export function typeInput<W extends PickerWindow>(
-  _state: PickerState<W>,
+export function typeInput<W extends PickerWindow, A extends PickerAction>(
+  _state: PickerState<W, A>,
   input: string,
-  source: PickerSource<W>
-): PickerState<W> {
+  source: PickerSource<W, A>
+): PickerState<W, A> {
   return build(input, source);
 }
 
@@ -127,11 +131,11 @@ export function typeInput<W extends PickerWindow>(
  * opens the picker as that mode opens, and the key of the mode shown does nothing.
  * @returns the new state, or `null` when nothing changes
  */
-export function pressOpenKey<W extends PickerWindow>(
-  state: PickerState<W>,
+export function pressOpenKey<W extends PickerWindow, A extends PickerAction>(
+  state: PickerState<W, A>,
   mode: PickerMode,
-  source: PickerSource<W>
-): PickerState<W> | null {
+  source: PickerSource<W, A>
+): PickerState<W, A> | null {
   return state.mode === mode ? null : openPicker(mode, source);
 }
 
@@ -141,10 +145,10 @@ export function pressOpenKey<W extends PickerWindow>(
  * added at the end of where it would go now (only when it matches what is
  * typed). The selection stays, unless its row is gone.
  */
-export function refreshPicker<W extends PickerWindow>(
-  state: PickerState<W>,
-  source: PickerSource<W>
-): PickerState<W> {
+export function refreshPicker<W extends PickerWindow, A extends PickerAction>(
+  state: PickerState<W, A>,
+  source: PickerSource<W, A>
+): PickerState<W, A> {
   const sections =
     state.mode === 'commands'
       ? refreshActionSections(state, source)
@@ -158,11 +162,11 @@ export function refreshPicker<W extends PickerWindow>(
  * Moves the selection by `distance` rows, stopping at either end. With nothing
  * selected, down goes to the first row and up to the last.
  */
-export function moveSelection<W extends PickerWindow>(
-  state: PickerState<W>,
+export function moveSelection<W extends PickerWindow, A extends PickerAction>(
+  state: PickerState<W, A>,
   direction: 'down' | 'up',
   distance: number
-): PickerState<W> {
+): PickerState<W, A> {
   const rows = rowsOf(state);
   if (rows.length === 0) {
     return state;
@@ -179,15 +183,17 @@ export function moveSelection<W extends PickerWindow>(
 }
 
 /** Selects the row under the pointer. */
-export function pointAt<W extends PickerWindow>(
-  state: PickerState<W>,
+export function pointAt<W extends PickerWindow, A extends PickerAction>(
+  state: PickerState<W, A>,
   key: string
-): PickerState<W> {
+): PickerState<W, A> {
   return rowsOf(state).some((row) => row.key === key) ? { ...state, selected: key } : state;
 }
 
 /** The row Enter runs: the selected row when it can run, else `null`. */
-export function chosenRow<W extends PickerWindow>(state: PickerState<W>): PickerRow<W> | null {
+export function chosenRow<W extends PickerWindow, A extends PickerAction>(
+  state: PickerState<W, A>
+): PickerRow<W, A> | null {
   const row = rowsOf(state).find((candidate) => candidate.key === state.selected);
   if (row === undefined || (row.kind === 'action' && row.blocked !== null)) {
     return null;
@@ -195,13 +201,18 @@ export function chosenRow<W extends PickerWindow>(state: PickerState<W>): Picker
   return row;
 }
 
-function rowsOf<W extends PickerWindow>(state: PickerState<W>): PickerRow<W>[] {
+function rowsOf<W extends PickerWindow, A extends PickerAction>(
+  state: PickerState<W, A>
+): PickerRow<W, A>[] {
   return state.sections.flatMap((section) => section.rows);
 }
 
 // --- Building the rows ---
 
-function build<W extends PickerWindow>(input: string, source: PickerSource<W>): PickerState<W> {
+function build<W extends PickerWindow, A extends PickerAction>(
+  input: string,
+  source: PickerSource<W, A>
+): PickerState<W, A> {
   const mode: PickerMode = input.startsWith(COMMAND_PREFIX) ? 'commands' : 'windows';
   const query = prepareQuery(input);
   const sections =
@@ -209,13 +220,13 @@ function build<W extends PickerWindow>(input: string, source: PickerSource<W>): 
   return finish(input, mode, sections, source, (rows) => rows[0]?.key ?? null);
 }
 
-function finish<W extends PickerWindow>(
+function finish<W extends PickerWindow, A extends PickerAction>(
   input: string,
   mode: PickerMode,
-  sections: PickerSection<W>[],
-  source: PickerSource<W>,
-  selectedIn: (rows: PickerRow<W>[]) => string | null
-): PickerState<W> {
+  sections: PickerSection<W, A>[],
+  source: PickerSource<W, A>,
+  selectedIn: (rows: PickerRow<W, A>[]) => string | null
+): PickerState<W, A> {
   const kept = sections.filter((section) => section.rows.length > 0);
   const rows = kept.flatMap((section) => section.rows);
   return {
@@ -228,10 +239,10 @@ function finish<W extends PickerWindow>(
   };
 }
 
-function emptyOf<W extends PickerWindow>(
+function emptyOf<W extends PickerWindow, A extends PickerAction>(
   mode: PickerMode,
   query: Query,
-  source: PickerSource<W>,
+  source: PickerSource<W, A>,
   rowCount: number
 ): PickerEmpty {
   if (mode === 'windows' && query.words.length === 0 && source.windows.length === 0) {
@@ -247,10 +258,10 @@ function emptyOf<W extends PickerWindow>(
     : { kind: 'no-command-match', query: typed };
 }
 
-function windowSections<W extends PickerWindow>(
+function windowSections<W extends PickerWindow, A extends PickerAction>(
   query: Query,
-  source: PickerSource<W>
-): PickerSection<W>[] {
+  source: PickerSource<W, A>
+): PickerSection<W, A>[] {
   if (query.words.length === 0) {
     if (source.windows.length === 0) {
       return [{ heading: null, rows: newWindowOffer(source) }];
@@ -284,13 +295,18 @@ const NEEDS_YOU = { kind: 'needs-you' } as const;
 const OTHER_WINDOWS = { kind: 'other-windows' } as const;
 
 /** With nothing open, the windows mode offers to open one, so it is never a dead end. */
-function newWindowOffer<W extends PickerWindow>(source: PickerSource<W>): PickerRow<W>[] {
+function newWindowOffer<W extends PickerWindow, A extends PickerAction>(
+  source: PickerSource<W, A>
+): PickerRow<W, A>[] {
   const action = source.actions.find((candidate) => candidate.id === 'open-window-form');
   return action === undefined ? [] : [actionRow(action, null, false)];
 }
 
 /** Sorts one section with nothing typed; the current window goes last. */
-function sortWindows<W extends PickerWindow>(windows: readonly W[], source: PickerSource<W>): W[] {
+function sortWindows<W extends PickerWindow, A extends PickerAction>(
+  windows: readonly W[],
+  source: PickerSource<W, A>
+): W[] {
   const order = sidebarOrder(source);
   const sorted = [...windows].sort((a, b) => compareByAttention(a, b, order));
   return moveCurrentLast(sorted, (w) => w.windowId === source.currentId);
@@ -314,7 +330,9 @@ function compareByAttention(
   );
 }
 
-function sidebarOrder<W extends PickerWindow>(source: PickerSource<W>): Map<string, number> {
+function sidebarOrder<W extends PickerWindow, A extends PickerAction>(
+  source: PickerSource<W, A>
+): Map<string, number> {
   return new Map(source.windows.map((w, index) => [w.windowId, index]));
 }
 
@@ -322,10 +340,10 @@ function moveCurrentLast<T>(items: T[], isCurrent: (item: T) => boolean): T[] {
   return [...items.filter((item) => !isCurrent(item)), ...items.filter(isCurrent)];
 }
 
-function windowRow<W extends PickerWindow>(
+function windowRow<W extends PickerWindow, A extends PickerAction>(
   window: W,
   marks: PickerWindowRow<W>['marks'] | null,
-  source: PickerSource<W>
+  source: PickerSource<W, A>
 ): PickerWindowRow<W> {
   return {
     kind: 'window',
@@ -336,21 +354,21 @@ function windowRow<W extends PickerWindow>(
   };
 }
 
-function actionSections<W extends PickerWindow>(
+function actionSections<W extends PickerWindow, A extends PickerAction>(
   query: Query,
-  source: PickerSource<W>
-): PickerSection<W>[] {
+  source: PickerSource<W, A>
+): PickerSection<W, A>[] {
   const listed = [...source.actions]
     .filter((action) => action.id !== 'open-command-palette')
     .sort((a, b) => ACTION_IDS.indexOf(a.id) - ACTION_IDS.indexOf(b.id));
   if (query.words.length === 0) {
-    const bySection = new Map<string, PickerRow<W>[]>();
+    const bySection = new Map<A['section'], PickerRow<W, A>[]>();
     for (const action of listed) {
       const rows = bySection.get(action.section) ?? [];
       rows.push(actionRow(action, null, false));
       bySection.set(action.section, rows);
     }
-    return Array.from(bySection, ([name, rows]): PickerSection<W> => ({
+    return Array.from(bySection, ([name, rows]): PickerSection<W, A> => ({
       heading: { kind: 'actions', name },
       rows,
     }));
@@ -372,11 +390,11 @@ function actionSections<W extends PickerWindow>(
   ];
 }
 
-function actionRow(
-  action: PickerAction,
+function actionRow<A extends PickerAction>(
+  action: A,
   marks: { name: MarkSpan[] } | null,
   showsSection: boolean
-): PickerActionRow {
+): PickerActionRow<A> {
   return {
     kind: 'action',
     key: `action:${action.id}`,
@@ -389,17 +407,17 @@ function actionRow(
 
 // --- Keeping the rows while the picker is open ---
 
-function refreshWindowSections<W extends PickerWindow>(
-  state: PickerState<W>,
-  source: PickerSource<W>
-): PickerSection<W>[] {
+function refreshWindowSections<W extends PickerWindow, A extends PickerAction>(
+  state: PickerState<W, A>,
+  source: PickerSource<W, A>
+): PickerSection<W, A>[] {
   const query = prepareQuery(state.input);
   const byId = new Map(source.windows.map((w) => [w.windowId, w]));
   const marksFor = (w: W) =>
     query.words.length === 0 ? null : (matchWindow(w, query)?.marks ?? null);
-  const sections: PickerSection<W>[] = state.sections.map((section) => ({
+  const sections: PickerSection<W, A>[] = state.sections.map((section) => ({
     heading: section.heading,
-    rows: section.rows.flatMap((row): PickerRow<W>[] => {
+    rows: section.rows.flatMap((row): PickerRow<W, A>[] => {
       if (row.kind === 'action') {
         // The only action row here is the New window offer; the check below rebuilds it.
         return [];
@@ -440,24 +458,24 @@ function refreshWindowSections<W extends PickerWindow>(
 }
 
 /** The section with `heading`, inserted at `at` when there is none. */
-function sectionFor<W extends PickerWindow>(
-  sections: PickerSection<W>[],
-  heading: PickerHeading,
+function sectionFor<W extends PickerWindow, A extends PickerAction>(
+  sections: PickerSection<W, A>[],
+  heading: PickerHeading<A>,
   at: number
-): PickerSection<W> {
+): PickerSection<W, A> {
   const found = sections.find((section) => section.heading?.kind === heading?.kind);
   if (found !== undefined) {
     return found;
   }
-  const created: PickerSection<W> = { heading, rows: [] };
+  const created: PickerSection<W, A> = { heading, rows: [] };
   sections.splice(at, 0, created);
   return created;
 }
 
-function refreshActionSections<W extends PickerWindow>(
-  state: PickerState<W>,
-  source: PickerSource<W>
-): PickerSection<W>[] {
+function refreshActionSections<W extends PickerWindow, A extends PickerAction>(
+  state: PickerState<W, A>,
+  source: PickerSource<W, A>
+): PickerSection<W, A>[] {
   return state.sections.map((section) => ({
     heading: section.heading,
     rows: section.rows.flatMap((row) =>
@@ -466,10 +484,10 @@ function refreshActionSections<W extends PickerWindow>(
   }));
 }
 
-function refreshActionRow<W extends PickerWindow>(
-  row: PickerActionRow,
-  source: PickerSource<W>
-): PickerRow<W>[] {
+function refreshActionRow<W extends PickerWindow, A extends PickerAction>(
+  row: PickerActionRow<A>,
+  source: PickerSource<W, A>
+): PickerRow<W, A>[] {
   const now = source.actions.find((action) => action.id === row.action.id);
   return now === undefined ? [] : [actionRow(now, row.marks, row.showsSection)];
 }

@@ -383,7 +383,6 @@
     describeEventTime,
     describeOperationFailure,
     describeThemeName,
-    foldExternalText,
     foldedFailureReason,
     plans as plansText,
     settings,
@@ -421,14 +420,14 @@
 
   // Why the detection definitions could not be enumerated. This one arises
   // while the dialog is open, so the dialog displays it.
-  let detectionListWarning: string | null = null;
+  let detectionListWarning: UiText | null = null;
 
   // The launch profiles the daemon offers, as of the last successful
   // enumeration, and why the last one failed. Their own pair of variables:
   // a profile-list failure must not overwrite the detection-list warning,
   // which is about a different list and a different field.
   let profileOptions: ProfileOption[] = [];
-  let profileListWarning: string | null = null;
+  let profileListWarning: UiText | null = null;
 
   // What was launched from the dialog last time at this terminal, which is
   // what it opens on.
@@ -670,11 +669,11 @@
   // for it, and the state of a command save or reset for it.
   let openProfileDetailId: string | null = null;
   let profileDetail: ProfileDetail | null = null;
-  let profileDetailFailure: string | null = null;
+  let profileDetailFailure: UiText | null = null;
   // A command save belongs to the profile it was sent for, so another
   // profile's details opened meanwhile never show its state.
   let savingCommandProfileId: string | null = null;
-  let profileCommandFailure: { id: string; line: string } | null = null;
+  let profileCommandFailure: { id: string; line: UiText } | null = null;
   // A request to show one profile in the Plans panel's Models tab.
   let requestedModelProfile: { id: string; seq: number } | null = null;
 
@@ -1988,7 +1987,7 @@
   }
 
   /** Resolves the line to show when the assignment failed, `null` when it was accepted. */
-  async function setPlanOwner(windowId: string): Promise<string | null> {
+  async function setPlanOwner(windowId: string): Promise<UiText | null> {
     const planId = selectedPlanId;
     if (planId === null) {
       return plansText.assignOwnerFailed;
@@ -3207,11 +3206,7 @@
    * compatibility changes alone, which also say when it stops being so.
    */
   function takeDaemonConnection(connection: DaemonConnectedPayload): Promise<void> {
-    const warning = connection.spawn_warning;
-    noticeState = {
-      ...noticeState,
-      daemonSpawnNotice: warning === null ? null : foldExternalText(warning),
-    };
+    noticeState = { ...noticeState, daemonSpawnNotice: connection.spawn_warning };
     return connection.compatible ? rereadDaemonStart() : Promise.resolve();
   }
 

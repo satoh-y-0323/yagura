@@ -1,5 +1,7 @@
 <script lang="ts">
   import { commandFailureOf } from '../command-failure-model';
+  import type { UiText } from '../display/ui-text';
+  import type { DisplayLine } from '../display/untrusted-text';
   import { mappedLaunchOptionValues } from '../profile/launch-profile-choices';
   import { buttons, errors, forms } from '../ui-messages';
   import { describeWindowOpenFailure } from '../window-open-failure-model';
@@ -23,7 +25,7 @@
    * is closed must survive until it is opened again, so it is only displayed
    * here, never set or cleared.
    */
-  export let warning: string | null = null;
+  export let warning: UiText | DisplayLine | null = null;
   /** The working directory currently entered, held by the caller. */
   export let cwdValue: string = '';
   /** Reports a new working directory back to the caller. */
@@ -54,7 +56,7 @@
    * could not be read says nothing about the detection definitions, and the
    * Custom form stays usable either way.
    */
-  export let profileWarning: string | null = null;
+  export let profileWarning: UiText | DisplayLine | null = null;
   /** The `model` value currently entered, held by the caller. */
   export let modelValue: string = '';
   /** Reports a new `model` value back to the caller. */
@@ -69,7 +71,7 @@
   let commandInput = '';
   let nameInput = '';
   let isSubmitting = false;
-  let formError: string | null = null;
+  let formError: UiText | DisplayLine | null = null;
 
   /** The profile the selection names, `null` while Custom is selected. */
   $: selectedProfile = profileOptions.find((entry) => entry.id === profileValue) ?? null;

@@ -1,7 +1,9 @@
 /**
  * Display preparation for untrusted text: text the daemon or a child process
- * wrote and a person reads. Display-only parts import from here, never from
- * `ipc/`, so every drawn string passes through these functions.
+ * wrote and a person reads. Every drawn string has the type of its maker
+ * (`DisplayLine` and `DisplayBlock` from here, `UiText` from the message
+ * resources); the types, `MessagesTextContract` and the `yagura/display-text`
+ * and `yagura/no-brand-forging` lint rules hold that, except in an input's `value`.
  */
 import type { UiText } from './ui-text';
 
@@ -307,6 +309,12 @@ function sliceIndex(length: number, index: number): number {
   return index < 0 ? Math.max(length + index, 0) : Math.min(index, length);
 }
 
+function slicePrepared(text: string, start: number, end: number | undefined): string {
+  const from = unsplitIndex(text, sliceIndex(text.length, start));
+  const to = unsplitIndex(text, sliceIndex(text.length, end ?? text.length));
+  return text.slice(from, to);
+}
+
 /**
  * Part of prepared text, taken as `String.prototype.slice` takes it (UTF-16
  * indices, a negative one counted from the end), with each end moved back to
@@ -321,9 +329,19 @@ export function sliceDisplayText<T extends DisplayLine | DisplayBlock>(
   start: number,
   end?: number
 ): T {
-  const from = unsplitIndex(text, sliceIndex(text.length, start));
-  const to = unsplitIndex(text, sliceIndex(text.length, end ?? text.length));
-  return text.slice(from, to) as T;
+  return slicePrepared(text, start, end) as T;
+}
+
+/**
+ * Part of the UI's own text, cut as {@link sliceDisplayText} cuts, as one
+ * display line. Only the message resources make `UiText`, so the part is
+ * prepared here as {@link sanitizeForDisplay} prepares a line.
+ * @param text the UI text
+ * @param start where the part begins
+ * @param end where the part ends; the end of `text` when left out
+ */
+export function sliceUiText(text: UiText, start: number, end?: number): DisplayLine {
+  return sanitizeForDisplay(slicePrepared(text, start, end));
 }
 
 /**

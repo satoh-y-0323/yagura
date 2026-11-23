@@ -7,14 +7,16 @@
  */
 import { writable } from 'svelte/store';
 
+import type { UiText } from '../display/ui-text';
+import type { DisplayLine } from '../display/untrusted-text';
 import { isImeKey } from '../keymap/key-chord';
 import { isKeyboardFocus, sharedInputModality } from './input-modality';
 import { createTooltipController } from './tooltip-controller';
 
 export interface TooltipOptions {
-  text: string;
+  text: UiText | DisplayLine;
   /** Lines drawn under `text`; empty or absent for a plain tooltip. */
-  details?: readonly string[];
+  details?: readonly (UiText | DisplayLine)[];
   /** `toggle` is the press-to-open chip (a toggletip); `hover` is the default. */
   mode?: 'hover' | 'toggle';
   /** The trigger already exposes `text` as its name or description, so assistive tech skips the tooltip. */
@@ -25,8 +27,8 @@ export interface TooltipOptions {
 export interface ActiveTooltip {
   owner: object;
   origin: HTMLElement;
-  text: string;
-  details: readonly string[];
+  text: UiText | DisplayLine;
+  details: readonly (UiText | DisplayLine)[];
   mode: 'hover' | 'toggle';
   announcedElsewhere: boolean;
   holdOpen: () => void;

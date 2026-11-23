@@ -12,10 +12,10 @@
   import IconButton from './IconButton.svelte';
 
   export let detail: ProfileDetail | null;
-  export let failure: string | null;
+  export let failure: UiText | null;
   export let platformName: UiText;
   export let isSavingCommand: boolean;
-  export let commandFailure: string | null;
+  export let commandFailure: UiText | null;
   export let onSaveCommand: (argv: string[]) => void;
   export let onResetCommand: () => void;
   export let onOpenModels: () => void;

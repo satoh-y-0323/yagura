@@ -1,4 +1,6 @@
 <script lang="ts">
+  import type { UiText } from '../display/ui-text';
+  import type { DisplayLine } from '../display/untrusted-text';
   import type { ApprovalRequest } from '../ipc/session-boundary';
   import { isWithinGuard } from '../session/approval-queue';
   import { describeApprovalRequester, describeApprovalTarget } from '../session/approval-target';
@@ -19,7 +21,7 @@
    * The line for the decision on the request shown now that could not be sent, `null` when it did not fail. The
    * shell answers it for this request only; the note never moves focus.
    */
-  export let decisionFailure: string | null = null;
+  export let decisionFailure: UiText | DisplayLine | null = null;
 
   const failureNoteId = 'approval-decision-failed';
   $: describedBy = decisionFailure !== null ? failureNoteId : undefined;

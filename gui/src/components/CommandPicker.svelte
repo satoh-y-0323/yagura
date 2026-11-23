@@ -1,9 +1,11 @@
 <script context="module" lang="ts">
+  import type { DisplayLine } from '../display/untrusted-text';
+
   let instanceCount = 0;
 
   /** A run of a shown text, marked or not. */
   interface TextPiece {
-    text: string;
+    text: DisplayLine;
     marked: boolean;
   }
 </script>
@@ -36,7 +38,7 @@
   } from '../command-picker/picker-model';
   import { splitPreparedForMiddleEllipsis } from '../chat/middle-ellipsis';
   import type { UiText } from '../display/ui-text';
-  import type { DisplayLine } from '../display/untrusted-text';
+  import { sliceDisplayText, sliceUiText } from '../display/untrusted-text';
   import type { ActionVerdict } from '../keymap/action-availability';
   import { defaultKeysFor } from '../keymap/default-keymap';
   import type { ActionId } from '../keymap/key-binding';
@@ -92,6 +94,13 @@
     entry: WindowEntry;
   }
 
+  /** One action as the palette shows it. */
+  interface PickerEntryAction extends PickerAction {
+    name: UiText;
+    keywords: UiText;
+    section: UiText;
+  }
+
   // The list shows this many rows before it scrolls, and Page Up / Page Down move by it.
   const PAGE_ROWS = 10;
   // Read once typing pauses; the delay paces the screen reader and nothing else.
@@ -102,9 +111,9 @@
 
   let inputElement: HTMLInputElement | null = null;
   let listElement: HTMLDivElement | null = null;
-  let state: PickerState<PickerEntry> | null = null;
+  let state: PickerState<PickerEntry, PickerEntryAction> | null = null;
   let wasOpen = false;
-  let announcement = '';
+  let announcement: UiText | null = null;
   let announceTimer: ReturnType<typeof setTimeout> | null = null;
 
   function pickerWindowOf(entry: WindowEntry): PickerEntry {
@@ -123,7 +132,7 @@
 
   // The Keyboard tab's rows name each action's section, so the palette's
   // sections are the tab's own; the defaults only feed what the tab marks changed.
-  function actionsNow(): PickerAction[] {
+  function actionsNow(): PickerEntryAction[] {
     return keyboardRows(keys, defaultKeysFor(platform)).map((row) => ({
       id: row.action,
       name: settings.keyboardActionName(row.action),
@@ -133,7 +142,7 @@
     }));
   }
 
-  function sourceNow(): PickerSource<PickerEntry> {
+  function sourceNow(): PickerSource<PickerEntry, PickerEntryAction> {
     return { windows: windows.map(pickerWindowOf), currentId, actions: actionsNow() };
   }
 
@@ -314,18 +323,24 @@
       clearTimeout(announceTimer);
       announceTimer = null;
     }
-    announcement = '';
+    announcement = null;
   }
 
   onDestroy(stopAnnouncing);
 
-  /** Cuts the code points `[start, end)` of a shown text into marked and plain runs. */
+  /**
+   * Cuts the code points `[start, end)` of a shown text into marked and plain runs;
+   * `cut` takes a part of the text between two UTF-16 offsets.
+   */
   function piecesOf(
     points: readonly string[],
     marks: readonly MarkSpan[],
     start: number,
-    end: number
+    end: number,
+    cut: (from: number, to: number) => DisplayLine
   ): TextPiece[] {
+    const offset = (point: number): number => points.slice(0, point).join('').length;
+    const part = (from: number, to: number): DisplayLine => cut(offset(from), offset(to));
     const pieces: TextPiece[] = [];
     let at = start;
     for (const mark of marks) {
@@ -335,20 +350,27 @@
         continue;
       }
       if (from > at) {
-        pieces.push({ text: points.slice(at, from).join(''), marked: false });
+        pieces.push({ text: part(at, from), marked: false });
       }
-      pieces.push({ text: points.slice(from, to).join(''), marked: true });
+      pieces.push({ text: part(from, to), marked: true });
       at = to;
     }
     if (at < end) {
-      pieces.push({ text: points.slice(at, end).join(''), marked: false });
+      pieces.push({ text: part(at, end), marked: false });
     }
     return pieces;
   }
 
-  function markedText(text: string, marks: readonly MarkSpan[]): TextPiece[] {
+  function markedText(text: DisplayLine, marks: readonly MarkSpan[]): TextPiece[] {
     const points = Array.from(text);
-    return piecesOf(points, marks, 0, points.length);
+    return piecesOf(points, marks, 0, points.length, (from, to) =>
+      sliceDisplayText(text, from, to)
+    );
+  }
+
+  function markedUiText(text: UiText, marks: readonly MarkSpan[]): TextPiece[] {
+    const points = Array.from(text);
+    return piecesOf(points, marks, 0, points.length, (from, to) => sliceUiText(text, from, to));
   }
 
   /** The cwd split for an ellipsis in its middle, each half cut into its runs. */
@@ -358,9 +380,10 @@
   ): { head: TextPiece[]; tail: TextPiece[] } {
     const points = Array.from(cwd);
     const headLength = Array.from(splitPreparedForMiddleEllipsis(cwd).head).length;
+    const cut = (from: number, to: number): DisplayLine => sliceDisplayText(cwd, from, to);
     return {
-      head: piecesOf(points, marks, 0, headLength),
-      tail: piecesOf(points, marks, headLength, points.length),
+      head: piecesOf(points, marks, 0, headLength, cut),
+      tail: piecesOf(points, marks, headLength, points.length, cut),
     };
   }
 
@@ -373,7 +396,7 @@
     return `command-picker-${instance}-option-${key}`;
   }
 
-  function headingText(heading: NonNullable<PickerHeading>): string {
+  function headingText(heading: NonNullable<PickerHeading<PickerEntryAction>>): UiText {
     switch (heading.kind) {
       case 'needs-you':
         return picker.needsYouHeading;
@@ -544,7 +567,7 @@
                     )}</span
                   >
                   <span class="command-picker__name"
-                    >{@render marked(markedText(row.action.name, row.marks.name))}</span
+                    >{@render marked(markedUiText(row.action.name, row.marks.name))}</span
                   >
                   {#if row.blocked !== null}
                     <span id="{optionId(row.key)}-why" class="command-picker__why"

@@ -9,6 +9,7 @@
  */
 import {
   caughtValueText,
+  foldExternalText,
   formatApprovalBody,
   formatChatBody,
   formatCommandLine,
@@ -195,9 +196,9 @@ export interface DaemonConnectedPayload {
   status_boot: StatusBoot | null;
   /**
    * English text naming the consequence when this GUI started the daemon
-   * with the weaker detachment; `null` for any other start.
+   * with the weaker detachment, folded to one line; `null` for any other start.
    */
-  spawn_warning: string | null;
+  spawn_warning: DisplayLine | null;
   /**
    * Whether the daemon answered this build's own wire revision. When it did
    * not, nothing but the revision probe is ever sent to it.
@@ -1135,9 +1136,11 @@ export function narrowWindowLinkPayload(value: unknown): WindowLinkPayload {
 export function narrowDaemonConnectedPayload(value: unknown): DaemonConnectedPayload {
   const context = SESSION_EVENT.daemonConnected;
   const record = requireRecord(value, context);
+  const statusBoot = readOptionalStatusBoot(record, context, 'drop');
+  const warning = readOptionalString(record, 'spawn_warning', context);
   return {
-    status_boot: readOptionalStatusBoot(record, context, 'drop'),
-    spawn_warning: readOptionalString(record, 'spawn_warning', context),
+    status_boot: statusBoot,
+    spawn_warning: warning === null ? null : foldExternalText(warning),
     compatible: requireBoolean(record, 'compatible', context),
   };
 }

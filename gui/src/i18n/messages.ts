@@ -76,3 +76,6 @@ export type NoUnpreparedParams<T extends never> = T;
 
 /** The paths of the `messagesEn` functions that still accept unprepared text. */
 export type UnpreparedMessageParams = UnpreparedParams<MessagesSource>;
+
+/** Fails to type-check, naming the paths, while any `messagesEn` function accepts unprepared text. */
+export type MessagesTextContract = NoUnpreparedParams<UnpreparedMessageParams>;

@@ -39,47 +39,8 @@ const BRANDS = [
   },
 ];
 
-// The templates whose shown text must be one of the brands; the list grows as each part of
-// the GUI hands its templates prepared text.
-const DISPLAY_TEXT_TEMPLATES = [
-  'src/components/McpMark.svelte',
-  'src/components/StatusReportMark.svelte',
-  'src/components/QueuedMark.svelte',
-  'src/components/LaunchProfileFields.svelte',
-  'src/components/GuidanceCopyRows.svelte',
-  'src/components/PlansPanel.svelte',
-  'src/components/RolesEditor.svelte',
-  'src/components/PlansAttentionMark.svelte',
-  'src/components/ChatPanel.svelte',
-  'src/components/NavigatorRow.svelte',
-  'src/components/WindowHeader.svelte',
-  'src/components/WindowMenu.svelte',
-  'src/components/WindowControls.svelte',
-  'src/components/FloatWindow.svelte',
-  'src/components/ExitedCard.svelte',
-  'src/components/RestoreDialog.svelte',
-  'src/components/RenameDialog.svelte',
-  'src/components/AppRail.svelte',
-  'src/components/KeyboardSettings.svelte',
-  'src/components/EmptyState.svelte',
-  'src/components/SettingsPanel.svelte',
-  'src/components/StatusBadge.svelte',
-  'src/components/TerminalPane.svelte',
-  'src/components/ProfileSettings.svelte',
-  'src/components/IntegrationSettings.svelte',
-  'src/components/ApprovalSettings.svelte',
-  'src/components/LaneCard.svelte',
-  'src/components/NoticeLane.svelte',
-  'src/components/NoticeCenter.svelte',
-  'src/components/AlertStrip.svelte',
-  'src/components/NoticeAnnouncer.svelte',
-  'src/components/NotificationSettings.svelte',
-  'src/components/TicketBoard.svelte',
-  'src/components/TicketDetail.svelte',
-  'src/shell/Navigator.svelte',
-  'src/shell/WorkArea.svelte',
-  'src/App.svelte',
-];
+// Every template's shown text must be one of the brands.
+const DISPLAY_TEXT_TEMPLATES = ['src/**/*.svelte'];
 
 // Text reaching the DOM goes through Svelte's escaping; `{@html}` is refused by svelte/no-at-html-tags.
 const RAW_HTML_MESSAGE = 'Render text through Svelte expressions, not raw HTML.';

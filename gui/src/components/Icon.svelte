@@ -4,11 +4,13 @@
    * decoration and hidden from assistive technology; with `label` it is a
    * standalone image that carries its meaning as its accessible name.
    */
+  import type { UiText } from '../display/ui-text';
+  import type { DisplayLine } from '../display/untrusted-text';
   import { ICON_SHAPES, type IconName } from '../icons/icon-paths';
 
   export let name: IconName;
   export let size: 'xs' | 'sm' | 'md' | 'xl' = 'md';
-  export let label: string | undefined = undefined;
+  export let label: UiText | DisplayLine | undefined = undefined;
 </script>
 
 <svg

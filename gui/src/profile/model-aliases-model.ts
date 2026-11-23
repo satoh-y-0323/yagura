@@ -38,7 +38,7 @@ export type ChoicesFailure =
   /** The requested list did not arrive within {@link CHOICES_FETCH_TIMEOUT_MS}. */
   | { kind: 'overdue' }
   /** A whole line chosen when the request failed, shown in place of the list as it is. */
-  | { kind: 'line'; line: string };
+  | { kind: 'line'; line: UiText };
 
 /** Where one profile's model list stands. */
 export type ModelChoicesEntry =
@@ -149,7 +149,7 @@ export function isChoicesFetchOverdue(startedAtMs: number, nowMs: number): boole
 }
 
 /** The line shown in place of the model list when none could be read. */
-export function choicesFailureLine(failure: ChoicesFailure): string {
+export function choicesFailureLine(failure: ChoicesFailure): UiText {
   if (failure.kind === 'line') {
     return failure.line;
   }

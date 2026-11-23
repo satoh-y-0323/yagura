@@ -151,11 +151,11 @@ export interface ProfileDetailsState {
   /** The open profile's details, null while they are being read. */
   detail: ProfileDetail | null;
   /** The line shown when the open profile's details could not be read. */
-  failure: string | null;
+  failure: UiText | null;
   /** Whether a command save or reset for the open profile is in flight. */
   isSavingCommand: boolean;
   /** The line shown when the last command save or reset failed. */
-  commandFailure: string | null;
+  commandFailure: UiText | null;
   /** The host operating system's name, as the command heading says it. */
   platformName: UiText;
 }

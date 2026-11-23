@@ -17,7 +17,7 @@ import type {
 } from '../ipc/plan-boundary';
 import { commandRejectionCode } from '../command-failure-model';
 import type { UiText } from '../display/ui-text';
-import { sanitizeForDisplay } from '../display/untrusted-text';
+import { sanitizeForDisplay, type DisplayLine } from '../display/untrusted-text';
 import type { DetectedStatusView } from '../ipc/session-boundary';
 import { limitGuidance, profileLimit, type LaunchProfile } from '../profile/launch-profile-choices';
 import { plans } from '../ui-messages';
@@ -28,7 +28,7 @@ export type BoardWindow = Pick<WindowEntry, 'windowId' | 'displayName' | 'detect
 
 /** A window a plan names, resolved against the window list. */
 export type BoardWindowState =
-  | { kind: 'live'; windowId: string; displayName: string; detected: DetectedStatusView }
+  | { kind: 'live'; windowId: string; displayName: DisplayLine; detected: DetectedStatusView }
   | { kind: 'none' };
 
 /** One task, laid out with the window state of the window it names. */
@@ -219,7 +219,7 @@ export function assignmentFromEditor(fields: EditorFields): TaskAssignment {
 export function ownerCandidates(
   _plan: PlanInfo,
   windows: readonly BoardWindow[]
-): { windowId: string; displayName: string }[] {
+): { windowId: string; displayName: DisplayLine }[] {
   return windows
     .filter((window) => isWindowLive(windows, window.windowId))
     .map((window) => ({ windowId: window.windowId, displayName: window.displayName }));

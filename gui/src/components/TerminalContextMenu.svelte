@@ -3,14 +3,15 @@
   import PopupMenu from './PopupMenu.svelte';
   import type { Rect } from './menu-position';
   import { menus } from '../ui-messages';
+  import type { UiText } from '../display/ui-text';
 
   export let isOpen = false;
   /** Where the right-click landed, viewport-relative. */
   export let at: { x: number; y: number } | null;
   export let canCopy: boolean;
   /** The platform's copy and paste chords, as the user reads them. */
-  export let copyKeys: string;
-  export let pasteKeys: string;
+  export let copyKeys: UiText;
+  export let pasteKeys: UiText;
   export let onCopy: () => void;
   export let onPaste: () => void;
   export let onClose: () => void;

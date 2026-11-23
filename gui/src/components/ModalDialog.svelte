@@ -2,6 +2,8 @@
   import { onDestroy } from 'svelte';
 
   import { isImeKey } from '../keymap/key-chord';
+  import type { UiText } from '../display/ui-text';
+  import type { DisplayLine } from '../display/untrusted-text';
   import { modalFocusPort, type ModalFocusToken } from '../session/modal-focus-port';
   import { focusAutofocusDelegate, shouldRefocus } from './modal-refocus';
 
@@ -14,7 +16,7 @@
    */
   export let maxWidth: string | null = null;
   /** The dialog's accessible name; `null` leaves the dialog without one. */
-  export let label: string | null = null;
+  export let label: UiText | DisplayLine | null = null;
   /** `picker` is the command picker's frame: wider, near the top, and edge to edge inside. */
   export let variant: 'form' | 'picker' = 'form';
   /** The window the dialog is about, or null; decides where focus goes once it closes. */
