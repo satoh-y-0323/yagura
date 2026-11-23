@@ -4,7 +4,11 @@
 
   import { commandFailureLine, commandFailureOf } from '../command-failure-model';
   import { describeBoundaryNotice, type BoundaryOperation } from '../notices/boundary-notice';
-  import type { OpenWindowSubmission, ProfileOption } from '../components/add-window-dialog-types';
+  import {
+    detectionChoices,
+    type OpenWindowSubmission,
+    type ProfileOption,
+  } from '../components/add-window-dialog-types';
   import AddWindowDialog from '../components/AddWindowDialog.svelte';
   import AlertStrip from '../components/AlertStrip.svelte';
   import AppRail from '../components/AppRail.svelte';
@@ -851,12 +855,7 @@
   // switched on. Settings needs the full list -- it is where a disabled one
   // is switched back on -- so it alone is handed the unfiltered profileOptions.
   $: offeredProfileOptions = offeredProfiles(profileOptions);
-  // A definition the user picked before the list dropped it stays selectable,
-  // so a stale-looking selection is never silently swapped for the default.
-  $: detectionOptions =
-    detectionInput !== '' && !detectionNames.includes(detectionInput)
-      ? [detectionInput, ...detectionNames]
-      : detectionNames;
+  $: detectionOptions = detectionChoices(detectionNames, detectionInput);
   $: sourceState = {
     ...noticeState,
     hasThemeLoadFailure: themeLoadFailure !== null,

@@ -7,18 +7,29 @@ import { describe, it, expect } from 'vitest';
 import { profileSettingsRows, rolesUsingProfile } from './profile-settings-model';
 import type { ProfileOption } from '../components/add-window-dialog-types';
 import type { RoleEntry } from '../ipc/plan-boundary';
-import type { ProfileLimit } from '../ipc/session-client';
+import type { ProfileGuidance, ProfileLimit } from '../ipc/session-client';
+import {
+  foldExternalText,
+  formatCommandLine,
+  formatPathForDisplay,
+  sanitizeForDisplay,
+} from '../display/untrusted-text';
 import { settings } from '../ui-messages';
 
 function option(overrides: Partial<ProfileOption> = {}): ProfileOption {
+  const id = overrides.id ?? 'codex-cli';
+  const command = overrides.command ?? ['codex'];
   return {
-    id: 'codex-cli',
-    displayName: 'Codex CLI',
+    id,
+    displayId: sanitizeForDisplay(id),
+    displayName: sanitizeForDisplay('Codex CLI'),
     detection: null,
+    displayDetection: null,
     detectionWarning: null,
     displayDetectionWarning: null,
     cwd: null,
-    command: ['codex'],
+    command,
+    displayCommand: formatCommandLine(command),
     available: true,
     reason: null,
     unavailableKind: null,
@@ -31,11 +42,21 @@ function option(overrides: Partial<ProfileOption> = {}): ProfileOption {
   };
 }
 
-const GUIDANCE = {
-  text: 'Install the standalone build.',
-  command: 'install-it',
-  url: 'https://example.com/install',
-};
+function guidance(text: string, command: string | null, url: string | null): ProfileGuidance {
+  return {
+    text: foldExternalText(text),
+    command,
+    displayCommand: command === null ? null : formatPathForDisplay(command),
+    url,
+    displayUrl: url === null ? null : formatPathForDisplay(url),
+  };
+}
+
+const GUIDANCE = guidance(
+  'Install the standalone build.',
+  'install-it',
+  'https://example.com/install'
+);
 
 function role(name: string, profile: string): RoleEntry {
   return { name, profile, model: null, effort: null };
@@ -68,7 +89,7 @@ describe('profileSettingsRows', () => {
       [
         option({
           id: 'codex-cli',
-          displayName: 'Codex CLI',
+          displayName: sanitizeForDisplay('Codex CLI'),
           command: ['codex', '--sandbox', 'workspace-write'],
           enabled: false,
         }),
@@ -79,6 +100,7 @@ describe('profileSettingsRows', () => {
     expect(rows).toEqual([
       {
         id: 'codex-cli',
+        displayId: 'codex-cli',
         displayName: 'Codex CLI',
         commandLine: 'codex --sandbox workspace-write',
         isReady: true,
@@ -104,7 +126,7 @@ describe('profileSettingsRows', () => {
         option({
           id: 'wsl-codex',
           available: false,
-          reason: 'executable not found',
+          reason: foldExternalText('executable not found'),
         }),
       ],
       []
@@ -112,24 +134,42 @@ describe('profileSettingsRows', () => {
 
     expect(rows[0]).toMatchObject({
       isReady: false,
-      unavailableLine: settings.profileUnavailable('executable not found'),
+      unavailableLine: settings.profileUnavailable(foldExternalText('executable not found')),
     });
   });
 
   it('falls back to the reason the daemon gave for a kind this build does not know', () => {
     const rows = profileSettingsRows(
-      [option({ available: false, reason: 'some new reason', unavailableKind: 'unknown' })],
+      [
+        option({
+          available: false,
+          reason: foldExternalText('some new reason'),
+          unavailableKind: 'unknown',
+        }),
+      ],
       []
     );
 
-    expect(rows[0]?.unavailableLine).toBe(settings.profileUnavailable('some new reason'));
+    expect(rows[0]?.unavailableLine).toBe(
+      settings.profileUnavailable(foldExternalText('some new reason'))
+    );
   });
 
   it('heads only a program that could not be found as not found', () => {
     const rows = profileSettingsRows(
       [
-        option({ id: 'a', available: false, reason: 'x', unavailableKind: 'not_found' }),
-        option({ id: 'b', available: false, reason: 'y', unavailableKind: 'no_command' }),
+        option({
+          id: 'a',
+          available: false,
+          reason: foldExternalText('x'),
+          unavailableKind: 'not_found',
+        }),
+        option({
+          id: 'b',
+          available: false,
+          reason: foldExternalText('y'),
+          unavailableKind: 'no_command',
+        }),
       ],
       []
     );
@@ -145,7 +185,7 @@ describe('profileSettingsRows', () => {
       [
         option({
           available: false,
-          reason: 'daemon sentence. Install the standalone build.',
+          reason: foldExternalText('daemon sentence. Install the standalone build.'),
           unavailableKind: 'needs_native_program',
           guidance: GUIDANCE,
         }),
@@ -186,9 +226,9 @@ describe('profileSettingsRows', () => {
   it('keeps the order the profiles arrived in', () => {
     const rows = profileSettingsRows(
       [
-        option({ id: 'zeta', displayName: 'Zeta' }),
-        option({ id: 'alpha', displayName: 'Alpha' }),
-        option({ id: 'mid', displayName: 'Mid' }),
+        option({ id: 'zeta', displayName: sanitizeForDisplay('Zeta') }),
+        option({ id: 'alpha', displayName: sanitizeForDisplay('Alpha') }),
+        option({ id: 'mid', displayName: sanitizeForDisplay('Mid') }),
       ],
       []
     );
@@ -201,14 +241,10 @@ describe('profileSettingsRows', () => {
   });
 });
 
-const SHIM_GUIDANCE = {
-  text: 'Use the WSL profile for those.',
-  command: null,
-  url: 'https://example.com/muse',
-};
+const SHIM_GUIDANCE = guidance('Use the WSL profile for those.', null, 'https://example.com/muse');
 
 function limit(capability: ProfileLimit['capability'], reason: string): ProfileLimit {
-  return { capability, reason, guidance: SHIM_GUIDANCE };
+  return { capability, reason: foldExternalText(reason), guidance: SHIM_GUIDANCE };
 }
 
 describe('profileSettingsRows: what a ready profile cannot do here', () => {
@@ -252,8 +288,8 @@ describe('profileSettingsRows: what a ready profile cannot do here', () => {
           limits: [
             {
               capability: 'effort',
-              reason: 'no effort here',
-              guidance: { text: 'See the page.', command: null, url: 'http://example.com/muse' },
+              reason: foldExternalText('no effort here'),
+              guidance: guidance('See the page.', null, 'http://example.com/muse'),
             },
           ],
         }),

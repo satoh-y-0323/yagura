@@ -107,6 +107,7 @@ export const dummyMessages = {
       no_default_shell: 'DUMMY_profileUnavailableShort_no_default_shell',
       needs_native_program: 'DUMMY_profileUnavailableShort_needs_native_program',
     },
+    profileChoiceUnavailable: (name, why) => `DUMMY_profileChoiceUnavailable(${name},${why})`,
     customOption: 'DUMMY_customOption',
     profileSummaryCommandLabel: 'DUMMY_profileSummaryCommandLabel',
     profileSummaryCommandUnavailable: 'DUMMY_profileSummaryCommandUnavailable',
@@ -188,8 +189,7 @@ export const dummyMessages = {
     clientConfigLoadFailed: 'DUMMY_clientConfigLoadFailed',
     // The daemon does not speak this build's wire revision.
     daemonIncompatible: 'DUMMY_daemonIncompatible',
-    profileNeedsNativeProgram: (names: readonly string[]) =>
-      `DUMMY_profileNeedsNativeProgram(${names.join(',')})`,
+    profileNeedsNativeProgram: (names) => `DUMMY_profileNeedsNativeProgram(${names.join(',')})`,
     // The two reasons start-up could not resolve
     // this process's instance.
     invalidInstanceId: 'DUMMY_invalidInstanceId',
@@ -320,8 +320,8 @@ export const dummyMessages = {
     profileEnabled: 'DUMMY_settings_profileEnabled',
     profileDisabled: 'DUMMY_settings_profileDisabled',
     profileReady: 'DUMMY_settings_profileReady',
-    profileNotFound: (reason: string) => `DUMMY_settings_profileNotFound(${reason})`,
-    profileUnavailable: (reason: string) => `DUMMY_settings_profileUnavailable(${reason})`,
+    profileNotFound: (reason) => `DUMMY_settings_profileNotFound(${reason ?? ''})`,
+    profileUnavailable: (reason) => `DUMMY_settings_profileUnavailable(${reason ?? ''})`,
     profileUnavailableReason: {
       not_found: 'DUMMY_settings_profileUnavailableReason_not_found',
       metacharacter: 'DUMMY_settings_profileUnavailableReason_metacharacter',
@@ -332,10 +332,14 @@ export const dummyMessages = {
     profileCopyCommand: 'DUMMY_settings_profileCopyCommand',
     profileCopyInstallGuide: 'DUMMY_settings_profileCopyInstallGuide',
     profileInstallGuide: 'DUMMY_settings_profileInstallGuide',
-    profileSwitchLabel: (name: string) => `DUMMY_settings_profileSwitchLabel(${name})`,
+    profileSwitchLabel: (name) => `DUMMY_settings_profileSwitchLabel(${name})`,
     profileLimitsHeading: 'DUMMY_settings_profileLimitsHeading',
-    profileLimitItem: (capability: string, reason: string) =>
-      `DUMMY_settings_profileLimitItem(${capability},${reason})`,
+    profileLimitItem: {
+      model: 'DUMMY_settings_profileLimitItem_model',
+      effort: 'DUMMY_settings_profileLimitItem_effort',
+      launch_prompt: 'DUMMY_settings_profileLimitItem_launch_prompt',
+      launch_context: 'DUMMY_settings_profileLimitItem_launch_context',
+    },
     profileLimitGuide: 'DUMMY_settings_profileLimitGuide',
     profileCopyLimitGuide: 'DUMMY_settings_profileCopyLimitGuide',
     profileUsedByRoles: (roles: readonly string[]) =>

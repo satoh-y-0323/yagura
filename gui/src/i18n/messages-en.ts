@@ -1,5 +1,6 @@
 import type { NoticeCategory } from '../notices/notice-model';
 import type { DisplayLine } from '../display/untrusted-text';
+import type { UiText } from '../display/ui-text';
 
 /**
  * The consequence shared by every message that tells the user to restart the
@@ -288,6 +289,9 @@ export const messagesEn = {
       no_default_shell: 'no default shell',
       needs_native_program: 'needs a different install (see Settings › Profiles)',
     },
+    /** A profile option that cannot be chosen: its name, then why. */
+    profileChoiceUnavailable: (name: DisplayLine, why: UiText | DisplayLine): string =>
+      `${name} — ${why}`,
     customOption: 'Custom…',
     profileSummaryCommandLabel: 'Command:',
     profileSummaryCommandUnavailable: 'Provided by the daemon at launch',
@@ -424,7 +428,7 @@ export const messagesEn = {
     daemonIncompatible: `This daemon can't be used with this version of yagura: restart it (yagura-daemon --shutdown). ${RESTART_CLOSES_ALL_WINDOWS}`,
 
     /** Enabled profiles whose program is installed as a Windows .cmd / .bat file, which they cannot run through. */
-    profileNeedsNativeProgram: (names: readonly string[]): string =>
+    profileNeedsNativeProgram: (names: readonly DisplayLine[]): string =>
       names.length === 1
         ? `${names[0] ?? ''} can't be used: it's installed as a Windows .cmd / .bat file.`
         : `${names.join(', ')} can't be used: they're installed as Windows .cmd / .bat files.`,
@@ -803,8 +807,10 @@ export const messagesEn = {
     profileEnabled: 'Enabled',
     profileDisabled: 'Disabled',
     profileReady: 'Ready',
-    profileNotFound: (reason: string): string => `Not found — ${reason}`,
-    profileUnavailable: (reason: string): string => `Unavailable — ${reason}`,
+    profileNotFound: (reason: UiText | DisplayLine | null): string =>
+      reason === null ? 'Not found' : `Not found — ${reason}`,
+    profileUnavailable: (reason: UiText | DisplayLine | null): string =>
+      reason === null ? 'Unavailable' : `Unavailable — ${reason}`,
     /** Why a profile cannot be launched, after the row's "Not found" / "Unavailable" heading. */
     profileUnavailableReason: {
       not_found: 'the program this profile runs could not be found',
@@ -820,25 +826,16 @@ export const messagesEn = {
     profileCopyInstallGuide: 'Copy install guide address',
     /** Labels the page a profile's guidance points to; shown as text to copy, not a link. */
     profileInstallGuide: 'Install guide',
-    profileSwitchLabel: (name: string): string => `Use ${name}`,
+    profileSwitchLabel: (name: DisplayLine): string => `Use ${name}`,
     /** A launchable profile that lacks a capability here: the heading, one line per capability, the page. */
     profileLimitsHeading: "On this computer, this profile can't take:",
-    profileLimitItem: (
-      capability: 'model' | 'effort' | 'launch_prompt' | 'launch_context' | 'unknown',
-      reason: string
-    ): string => {
-      switch (capability) {
-        case 'model':
-          return 'a model';
-        case 'effort':
-          return 'an effort level';
-        case 'launch_prompt':
-          return "a request at launch, so it can't be used for task windows or for a handoff that opens a new window";
-        case 'launch_context':
-          return "the room's introduction at launch";
-        case 'unknown':
-          return reason;
-      }
+    /** One line per capability this build knows; any other one is told by the daemon's reason. */
+    profileLimitItem: {
+      model: 'a model',
+      effort: 'an effort level',
+      launch_prompt:
+        "a request at launch, so it can't be used for task windows or for a handoff that opens a new window",
+      launch_context: "the room's introduction at launch",
     },
     profileLimitGuide: 'More information',
     profileCopyLimitGuide: 'Copy address of the page',

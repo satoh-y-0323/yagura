@@ -14,6 +14,7 @@
     profileChoiceLabel,
     profileChoices,
   } from '../profile/launch-profile-choices';
+  import type { UiText } from '../display/ui-text';
   import { forms } from '../ui-messages';
   import type { ProfileOption } from './add-window-dialog-types';
 
@@ -32,7 +33,7 @@
   /** Reports new `effort` text back to the caller. */
   export let onEffortChange: (value: string) => void;
   /** The label of a trailing `value=""` option; `null` offers none. */
-  export let customOptionLabel: string | null = null;
+  export let customOptionLabel: UiText | null = null;
   /** Asks the caller to refresh `profileOptions`. */
   export let onLoadProfiles: () => void = () => undefined;
   /** Whether the fields are disabled. */
@@ -42,7 +43,7 @@
   instanceCount += 1;
   const listPrefix = `launch-option-${String(instanceCount)}-`;
 
-  function labelOf(key: 'model' | 'effort'): string {
+  function labelOf(key: 'model' | 'effort'): UiText {
     return key === 'model' ? forms.modelLabel : forms.effortLabel;
   }
 
@@ -104,7 +105,7 @@
       />
       <datalist id={listPrefix + axis.key}>
         {#each axis.aliases as entry (entry.alias)}
-          <option value={entry.alias}>{entry.alias} — {entry.value}</option>
+          <option value={entry.alias}>{entry.displayAlias} — {entry.displayValue}</option>
         {/each}
       </datalist>
       {#if limit !== null}

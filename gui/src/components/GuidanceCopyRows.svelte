@@ -1,20 +1,26 @@
 <script lang="ts">
   /**
    * A guidance's command and page as copyable rows, each with its own copy
-   * button. Renders nothing for a part that is `null`.
+   * button. Renders nothing for a part that is `null`. Each row shows the
+   * display form and copies the text as it arrived.
    */
+  import type { DisplayLine } from '../display/untrusted-text';
+  import type { UiText } from '../display/ui-text';
+
   export let command: string | null;
+  export let displayCommand: DisplayLine | null;
   export let url: string | null;
-  export let urlLabel: string;
-  export let copyCommandLabel: string;
-  export let copyUrlLabel: string;
+  export let displayUrl: DisplayLine | null;
+  export let urlLabel: UiText;
+  export let copyCommandLabel: UiText;
+  export let copyUrlLabel: UiText;
   export let onCopy: (text: string) => void;
 </script>
 
-{#if command !== null}
+{#if command !== null && displayCommand !== null}
   {@const value = command}
   <div class="guidance-copy">
-    <code class="guidance-copy__value">{value}</code>
+    <code class="guidance-copy__value">{displayCommand}</code>
     <button
       type="button"
       class="btn btn-secondary guidance-copy__button"
@@ -22,11 +28,11 @@
     >
   </div>
 {/if}
-{#if url !== null}
+{#if url !== null && displayUrl !== null}
   {@const value = url}
   <span class="guidance-copy__label">{urlLabel}</span>
   <div class="guidance-copy">
-    <code class="guidance-copy__value">{value}</code>
+    <code class="guidance-copy__value">{displayUrl}</code>
     <button
       type="button"
       class="btn btn-secondary guidance-copy__button"

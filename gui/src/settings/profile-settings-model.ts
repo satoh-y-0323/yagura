@@ -3,6 +3,8 @@
  * the component renders these rows and hands the switch back to its caller.
  */
 import type { ProfileOption } from '../components/add-window-dialog-types';
+import type { DisplayLine } from '../display/untrusted-text';
+import type { UiText } from '../display/ui-text';
 import type { ProfileGuidance } from '../ipc/session-client';
 import type { RoleEntry } from '../ipc/plan-boundary';
 import {
@@ -15,7 +17,7 @@ import { settings } from '../ui-messages';
 /** What a ready profile cannot do on this host, and what its profile says to do instead. */
 export interface ProfileLimitNote {
   /** One line per limit. */
-  items: string[];
+  items: (UiText | DisplayLine)[];
   /** The first guidance a limit carries, `null` when none does. */
   guidance: LimitGuidance | null;
 }
@@ -24,10 +26,12 @@ export interface ProfileLimitNote {
 export interface ProfileSettingsRow {
   /** The profile identifier. */
   id: string;
+  /** `id` for display. */
+  displayId: DisplayLine;
   /** The profile's declared display name. */
-  displayName: string;
-  /** The argv the daemon would run, joined with single spaces. */
-  commandLine: string;
+  displayName: DisplayLine;
+  /** The argv the daemon would run, on one line. */
+  commandLine: DisplayLine;
   /** Whether the profile currently resolves to something launchable. */
   isReady: boolean;
   /**
@@ -35,7 +39,7 @@ export interface ProfileSettingsRow {
    * program that could not be found, "Unavailable" for every other reason.
    * `null` when ready.
    */
-  unavailableLine: string | null;
+  unavailableLine: UiText | null;
   /** The profile's own install guidance, shown under the heading; `null` when it has none. */
   guidance: ProfileGuidance | null;
   /** Whether the user left this profile switched on. */
@@ -54,10 +58,12 @@ export function rolesUsingProfile(roles: readonly RoleEntry[], profileId: string
   return roles.filter((role) => role.profile === profileId).map((role) => role.name);
 }
 
-function unavailableLine(profile: ProfileOption): string {
-  const why =
-    unavailableText(profile.unavailableKind, profile.reason, settings.profileUnavailableReason) ??
-    '';
+function unavailableLine(profile: ProfileOption): UiText {
+  const why = unavailableText(
+    profile.unavailableKind,
+    profile.reason,
+    settings.profileUnavailableReason
+  );
   return profile.unavailableKind === 'not_found'
     ? settings.profileNotFound(why)
     : settings.profileUnavailable(why);
@@ -68,7 +74,9 @@ function limitNoteOf(profile: ProfileOption): ProfileLimitNote | null {
     return null;
   }
   return {
-    items: profile.limits.map((limit) => settings.profileLimitItem(limit.capability, limit.reason)),
+    items: profile.limits.map((limit) =>
+      limit.capability === 'unknown' ? limit.reason : settings.profileLimitItem[limit.capability]
+    ),
     guidance: profile.limits.map(limitGuidance).find((guidance) => guidance !== null) ?? null,
   };
 }
@@ -80,8 +88,9 @@ export function profileSettingsRows(
 ): ProfileSettingsRow[] {
   return profiles.map((profile) => ({
     id: profile.id,
+    displayId: profile.displayId,
     displayName: profile.displayName,
-    commandLine: profile.command.join(' '),
+    commandLine: profile.displayCommand,
     isReady: profile.available,
     unavailableLine: profile.available ? null : unavailableLine(profile),
     guidance:

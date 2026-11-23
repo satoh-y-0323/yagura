@@ -4,6 +4,8 @@
  * kept for the chosen profile. The window dialog, the role table and the plan
  * board all read these, so the three pickers cannot drift apart.
  */
+import { sanitizeForDisplay, type DisplayLine } from '../display/untrusted-text';
+import type { UiText } from '../display/ui-text';
 import type {
   LaunchOptionInfo,
   ProfileCapability,
@@ -16,9 +18,9 @@ import { forms } from '../ui-messages';
 /** The least of a daemon profile entry the pickers read. */
 export interface LaunchProfile {
   id: string;
-  displayName: string;
+  displayName: DisplayLine;
   available: boolean;
-  reason: string | null;
+  reason: DisplayLine | null;
   unavailableKind: ProfileUnavailableKind | null;
   model: LaunchOptionInfo | null;
   effort: LaunchOptionInfo | null;
@@ -29,9 +31,9 @@ export interface LaunchProfile {
 /** One option a profile select renders. */
 export interface ProfileChoice {
   id: string;
-  displayName: string;
+  displayName: DisplayLine;
   available: boolean;
-  reason: string | null;
+  reason: DisplayLine | null;
   unavailableKind: ProfileUnavailableKind | null;
 }
 
@@ -68,7 +70,13 @@ export function profileChoices(
   }
   return [
     ...choices,
-    { id: selected, displayName: selected, available: false, reason: null, unavailableKind: null },
+    {
+      id: selected,
+      displayName: sanitizeForDisplay(selected),
+      available: false,
+      reason: null,
+      unavailableKind: null,
+    },
   ];
 }
 
@@ -79,9 +87,9 @@ export function profileChoices(
  */
 export function unavailableText(
   kind: ProfileUnavailableKind | null,
-  reason: string | null,
-  wording: Readonly<Record<Exclude<ProfileUnavailableKind, 'unknown'>, string>>
-): string | null {
+  reason: DisplayLine | null,
+  wording: Readonly<Record<Exclude<ProfileUnavailableKind, 'unknown'>, UiText>>
+): UiText | DisplayLine | null {
   if (kind === null || kind === 'unknown') {
     return reason;
   }
@@ -89,9 +97,11 @@ export function unavailableText(
 }
 
 /** What a profile option reads: its name, then why it cannot be chosen when it cannot. */
-export function profileChoiceLabel(choice: ProfileChoice): string {
+export function profileChoiceLabel(choice: ProfileChoice): UiText | DisplayLine {
   const why = unavailableText(choice.unavailableKind, choice.reason, forms.profileUnavailableShort);
-  return why === null ? choice.displayName : `${choice.displayName} — ${why}`;
+  return why === null
+    ? choice.displayName
+    : forms.profileChoiceUnavailable(choice.displayName, why);
 }
 
 /** The axes the chosen profile maps, model before effort; none for an unlisted profile. */
@@ -115,10 +125,12 @@ export function launchOptionAxes(
 
 /** A profile's guidance for a limit, as the screens may show it. */
 export interface LimitGuidance {
-  text: string;
+  text: DisplayLine;
   command: string | null;
+  displayCommand: DisplayLine | null;
   /** An `https://` page only; anything else is dropped. */
   url: string | null;
+  displayUrl: DisplayLine | null;
 }
 
 /** The guidance of `limit`, with a page that is not `https://` left out. */
@@ -127,10 +139,13 @@ export function limitGuidance(limit: ProfileLimit): LimitGuidance | null {
   if (guidance === null) {
     return null;
   }
+  const isSecurePage = guidance.url !== null && guidance.url.startsWith('https://');
   return {
     text: guidance.text,
     command: guidance.command,
-    url: guidance.url !== null && guidance.url.startsWith('https://') ? guidance.url : null,
+    displayCommand: guidance.displayCommand,
+    url: isSecurePage ? guidance.url : null,
+    displayUrl: isSecurePage ? guidance.displayUrl : null,
   };
 }
 
@@ -146,7 +161,7 @@ export function profileLimit(
 
 /** Why a launch-option field cannot be used with the chosen profile here, and what to do instead. */
 export interface LaunchOptionLimit {
-  reason: string;
+  reason: UiText;
   guidance: LimitGuidance | null;
 }
 

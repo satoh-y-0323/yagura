@@ -45,6 +45,8 @@ const DISPLAY_TEXT_TEMPLATES = [
   'src/components/McpMark.svelte',
   'src/components/StatusReportMark.svelte',
   'src/components/QueuedMark.svelte',
+  'src/components/LaunchProfileFields.svelte',
+  'src/components/GuidanceCopyRows.svelte',
 ];
 
 // Text reaching the DOM goes through Svelte's escaping; `{@html}` is refused by svelte/no-at-html-tags.

@@ -48,7 +48,7 @@
       >
         <div class="profile-settings__name">
           <b>{row.displayName}</b>
-          <span class="profile-settings__id">{row.id}</span>
+          <span class="profile-settings__id">{row.displayId}</span>
           {#if !row.enabled}
             <span class="profile-settings__badge">{settings.profileDisabled}</span>
           {/if}
@@ -85,7 +85,9 @@
             <p class="profile-settings__guidance-text">{guidance.text}</p>
             <GuidanceCopyRows
               command={guidance.command}
+              displayCommand={guidance.displayCommand}
               url={guidance.url}
+              displayUrl={guidance.displayUrl}
               urlLabel={settings.profileInstallGuide}
               copyCommandLabel={settings.profileCopyCommand}
               copyUrlLabel={settings.profileCopyInstallGuide}
@@ -109,7 +111,9 @@
               </p>
               <GuidanceCopyRows
                 command={guidance.command}
+                displayCommand={guidance.displayCommand}
                 url={guidance.url}
+                displayUrl={guidance.displayUrl}
                 urlLabel={settings.profileLimitGuide}
                 copyCommandLabel={settings.profileCopyCommand}
                 copyUrlLabel={settings.profileCopyLimitGuide}

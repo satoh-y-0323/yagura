@@ -10,6 +10,7 @@
  */
 import { describe, expect, it } from 'vitest';
 
+import { foldExternalText, formatCommandLine, sanitizeForDisplay } from '../display/untrusted-text';
 import type { ProfileEntry, ProfileLimit } from '../ipc/session-client';
 import { acceptsRoleTableReload, defaultRoleAfterEdit, roleLaunchNote } from './roles-editor-model';
 
@@ -57,12 +58,15 @@ describe('defaultRoleAfterEdit', () => {
 function launchProfile(id: string, limits: ProfileLimit['capability'][]): ProfileEntry {
   return {
     id,
-    displayName: `${id} name`,
+    displayId: sanitizeForDisplay(id),
+    displayName: sanitizeForDisplay(`${id} name`),
     detection: null,
+    displayDetection: null,
     detectionWarning: null,
     displayDetectionWarning: null,
     cwd: null,
     command: [id],
+    displayCommand: formatCommandLine([id]),
     available: true,
     reason: null,
     unavailableKind: null,
@@ -72,8 +76,14 @@ function launchProfile(id: string, limits: ProfileLimit['capability'][]): Profil
     enabled: true,
     limits: limits.map((capability) => ({
       capability,
-      reason: `the ${capability} cannot pass a .cmd file unchanged`,
-      guidance: { text: 'Use the WSL profile.', command: null, url: null },
+      reason: foldExternalText(`the ${capability} cannot pass a .cmd file unchanged`),
+      guidance: {
+        text: foldExternalText('Use the WSL profile.'),
+        command: null,
+        displayCommand: null,
+        url: null,
+        displayUrl: null,
+      },
     })),
   };
 }

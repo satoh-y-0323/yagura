@@ -1,5 +1,6 @@
 import { banners, describeReopenNotice, describeThemeIssues } from '../ui-messages';
 import type { WithdrawReason } from '../session/approval-types';
+import type { DisplayLine } from '../display/untrusted-text';
 import type {
   ClientConfigFailure,
   DaemonRecoveryStatus,
@@ -101,7 +102,7 @@ export type NoticeAction =
 /** A profile a notice names. */
 export interface NamedProfile {
   id: string;
-  displayName: string;
+  displayName: DisplayLine;
 }
 
 /** The least of a profile entry {@link profilesNeedingNativeProgram} reads. */

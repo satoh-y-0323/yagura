@@ -468,8 +468,10 @@ describe('invokeListProfiles', () => {
     expect(result.profiles).toEqual([
       {
         id: 'codex-cli',
+        displayId: 'codex-cli',
         displayName: 'Codex CLI',
         detection: 'codex-cli',
+        displayDetection: 'codex-cli',
         detectionWarning: null,
         displayDetectionWarning: null,
         cwd: null,
@@ -478,6 +480,7 @@ describe('invokeListProfiles', () => {
         unavailableKind: null,
         guidance: null,
         command: ['codex'],
+        displayCommand: 'codex',
         model: null,
         effort: null,
         enabled: true,
@@ -502,6 +505,31 @@ describe('invokeListProfiles', () => {
     const result = await invokeListProfiles();
 
     expect(result.profiles[0]).toMatchObject({ available: false, reason: 'executable not found' });
+  });
+
+  it('folds an unavailable reason into one trimmed line, and caps it at 200 characters', async () => {
+    invokeMock.mockResolvedValueOnce({
+      profiles: [
+        {
+          ...RAW_PROFILE,
+          id: 'zz-folded',
+          available: false,
+          unavailable_reason: '  first line\r\n‮second   line​\tend  ',
+        },
+        {
+          ...RAW_PROFILE,
+          id: 'zz-long',
+          available: false,
+          unavailable_reason: 'a'.repeat(250),
+        },
+      ],
+      warnings: [],
+    });
+
+    const result = await invokeListProfiles();
+
+    expect(result.profiles[0]?.reason).toBe('first line second line end');
+    expect(result.profiles[1]?.reason).toBe(`${'a'.repeat(200)}…`);
   });
 
   it('reads a kind of reason this build does not know as unknown, keeping the reason text', async () => {
@@ -755,11 +783,38 @@ describe('invokeListProfiles', () => {
           guidance: {
             text: 'Use the native program.',
             command: 'install alpha',
+            displayCommand: 'install alpha',
             url: 'https://example.invalid/alpha',
+            displayUrl: 'https://example.invalid/alpha',
           },
         },
         { capability: 'launch_prompt', reason: 'the launcher drops --', guidance: null },
       ]);
+    });
+
+    it('folds a limit reason into one trimmed line, and caps it at 200 characters', async () => {
+      invokeMock.mockResolvedValueOnce({
+        profiles: [
+          {
+            ...RAW_PROFILE,
+            available: true,
+            limits: [
+              {
+                capability: 'effort',
+                reason: '  the launcher\r\n‮drops   quotes​\tonly  ',
+                guidance: null,
+              },
+              { capability: 'launch_prompt', reason: 'b'.repeat(250), guidance: null },
+            ],
+          },
+        ],
+        warnings: [],
+      });
+
+      const result = await invokeListProfiles();
+
+      expect(result.profiles[0]?.limits[0]?.reason).toBe('the launcher drops quotes only');
+      expect(result.profiles[0]?.limits[1]?.reason).toBe(`${'b'.repeat(200)}…`);
     });
 
     it('keeps launch_context as a known capability, not unknown', async () => {

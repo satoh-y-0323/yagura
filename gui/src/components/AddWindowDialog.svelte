@@ -3,7 +3,11 @@
   import { mappedLaunchOptionValues } from '../profile/launch-profile-choices';
   import { buttons, errors, forms } from '../ui-messages';
   import { describeWindowOpenFailure } from '../window-open-failure-model';
-  import type { OpenWindowSubmission, ProfileOption } from './add-window-dialog-types';
+  import type {
+    DetectionChoice,
+    OpenWindowSubmission,
+    ProfileOption,
+  } from './add-window-dialog-types';
   import Icon from './Icon.svelte';
   import IconButton from './IconButton.svelte';
   import LaunchProfileFields from './LaunchProfileFields.svelte';
@@ -33,7 +37,7 @@
   /** Reports a new detection definition selection back to the caller. */
   export let onDetectionChange: (value: string) => void;
   /** The detection definition names to offer. */
-  export let detectionOptions: string[] = [];
+  export let detectionOptions: DetectionChoice[] = [];
   /** Asks the caller to refresh `detectionOptions`. */
   export let onLoadDetections: () => void;
   /** The launch profiles to offer, in the order they are shown. */
@@ -195,12 +199,12 @@
           <span>
             {forms.profileSummaryCommandLabel}
             {selectedProfile !== null && selectedProfile.command.length > 0
-              ? selectedProfile.command.join(' ')
+              ? selectedProfile.displayCommand
               : forms.profileSummaryCommandUnavailable}
           </span>
           <span>
             {forms.profileSummaryDetectionLabel}
-            {selectedProfile?.detection ?? forms.detectionDefaultOption}
+            {selectedProfile?.displayDetection ?? forms.detectionDefaultOption}
           </span>
           {#if selectedProfile?.displayDetectionWarning}
             <span class="profile-summary-warning">{selectedProfile.displayDetectionWarning}</span>
@@ -276,8 +280,8 @@
             disabled={isSubmitting}
           >
             <option value="">{forms.detectionDefaultOption}</option>
-            {#each detectionOptions as name (name)}
-              <option value={name}>{name}</option>
+            {#each detectionOptions as option (option.name)}
+              <option value={option.name}>{option.displayName}</option>
             {/each}
           </select>
         </label>

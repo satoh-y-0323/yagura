@@ -22,6 +22,7 @@ import type {
   NoticeSourceState,
 } from './notice-model';
 import { banners, describeReopenNotice, describeThemeIssues } from '../ui-messages';
+import { sanitizeForDisplay } from '../display/untrusted-text';
 
 const DAEMON_SPAWN_NOTICE = 'spawn-probe: started without the strongest detachment mode';
 const DAEMON_HEALTH_NOTICE = 'health-probe: windows cannot be opened';
@@ -180,10 +181,14 @@ const NOTICES: { label: string; on: Partial<NoticeSourceState>; notice: ShownNot
   },
   {
     label: 'profile-unavailable',
-    on: { profilesNeedingNativeProgram: [{ id: 'codex-cli', displayName: 'Codex CLI' }] },
+    on: {
+      profilesNeedingNativeProgram: [
+        { id: 'codex-cli', displayName: sanitizeForDisplay('Codex CLI') },
+      ],
+    },
     notice: {
       key: 'profile-unavailable',
-      sentence: banners.profileNeedsNativeProgram(['Codex CLI']),
+      sentence: banners.profileNeedsNativeProgram([sanitizeForDisplay('Codex CLI')]),
       action: { labelKey: 'howToInstall', profileId: 'codex-cli' },
     },
   },
@@ -415,8 +420,8 @@ describe('buildNotices', () => {
     const drafts = buildNotices(
       baseState({
         profilesNeedingNativeProgram: [
-          { id: 'codex-cli', displayName: 'Codex CLI' },
-          { id: 'other-cli', displayName: 'Other CLI' },
+          { id: 'codex-cli', displayName: sanitizeForDisplay('Codex CLI') },
+          { id: 'other-cli', displayName: sanitizeForDisplay('Other CLI') },
         ],
       })
     );
@@ -424,7 +429,10 @@ describe('buildNotices', () => {
     expect(shown(drafts)).toEqual([
       {
         key: 'profile-unavailable',
-        sentence: banners.profileNeedsNativeProgram(['Codex CLI', 'Other CLI']),
+        sentence: banners.profileNeedsNativeProgram([
+          sanitizeForDisplay('Codex CLI'),
+          sanitizeForDisplay('Other CLI'),
+        ]),
         action: { labelKey: 'howToInstall', profileId: 'codex-cli' },
       },
     ]);
@@ -549,7 +557,7 @@ describe('dismissApprovalExpiredUnseen', () => {
 
 describe('profilesNeedingNativeProgram', () => {
   function entry(id: string, unavailableKind: string | null, enabled = true) {
-    return { id, displayName: id.toUpperCase(), enabled, unavailableKind };
+    return { id, displayName: sanitizeForDisplay(id.toUpperCase()), enabled, unavailableKind };
   }
 
   it('keeps only the enabled profiles whose reason is a .cmd / .bat program, in list order', () => {

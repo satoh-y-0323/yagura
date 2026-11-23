@@ -293,17 +293,26 @@ describe('invokeListProfiles', () => {
     expect(invokeMock).toHaveBeenCalledWith('list_profiles');
     expect(result.profiles[0]).toEqual({
       id: 'p',
+      displayId: 'p',
       displayName: 'P',
       detection: 'det',
+      displayDetection: 'det',
       detectionWarning: 'warn',
       displayDetectionWarning: 'warn',
       cwd: '/work',
       command: ['p'],
+      displayCommand: 'p',
       available: true,
       reason: 'why',
       unavailableKind: 'needs_native_program',
-      guidance: { text: 'guide', command: 'run-it', url: 'https://example.com/guide' },
-      model: { aliases: [{ alias: 'fast', value: 'm' }] },
+      guidance: {
+        text: 'guide',
+        command: 'run-it',
+        displayCommand: 'run-it',
+        url: 'https://example.com/guide',
+        displayUrl: 'https://example.com/guide',
+      },
+      model: { aliases: [{ alias: 'fast', value: 'm', displayAlias: 'fast', displayValue: 'm' }] },
       effort: null,
       enabled: false,
       limits: [],
@@ -318,7 +327,13 @@ describe('invokeListProfiles', () => {
         profiles: [profileWire({ unavailable_guidance: { text: 't', command: 'c', url } })],
       });
       const result = await invokeListProfiles();
-      expect(result.profiles[0]?.guidance).toEqual({ text: 't', command: 'c', url: null });
+      expect(result.profiles[0]?.guidance).toEqual({
+        text: 't',
+        command: 'c',
+        displayCommand: 'c',
+        url: null,
+        displayUrl: null,
+      });
     }
   );
 
@@ -340,7 +355,13 @@ describe('invokeListProfiles', () => {
       profiles: [profileWire({ unavailable_guidance: { text: 't', command: null, url: null } })],
     });
     const result = await invokeListProfiles();
-    expect(result.profiles[0]?.guidance).toEqual({ text: 't', command: null, url: null });
+    expect(result.profiles[0]?.guidance).toEqual({
+      text: 't',
+      command: null,
+      displayCommand: null,
+      url: null,
+      displayUrl: null,
+    });
   });
 
   it('reads a missing or null warnings list as empty', async () => {

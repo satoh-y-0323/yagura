@@ -7,7 +7,18 @@
  */
 import { describe, expect, it } from 'vitest';
 
-import type { LaunchOptionInfo, ProfileEntry, ProfileLimit } from '../ipc/session-client';
+import {
+  foldExternalText,
+  formatCommandLine,
+  formatPathForDisplay,
+  sanitizeForDisplay,
+} from '../display/untrusted-text';
+import type {
+  LaunchOptionAliasInfo,
+  LaunchOptionInfo,
+  ProfileEntry,
+  ProfileLimit,
+} from '../ipc/session-client';
 import {
   launchOptionAxes,
   launchOptionLimit,
@@ -26,14 +37,17 @@ function profile(
 ): ProfileEntry {
   return {
     id,
-    displayName,
+    displayId: sanitizeForDisplay(id),
+    displayName: sanitizeForDisplay(displayName),
     detection: null,
+    displayDetection: null,
     detectionWarning: null,
     displayDetectionWarning: null,
     cwd: null,
     command: [id],
+    displayCommand: formatCommandLine([id]),
     available: reason === null,
-    reason,
+    reason: reason === null ? null : foldExternalText(reason),
     unavailableKind: null,
     guidance: null,
     model,
@@ -43,18 +57,21 @@ function profile(
   };
 }
 
+function alias(name: string, value: string): LaunchOptionAliasInfo {
+  return {
+    alias: name,
+    value,
+    displayAlias: sanitizeForDisplay(name),
+    displayValue: sanitizeForDisplay(value),
+  };
+}
+
 const CODEX_MODEL: LaunchOptionInfo = {
-  aliases: [
-    { alias: 'fast', value: 'gpt-mini' },
-    { alias: 'deep', value: 'gpt-large' },
-  ],
+  aliases: [alias('fast', 'gpt-mini'), alias('deep', 'gpt-large')],
 };
-const CLAUDE_MODEL: LaunchOptionInfo = { aliases: [{ alias: 'opus', value: 'claude-opus' }] };
+const CLAUDE_MODEL: LaunchOptionInfo = { aliases: [alias('opus', 'claude-opus')] };
 const CLAUDE_EFFORT: LaunchOptionInfo = {
-  aliases: [
-    { alias: 'high', value: 'high' },
-    { alias: 'low', value: 'low' },
-  ],
+  aliases: [alias('high', 'high'), alias('low', 'low')],
 };
 
 const profiles: ProfileEntry[] = [
@@ -178,7 +195,13 @@ describe('profileChoiceLabel', () => {
   const native: ProfileEntry = {
     ...profile('codex-cli', 'Codex CLI', null, null, 'daemon sentence. Install guidance.'),
     unavailableKind: 'needs_native_program',
-    guidance: { text: 'Install guidance.', command: null, url: null },
+    guidance: {
+      text: foldExternalText('Install guidance.'),
+      command: null,
+      displayCommand: null,
+      url: null,
+      displayUrl: null,
+    },
   };
 
   it('carries the kind of reason into the choice', () => {
@@ -207,9 +230,11 @@ describe('profileChoiceLabel', () => {
 });
 
 const MUSE_GUIDANCE = {
-  text: 'Use the WSL: Muse Code profile (wsl-muse-code) for those.',
+  text: foldExternalText('Use the WSL: Muse Code profile (wsl-muse-code) for those.'),
   command: null,
+  displayCommand: null,
   url: 'https://example.com/muse',
+  displayUrl: formatPathForDisplay('https://example.com/muse'),
 };
 
 function limited(
@@ -222,7 +247,7 @@ function limited(
     ...profile(id, `${id} name`, model, effort),
     limits: capabilities.map((capability) => ({
       capability,
-      reason: `the ${capability} option cannot pass a .cmd file unchanged`,
+      reason: foldExternalText(`the ${capability} option cannot pass a .cmd file unchanged`),
       guidance: MUSE_GUIDANCE,
     })),
   };

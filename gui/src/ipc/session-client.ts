@@ -20,7 +20,13 @@
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 
 import { invokeDaemonCommand, invokeLocalCommand } from './command-invoke';
-import { sanitizeForDisplay } from '../display/untrusted-text';
+import {
+  foldExternalText,
+  formatCommandLine,
+  formatPathForDisplay,
+  sanitizeForDisplay,
+  type DisplayLine,
+} from '../display/untrusted-text';
 import type { FrameAckEntry } from './frame-pull';
 import {
   asRecord,
@@ -428,7 +434,15 @@ export async function invokeListDetections(): Promise<DetectionListResult> {
  * candidates, in the order the profile file declared them.
  */
 export interface LaunchOptionInfo {
-  aliases: { alias: string; value: string }[];
+  aliases: LaunchOptionAliasInfo[];
+}
+
+/** One alias of a launch option, as sent and as shown. */
+export interface LaunchOptionAliasInfo {
+  alias: string;
+  value: string;
+  displayAlias: DisplayLine;
+  displayValue: DisplayLine;
 }
 
 /**
@@ -457,11 +471,15 @@ const PROFILE_UNAVAILABLE_KINDS: ReadonlySet<string> = new Set<ProfileUnavailabl
  */
 export interface ProfileGuidance {
   /** The explanation, one line. */
-  text: string;
+  text: DisplayLine;
   /** A command the user can copy and run, `null` when the profile names none. */
   command: string | null;
+  /** `command` for display, `null` exactly when `command` is. */
+  displayCommand: DisplayLine | null;
   /** An `https://` page that says more, `null` when there is none to show. */
   url: string | null;
+  /** `url` for display, `null` exactly when `url` is. */
+  displayUrl: DisplayLine | null;
 }
 
 /**
@@ -481,7 +499,7 @@ const PROFILE_CAPABILITIES: ReadonlySet<string> = new Set<ProfileCapability>([
 export interface ProfileLimit {
   capability: ProfileCapability;
   /** The daemon's English reason text. */
-  reason: string;
+  reason: DisplayLine;
   /** The profile's own guidance for the limit, `null` when it declares none. */
   guidance: ProfileGuidance | null;
 }
@@ -490,14 +508,18 @@ export interface ProfileLimit {
 export interface ProfileEntry {
   /** The profile identifier, which `invokeOpenWindow`'s `profile` takes. */
   id: string;
+  /** `id` for display. */
+  displayId: DisplayLine;
   /** The profile's declared display name. */
-  displayName: string;
+  displayName: DisplayLine;
   /** The detection definition this profile names, `null` for the default. */
   detection: string | null;
+  /** `detection` for display, `null` exactly when `detection` is. */
+  displayDetection: DisplayLine | null;
   /** Why that definition could not be found, `null` when it was. */
   detectionWarning: string | null;
-  /** `detectionWarning` with the characters it must not draw removed, for rendering. */
-  displayDetectionWarning: string | null;
+  /** `detectionWarning` folded onto one line for display. */
+  displayDetectionWarning: DisplayLine | null;
   /** The profile's own default working directory, `null` when it has none. */
   cwd: string | null;
   /**
@@ -505,10 +527,12 @@ export interface ProfileEntry {
    * daemon has none to offer on its operating system.
    */
   command: string[];
+  /** `command` as one display line. */
+  displayCommand: DisplayLine;
   /** Whether the profile currently resolves to something launchable. */
   available: boolean;
   /** The daemon's English reason text when `available` is false. */
-  reason: string | null;
+  reason: DisplayLine | null;
   /** The kind of that reason, `null` when available or from a daemon that does not say. */
   unavailableKind: ProfileUnavailableKind | null;
   /** The profile's own guidance for a `needs_native_program` reason, `null` otherwise. */
@@ -762,19 +786,27 @@ function narrowProfileEntry(value: unknown, context: string): ProfileEntry {
     throw new BoundaryError(`${context}.profiles.available: expected a boolean`);
   }
   const detectionWarning = readOptionalString(record, 'detection_warning', context);
+  const id = requireString(record, 'id', context);
+  const displayName = requireString(record, 'display_name', context);
+  const detection = readOptionalString(record, 'detection', context);
+  const cwd = readOptionalString(record, 'cwd', context);
+  // The daemon always sends `command` (empty when it has no argv to run),
+  // so a missing key is a contract violation rather than "no value".
+  const command = narrowStringArray(readOwnField(record, 'command'), `${context}.profiles.command`);
+  const reason = readOptionalString(record, 'unavailable_reason', context);
   return {
-    id: requireString(record, 'id', context),
-    displayName: requireString(record, 'display_name', context),
-    detection: readOptionalString(record, 'detection', context),
+    id,
+    displayId: sanitizeForDisplay(id),
+    displayName: sanitizeForDisplay(displayName),
+    detection,
+    displayDetection: detection === null ? null : sanitizeForDisplay(detection),
     detectionWarning,
-    displayDetectionWarning:
-      detectionWarning === null ? null : sanitizeForDisplay(detectionWarning),
-    cwd: readOptionalString(record, 'cwd', context),
-    // The daemon always sends `command` (empty when it has no argv to run),
-    // so a missing key is a contract violation rather than "no value".
-    command: narrowStringArray(readOwnField(record, 'command'), `${context}.profiles.command`),
+    displayDetectionWarning: detectionWarning === null ? null : foldExternalText(detectionWarning),
+    cwd,
+    command,
+    displayCommand: formatCommandLine(command),
     available,
-    reason: readOptionalString(record, 'unavailable_reason', context),
+    reason: reason === null ? null : foldExternalText(reason),
     unavailableKind: narrowUnavailableKind(readOptionalString(record, 'unavailable_kind', context)),
     guidance: narrowProfileGuidance(
       readOwnField(record, 'unavailable_guidance'),
@@ -804,7 +836,7 @@ function narrowProfileLimits(value: unknown, context: string): ProfileLimit[] {
       capability: PROFILE_CAPABILITIES.has(capability)
         ? (capability as ProfileCapability)
         : 'unknown',
-      reason: requireString(record, 'reason', context),
+      reason: foldExternalText(requireString(record, 'reason', context)),
       guidance: narrowProfileGuidance(readOwnField(record, 'guidance'), `${context}.guidance`),
     };
   });
@@ -821,11 +853,16 @@ function narrowProfileGuidance(value: unknown, guidanceContext: string): Profile
     return null;
   }
   const record = requireRecord(value, guidanceContext);
-  const url = readOptionalString(record, 'url', guidanceContext);
+  const command = readOptionalString(record, 'command', guidanceContext);
+  const page = readOptionalString(record, 'url', guidanceContext);
+  const url = page !== null && page.startsWith('https://') ? page : null;
+  // What is copied is run or opened, so the shown form writes out every hidden character in it.
   return {
-    text: requireString(record, 'text', guidanceContext),
-    command: readOptionalString(record, 'command', guidanceContext),
-    url: url !== null && url.startsWith('https://') ? url : null,
+    text: foldExternalText(requireString(record, 'text', guidanceContext)),
+    command,
+    displayCommand: command === null ? null : formatPathForDisplay(command),
+    url,
+    displayUrl: url === null ? null : formatPathForDisplay(url),
   };
 }
 
@@ -889,7 +926,7 @@ function narrowLaunchOptionInfo(value: unknown, path: string): LaunchOptionInfo 
   if (!Array.isArray(rawAliases)) {
     throw new BoundaryError(`${path}.aliases: expected an array`);
   }
-  const aliases: { alias: string; value: string }[] = [];
+  const aliases: LaunchOptionAliasInfo[] = [];
   for (const entry of rawAliases as unknown[]) {
     const record = asRecord(entry);
     if (record === null) {
@@ -900,7 +937,12 @@ function narrowLaunchOptionInfo(value: unknown, path: string): LaunchOptionInfo 
     if (typeof alias !== 'string' || typeof aliasValue !== 'string') {
       throw new BoundaryError(`${path}.aliases: expected string alias/value fields`);
     }
-    aliases.push({ alias, value: aliasValue });
+    aliases.push({
+      alias,
+      value: aliasValue,
+      displayAlias: sanitizeForDisplay(alias),
+      displayValue: sanitizeForDisplay(aliasValue),
+    });
   }
   return { aliases };
 }

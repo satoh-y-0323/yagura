@@ -8,6 +8,7 @@
 import { describe, it, expect } from 'vitest';
 
 import type { LaunchOptionAlias, ModelChoice } from '../ipc/model-boundary';
+import { formatCommandLine, sanitizeForDisplay } from '../display/untrusted-text';
 import type { ProfileEntry } from '../ipc/session-client';
 import { plans } from '../ui-messages';
 import {
@@ -27,19 +28,32 @@ import {
 
 /** A well-formed `ProfileEntry`, minimal beyond the fields these functions read. */
 function profileEntry(overrides: Partial<ProfileEntry> = {}): ProfileEntry {
+  const id = overrides.id ?? 'claude-code';
   return {
-    id: 'claude-code',
-    displayName: 'Claude Code',
+    id,
+    displayId: sanitizeForDisplay(id),
+    displayName: sanitizeForDisplay('Claude Code'),
     detection: null,
+    displayDetection: null,
     detectionWarning: null,
     displayDetectionWarning: null,
     cwd: null,
     command: [],
+    displayCommand: formatCommandLine([]),
     available: true,
     reason: null,
     unavailableKind: null,
     guidance: null,
-    model: { aliases: [{ alias: 'fast', value: 'haiku' }] },
+    model: {
+      aliases: [
+        {
+          alias: 'fast',
+          value: 'haiku',
+          displayAlias: sanitizeForDisplay('fast'),
+          displayValue: sanitizeForDisplay('haiku'),
+        },
+      ],
+    },
     effort: null,
     enabled: true,
     limits: [],
