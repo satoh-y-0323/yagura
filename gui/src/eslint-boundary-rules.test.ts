@@ -20,10 +20,8 @@
  * those stays invisible to it.
  *
  * These answer for the configuration. Whether anyone runs `npm run lint` is a
- * separate question, and so is an `eslint-disable` comment in the module
- * itself, which turns a rule off for a line while the configuration it is
- * measured against stays intact. What holds at runtime is the seal the entry
- * point installs, not the rule.
+ * separate question. What holds at runtime is the seal the entry point
+ * installs, not the rule.
  */
 import { ESLint } from 'eslint';
 import { describe, it, expect } from 'vitest';
@@ -38,6 +36,25 @@ const configModules = import.meta.glob('../eslint.config.js', {
   import: 'default',
   eager: true,
 });
+
+const brandGuardRuleModules = import.meta.glob('../eslint.config.js', {
+  import: 'BRAND_GUARD_RULES',
+  eager: true,
+});
+
+const displaySinkMessageModules = import.meta.glob('../eslint.config.js', {
+  import: 'DISPLAY_SINK_MESSAGES',
+  eager: true,
+});
+
+/** The one named export of the config read by `modules`, as a list of strings. */
+function configStrings(modules: Record<string, unknown>, name: string): string[] {
+  const value = Object.values(modules)[0];
+  if (!Array.isArray(value) || value.some((item) => typeof item !== 'string')) {
+    throw new Error(`eslint.config.js does not export ${name} as a list of strings`);
+  }
+  return value.filter((item): item is string => typeof item === 'string');
+}
 
 const sourceFiles = import.meta.glob('./**/*.{ts,svelte}', {
   query: '?raw',
@@ -96,11 +113,16 @@ function blocksConfiguring(name: string): { files: string[]; entry: unknown }[] 
   return found;
 }
 
-/** The entry eslint itself resolves for `name` on `path`. */
-async function resolvedRuleEntry(path: string, name: string): Promise<unknown> {
+/** The rules eslint itself resolves for `path`. */
+async function resolvedRules(path: string): Promise<ReturnType<typeof requireRecord>> {
   const config: unknown = await eslint.calculateConfigForFile(path);
   const rules = readOwnField(requireRecord(config, `resolved config of ${path}`), 'rules');
-  return readOwnField(requireRecord(rules, `resolved rules of ${path}`), name);
+  return requireRecord(rules, `resolved rules of ${path}`);
+}
+
+/** The entry eslint itself resolves for `name` on `path`. */
+async function resolvedRuleEntry(path: string, name: string): Promise<unknown> {
+  return readOwnField(await resolvedRules(path), name);
 }
 
 /** The severity and options of a rule entry written as `[severity, options]`. */
@@ -273,25 +295,135 @@ function productionSources(): string[] {
     .map((key) => `${SOURCE_PREFIX}/${key.replace(/^\.\//, '')}`);
 }
 
-describe('eslint refuses raw HTML in every gui source', () => {
+/** Test fixtures build brands as they need; their values are never drawn. */
+const FIXTURE_PREFIX = `${SOURCE_PREFIX}/test-utils/`;
+
+const BRAND_FORGING_RULE = 'yagura/no-brand-forging';
+const DISPLAY_TEXT_RULE = 'yagura/display-text';
+const TS_COMMENT_RULE = '@typescript-eslint/ban-ts-comment';
+const DISPLAYED_BRANDS = ['DisplayLine', 'DisplayBlock', 'UiText'];
+
+/** The `type` of every brand in the options of a brand rule entry. */
+function brandTypes(entry: unknown): unknown[] {
+  const brands = readOwnField(
+    requireRecord(ruleEntry(entry).options[0], 'brand options'),
+    'brands'
+  );
+  if (!Array.isArray(brands)) {
+    throw new Error('brand options carry no list of brands');
+  }
+  return brands.map((brand) => readOwnField(requireRecord(brand, 'brand'), 'type'));
+}
+
+/** The guards a source must resolve, by where it sits and what kind of file it is. */
+function guardsFor(path: string): string[] {
+  return configStrings(brandGuardRuleModules, 'BRAND_GUARD_RULES').filter(
+    (name) => name !== DISPLAY_TEXT_RULE || path.endsWith('.svelte')
+  );
+}
+
+/** The production sources the brand guards answer for. */
+function guardedSources(): string[] {
+  return productionSources().filter((path) => !path.startsWith(FIXTURE_PREFIX));
+}
+
+describe('the display guards apply to every gui source', () => {
   it('finds gui sources to check (sanity check against a vacuous pass)', () => {
     expect(productionSources().length).toBeGreaterThan(0);
+    expect(guardedSources().length).toBeGreaterThan(0);
   });
 
   it(
-    'resolves the raw HTML restriction as an error for each of them',
+    'resolves the raw HTML restriction and every display guard as errors for each of them',
     async () => {
+      const guarded = new Set(guardedSources());
       for (const path of productionSources()) {
-        const restricted = await resolvedRuleEntry(path, 'no-restricted-syntax');
+        const rules = await resolvedRules(path);
+        const restricted = readOwnField(rules, 'no-restricted-syntax');
         expect(ruleEntry(restricted).severity, path).toBe(2);
         expect(restrictedSelectors(restricted), path).toEqual(
           expect.arrayContaining(RAW_HTML_SELECTORS)
         );
         if (path.endsWith('.svelte')) {
-          const atHtml = await resolvedRuleEntry(path, 'svelte/no-at-html-tags');
+          const atHtml = readOwnField(rules, 'svelte/no-at-html-tags');
           expect(ruleEntry(atHtml).severity, path).toBe(2);
         }
+        if (!guarded.has(path)) {
+          continue;
+        }
+        for (const name of guardsFor(path)) {
+          expect(ruleEntry(readOwnField(rules, name)).severity, `${path} ${name}`).toBe(2);
+        }
+        expect(brandTypes(readOwnField(rules, BRAND_FORGING_RULE)), path).toEqual(
+          expect.arrayContaining(DISPLAYED_BRANDS)
+        );
+        if (path.endsWith('.svelte')) {
+          expect(brandTypes(readOwnField(rules, DISPLAY_TEXT_RULE)), path).toEqual(
+            expect.arrayContaining(DISPLAYED_BRANDS)
+          );
+        }
+        const tsComment = requireRecord(
+          ruleEntry(readOwnField(rules, TS_COMMENT_RULE)).options[0],
+          `${path} ${TS_COMMENT_RULE}`
+        );
+        expect(
+          ['ts-expect-error', 'ts-ignore', 'ts-nocheck'].map((key) => readOwnField(tsComment, key)),
+          path
+        ).toEqual([true, true, true]);
       }
+    },
+    RESOLVE_TIMEOUT_MS
+  );
+});
+
+/**
+ * The linter that reads no inline directive. `allowInlineConfig: false` drops
+ * the line and block directives and the configuration comments; with
+ * `svelte/comment-directive` off, the Svelte processor removes nothing for an
+ * HTML comment either.
+ */
+const directiveBlindEslint = new ESLint({
+  cwd: guiRoot(),
+  allowInlineConfig: false,
+  overrideConfig: { rules: { 'svelte/comment-directive': 'off' } },
+});
+
+/** The guarded sources that hold an inline directive; every directive starts with `eslint`. */
+function sourcesWithDirectives(): string[] {
+  const guarded = new Set(guardedSources());
+  return Object.entries(sourceFiles)
+    .filter(([, source]) => String(source).includes('eslint'))
+    .map(([key]) => `${SOURCE_PREFIX}/${key.replace(/^\.\//, '')}`)
+    .filter((path) => guarded.has(path));
+}
+
+describe('an inline directive cannot silence the display guards', () => {
+  it(
+    'reports no display guard once inline directives are ignored',
+    async () => {
+      const paths = sourcesWithDirectives();
+      expect(paths.length).toBeGreaterThan(0);
+      const guards = new Set(configStrings(brandGuardRuleModules, 'BRAND_GUARD_RULES'));
+      const sinkMessages = new Set(
+        configStrings(displaySinkMessageModules, 'DISPLAY_SINK_MESSAGES')
+      );
+
+      const results = await directiveBlindEslint.lintFiles(paths);
+      const messages = results.flatMap((result) =>
+        result.messages.map((message) => ({ file: result.filePath, ...message }))
+      );
+
+      expect(results.length).toBe(paths.length);
+      expect(messages.filter((message) => message.ruleId === null)).toEqual([]);
+      expect(
+        messages
+          .filter(
+            ({ ruleId, message }) =>
+              (ruleId !== null && guards.has(ruleId)) ||
+              (ruleId === 'no-restricted-syntax' && sinkMessages.has(message))
+          )
+          .map(({ file, line, ruleId, message }) => `${file}:${line} ${ruleId} ${message}`)
+      ).toEqual([]);
     },
     RESOLVE_TIMEOUT_MS
   );
