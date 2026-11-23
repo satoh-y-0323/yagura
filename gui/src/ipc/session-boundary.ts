@@ -464,7 +464,7 @@ export interface ChatParticipant {
   displayWindowId: DisplayLine;
   /** The participant window's display name, as the daemon sent it. */
   name: string;
-  /** `name` with the characters it must not draw removed, for rendering. */
+  /** `name` prepared for display by {@link sanitizeForDisplay}. */
   displayName: DisplayLine;
 }
 
@@ -535,7 +535,7 @@ export interface ChatMessage {
   from_window_id: string | null;
   /** The poster's display name, as the daemon sent it. */
   from_name: string;
-  /** `from_name` with the characters it must not draw removed, for rendering. */
+  /** `from_name` prepared for display by {@link sanitizeForDisplay}. */
   displayFromName: DisplayLine;
   /** The message body, prepared for display by {@link formatChatBody}. */
   body: DisplayBlock;

@@ -21,7 +21,7 @@ const MENTION_USER_DISPLAY_NAME = sanitizeForDisplay(MENTION_USER_NAME);
 export interface MentionCandidate {
   /** The name that would be inserted and matched on, as the daemon knows it. */
   name: string;
-  /** `name` with the characters it must not draw removed, for rendering. */
+  /** `name` prepared for display by {@link sanitizeForDisplay}. */
   displayName: DisplayLine;
   /** The participant's window id, `null` for the reserved entry. */
   windowId: string | null;

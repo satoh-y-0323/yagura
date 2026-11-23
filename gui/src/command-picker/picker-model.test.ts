@@ -381,6 +381,26 @@ describe('picker-model: folding what is typed and what is shown', () => {
     expect(idsOf(typedZwnj)).toEqual(['a']);
     expect(windowRowOf(typedZwnj, 'a').marks.name).toEqual([]);
     expect(windowRowOf(typedZwnj, 'a').marks.cwd).toEqual([{ start: 8, end: 18 }]);
+
+    // U+2800 is drawn on a line and written out on a path, so each field's form tells them apart.
+    const forms = source([
+      win('name', 'idle', { name: sanitizeForDisplay('n\u2800a') }),
+      win('vendor', 'idle', { name: 'beta', vendor: sanitizeForDisplay('v\u2800e') }),
+      win('place', 'idle', { name: 'gamma', place: formatPathForDisplay('p\u2800l') }),
+      win('cwd', 'idle', { name: 'delta', cwd: formatPathForDisplay('c\u2800w') }),
+    ]);
+    const typedName = typed(forms, 'n\u2800a');
+    expect(idsOf(typedName)).toEqual(['name']);
+    expect(windowRowOf(typedName, 'name').marks.name).toEqual([{ start: 0, end: 3 }]);
+    const typedVendor = typed(forms, 'v\u2800e');
+    expect(idsOf(typedVendor)).toEqual(['vendor']);
+    expect(windowRowOf(typedVendor, 'vendor').marks.vendor).toEqual([{ start: 0, end: 3 }]);
+    const typedPlace = typed(forms, 'p\u2800l');
+    expect(idsOf(typedPlace)).toEqual(['place']);
+    expect(windowRowOf(typedPlace, 'place').marks.place).toEqual([{ start: 0, end: 10 }]);
+    const typedCwd = typed(forms, 'c\u2800w');
+    expect(idsOf(typedCwd)).toEqual(['cwd']);
+    expect(windowRowOf(typedCwd, 'cwd').marks.cwd).toEqual([{ start: 0, end: 10 }]);
   });
 });
 

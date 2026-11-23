@@ -541,27 +541,24 @@ function prepareQuery(input: string): Query {
   for (const typed of bare.split(/\s+/u)) {
     if (typed !== '') {
       const word = formsOf(typed);
-      words.set(JSON.stringify([word.line, word.path, word.typed]), word);
+      words.set(JSON.stringify(word), word);
     }
   }
   const whole = formsOf(bare);
   return {
     text: bare.trim(),
     words: Array.from(words.values()),
-    whole: {
-      line: collapseSpaces(whole.line),
-      path: collapseSpaces(whole.path),
-      typed: collapseSpaces(whole.typed),
-    },
+    whole: eachForm((form) => collapseSpaces(whole[form])),
   };
 }
 
 function formsOf(text: string): Forms {
-  return {
-    line: fold(WORD_FORMS.line(text)).folded,
-    path: fold(WORD_FORMS.path(text)).folded,
-    typed: fold(WORD_FORMS.typed(text)).folded,
-  };
+  return eachForm((form) => fold(WORD_FORMS[form](text)).folded);
+}
+
+/** The one place the forms are listed; `Forms` makes a missing form a type error. */
+function eachForm(make: (form: WordForm) => string): Forms {
+  return { line: make('line'), path: make('path'), typed: make('typed') };
 }
 
 /** A shown text folded, with the form a typed word takes to match it. */
