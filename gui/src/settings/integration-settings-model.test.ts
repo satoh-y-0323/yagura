@@ -10,20 +10,28 @@
 import { describe, it, expect } from 'vitest';
 
 import {
-  displayCommand,
   integrationGroups,
   integrationsNotice,
   resultLines,
   type IntegrationGroup,
   type IntegrationRowView,
 } from './integration-settings-model';
+import {
+  foldExternalText,
+  formatCommandLine,
+  formatOutputBlock,
+  formatPathForDisplay,
+  sanitizeForDisplay,
+} from '../display/untrusted-text';
 import type {
   McpRegistrationCommand,
+  McpRegistrationEntry,
   McpRegistrationResultPayload,
   McpRegistrationRow,
   McpRegistrationsListed,
   McpRegistrationState,
   McpRegistrationStatusInfo,
+  McpRegistrationStep,
 } from '../ipc/mcp-registration-boundary';
 import { settings } from '../ui-messages';
 
@@ -40,13 +48,26 @@ function text(value: unknown): string {
 }
 
 function command(argv: string[], programAt = 0): McpRegistrationCommand {
-  return { argv, programAt };
+  return {
+    argv,
+    programAt,
+    displayCommand: formatCommandLine(argv.slice(programAt)),
+    displayArgv: formatCommandLine(argv),
+  };
+}
+
+function entry(file: string, name: string, content: string): McpRegistrationEntry {
+  return {
+    file: formatPathForDisplay(file),
+    name: formatPathForDisplay(name),
+    content: formatPathForDisplay(content),
+  };
 }
 
 function row(profile: string, overrides: Partial<McpRegistrationRow> = {}): McpRegistrationRow {
   return {
     profile,
-    displayName: `${profile} name`,
+    displayName: sanitizeForDisplay(`${profile} name`),
     group: null,
     add: command(['launcher', profile, 'mcp', 'add', 'yagura', '--', BRIDGE], 1),
     remove: command(['launcher', profile, 'mcp', 'remove', 'yagura'], 1),
@@ -60,7 +81,7 @@ function listed(
   rows: McpRegistrationRow[],
   bridge: string | null = BRIDGE
 ): McpRegistrationsListed {
-  return { requestId: 1, bridge, rows };
+  return { requestId: 1, bridge: bridge === null ? null : formatPathForDisplay(bridge), rows };
 }
 
 function status(
@@ -68,10 +89,12 @@ function status(
   state: McpRegistrationState,
   overrides: Partial<McpRegistrationStatusInfo> = {}
 ): McpRegistrationStatusInfo {
+  const differsIn = overrides.differsIn ?? [];
   return {
     profile,
     state,
-    differsIn: [],
+    differsIn,
+    displayDiffersIn: differsIn.map(formatPathForDisplay),
     reason: null,
     add: null,
     remove: null,
@@ -113,11 +136,11 @@ function hasNoEnabledButton(view: IntegrationRowView): boolean {
 describe('integrationGroups: grouping', () => {
   it('puts the rows without a group first under the host heading, then each group in row order', () => {
     const rows = [
-      row('linux-alpha', { group: 'Linux' }),
+      row('linux-alpha', { group: sanitizeForDisplay('Linux') }),
       row('alpha'),
-      row('other-alpha', { group: 'Other' }),
+      row('other-alpha', { group: sanitizeForDisplay('Other') }),
       row('beta'),
-      row('linux-beta', { group: 'Linux' }),
+      row('linux-beta', { group: sanitizeForDisplay('Linux') }),
     ];
 
     const groups: IntegrationGroup[] = integrationGroups(listed(rows), statuses(), null);
@@ -136,7 +159,7 @@ describe('integrationGroups: grouping', () => {
 
   it('shows no host heading when every row belongs to a group', () => {
     const groups: IntegrationGroup[] = integrationGroups(
-      listed([row('linux-alpha', { group: 'Linux' })]),
+      listed([row('linux-alpha', { group: sanitizeForDisplay('Linux') })]),
       statuses(),
       null
     );
@@ -144,8 +167,27 @@ describe('integrationGroups: grouping', () => {
     expect(groups.map((group) => group.heading)).toEqual(['Linux']);
   });
 
+  it('keys a group named like the host heading apart from the host group', () => {
+    const groups: IntegrationGroup[] = integrationGroups(
+      listed([
+        row('alpha'),
+        row('named', { group: sanitizeForDisplay(settings.integrationsHostGroup) }),
+      ]),
+      statuses(),
+      null
+    );
+
+    expect(groups.map((group) => group.heading)).toEqual([
+      text(settings.integrationsHostGroup),
+      text(settings.integrationsHostGroup),
+    ]);
+    expect(new Set(groups.map((group) => group.key)).size).toBe(2);
+  });
+
   it('names each row by the display name the daemon sent', () => {
-    const view = viewOf('registered', {}, null, { displayName: 'Alpha Shown Name' });
+    const view = viewOf('registered', {}, null, {
+      displayName: sanitizeForDisplay('Alpha Shown Name'),
+    });
 
     expect(view.name).toBe('Alpha Shown Name');
     expect(view.profile).toBe('alpha');
@@ -187,7 +229,9 @@ describe('integrationGroups: buttons per state', () => {
   });
 
   it('offers Register and Remove with the reason for a row whose state could not be read', () => {
-    const view = viewOf('unknown', { reason: 'the status output could not be read' });
+    const view = viewOf('unknown', {
+      reason: foldExternalText('the status output could not be read'),
+    });
 
     expect(view.primaryAction).toBe('register');
     expect(view.isPrimaryDisabled).toBe(false);
@@ -197,9 +241,9 @@ describe('integrationGroups: buttons per state', () => {
   });
 
   it('folds the line breaks and control characters of the reason', () => {
-    expect(viewOf('unknown', { reason: 'status\r\nunreadable\u202E' }).reason).toBe(
-      'status unreadable'
-    );
+    expect(
+      viewOf('unknown', { reason: foldExternalText('status\r\nunreadable\u202E') }).reason
+    ).toBe('status unreadable');
   });
 
   it('carries no reason for a row whose state was read', () => {
@@ -311,9 +355,9 @@ describe('integrationGroups: the command a row shows', () => {
 describe('integrationGroups: the settings-file note', () => {
   it('describes the change from the file, table and values the daemon sent', () => {
     const tomlSet = {
-      file: '.alpha/config.toml',
-      table: ['mcp_servers', 'yagura'],
-      values: [{ key: 'call_timeout', value: '86400' }],
+      file: formatPathForDisplay('.alpha/config.toml'),
+      table: ['mcp_servers', 'yagura'].map(formatPathForDisplay),
+      values: [{ key: formatPathForDisplay('call_timeout'), value: formatPathForDisplay('86400') }],
     };
 
     const view = viewOf('not_registered', {}, null, { tomlSet });
@@ -333,27 +377,15 @@ describe('integrationGroups: the settings-file note', () => {
 
 describe('integrationGroups: the notice a profile asks to show', () => {
   it("shows the profile's own sentence before and after registering, and none without one", () => {
-    const notice = 'While this is registered, the CLI asks before trusting a folder.';
+    const notice = sanitizeForDisplay(
+      'While this is registered, the CLI asks before trusting a folder.'
+    );
     const states: (McpRegistrationState | null)[] = [null, 'not_registered', 'registered'];
     for (const state of states) {
       expect(viewOf(state, {}, null, { notice }).notice).toBe(notice);
     }
     expect(viewOf('not_registered').notice).toBeNull();
     expect(viewOf('registered', {}, null, { notice: null }).notice).toBeNull();
-  });
-});
-
-describe('displayCommand', () => {
-  it('shows the argv from the CLI on, joined by spaces', () => {
-    expect(displayCommand(command(['wrap', '-x', 'alpha', 'mcp', 'remove', 'yagura'], 2))).toBe(
-      'alpha mcp remove yagura'
-    );
-  });
-
-  it('quotes an element that contains whitespace', () => {
-    expect(
-      displayCommand(command(['alpha', 'mcp', 'add', 'yagura', '--', 'C:\\Program Files\\y.exe']))
-    ).toBe('alpha mcp add yagura -- "C:\\Program Files\\y.exe"');
   });
 });
 
@@ -371,6 +403,21 @@ describe('integrationsNotice', () => {
 });
 
 describe('resultLines', () => {
+  function step(
+    argv: string[],
+    programAt: number,
+    exitCode: number | null,
+    output: string
+  ): McpRegistrationStep {
+    return {
+      argv,
+      programAt,
+      displayCommand: formatCommandLine(argv.slice(programAt)),
+      exitCode,
+      output: formatOutputBlock(output),
+    };
+  }
+
   function result(
     overrides: Partial<McpRegistrationResultPayload> = {}
   ): McpRegistrationResultPayload {
@@ -379,19 +426,14 @@ describe('resultLines', () => {
       profile: 'alpha',
       action: 'register',
       steps: [
-        {
-          argv: ['launcher', 'alpha', 'mcp', 'add', 'yagura', '--', 'C:\\Program Files\\y.exe'],
-          programAt: 1,
-          exitCode: 0,
-          output: 'Added the server.',
-        },
-        { argv: [], programAt: 0, exitCode: null, output: 'set call_timeout in the table' },
-        {
-          argv: ['launcher', 'alpha', 'mcp', 'get', 'yagura'],
-          programAt: 1,
-          exitCode: 0,
-          output: '',
-        },
+        step(
+          ['launcher', 'alpha', 'mcp', 'add', 'yagura', '--', 'C:\\Program Files\\y.exe'],
+          1,
+          0,
+          'Added the server.'
+        ),
+        step([], 0, null, 'set call_timeout in the table'),
+        step(['launcher', 'alpha', 'mcp', 'get', 'yagura'], 1, 0, ''),
       ],
       error: null,
       status: status('alpha', 'registered'),
@@ -414,7 +456,7 @@ describe('resultLines', () => {
   });
 
   it('marks the result as a failure and shows the error when there is one', () => {
-    const lines = resultLines(result({ error: 'the add step exited with 1' }));
+    const lines = resultLines(result({ error: formatOutputBlock('the add step exited with 1') }));
 
     expect(lines.isFailure).toBe(true);
     expect(lines.text).toContain('the add step exited with 1');
@@ -424,30 +466,37 @@ describe('resultLines', () => {
 
 describe('integrationGroups: the entries note', () => {
   it('names the single entry and the file it is added to', () => {
-    const entries = [{ file: '.beta/config/hooks.json', name: 'yagura', content: '{"Event":[]}' }];
+    const entries = [entry('.beta/config/hooks.json', 'yagura', '{"Event":[]}')];
 
     const view = viewOf('not_registered', {}, null, { entries });
 
     expect(view.entriesNote).toBe(
-      text(settings.integrationHookEntriesNote('.beta/config/hooks.json', ['yagura']))
+      text(
+        settings.integrationHookEntriesNote(formatPathForDisplay('.beta/config/hooks.json'), [
+          formatPathForDisplay('yagura'),
+        ])
+      )
     );
     for (const part of ['.beta/config/hooks.json', 'yagura']) {
       expect(view.entriesNote).toContain(part);
     }
-    expect(view.entriesTitle).toContain('{"Event":[]}');
+    expect(view.entriesTitle?.join('\n')).toContain('{"Event":[]}');
   });
 
   it('counts several entries added to one file', () => {
-    const entries = ['a', 'b', 'c'].map((name) => ({
-      file: '.alpha/config.toml',
-      name,
-      content: `{ hash = "${name}" }`,
-    }));
+    const entries = ['a', 'b', 'c'].map((name) =>
+      entry('.alpha/config.toml', name, `{ hash = "${name}" }`)
+    );
 
     const view = viewOf('not_registered', {}, null, { entries });
 
     expect(view.entriesNote).toBe(
-      text(settings.integrationHookEntriesNote('.alpha/config.toml', ['a', 'b', 'c']))
+      text(
+        settings.integrationHookEntriesNote(
+          formatPathForDisplay('.alpha/config.toml'),
+          ['a', 'b', 'c'].map(formatPathForDisplay)
+        )
+      )
     );
     for (const name of ['a', 'b', 'c']) {
       expect(view.entriesTitle).toContain(`${name} = { hash = "${name}" }`);
@@ -487,23 +536,28 @@ describe('integrationGroups: details of the state and the notes', () => {
   });
 
   it('lists each hook entry on a line of its own in the title', () => {
-    const entries = [
-      { file: 'a.json', name: 'one', content: '1' },
-      { file: 'a.json', name: 'two', content: '2' },
-    ];
+    const entries = [entry('a.json', 'one', '1'), entry('a.json', 'two', '2')];
 
-    expect(viewOf('not_registered', {}, null, { entries }).entriesTitle).toBe('one = 1\ntwo = 2');
+    expect(viewOf('not_registered', {}, null, { entries }).entriesTitle).toEqual([
+      'one = 1',
+      'two = 2',
+    ]);
   });
 
   it('writes one sentence per file, in the order the files first appear, joined by a space', () => {
     const entries = [
-      { file: 'b.json', name: 'one', content: '1' },
-      { file: 'a.json', name: 'two', content: '2' },
-      { file: 'b.json', name: 'three', content: '3' },
+      entry('b.json', 'one', '1'),
+      entry('a.json', 'two', '2'),
+      entry('b.json', 'three', '3'),
     ];
+    const note = (file: string, names: string[]): string =>
+      settings.integrationHookEntriesNote(
+        formatPathForDisplay(file),
+        names.map(formatPathForDisplay)
+      );
 
     expect(viewOf('not_registered', {}, null, { entries }).entriesNote).toBe(
-      `${settings.integrationHookEntriesNote('b.json', ['one', 'three'])} ${settings.integrationHookEntriesNote('a.json', ['two'])}`
+      `${note('b.json', ['one', 'three'])} ${note('a.json', ['two'])}`
     );
   });
 });
@@ -514,9 +568,9 @@ function commandlessRow(entries: McpRegistrationRow['entries']): Partial<McpRegi
 }
 
 const MUSE_ENTRIES: McpRegistrationRow['entries'] = [
-  { file: '.config/muse/settings.json', name: '/mcpServers/yagura', content: '{}' },
-  { file: '.config/muse/yagura-managed-hooks.json', name: '/hooks', content: '{}' },
-  { file: '.config/muse/settings.json', name: '/managed_hooks_path', content: '"x.json"' },
+  entry('.config/muse/settings.json', '/mcpServers/yagura', '{}'),
+  entry('.config/muse/yagura-managed-hooks.json', '/hooks', '{}'),
+  entry('.config/muse/settings.json', '/managed_hooks_path', '"x.json"'),
 ];
 
 describe('integrationGroups: a registration that runs no command', () => {
@@ -524,8 +578,8 @@ describe('integrationGroups: a registration that runs no command', () => {
     for (const state of ['not_registered', 'registered', 'differs'] as const) {
       const view = viewOf(state, {}, null, commandlessRow(MUSE_ENTRIES));
 
-      expect(view.command).toBe('');
-      expect(view.commandTitle).toBe('');
+      expect(view.command).toBeNull();
+      expect(view.commandTitle).toBeNull();
       expect(view.fileWrites).toEqual([
         {
           file: '.config/muse/settings.json',
@@ -543,12 +597,12 @@ describe('integrationGroups: a registration that runs no command', () => {
   });
 
   it('keeps the command and its entries note for a registration that runs one', () => {
-    const entries = [{ file: '.beta/config/hooks.json', name: 'yagura', content: '{}' }];
+    const entries = [entry('.beta/config/hooks.json', 'yagura', '{}')];
 
     const view = viewOf('not_registered', {}, null, { entries });
 
     expect(view.fileWrites).toBeNull();
-    expect(view.command).not.toBe('');
+    expect(view.command).not.toBeNull();
     expect(view.entriesNote).not.toBeNull();
   });
 });
@@ -559,7 +613,7 @@ describe('integrationGroups: a claim another value holds', () => {
   it('refuses Register before it is pressed and says which claim refuses it', () => {
     const view = viewOf(
       'not_registered',
-      { refusedByClaim: CLAIM },
+      { refusedByClaim: formatPathForDisplay(CLAIM) },
       null,
       commandlessRow(MUSE_ENTRIES)
     );
@@ -572,7 +626,7 @@ describe('integrationGroups: a claim another value holds', () => {
   it('refuses Update but leaves Remove pressable, since only Register and Update are refused', () => {
     const view = viewOf(
       'differs',
-      { differsIn: [CLAIM], refusedByClaim: CLAIM },
+      { differsIn: [CLAIM], refusedByClaim: formatPathForDisplay(CLAIM) },
       null,
       commandlessRow(MUSE_ENTRIES)
     );

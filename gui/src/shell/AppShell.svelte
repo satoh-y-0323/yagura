@@ -258,7 +258,7 @@
     isApprovalSettingsReadOnly,
     PLAN_REVIEW_GATE_ID,
   } from '../settings/approval-settings-model';
-  import { integrationsNotice } from '../settings/integration-settings-model';
+  import { integrationRunName, integrationsNotice } from '../settings/integration-settings-model';
   import {
     clampPanelSize,
     panelMaxSize,
@@ -1388,8 +1388,7 @@
       if (integrationsRunRequestId === requestId) {
         integrationsRunRequestId = null;
         integrationRunning = null;
-        const name =
-          integrationsListed?.rows.find((row) => row.profile === profile)?.displayName ?? profile;
+        const name = integrationRunName(integrationsListed, profile);
         integrationsFailure = commandFailureLine(error, () =>
           describeOperationFailure(settings.integrationRunFailure(name), error)
         );

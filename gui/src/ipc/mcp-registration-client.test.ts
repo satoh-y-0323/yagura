@@ -158,8 +158,15 @@ describe('invokeListMcpRegistrations', () => {
           add: {
             argv: ['alpha', 'mcp', 'add', 'yagura', '--', 'C:\\bridge\\yagura-mcp.exe'],
             programAt: 0,
+            displayCommand: 'alpha mcp add yagura -- C:\\bridge\\yagura-mcp.exe',
+            displayArgv: 'alpha mcp add yagura -- C:\\bridge\\yagura-mcp.exe',
           },
-          remove: { argv: ['alpha', 'mcp', 'remove', 'yagura'], programAt: 0 },
+          remove: {
+            argv: ['alpha', 'mcp', 'remove', 'yagura'],
+            programAt: 0,
+            displayCommand: 'alpha mcp remove yagura',
+            displayArgv: 'alpha mcp remove yagura',
+          },
           tomlSet: {
             file: '.alpha/config.toml',
             table: ['mcp_servers', 'yagura'],
@@ -249,16 +256,19 @@ describe('listenMcpRegistrationStatus', () => {
 
     callback({ payload: statusPayloadWire() });
 
-    const expected: McpRegistrationStatusPayload = {
+    const expected = {
       requestId: 7,
       status: {
         profile: 'alpha-cli',
         state: 'differs',
         differsIn: ['command'],
+        displayDiffersIn: ['command'],
         reason: null,
         add: {
           argv: ['alpha', 'mcp', 'add', 'yagura', '--', 'C:\\bridge\\yagura-mcp.exe'],
           programAt: 0,
+          displayCommand: 'alpha mcp add yagura -- C:\\bridge\\yagura-mcp.exe',
+          displayArgv: 'alpha mcp add yagura -- C:\\bridge\\yagura-mcp.exe',
         },
         remove: null,
         refusedByClaim: null,
@@ -312,7 +322,7 @@ describe('listenMcpRegistrationResult', () => {
 
     callback({ payload: resultPayloadWire({ error: 'the add step failed' }) });
 
-    const expected: McpRegistrationResultPayload = {
+    const expected = {
       requestId: 8,
       profile: 'alpha-cli',
       action: 'register',
@@ -320,20 +330,24 @@ describe('listenMcpRegistrationResult', () => {
         {
           argv: ['alpha', 'mcp', 'add', 'yagura', '--', 'C:\\bridge\\yagura-mcp.exe'],
           programAt: 0,
+          displayCommand: 'alpha mcp add yagura -- C:\\bridge\\yagura-mcp.exe',
           exitCode: 0,
           output: 'Added.',
         },
-        { argv: [], programAt: 0, exitCode: null, output: 'set' },
+        { argv: [], programAt: 0, displayCommand: '', exitCode: null, output: 'set' },
       ],
       error: 'the add step failed',
       status: {
         profile: 'alpha-cli',
         state: 'registered',
         differsIn: [],
+        displayDiffersIn: [],
         reason: null,
         add: {
           argv: ['alpha', 'mcp', 'add', 'yagura', '--', 'C:\\bridge\\yagura-mcp.exe'],
           programAt: 0,
+          displayCommand: 'alpha mcp add yagura -- C:\\bridge\\yagura-mcp.exe',
+          displayArgv: 'alpha mcp add yagura -- C:\\bridge\\yagura-mcp.exe',
         },
         remove: null,
         refusedByClaim: null,

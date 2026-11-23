@@ -1003,27 +1003,36 @@ export const messagesEn = {
     integrationUpdateButton: 'Update',
     integrationRemoveButton: 'Remove',
     integrationTomlSetNote: (
-      file: string,
-      table: readonly string[],
-      values: readonly { key: string; value: string }[]
+      file: DisplayLine,
+      table: readonly DisplayLine[],
+      values: readonly { key: DisplayLine; value: DisplayLine }[]
     ): string => {
       const path = table.join('.');
       const changes = values.map((entry) => `${entry.key} = ${entry.value}`).join(', ');
       return `Also sets ${changes} in [${path}] of ${file}.`;
     },
     integrationFileWritesLead: 'yagura edits these files instead of running a command:',
-    integrationRefusedByClaim: (pointer: string): string =>
+    /** The entries one file gets, as the row lists them after the file. */
+    integrationFileWriteNames: (names: readonly DisplayLine[]): string => names.join(', '),
+    integrationRefusedByClaim: (pointer: DisplayLine): string =>
       `Can't register or update: ${pointer} already holds a different value, and yagura does not overwrite it.`,
-    integrationHookEntriesNote: (file: string, names: readonly string[]): string =>
+    integrationHookEntriesNote: (file: DisplayLine, names: readonly DisplayLine[]): string =>
       names.length === 1
         ? `Also adds the "${names[0] ?? ''}" entry to ${file} so the CLI reports its status.`
         : `Also adds ${names.length} entries to ${file} so the CLI reports its status.`,
+    /** The entry notes of a row's files, one sentence per file. */
+    integrationHookEntriesNotes: (notes: readonly UiText[]): string => notes.join(' '),
+    /** One line of a row's entry list: an entry and the value written for it. */
+    integrationEntryLine: (name: DisplayLine, content: DisplayLine): string =>
+      `${name} = ${content}`,
+    /** The line a result shows for a command a step ran. */
+    integrationResultCommand: (command: DisplayLine): string => `$ ${command}`,
     integrationsNoBridge:
       'yagura could not find its own MCP bridge, so no CLI can be registered from here.',
-    integrationsFooter: (bridge: string): string =>
+    integrationsFooter: (bridge: DisplayLine): string =>
       `Bridge: ${bridge}. Restart a running CLI session to pick up a change.`,
     integrationsListFailure: 'Could not read the CLI registrations',
-    integrationRunFailure: (name: string): string =>
+    integrationRunFailure: (name: DisplayLine): string =>
       `Could not run the registration command for ${name}`,
 
     // The Keyboard tab: the shortcut table, recording a chord, and why a chord

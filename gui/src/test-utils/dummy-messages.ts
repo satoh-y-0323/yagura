@@ -453,23 +453,25 @@ export const dummyMessages = {
     integrationRegisterButton: 'DUMMY_settings_integrationRegisterButton',
     integrationUpdateButton: 'DUMMY_settings_integrationUpdateButton',
     integrationRemoveButton: 'DUMMY_settings_integrationRemoveButton',
-    integrationTomlSetNote: (
-      file: string,
-      table: readonly string[],
-      values: readonly { key: string; value: string }[]
-    ) =>
+    integrationTomlSetNote: (file, table, values) =>
       `DUMMY_settings_integrationTomlSetNote(${file},${table.join('.')},${values
         .map((entry) => `${entry.key}=${entry.value}`)
         .join(',')})`,
     integrationFileWritesLead: 'DUMMY_settings_integrationFileWritesLead',
-    integrationRefusedByClaim: (pointer: string) =>
-      `DUMMY_settings_integrationRefusedByClaim(${pointer})`,
-    integrationHookEntriesNote: (file: string, names: readonly string[]) =>
+    integrationFileWriteNames: (names) =>
+      `DUMMY_settings_integrationFileWriteNames(${names.join(',')})`,
+    integrationRefusedByClaim: (pointer) => `DUMMY_settings_integrationRefusedByClaim(${pointer})`,
+    integrationHookEntriesNote: (file, names) =>
       `DUMMY_settings_integrationHookEntriesNote(${file},${names.join(',')})`,
+    integrationHookEntriesNotes: (notes) =>
+      `DUMMY_settings_integrationHookEntriesNotes(${notes.join(',')})`,
+    integrationEntryLine: (name, content) =>
+      `DUMMY_settings_integrationEntryLine(${name},${content})`,
+    integrationResultCommand: (command) => `DUMMY_settings_integrationResultCommand(${command})`,
     integrationsNoBridge: 'DUMMY_settings_integrationsNoBridge',
-    integrationsFooter: (bridge: string) => `DUMMY_settings_integrationsFooter(${bridge})`,
+    integrationsFooter: (bridge) => `DUMMY_settings_integrationsFooter(${bridge})`,
     integrationsListFailure: 'DUMMY_settings_integrationsListFailure',
-    integrationRunFailure: (name: string) => `DUMMY_settings_integrationRunFailure(${name})`,
+    integrationRunFailure: (name) => `DUMMY_settings_integrationRunFailure(${name})`,
 
     notificationsTab: 'DUMMY_settings_notificationsTab',
     notificationsDescription: 'DUMMY_settings_notificationsDescription',

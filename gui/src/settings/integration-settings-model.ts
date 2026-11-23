@@ -6,6 +6,13 @@
  * DOM: the component renders these values and hands the switch back to its
  * caller.
  */
+import {
+  joinDisplayBlocks,
+  sanitizeForDisplay,
+  type DisplayBlock,
+  type DisplayLine,
+} from '../display/untrusted-text';
+import type { UiText } from '../display/ui-text';
 import type {
   McpRegistrationCommand,
   McpRegistrationEntry,
@@ -15,12 +22,12 @@ import type {
   McpRegistrationsListed,
   McpRegistrationStatusInfo,
 } from '../ipc/mcp-registration-boundary';
-import { foldExternalText, settings } from '../ui-messages';
+import { settings } from '../ui-messages';
 
 /** The entries a command-less registration writes into one of its CLI's files. */
 export interface IntegrationFileWrite {
-  file: string;
-  names: string[];
+  file: DisplayLine;
+  names: DisplayLine[];
 }
 
 /** What one row of the Integrations tab shows. */
@@ -28,15 +35,15 @@ export interface IntegrationRowView {
   /** The profile's wire id. */
   profile: string;
   /** The profile's display name. */
-  name: string;
+  name: DisplayLine;
   /** The registration-state text this row currently shows. */
-  stateLabel: string;
+  stateLabel: UiText;
   /** Which color the state line should render in. */
   stateTone: 'ok' | 'warn' | 'none';
-  /** The command this row shows, from `programAt` onward. */
-  command: string;
-  /** The full command (from argv[0]), for the `title` attribute. */
-  commandTitle: string;
+  /** The command this row shows, from `programAt` onward; `null` for a row that runs none. */
+  command: DisplayLine | null;
+  /** The full command (from argv[0]); `null` for a row that runs none. */
+  commandTitle: DisplayLine | null;
   /** The primary button this row offers, `null` when it offers none. */
   primaryAction: 'register' | 'update' | null;
   /** Whether the primary button must stay unpressable. */
@@ -46,35 +53,44 @@ export interface IntegrationRowView {
   /** Whether the Remove button must stay unpressable. */
   isRemoveDisabled: boolean;
   /** Why the state could not be read, `null` for every other state. */
-  reason: string | null;
+  reason: DisplayLine | null;
   /** The settings-file change this row's registration also makes, `null` for a row with none. */
-  tomlSetNote: string | null;
+  tomlSetNote: UiText | null;
   /** The entries this row's registration writes into its CLI's files, `null` for a row with none. */
-  entriesNote: string | null;
-  /** Every such entry written out in full, for a tooltip; `null` alongside a `null` note. */
-  entriesTitle: string | null;
+  entriesNote: UiText | null;
+  /**
+   * Every such entry written out in full, one line each; `null` alongside a
+   * `null` note. Lines, so that no one-line place can run them together.
+   */
+  entriesTitle: UiText[] | null;
   /**
    * The files a registration that runs no command writes, with the entries in
    * each; `null` for a row that runs a command.
    */
   fileWrites: IntegrationFileWrite[] | null;
   /** Why Register / Update would be refused before it is pressed, `null` when it would not. */
-  refusal: string | null;
+  refusal: UiText | null;
   /** The profile's own sentence for this row, shown in every state; `null` when it writes none. */
-  notice: string | null;
+  notice: DisplayLine | null;
 }
 
 /** One heading and the rows under it. */
 export interface IntegrationGroup {
-  heading: string;
+  /** Tells the groups apart whatever their headings read; a named group may read like the host's. */
+  key: string;
+  heading: UiText | DisplayLine;
   rows: IntegrationRowView[];
 }
+
+// The two key spaces cannot meet: only the host key lacks the prefix.
+const HOST_GROUP_KEY = 'host';
+const NAMED_GROUP_KEY_PREFIX = 'group:';
 
 /**
  * The one line explaining why the Integrations tab cannot act right now,
  * `null` when there is nothing to say.
  */
-export function integrationsNotice(listed: McpRegistrationsListed | null): string | null {
+export function integrationsNotice(listed: McpRegistrationsListed | null): UiText | null {
   if (listed === null) {
     return null;
   }
@@ -84,14 +100,17 @@ export function integrationsNotice(listed: McpRegistrationsListed | null): strin
   return null;
 }
 
-/** Joins argv elements with spaces, quoting an element that contains whitespace. */
-function joinArgv(argv: readonly string[]): string {
-  return argv.map((part) => (/\s/.test(part) ? `"${part}"` : part)).join(' ');
-}
-
-/** The command a row (or a result step) shows, sliced at `programAt`. */
-export function displayCommand(command: McpRegistrationCommand): string {
-  return joinArgv(command.argv.slice(command.programAt));
+/**
+ * The name a failure to run `profile`'s registration is told by: the listed
+ * row's display name, or the profile id itself when no listed row has it.
+ */
+export function integrationRunName(
+  listed: McpRegistrationsListed | null,
+  profile: string
+): DisplayLine {
+  return (
+    listed?.rows.find((row) => row.profile === profile)?.displayName ?? sanitizeForDisplay(profile)
+  );
 }
 
 /**
@@ -131,7 +150,7 @@ function canRemoveFor(state: McpRegistrationState | null): boolean {
 
 /** The state line's text and color for one row. */
 function stateView(status: McpRegistrationStatusInfo | undefined): {
-  label: string;
+  label: UiText;
   tone: 'ok' | 'warn' | 'none';
 } {
   if (status === undefined) {
@@ -149,7 +168,12 @@ function stateView(status: McpRegistrationStatusInfo | undefined): {
     case 'differs':
       return status.differsIn.includes('command')
         ? { label: settings.integrationDiffers, tone: 'warn' }
-        : { label: settings.integrationDiffersIn(status.differsIn[0] ?? ''), tone: 'warn' };
+        : {
+            label: settings.integrationDiffersIn(
+              status.displayDiffersIn[0] ?? sanitizeForDisplay('')
+            ),
+            tone: 'warn',
+          };
   }
 }
 
@@ -172,13 +196,13 @@ function buildRowView(
     name: row.displayName,
     stateLabel: label,
     stateTone: tone,
-    command: command === null ? '' : displayCommand(command),
-    commandTitle: command === null ? '' : joinArgv(command.argv),
+    command: command?.displayCommand ?? null,
+    commandTitle: command?.displayArgv ?? null,
     primaryAction,
     isPrimaryDisabled: state === 'not_installed' || operationRunning || refused,
     canRemove: canRemoveFor(state),
     isRemoveDisabled: operationRunning,
-    reason: status?.reason == null ? null : foldExternalText(status.reason),
+    reason: status?.reason ?? null,
     tomlSetNote:
       row.tomlSet === null
         ? null
@@ -187,7 +211,7 @@ function buildRowView(
     entriesTitle:
       row.entries.length === 0
         ? null
-        : row.entries.map((entry) => `${entry.name} = ${entry.content}`).join('\n'),
+        : row.entries.map((entry) => settings.integrationEntryLine(entry.name, entry.content)),
     fileWrites: writesFiles ? fileWrites(row.entries) : null,
     refusal: refused ? settings.integrationRefusedByClaim(claim) : null,
     notice: row.notice ?? null,
@@ -196,7 +220,7 @@ function buildRowView(
 
 /** The entries grouped by file, in the order the files first appear. */
 function fileWrites(entries: readonly McpRegistrationEntry[]): IntegrationFileWrite[] {
-  const namesByFile = new Map<string, string[]>();
+  const namesByFile = new Map<DisplayLine, DisplayLine[]>();
   for (const entry of entries) {
     const names = namesByFile.get(entry.file) ?? [];
     names.push(entry.name);
@@ -206,13 +230,13 @@ function fileWrites(entries: readonly McpRegistrationEntry[]): IntegrationFileWr
 }
 
 /** One sentence per file the entries go into, in the order the files first appear. */
-function entriesNote(entries: readonly McpRegistrationEntry[]): string | null {
+function entriesNote(entries: readonly McpRegistrationEntry[]): UiText | null {
   if (entries.length === 0) {
     return null;
   }
-  return fileWrites(entries)
-    .map(({ file, names }) => settings.integrationHookEntriesNote(file, names))
-    .join(' ');
+  return settings.integrationHookEntriesNotes(
+    fileWrites(entries).map(({ file, names }) => settings.integrationHookEntriesNote(file, names))
+  );
 }
 
 /**
@@ -226,8 +250,9 @@ export function integrationGroups(
   running: string | null
 ): IntegrationGroup[] {
   const hostRows: IntegrationRowView[] = [];
-  // A Map keeps the order in which each group first appeared.
-  const groupRows = new Map<string, IntegrationRowView[]>();
+  // A Map keeps the order in which each group first appeared. The daemon refuses hidden
+  // characters in a group, so the prepared name groups the rows as the raw one would.
+  const groupRows = new Map<DisplayLine, IntegrationRowView[]>();
 
   for (const row of listed.rows) {
     const view = buildRowView(row, statuses.get(row.profile), running);
@@ -245,23 +270,27 @@ export function integrationGroups(
 
   const groups: IntegrationGroup[] = [];
   if (hostRows.length > 0) {
-    groups.push({ heading: settings.integrationsHostGroup, rows: hostRows });
+    groups.push({ key: HOST_GROUP_KEY, heading: settings.integrationsHostGroup, rows: hostRows });
   }
   for (const [heading, rows] of groupRows) {
-    groups.push({ heading, rows });
+    groups.push({ key: `${NAMED_GROUP_KEY_PREFIX}${heading}`, heading, rows });
   }
   return groups;
 }
 
-/** The text an operation's result leaves in the row's result area, and whether it failed. */
+/**
+ * The text an operation's result leaves in the row's result area, and whether
+ * it failed. The whole is capped, since every step's output is capped only on
+ * its own.
+ */
 export function resultLines(result: McpRegistrationResultPayload): {
-  text: string;
+  text: DisplayBlock;
   isFailure: boolean;
 } {
-  const lines: string[] = [];
+  const lines: (UiText | DisplayBlock)[] = [];
   for (const step of result.steps) {
     if (step.argv.length > 0) {
-      lines.push(`$ ${displayCommand(step)}`);
+      lines.push(settings.integrationResultCommand(step.displayCommand));
     }
     if (step.output !== '') {
       lines.push(step.output);
@@ -270,5 +299,5 @@ export function resultLines(result: McpRegistrationResultPayload): {
   if (result.error !== null) {
     lines.push(result.error);
   }
-  return { text: lines.join('\n'), isFailure: result.error !== null };
+  return { text: joinDisplayBlocks(lines), isFailure: result.error !== null };
 }

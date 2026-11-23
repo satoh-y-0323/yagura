@@ -91,8 +91,18 @@ describe('the registration state of a status push', () => {
     });
     expect(status.differsIn).toEqual(['command', 'args', 'a-part-this-build-does-not-name']);
     expect(status.reason).toBe('why');
-    expect(status.add).toEqual({ argv: ['alpha', 'mcp', 'add'], programAt: 1 });
-    expect(status.remove).toEqual({ argv: ['alpha', 'mcp', 'add'], programAt: 0 });
+    expect(status.add).toEqual({
+      argv: ['alpha', 'mcp', 'add'],
+      programAt: 1,
+      displayCommand: 'mcp add',
+      displayArgv: 'alpha mcp add',
+    });
+    expect(status.remove).toEqual({
+      argv: ['alpha', 'mcp', 'add'],
+      programAt: 0,
+      displayCommand: 'alpha mcp add',
+      displayArgv: 'alpha mcp add',
+    });
   });
 
   it('keeps the claim pointer a refused Register or Update names', () => {
@@ -145,8 +155,18 @@ describe('narrowMcpRegistrationsListed', () => {
           profile: 'alpha-cli',
           displayName: 'Alpha CLI',
           group: 'g',
-          add: { argv: ['alpha', 'mcp', 'add'], programAt: 1 },
-          remove: { argv: ['alpha', 'mcp', 'remove'], programAt: 1 },
+          add: {
+            argv: ['alpha', 'mcp', 'add'],
+            programAt: 1,
+            displayCommand: 'mcp add',
+            displayArgv: 'alpha mcp add',
+          },
+          remove: {
+            argv: ['alpha', 'mcp', 'remove'],
+            programAt: 1,
+            displayCommand: 'mcp remove',
+            displayArgv: 'alpha mcp remove',
+          },
           tomlSet: { file: 'c.toml', table: ['t'], values: [{ key: 'k', value: 'v' }] },
           entries: [{ file: 'h.json', name: 'n', content: 'c' }],
           notice: null,
@@ -258,18 +278,35 @@ describe('narrowMcpRegistrationResultPayload', () => {
       requestId: 4,
       profile: 'alpha-cli',
       action: 'update',
-      steps: [{ argv: ['a'], programAt: 0, exitCode: 2, output: 'o' }],
+      steps: [{ argv: ['a'], programAt: 0, displayCommand: 'a', exitCode: 2, output: 'o' }],
       error: 'boom',
       status: {
         profile: 'alpha-cli',
         state: 'registered',
         differsIn: [],
+        displayDiffersIn: [],
         reason: null,
         add: null,
         remove: null,
         refusedByClaim: null,
       },
     });
+  });
+
+  it('prepares the error and every step output as a multi-line block', () => {
+    const hostile = 'a\nb\tc\rd‮e⚠️';
+    const prepared = 'a\nb\tc\\u{000D}d\\u{202E}e⚠️';
+    const payload = narrowMcpRegistrationResultPayload(
+      resultWire({
+        error: hostile,
+        steps: [
+          { argv: ['a'], program_at: 0, exit_code: 1, output: hostile },
+          { argv: ['b'], program_at: 0, exit_code: 0, output: 'plain\nline' },
+        ],
+      })
+    );
+    expect(payload.error).toBe(prepared);
+    expect(payload.steps.map((step) => step.output)).toEqual([prepared, 'plain\nline']);
   });
 
   it('reads a step without an exit code as having none', () => {

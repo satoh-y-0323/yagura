@@ -7,8 +7,18 @@
  * The field names mirror the Rust wire types in `yagura-protocol` verbatim
  * (snake_case). Every reply is accepted as `unknown` and validated here with
  * the same readers `session-boundary` uses, so a field is only ever read
- * through an ownership test.
+ * through an ownership test. The text the Integrations tab draws is prepared
+ * for display here, so no caller can draw the daemon's text unprepared.
  */
+import {
+  foldExternalText,
+  formatCommandLine,
+  formatOutputBlock,
+  formatPathForDisplay,
+  sanitizeForDisplay,
+  type DisplayBlock,
+  type DisplayLine,
+} from '../display/untrusted-text';
 import {
   BoundaryError,
   readOptionalInteger,
@@ -50,27 +60,35 @@ const MCP_REGISTRATION_ACTION_VALUES: ReadonlySet<string> = new Set<McpRegistrat
 export interface McpRegistrationCommand {
   argv: string[];
   programAt: number;
+  /** `argv` from `programAt` on, for display. */
+  displayCommand: DisplayLine;
+  /** The whole `argv`, for display. */
+  displayArgv: DisplayLine;
 }
 
-/** One change `toml_set` would make (or made) to a host settings file. */
+/**
+ * One change `toml_set` would make (or made) to a host settings file. Every
+ * part is written into the file, so each is shown with every hidden character
+ * written out.
+ */
 export interface McpRegistrationTomlSet {
-  file: string;
-  table: string[];
-  values: { key: string; value: string }[];
+  file: DisplayLine;
+  table: DisplayLine[];
+  values: { key: DisplayLine; value: DisplayLine }[];
 }
 
-/** One entry registration writes into a host file. */
+/** One entry registration writes into a host file, written out like {@link McpRegistrationTomlSet}. */
 export interface McpRegistrationEntry {
-  file: string;
-  name: string;
-  content: string;
+  file: DisplayLine;
+  name: DisplayLine;
+  content: DisplayLine;
 }
 
 /** One row the daemon lists: a profile that declares an MCP registration table. */
 export interface McpRegistrationRow {
   profile: string;
-  displayName: string;
-  group: string | null;
+  displayName: DisplayLine;
+  group: DisplayLine | null;
   /** `null` when the registration only writes files. */
   add: McpRegistrationCommand | null;
   remove: McpRegistrationCommand | null;
@@ -78,16 +96,16 @@ export interface McpRegistrationRow {
   /** Empty when the profile writes none or the daemon predates the field. */
   entries: McpRegistrationEntry[];
   /**
-   * The sentence the profile asks to show with the row, verbatim; `null` (or
-   * absent in a hand-built row) when it writes none or the daemon predates the field.
+   * The sentence the profile asks to show with the row; `null` (or absent in
+   * a hand-built row) when it writes none or the daemon predates the field.
    */
-  notice?: string | null;
+  notice?: DisplayLine | null;
 }
 
 /** Reply to `list_mcp_registrations`. */
 export interface McpRegistrationsListed {
   requestId: number;
-  bridge: string | null;
+  bridge: DisplayLine | null;
   rows: McpRegistrationRow[];
 }
 
@@ -99,11 +117,14 @@ export interface McpRegistrationStatusInfo {
   profile: string;
   state: McpRegistrationState;
   differsIn: string[];
-  reason: string | null;
+  /** `differsIn` for display, in the same order. */
+  displayDiffersIn: DisplayLine[];
+  /** Why the state could not be read, folded onto one line. */
+  reason: DisplayLine | null;
   add: McpRegistrationCommand | null;
   remove: McpRegistrationCommand | null;
   /** The pointer of the claim that makes Register and Update refuse; `null` when nothing refuses. */
-  refusedByClaim: string | null;
+  refusedByClaim: DisplayLine | null;
 }
 
 /** Payload of `session://mcp-registration-status`. */
@@ -123,8 +144,10 @@ export interface McpRegistrationRequested {
 export interface McpRegistrationStep {
   argv: string[];
   programAt: number;
+  /** `argv` from `programAt` on, for display. */
+  displayCommand: DisplayLine;
   exitCode: number | null;
-  output: string;
+  output: DisplayBlock;
 }
 
 /** Payload of `session://mcp-registration-result`. */
@@ -133,7 +156,7 @@ export interface McpRegistrationResultPayload {
   profile: string;
   action: McpRegistrationAction;
   steps: McpRegistrationStep[];
-  error: string | null;
+  error: DisplayBlock | null;
   status: McpRegistrationStatusInfo;
 }
 
@@ -168,10 +191,24 @@ function requireMcpRegistrationAction(
 
 function narrowMcpRegistrationCommand(value: unknown, context: string): McpRegistrationCommand {
   const record = requireRecord(value, context);
+  const argv = requireStringArray(record, 'argv', context);
+  const programAt = requireNonNegativeInteger(record, 'program_at', context);
   return {
-    argv: requireStringArray(record, 'argv', context),
-    programAt: requireNonNegativeInteger(record, 'program_at', context),
+    argv,
+    programAt,
+    displayCommand: formatCommandLine(argv.slice(programAt)),
+    displayArgv: formatCommandLine(argv),
   };
+}
+
+function readOptionalLine(
+  record: UntrustedRecord,
+  key: string,
+  context: string,
+  prepare: (value: string) => DisplayLine
+): DisplayLine | null {
+  const value = readOptionalString(record, key, context);
+  return value === null ? null : prepare(value);
 }
 
 /** Reads a command field the core serializes as `null`, or leaves out, when the row carries none. */
@@ -191,13 +228,13 @@ function narrowMcpRegistrationTomlSet(value: unknown, context: string): McpRegis
   const record = requireRecord(value, context);
   const valuesContext = `${context}.values`;
   return {
-    file: requireString(record, 'file', context),
-    table: requireStringArray(record, 'table', context),
+    file: formatPathForDisplay(requireString(record, 'file', context)),
+    table: requireStringArray(record, 'table', context).map(formatPathForDisplay),
     values: requireArray(readOwnField(record, 'values'), valuesContext).map((entry) => {
       const row = requireRecord(entry, valuesContext);
       return {
-        key: requireString(row, 'key', valuesContext),
-        value: requireString(row, 'value', valuesContext),
+        key: formatPathForDisplay(requireString(row, 'key', valuesContext)),
+        value: formatPathForDisplay(requireString(row, 'value', valuesContext)),
       };
     }),
   };
@@ -223,9 +260,9 @@ function readEntries(record: UntrustedRecord, context: string): McpRegistrationE
   return requireArray(value, entriesContext).map((entry) => {
     const row = requireRecord(entry, entriesContext);
     return {
-      file: requireString(row, 'file', entriesContext),
-      name: requireString(row, 'name', entriesContext),
-      content: requireString(row, 'content', entriesContext),
+      file: formatPathForDisplay(requireString(row, 'file', entriesContext)),
+      name: formatPathForDisplay(requireString(row, 'name', entriesContext)),
+      content: formatPathForDisplay(requireString(row, 'content', entriesContext)),
     };
   });
 }
@@ -234,13 +271,14 @@ function narrowMcpRegistrationRow(value: unknown, context: string): McpRegistrat
   const record = requireRecord(value, context);
   return {
     profile: requireString(record, 'profile', context),
-    displayName: requireString(record, 'display_name', context),
-    group: readOptionalString(record, 'group', context),
+    displayName: sanitizeForDisplay(requireString(record, 'display_name', context)),
+    group: readOptionalLine(record, 'group', context, sanitizeForDisplay),
     add: readOptionalCommand(record, 'add', context),
     remove: readOptionalCommand(record, 'remove', context),
     tomlSet: readOptionalTomlSet(record, context),
     entries: readEntries(record, context),
-    notice: readOptionalString(record, 'notice', context),
+    // A notice may run past one reason's length, so it is not folded and capped like one.
+    notice: readOptionalLine(record, 'notice', context, sanitizeForDisplay),
   };
 }
 
@@ -256,7 +294,7 @@ export function narrowMcpRegistrationsListed(value: unknown): McpRegistrationsLi
   const rowsContext = `${context}.rows`;
   return {
     requestId: requireNonNegativeInteger(record, 'request_id', context),
-    bridge: readOptionalString(record, 'bridge', context),
+    bridge: readOptionalLine(record, 'bridge', context, formatPathForDisplay),
     rows: requireArray(readOwnField(record, 'rows'), rowsContext).map((entry) =>
       narrowMcpRegistrationRow(entry, rowsContext)
     ),
@@ -283,14 +321,16 @@ function narrowMcpRegistrationStatusInfo(
   context: string
 ): McpRegistrationStatusInfo {
   const record = requireRecord(value, context);
+  const differsIn = requireStringArray(record, 'differs_in', context);
   return {
     profile: requireString(record, 'profile', context),
     state: normalizeMcpRegistrationState(requireString(record, 'state', context)),
-    differsIn: requireStringArray(record, 'differs_in', context),
-    reason: readOptionalString(record, 'reason', context),
+    differsIn,
+    displayDiffersIn: differsIn.map(formatPathForDisplay),
+    reason: readOptionalLine(record, 'reason', context, foldExternalText),
     add: readOptionalCommand(record, 'add', context),
     remove: readOptionalCommand(record, 'remove', context),
-    refusedByClaim: readOptionalString(record, 'refused_by_claim', context),
+    refusedByClaim: readOptionalLine(record, 'refused_by_claim', context, formatPathForDisplay),
   };
 }
 
@@ -310,12 +350,24 @@ export function narrowMcpRegistrationStatusPayload(value: unknown): McpRegistrat
 
 function narrowMcpRegistrationStep(value: unknown, context: string): McpRegistrationStep {
   const record = requireRecord(value, context);
+  const argv = requireStringArray(record, 'argv', context);
+  const programAt = requireNonNegativeInteger(record, 'program_at', context);
   return {
-    argv: requireStringArray(record, 'argv', context),
-    programAt: requireNonNegativeInteger(record, 'program_at', context),
+    argv,
+    programAt,
+    displayCommand: formatCommandLine(argv.slice(programAt)),
     exitCode: readOptionalInteger(record, 'exit_code', context),
-    output: requireString(record, 'output', context),
+    output: formatOutputBlock(requireString(record, 'output', context)),
   };
+}
+
+function readOptionalBlock(
+  record: UntrustedRecord,
+  key: string,
+  context: string
+): DisplayBlock | null {
+  const value = readOptionalString(record, key, context);
+  return value === null ? null : formatOutputBlock(value);
 }
 
 /**
@@ -334,7 +386,7 @@ export function narrowMcpRegistrationResultPayload(value: unknown): McpRegistrat
     steps: requireArray(readOwnField(record, 'steps'), stepsContext).map((entry) =>
       narrowMcpRegistrationStep(entry, stepsContext)
     ),
-    error: readOptionalString(record, 'error', context),
+    error: readOptionalBlock(record, 'error', context),
     status: narrowMcpRegistrationStatusInfo(readOwnField(record, 'status'), `${context}.status`),
   };
 }

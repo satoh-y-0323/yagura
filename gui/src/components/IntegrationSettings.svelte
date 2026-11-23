@@ -5,6 +5,7 @@
    * decision of its own -- the shell owns the list, the per-row status, the
    * operation in flight, its result and every call.
    */
+  import type { UiText } from '../display/ui-text';
   import type {
     McpRegistrationAction,
     McpRegistrationResultPayload,
@@ -23,7 +24,7 @@
   export let onRun: (profile: string, action: McpRegistrationAction) => void;
 
   /** The primary button's text, keyed by the action it starts. */
-  const PRIMARY_LABELS: Record<'register' | 'update', string> = {
+  const PRIMARY_LABELS: Record<'register' | 'update', UiText> = {
     register: settings.integrationRegisterButton,
     update: settings.integrationUpdateButton,
   };
@@ -38,7 +39,7 @@
     <p class="integration-settings__failure">{failure}</p>
   {/if}
   {#if listed}
-    {#each integrationGroups(listed, statuses, running) as group (group.heading)}
+    {#each integrationGroups(listed, statuses, running) as group (group.key)}
       <div class="integration-settings__group-head">{group.heading}</div>
       <div class="integration-settings__list">
         {#each group.rows as row (row.profile)}
@@ -56,7 +57,10 @@
               <div class="integration-settings__writes">
                 <span>{settings.integrationFileWritesLead}</span>
                 {#each row.fileWrites as write (write.file)}
-                  <span><code>{write.file}</code> — <code>{write.names.join(', ')}</code></span>
+                  <span
+                    ><code>{write.file}</code> —
+                    <code>{settings.integrationFileWriteNames(write.names)}</code></span
+                  >
                 {/each}
               </div>
             {:else}
@@ -69,7 +73,9 @@
               <div class="integration-settings__extra">{row.entriesNote}</div>
               {#if row.entriesTitle}
                 <div class="integration-settings__extra integration-settings__entries">
-                  {row.entriesTitle}
+                  {#each row.entriesTitle as line, index (index)}
+                    <div>{line}</div>
+                  {/each}
                 </div>
               {/if}
             {/if}
