@@ -5,10 +5,11 @@
  */
 import { describe, it, expect } from 'vitest';
 
+import { formatPathForDisplay } from '../display/untrusted-text';
 import {
   confirmCopy,
   resolveConfirmTarget,
-  type ConfirmOperation,
+  type ConfirmSubject,
   type WindowOperation,
 } from './confirm-target';
 import { buttons, chat, dialogs } from '../ui-messages';
@@ -98,19 +99,21 @@ describe('resolveConfirmTarget: the blocked reason is distinguishable', () => {
   });
 });
 
-const CONFIRM_OPERATIONS: ConfirmOperation[] = [
-  'close',
-  'interrupt',
-  'broadcast',
-  'clear_room',
-  'delete_room',
+const ROOM_NAME = formatPathForDisplay('yagura');
+
+const CONFIRM_SUBJECTS: ConfirmSubject[] = [
+  { operation: 'close' },
+  { operation: 'interrupt' },
+  { operation: 'broadcast' },
+  { operation: 'clear_room', roomName: ROOM_NAME },
+  { operation: 'delete_room', roomName: ROOM_NAME },
 ];
 
 describe('confirmCopy: one wording source for the confirmation dialog', () => {
-  it.each(CONFIRM_OPERATIONS)(
+  it.each(CONFIRM_SUBJECTS.map((subject) => [subject.operation, subject] as const))(
     'returns a non-empty title, message and label for %s',
-    (operation) => {
-      const copy = confirmCopy(operation);
+    (_operation, subject) => {
+      const copy = confirmCopy(subject);
       expect(copy.title.length).toBeGreaterThan(0);
       expect(copy.message.length).toBeGreaterThan(0);
       expect(copy.confirmLabel.length).toBeGreaterThan(0);
@@ -118,22 +121,22 @@ describe('confirmCopy: one wording source for the confirmation dialog', () => {
   );
 
   it('gives each operation its own title', () => {
-    const titles = CONFIRM_OPERATIONS.map((operation) => confirmCopy(operation).title);
-    expect(new Set(titles).size).toBe(CONFIRM_OPERATIONS.length);
+    const titles = CONFIRM_SUBJECTS.map((subject) => confirmCopy(subject).title);
+    expect(new Set(titles).size).toBe(CONFIRM_SUBJECTS.length);
   });
 
   it('gives each operation its own message', () => {
-    const bodies = CONFIRM_OPERATIONS.map((operation) => confirmCopy(operation).message);
-    expect(new Set(bodies).size).toBe(CONFIRM_OPERATIONS.length);
+    const bodies = CONFIRM_SUBJECTS.map((subject) => confirmCopy(subject).message);
+    expect(new Set(bodies).size).toBe(CONFIRM_SUBJECTS.length);
   });
 
   it('gives each operation its own action label', () => {
-    const labels = CONFIRM_OPERATIONS.map((operation) => confirmCopy(operation).confirmLabel);
-    expect(new Set(labels).size).toBe(CONFIRM_OPERATIONS.length);
+    const labels = CONFIRM_SUBJECTS.map((subject) => confirmCopy(subject).confirmLabel);
+    expect(new Set(labels).size).toBe(CONFIRM_SUBJECTS.length);
   });
 
   it('keeps the close wording the window buttons and dialogs already carry', () => {
-    expect(confirmCopy('close')).toEqual({
+    expect(confirmCopy({ operation: 'close' })).toEqual({
       title: buttons.close,
       message: dialogs.closeConfirm,
       confirmLabel: buttons.close,
@@ -141,7 +144,7 @@ describe('confirmCopy: one wording source for the confirmation dialog', () => {
   });
 
   it('keeps the interrupt wording the window buttons and dialogs already carry', () => {
-    expect(confirmCopy('interrupt')).toEqual({
+    expect(confirmCopy({ operation: 'interrupt' })).toEqual({
       title: buttons.interrupt,
       message: dialogs.interruptConfirm,
       confirmLabel: buttons.interrupt,
@@ -149,7 +152,7 @@ describe('confirmCopy: one wording source for the confirmation dialog', () => {
   });
 
   it('takes the broadcast wording from the chat resources, not from buttons or dialogs', () => {
-    expect(confirmCopy('broadcast')).toEqual({
+    expect(confirmCopy({ operation: 'broadcast' })).toEqual({
       title: chat.broadcastConfirmTitle,
       message: chat.broadcastConfirmMessage,
       confirmLabel: chat.broadcastConfirmLabel,
@@ -159,7 +162,7 @@ describe('confirmCopy: one wording source for the confirmation dialog', () => {
 
 describe('confirmCopy: the room operations name the room', () => {
   it('asks before clearing a room, in the wording the room menu was agreed with', () => {
-    expect(confirmCopy('clear_room', 'yagura')).toEqual({
+    expect(confirmCopy({ operation: 'clear_room', roomName: ROOM_NAME })).toEqual({
       title: 'Clear the history of “yagura”?',
       message:
         "Every message in this room is deleted, and messages a window has not received yet are taken back. This can't be undone.",
@@ -168,7 +171,9 @@ describe('confirmCopy: the room operations name the room', () => {
   });
 
   it('asks before deleting a room, in the wording the room menu was agreed with', () => {
-    expect(confirmCopy('delete_room', 'yagura_test')).toEqual({
+    expect(
+      confirmCopy({ operation: 'delete_room', roomName: formatPathForDisplay('yagura_test') })
+    ).toEqual({
       title: 'Delete the room “yagura_test”?',
       message:
         "The room and all its messages are deleted. If a window in this folder uses chat later, the room comes back empty. This can't be undone.",

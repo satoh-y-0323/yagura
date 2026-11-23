@@ -44,15 +44,13 @@
   $: explanation = describeUnknownExplanation(entry.detected, entry.displayDetectionWarning);
   // The card repeats what the window's header says: where it runs and why its
   // status is unknown.
-  $: cardDetails = [
-    describeWindowLocation({ vendor: entry.displayVendor, cwd: entry.displayCwd }),
-    explanation,
-  ].filter((line) => line !== '');
+  $: location = describeWindowLocation({ vendor: entry.displayVendor, cwd: entry.displayCwd });
+  $: cardDetails = explanation === null ? [location] : [location, explanation];
   $: nameId = `navigator-row-name-${entry.windowId}`;
   $: whyId = `navigator-row-why-${entry.windowId}`;
   $: minimizedId = `navigator-row-minimized-${entry.windowId}`;
   $: describedBy =
-    [explanation === '' ? null : whyId, isMinimized ? minimizedId : null]
+    [explanation === null ? null : whyId, isMinimized ? minimizedId : null]
       .filter((id) => id !== null)
       .join(' ') || undefined;
 </script>
@@ -75,7 +73,7 @@
     <span id={nameId} hidden
       >{describeWindowRow(entry.displayName, entry.detected.status, isAwaitingPermission)}</span
     >
-    {#if explanation !== ''}
+    {#if explanation !== null}
       <span id={whyId} hidden>{explanation}</span>
     {/if}
     {#if isMinimized}

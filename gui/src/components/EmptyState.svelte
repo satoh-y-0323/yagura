@@ -4,10 +4,12 @@
    * reopen the last session's windows, and the main keys. Display only; the
    * shell decides when it shows and what the buttons do.
    */
+  import type { UiText } from '../display/ui-text';
   import type { ActionId } from '../keymap/key-binding';
-  import { formatChord } from '../keymap/key-chord';
+  import { chordText } from '../keymap/key-chord';
   import type { KeyboardPlatform } from '../keymap/keyboard-platform';
   import type { Keys } from '../keymap/keymap-model';
+  import type { ReopenOffer } from '../notices/notice-model';
   import { buttons, describeReopenOffer, workArea } from '../ui-messages';
   import Icon from './Icon.svelte';
 
@@ -15,20 +17,20 @@
   export let keys: Keys;
   export let platform: KeyboardPlatform;
   /** The last session's windows on offer, `null` while none are offered here. */
-  export let reopen: { count: number; timestamp: string | null } | null;
+  export let reopen: ReopenOffer | null;
   export let onNewWindow: () => void;
   /** Opens the dialog that picks which of the last session's windows to reopen. */
   export let onChooseWindows: () => void;
 
   // Only keys that do something while no window is open, so none of them leads nowhere.
-  const SHORTCUTS: readonly { action: ActionId; label: string }[] = [
+  const SHORTCUTS: readonly { action: ActionId; label: UiText }[] = [
     { action: 'open-command-palette', label: workArea.commands },
     { action: 'toggle-settings', label: workArea.settings },
   ];
 
-  function keyLabel(currentKeys: Keys, action: ActionId): string | null {
+  function keyLabel(currentKeys: Keys, action: ActionId): UiText | null {
     const chord = currentKeys[action];
-    return chord === null ? null : formatChord(chord, platform).join('+');
+    return chord === null ? null : chordText(chord, platform);
   }
 
   $: newWindowKey = keyLabel(keys, 'open-window-form');
@@ -53,7 +55,7 @@
   {#if reopen !== null}
     <div class="empty-state__reopen">
       <span class="empty-state__reopen-text">
-        {describeReopenOffer(reopen.count, reopen.timestamp)}
+        {describeReopenOffer(reopen.count, reopen.savedAtEpochS)}
       </span>
       <button type="button" class="btn btn-secondary" on:click={onChooseWindows}>
         {buttons.chooseWindows}

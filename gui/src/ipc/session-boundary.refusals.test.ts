@@ -570,9 +570,12 @@ describe('the restore candidates', () => {
     return { position: 0, command: ['claude', '--x'], cwd: '/repo', name: 'one', ...overrides };
   }
 
-  it('shows the command as its words joined by a space', () => {
+  it('shows the command as one command line, quoting a word that holds a space', () => {
     const [entry] = narrowRestoreCandidateList([candidate()]);
     expect(entry?.displayCommand).toBe('claude --x');
+    const [spaced] = narrowRestoreCandidateList([candidate({ command: ['claude', 'a b'] })]);
+    expect(spaced?.displayCommand).toBe(formatCommandLine(['claude', 'a b']));
+    expect(spaced?.displayCommand).toBe('claude "a b"');
   });
 
   it('keeps the vendor and detection, and shows them sanitized', () => {

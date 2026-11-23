@@ -5,6 +5,7 @@
   import PlansAttentionMark from './PlansAttentionMark.svelte';
   import type { PlansAttention } from '../plans/plan-board-model';
   import { themeMarkOf } from './theme-mark';
+  import type { ThemeOption } from '../theme/window-theme-options';
   import IconButton from './IconButton.svelte';
   import { tooltip } from './tooltip';
   // The small-size glyph the .ico also uses at 16-32px; the master icon blurs at rail size.
@@ -20,7 +21,7 @@
   /** Takes the keyboard back to the work surface, the current window's terminal. */
   export let onWindowsSelect: () => void;
   export let appThemeValue: string;
-  export let appThemeOptions: { value: string; label: string }[];
+  export let appThemeOptions: readonly ThemeOption[];
   export let onAppThemeChange: (event: Event) => void;
   /** Whether the chat room is asking for the user; its own badge. */
   export let chatNeedsUser: boolean;

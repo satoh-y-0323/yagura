@@ -11,6 +11,7 @@ import {
   caughtValueText,
   formatApprovalBody,
   formatChatBody,
+  formatCommandLine,
   formatPathForDisplay,
   sanitizeForDisplay,
   type DisplayBlock,
@@ -1792,13 +1793,15 @@ export interface RestoreEntry {
   vendor: string | null;
   detection: string | null;
   layout: LayoutV1 | null;
-  displayCommand: string;
-  displayCwd: string;
-  displayName: string;
-  displayVendor: string | null;
-  displayDetection: string | null;
+  displayCommand: DisplayLine;
+  displayCwd: DisplayLine;
+  displayName: DisplayLine;
+  displayVendor: DisplayLine | null;
+  displayDetection: DisplayLine | null;
   /** The launch profile this candidate was opened from, `null` for an argv launch. */
   profile: string | null;
+  /** `profile` prepared for display, `null` when `profile` is. */
+  displayProfile: DisplayLine | null;
   /** The `model` launch option recorded with the launch, `null` when none was. */
   model: string | null;
   /** The `effort` launch option recorded with the launch, `null` when none was. */
@@ -1870,12 +1873,13 @@ function tryNarrowRestoreCandidate(value: unknown): RestoreEntry | null {
     vendor,
     detection,
     layout: readCandidateLayout(record),
-    displayCommand: sanitizeForDisplay(command.join(' ')),
+    displayCommand: formatCommandLine(command),
     displayCwd: formatPathForDisplay(cwd),
     displayName: sanitizeForDisplay(name),
     displayVendor: vendor === null ? null : sanitizeForDisplay(vendor),
     displayDetection: detection === null ? null : sanitizeForDisplay(detection),
     profile,
+    displayProfile: profile === null ? null : sanitizeForDisplay(profile),
     model,
     effort,
   };

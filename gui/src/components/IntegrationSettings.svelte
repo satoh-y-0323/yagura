@@ -19,8 +19,8 @@
   export let statuses: ReadonlyMap<string, McpRegistrationStatusInfo>;
   export let running: string | null;
   export let results: ReadonlyMap<string, McpRegistrationResultPayload>;
-  export let notice: string | null;
-  export let failure: string | null;
+  export let notice: UiText | null;
+  export let failure: UiText | null;
   export let onRun: (profile: string, action: McpRegistrationAction) => void;
 
   /** The primary button's text, keyed by the action it starts. */

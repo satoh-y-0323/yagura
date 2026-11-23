@@ -9,9 +9,10 @@
    */
   import { onMount } from 'svelte';
 
-  import { formatChord } from '../keymap/key-chord';
+  import { chordText } from '../keymap/key-chord';
   import type { KeyboardPlatform } from '../keymap/keyboard-platform';
   import type { Keys } from '../keymap/keymap-model';
+  import type { ReopenOffer } from '../notices/notice-model';
   import type { ExitedCard } from '../session/shell-state';
   import { describeExitedWindow, describeGoToWindow, workArea } from '../ui-messages';
   import EmptyState from './EmptyState.svelte';
@@ -21,7 +22,7 @@
   export let keys: Keys;
   export let platform: KeyboardPlatform;
   /** The last session's windows on offer, `null` while none are offered here. */
-  export let reopen: { count: number; timestamp: string | null } | null;
+  export let reopen: ReopenOffer | null;
   /** Goes to the window the card names; the shell's reducer decides which. */
   export let onGoTo: () => void;
   export let onNewWindow: () => void;
@@ -29,7 +30,7 @@
 
   // Next window goes where the button does, so the button shows its key; a key switched off shows none.
   $: goToChord = keys['focus-next-window'];
-  $: goToKey = goToChord === null ? null : formatChord(goToChord, platform).join('+');
+  $: goToKey = goToChord === null ? null : chordText(goToChord, platform);
 
   let root: HTMLDivElement;
 

@@ -7,6 +7,7 @@
  */
 
 import { createGraphemeSegmenter } from '../display/graphemes';
+import { sanitizeForDisplay, type DisplayLine } from '../display/untrusted-text';
 import type { ActionBlockReason, ActionVerdict } from '../keymap/action-availability';
 import { ACTION_IDS, type ActionId } from '../keymap/key-binding';
 import { STATUS_PRESENTATION } from '../status-presentation';
@@ -79,11 +80,11 @@ export interface PickerSection<W extends PickerWindow> {
   rows: PickerRow<W>[];
 }
 
-/** Why nothing, or only the New window offer, is listed. `query` is what was typed. */
+/** Why nothing, or only the New window offer, is listed. `query` is what was typed, prepared for display. */
 export type PickerEmpty =
   | { kind: 'no-windows' }
-  | { kind: 'no-window-match'; query: string }
-  | { kind: 'no-command-match'; query: string }
+  | { kind: 'no-window-match'; query: DisplayLine }
+  | { kind: 'no-command-match'; query: DisplayLine }
   | null;
 
 export interface PickerState<W extends PickerWindow> {
@@ -239,9 +240,11 @@ function emptyOf<W extends PickerWindow>(
   if (rowCount > 0) {
     return null;
   }
+  // What was typed is quoted back, and an input method or a paste can carry hidden characters.
+  const typed = sanitizeForDisplay(query.text);
   return mode === 'windows'
-    ? { kind: 'no-window-match', query: query.text }
-    : { kind: 'no-command-match', query: query.text };
+    ? { kind: 'no-window-match', query: typed }
+    : { kind: 'no-command-match', query: typed };
 }
 
 function windowSections<W extends PickerWindow>(

@@ -1,6 +1,12 @@
 import { describe, it, expect, afterEach, vi } from 'vitest';
 
-import { splitForMiddleEllipsis } from './middle-ellipsis';
+import { sanitizeForDisplay, type DisplayLine } from '../display/untrusted-text';
+import { splitPreparedForMiddleEllipsis } from './middle-ellipsis';
+
+type Split = (name: string) => { head: DisplayLine; tail: DisplayLine };
+
+/** Splits `name` as a window's display name, which none of these names change. */
+const split: Split = (name) => splitPreparedForMiddleEllipsis(sanitizeForDisplay(name));
 
 // Written as escapes so this file stays free of Japanese text.
 const KA_WITH_DAKUTEN = '\u304b\u3099'; // one grapheme, two code points
@@ -14,28 +20,28 @@ function kanjiRun(count: number): string {
 }
 
 function expectPartsRebuildName(name: string): void {
-  const { head, tail } = splitForMiddleEllipsis(name);
+  const { head, tail } = split(name);
   expect(head + tail).toBe(name);
 }
 
-describe('splitForMiddleEllipsis - names of 16 graphemes or fewer are not split', () => {
+describe('splitPreparedForMiddleEllipsis - names of 16 graphemes or fewer are not split', () => {
   it.each([[''], ['a'], ['general'], ['a'.repeat(16)], [kanjiRun(16)]])(
     '%j stays whole',
     (name) => {
-      expect(splitForMiddleEllipsis(name)).toEqual({ head: name, tail: '' });
+      expect(split(name)).toEqual({ head: name, tail: '' });
     }
   );
 });
 
-describe('splitForMiddleEllipsis - names of 17 graphemes or more keep the last 8 as the tail', () => {
+describe('splitPreparedForMiddleEllipsis - names of 17 graphemes or more keep the last 8 as the tail', () => {
   it('17 ASCII characters split into 9 and 8', () => {
     const name = 'abcdefghijklmnopq';
-    expect(splitForMiddleEllipsis(name)).toEqual({ head: 'abcdefghi', tail: 'jklmnopq' });
+    expect(split(name)).toEqual({ head: 'abcdefghi', tail: 'jklmnopq' });
   });
 
   it('a long name keeps exactly the last 8 characters as the tail', () => {
     const name = 'review-backend-api-2026-09-30-final';
-    expect(splitForMiddleEllipsis(name)).toEqual({
+    expect(split(name)).toEqual({
       head: name.slice(0, name.length - 8),
       tail: name.slice(name.length - 8),
     });
@@ -44,7 +50,7 @@ describe('splitForMiddleEllipsis - names of 17 graphemes or more keep the last 8
   it('17 kanji split into 9 and 8 kanji', () => {
     const name = kanjiRun(17);
     const chars = Array.from(name);
-    expect(splitForMiddleEllipsis(name)).toEqual({
+    expect(split(name)).toEqual({
       head: chars.slice(0, 9).join(''),
       tail: chars.slice(9).join(''),
     });
@@ -55,15 +61,15 @@ describe('splitForMiddleEllipsis - names of 17 graphemes or more keep the last 8
   });
 });
 
-describe('splitForMiddleEllipsis - counts graphemes, so combined characters are never split', () => {
+describe('splitPreparedForMiddleEllipsis - counts graphemes, so combined characters are never split', () => {
   it('16 kana with a combining dakuten (32 code points) stay whole', () => {
     const name = KA_WITH_DAKUTEN.repeat(16);
-    expect(splitForMiddleEllipsis(name)).toEqual({ head: name, tail: '' });
+    expect(split(name)).toEqual({ head: name, tail: '' });
   });
 
   it('17 kana with a combining dakuten split into 9 and 8 whole kana', () => {
     const name = KA_WITH_DAKUTEN.repeat(17);
-    expect(splitForMiddleEllipsis(name)).toEqual({
+    expect(split(name)).toEqual({
       head: KA_WITH_DAKUTEN.repeat(9),
       tail: KA_WITH_DAKUTEN.repeat(8),
     });
@@ -71,13 +77,13 @@ describe('splitForMiddleEllipsis - counts graphemes, so combined characters are 
 
   it('12 letters and a ZWJ family (17 code points, 13 graphemes) stay whole', () => {
     const name = 'a'.repeat(12) + FAMILY;
-    expect(splitForMiddleEllipsis(name)).toEqual({ head: name, tail: '' });
+    expect(split(name)).toEqual({ head: name, tail: '' });
   });
 
   it('a ZWJ family on the tail boundary moves into the tail whole', () => {
     // 10 letters, the family, then 7 letters: 18 graphemes, the tail starts at the family.
     const name = 'a'.repeat(10) + FAMILY + 'b'.repeat(7);
-    expect(splitForMiddleEllipsis(name)).toEqual({
+    expect(split(name)).toEqual({
       head: 'a'.repeat(10),
       tail: FAMILY + 'b'.repeat(7),
     });
@@ -86,7 +92,7 @@ describe('splitForMiddleEllipsis - counts graphemes, so combined characters are 
   it('a ZWJ family just before the tail stays whole in the head', () => {
     // 9 letters, the family, then 8 letters: 18 graphemes, the family is the last of the head.
     const name = 'a'.repeat(9) + FAMILY + 'b'.repeat(8);
-    expect(splitForMiddleEllipsis(name)).toEqual({
+    expect(split(name)).toEqual({
       head: 'a'.repeat(9) + FAMILY,
       tail: 'b'.repeat(8),
     });
@@ -95,7 +101,7 @@ describe('splitForMiddleEllipsis - counts graphemes, so combined characters are 
   it('a written-out character counts as one grapheme and is never cut', () => {
     // 20 letters, the escape, then 4 letters: 25 graphemes, the tail starts 3 letters before the escape.
     const name = `${'a'.repeat(20)}\\u{200B}gura`;
-    expect(splitForMiddleEllipsis(name)).toEqual({
+    expect(split(name)).toEqual({
       head: 'a'.repeat(17),
       tail: 'aaa\\u{200B}gura',
     });
@@ -103,14 +109,14 @@ describe('splitForMiddleEllipsis - counts graphemes, so combined characters are 
 
   it('17 skin-toned emoji split into 9 and 8 whole emoji', () => {
     const name = THUMBS_UP_DARK.repeat(17);
-    expect(splitForMiddleEllipsis(name)).toEqual({
+    expect(split(name)).toEqual({
       head: THUMBS_UP_DARK.repeat(9),
       tail: THUMBS_UP_DARK.repeat(8),
     });
   });
 });
 
-describe('splitForMiddleEllipsis - falls back to code points when Intl.Segmenter is missing', () => {
+describe('splitPreparedForMiddleEllipsis - falls back to code points when Intl.Segmenter is missing', () => {
   const original = Object.getOwnPropertyDescriptor(Intl, 'Segmenter');
 
   afterEach(() => {
@@ -122,7 +128,7 @@ describe('splitForMiddleEllipsis - falls back to code points when Intl.Segmenter
 
   // Loaded after removing Segmenter so the result does not depend on whether
   // the module looks for it on import or on each call.
-  async function loadWithoutSegmenter(): Promise<typeof splitForMiddleEllipsis> {
+  async function loadWithoutSegmenter(): Promise<Split> {
     Object.defineProperty(Intl, 'Segmenter', {
       value: undefined,
       configurable: true,
@@ -130,7 +136,7 @@ describe('splitForMiddleEllipsis - falls back to code points when Intl.Segmenter
     });
     vi.resetModules();
     const mod = await import('./middle-ellipsis');
-    return mod.splitForMiddleEllipsis;
+    return (name) => mod.splitPreparedForMiddleEllipsis(sanitizeForDisplay(name));
   }
 
   it('does not throw and still splits plain names the same way', async () => {

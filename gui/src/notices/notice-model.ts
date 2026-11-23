@@ -1,6 +1,7 @@
 import { banners, describeReopenNotice, describeThemeIssues } from '../ui-messages';
 import type { WithdrawReason } from '../session/approval-types';
 import type { DisplayLine } from '../display/untrusted-text';
+import type { UiText } from '../display/ui-text';
 import type {
   ClientConfigFailure,
   DaemonRecoveryStatus,
@@ -63,11 +64,11 @@ export interface NoticeFacts {
 /** A one-line summary of the approval request a notice reports. */
 export interface ApprovalExpiredSummary {
   /** Who asked, as it would have been shown in the dialog. */
-  requester: string;
-  /** The operation that was asked for. */
-  tool: string;
+  requester: UiText | DisplayLine;
+  /** The operation that was asked for, prepared for display. */
+  tool: DisplayLine;
   /** The window it would have acted on. */
-  target: string;
+  target: UiText | DisplayLine;
 }
 
 /** A status change of daemon recovery, with the generation that orders it. */
@@ -123,8 +124,8 @@ export interface NoticeDraft extends Pick<NoticeClass, 'blocking' | 'tone' | 'di
 /** The last session's windows on offer to reopen. */
 export interface ReopenOffer {
   count: number;
-  /** The formatted time it was saved, `null` when unknown. */
-  timestamp: string | null;
+  /** When it was saved, in Unix epoch seconds; `null` when unknown. */
+  savedAtEpochS: number | null;
 }
 
 /**
@@ -417,7 +418,7 @@ export function buildNotices(state: NoticeSourceState): NoticeDraft[] {
       draftOf(
         'reopen-offer',
         {},
-        sentenceText(describeReopenNotice(offer.count, offer.timestamp)),
+        sentenceText(describeReopenNotice(offer.count, offer.savedAtEpochS)),
         { labelKey: 'chooseWindows' }
       )
     );

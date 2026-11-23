@@ -1,10 +1,11 @@
 <script lang="ts">
   import { commandFailureLine } from '../command-failure-model';
+  import type { UiText } from '../display/ui-text';
   import { buttons, describeOperationFailure, errors } from '../ui-messages';
   import ModalDialog from './ModalDialog.svelte';
 
-  export let title: string;
-  export let label: string;
+  export let title: UiText;
+  export let label: UiText;
   export let initialValue: string = '';
   export let isOpen: boolean = false;
   /** The window being renamed. */
@@ -14,7 +15,7 @@
   export let onCancel: () => void;
 
   let value = initialValue;
-  let formError: string | null = null;
+  let formError: UiText | null = null;
   let isSubmitting = false;
   // Bumped on cancel, so a rename still in flight from a cancelled dialog
   // cannot close or annotate the dialog opened after it.

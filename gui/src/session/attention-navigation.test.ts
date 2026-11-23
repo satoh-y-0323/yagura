@@ -2,6 +2,7 @@
 import { describe, it, expect } from 'vitest';
 import { get } from 'svelte/store';
 
+import { formatPathForDisplay, type DisplayLine } from '../display/untrusted-text';
 import type { DetectedStatusView, WindowStatus } from '../ipc/session-boundary';
 import { nextNeedsYouView } from '../sidebar/needs-you-view';
 import { groupByRoom } from '../sidebar/room-groups';
@@ -19,8 +20,8 @@ import {
 interface Entry {
   windowId: string;
   cwd: string;
-  displayCwd: string;
-  room: { roomId: string; name: string; displayName: string } | null;
+  displayCwd: DisplayLine;
+  room: { roomId: string; displayName: DisplayLine } | null;
   detected: DetectedStatusView;
   display: { isMinimized: boolean; zOrder: number };
 }
@@ -52,8 +53,8 @@ function makeEntry(windowId: string, roomId: string, status: WindowStatus, zOrde
   return {
     windowId,
     cwd: `C:\\Users\\dev\\${roomId}`,
-    displayCwd: `C:\\Users\\dev\\${roomId}`,
-    room: { roomId, name: roomId, displayName: roomId },
+    displayCwd: formatPathForDisplay(`C:\\Users\\dev\\${roomId}`),
+    room: { roomId, displayName: formatPathForDisplay(roomId) },
     detected: status === 'unknown' ? { status, reason: null } : { status },
     display: { isMinimized: false, zOrder },
   };

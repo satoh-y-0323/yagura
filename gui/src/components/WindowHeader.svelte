@@ -82,9 +82,9 @@
   <StatusBadge
     status={entry.detected.status}
     variant="label"
-    detail={describeUnknownReasonSuffix(entry.detected)}
+    reason={describeUnknownReasonSuffix(entry.detected)}
   />
-  {#if unknownExplanation !== ''}
+  {#if unknownExplanation !== null}
     <IconButton
       data-window-control
       class="window-header__why"

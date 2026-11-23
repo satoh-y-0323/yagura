@@ -1,4 +1,5 @@
 <script lang="ts">
+  import type { ThemeOption } from '../theme/window-theme-options';
   import { menus, themes } from '../ui-messages';
   import PopupMenu from './PopupMenu.svelte';
   import type { Rect } from './menu-position';
@@ -9,7 +10,7 @@
   export let at: Rect | null = null;
   export let onClose: () => void;
   export let themeValue: string;
-  export let themeOptions: { value: string; label: string }[];
+  export let themeOptions: readonly ThemeOption[];
   export let onThemeChange: (event: Event & { currentTarget: HTMLSelectElement }) => void;
   export let onRename: (() => void) | undefined;
   /** Moves the window within its room; Move up and Move down are offered only when set. */

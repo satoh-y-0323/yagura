@@ -25,12 +25,15 @@ import {
   describePickerResults as renderDescribePickerResults,
   describePickerWindowRow as renderDescribePickerWindowRow,
   describeQueuedMessages as renderDescribeQueuedMessages,
+  describeRecordedTime as renderDescribeRecordedTime,
   describeReopenOffer as renderDescribeReopenOffer,
   describeReopenNotice as renderDescribeReopenNotice,
   describeRestoreSelectionCount as renderDescribeRestoreSelectionCount,
   describeRestoreConfirm as renderDescribeRestoreConfirm,
+  describeRestoreOrigin as renderDescribeRestoreOrigin,
   describeRoomTitle as renderDescribeRoomTitle,
   describeStatus as renderDescribeStatus,
+  describeStatusLabel as renderDescribeStatusLabel,
   describeThemeIssues as renderDescribeThemeIssues,
   describeThemeName as renderDescribeThemeName,
   describeUndeliveredUnknownReason as renderDescribeUndeliveredUnknownReason,
@@ -47,7 +50,11 @@ import {
 } from './i18n/render';
 import type { TitleParts } from './i18n/messages';
 import type { UiText } from './display/ui-text';
-import { EXTERNAL_TEXT_MAX_CODE_POINTS, foldExternalText } from './display/untrusted-text';
+import {
+  EXTERNAL_TEXT_MAX_CODE_POINTS,
+  foldExternalText,
+  type DisplayLine,
+} from './display/untrusted-text';
 import type { PickerEmpty, PickerMode } from './command-picker/picker-model';
 import type { ChatDeliveryOutcome, DetectedStatusView, WindowStatus } from './ipc/session-boundary';
 import type { ActionBlockReason } from './keymap/action-availability';
@@ -117,6 +124,9 @@ export const workArea = messages.workArea;
 
 /** The go-to-window picker and the command palette. */
 export const picker = messages.picker;
+
+/** How a key combination is written: the modifier names and the chord they make. */
+export const keyNames = messages.keyNames;
 
 /**
  * Describes the card that stands in for a window that ended without this GUI
@@ -203,12 +213,20 @@ export function describeAnnouncement(sentences: readonly string[]): UiText {
 }
 
 /**
+ * Describes when something was recorded; `null` for no plausible recording time.
+ * @param epochS the moment, in Unix epoch seconds
+ */
+export function describeRecordedTime(epochS: number): UiText | null {
+  return renderDescribeRecordedTime(messages, epochS);
+}
+
+/**
  * Describes the empty work area's offer to reopen the windows of the last session.
  * @param count the number of restore candidates
- * @param timestamp the formatted recording time, `null` when unknown
+ * @param savedAtEpochS when that session was saved, in Unix epoch seconds; `null` when unknown
  */
-export function describeReopenOffer(count: number, timestamp: string | null): UiText {
-  return renderDescribeReopenOffer(messages, count, timestamp);
+export function describeReopenOffer(count: number, savedAtEpochS: number | null): UiText {
+  return renderDescribeReopenOffer(messages, count, savedAtEpochS);
 }
 
 /**
@@ -229,10 +247,10 @@ export function describeHaltReason(reason: string): UiText {
 
 /**
  * Describes a theme name for a select option. A user theme is shown under the
- * name its author gave it; only the built-in ones are translated.
+ * name its author gave it, prepared for display; only the built-in ones are translated.
  * @param name the theme name
  */
-export function describeThemeName(name: string): string {
+export function describeThemeName(name: string): UiText | DisplayLine {
   return renderDescribeThemeName(messages, name);
 }
 
@@ -248,7 +266,7 @@ export { EXTERNAL_TEXT_MAX_CODE_POINTS, foldExternalText, foldedFailureReason };
  * @param summary the operation-specific message, returned as is when no detail is left
  * @param detail the rejected value the operation failed with
  */
-export function describeOperationFailure<S extends string>(
+export function describeOperationFailure<S extends UiText | DisplayLine>(
   summary: S,
   detail: unknown
 ): S | UiText {
@@ -271,7 +289,7 @@ export function describeDetectionWarning(detail: unknown): UiText {
  * @param isAwaitingPermission whether the window waits for the user's permission
  */
 export function describeWindowRow(
-  name: string,
+  name: DisplayLine,
   status: string,
   isAwaitingPermission: boolean
 ): UiText {
@@ -302,6 +320,16 @@ export function describeWindowLocation(facts: Pick<WindowHeaderFacts, 'vendor' |
  */
 export function describeStatus(status: string): UiText {
   return renderDescribeStatus(messages, status);
+}
+
+/**
+ * Describes a status label: the status word, followed by the short reason it
+ * is unknown when there is one.
+ * @param status the status reported by the daemon
+ * @param reason the short reason, `null` when the label names none
+ */
+export function describeStatusLabel(status: string, reason: UiText | null): UiText {
+  return renderDescribeStatusLabel(messages, status, reason);
 }
 
 /**
@@ -343,10 +371,10 @@ export function describeAttentionBadge(count: number): UiText {
  * Describes the reopen offer's text: how many windows from the last
  * session can be reopened, and when that configuration was recorded.
  * @param count the number of restore candidates
- * @param timestamp the formatted recording time, `null` when unknown
+ * @param savedAtEpochS when that session was saved, in Unix epoch seconds; `null` when unknown
  */
-export function describeReopenNotice(count: number, timestamp: string | null): UiText {
-  return renderDescribeReopenNotice(messages, count, timestamp);
+export function describeReopenNotice(count: number, savedAtEpochS: number | null): UiText {
+  return renderDescribeReopenNotice(messages, count, savedAtEpochS);
 }
 
 /**
@@ -356,6 +384,18 @@ export function describeReopenNotice(count: number, timestamp: string | null): U
  */
 export function describeRestoreSelectionCount(selected: number, total: number): UiText {
   return renderDescribeRestoreSelectionCount(messages, selected, total);
+}
+
+/**
+ * Describes where a restore candidate came from; `null` when it recorded neither.
+ * @param profile the candidate's profile, prepared for display
+ * @param vendor the candidate's vendor, prepared for display
+ */
+export function describeRestoreOrigin(
+  profile: DisplayLine | null,
+  vendor: DisplayLine | null
+): UiText | null {
+  return renderDescribeRestoreOrigin(messages, profile, vendor);
 }
 
 /**
@@ -371,7 +411,7 @@ export function describeRestoreConfirm(count: number): UiText {
  * @param name the room's display name
  * @param count the number of windows in the room
  */
-export function describeRoomTitle(name: string, count: number): UiText {
+export function describeRoomTitle(name: DisplayLine, count: number): UiText {
   return renderDescribeRoomTitle(messages, name, count);
 }
 
@@ -381,23 +421,24 @@ export function describeQueuedMessages(count: number): UiText {
 }
 
 /**
- * Describes the suffix a status label appends when the pair names the
- * `'unknown'` arm.
+ * Describes the short reason a status label is followed by when the pair
+ * names the `'unknown'` arm; `null` otherwise.
  * @param detected the window's status and the reason it is `'unknown'`
  */
-export function describeUnknownReasonSuffix(detected: DetectedStatusView): string {
+export function describeUnknownReasonSuffix(detected: DetectedStatusView): UiText | null {
   return renderDescribeUnknownReasonSuffix(messages, detected);
 }
 
 /**
- * Describes why a window's status is `'unknown'`, for the title-bar tooltip.
+ * Describes why a window's status is `'unknown'`, for the title-bar tooltip;
+ * `null` when the pair names no reason.
  * @param detected the window's status and the reason it is `'unknown'`
  * @param warning the detection-load warning carried alongside the pair
  */
 export function describeUnknownExplanation(
   detected: DetectedStatusView,
-  warning: string | null
-): string {
+  warning: DisplayLine | null
+): UiText | null {
   return renderDescribeUnknownExplanation(messages, detected, warning);
 }
 
@@ -441,7 +482,7 @@ export function describePickerWindowRow(facts: PickerWindowRowFacts): UiText {
  * @param name the action's name
  * @param key the key as the row shows it, `null` when the action has none
  */
-export function describePickerActionRow(name: string, key: string | null): string {
+export function describePickerActionRow(name: UiText, key: UiText | null): UiText {
   return renderDescribePickerActionRow(messages, name, key);
 }
 

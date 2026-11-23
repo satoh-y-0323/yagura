@@ -6,19 +6,23 @@
    * and every call.
    */
   import type { ProfileOption } from './add-window-dialog-types';
-  import type { RoleEntry } from '../ipc/plan-boundary';
+  import type { UiText } from '../display/ui-text';
+  import type { RoleInfo } from '../ipc/plan-boundary';
   import GuidanceCopyRows from './GuidanceCopyRows.svelte';
   import ProfileDetailView from './ProfileDetailView.svelte';
   import SettingsSwitch from './SettingsSwitch.svelte';
   import type { ProfileDetailActions, ProfileDetailsState } from '../settings/profile-detail-model';
-  import { profileSettingsRows } from '../settings/profile-settings-model';
+  import {
+    profileSettingsRows,
+    type ProfileSwitchTarget,
+  } from '../settings/profile-settings-model';
   import { settings } from '../ui-messages';
 
   export let profileOptions: readonly ProfileOption[];
-  export let roles: readonly RoleEntry[];
+  export let roles: readonly RoleInfo[];
   export let savingProfileId: string | null;
-  export let updateFailure: string | null;
-  export let onSetEnabled: (id: string, enabled: boolean) => void;
+  export let updateFailure: UiText | null;
+  export let onSetEnabled: (profile: ProfileSwitchTarget, enabled: boolean) => void;
   export let details: ProfileDetailsState;
   export let detailActions: ProfileDetailActions;
 
@@ -68,7 +72,7 @@
             label={settings.profileSwitchLabel(row.displayName)}
             text={row.enabled ? settings.profileEnabled : settings.profileDisabled}
             disabled={savingProfileId === row.id}
-            onToggle={() => onSetEnabled(row.id, !row.enabled)}
+            onToggle={() => onSetEnabled(row, !row.enabled)}
           />
         </div>
         <div class="profile-settings__command">{row.commandLine}</div>

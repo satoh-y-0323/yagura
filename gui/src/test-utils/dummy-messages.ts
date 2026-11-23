@@ -125,7 +125,7 @@ export const dummyMessages = {
     systemOption: 'DUMMY_systemOption',
     windowFollowsAppOption: 'DUMMY_windowFollowsAppOption',
     windowSelectLabel: 'DUMMY_windowSelectLabel',
-    appTooltip: (name: string): string => `DUMMY_appTooltip ${name}`,
+    appTooltip: (name) => `DUMMY_appTooltip ${name}`,
   },
   builtInThemeLabels: {
     dark: 'DUMMY_dark',
@@ -162,15 +162,12 @@ export const dummyMessages = {
     themesLoadFailed: 'DUMMY_themesLoadFailed',
     discardedKeymapEntries: (count: number) => `DUMMY_discardedKeymapEntries(${count})`,
     themeIssues: (count: number) => `DUMMY_themeIssues(${count})`,
-    restoreAvailable: (count: number, timestamp: string | null) =>
-      `DUMMY_restoreAvailable(${count},${String(timestamp)})`,
+    restoreAvailable: (count: number, savedAtEpochS: number | null) =>
+      `DUMMY_restoreAvailable(${count},${String(savedAtEpochS)})`,
     restoreLoadFailed: 'DUMMY_restoreLoadFailed',
     daemonWindowsUnavailable: 'DUMMY_daemonWindowsUnavailable',
     // Unseen-and-expired approval requests.
-    approvalExpiredUnseen: (
-      count: number,
-      latest: { requester: string; tool: string; target: string }
-    ) =>
+    approvalExpiredUnseen: (count, latest) =>
       `DUMMY_approvalExpiredUnseen(${count},${latest.requester},${latest.tool},${latest.target})`,
     // A failed decide_approval invocation, and a
     // register_approver rejection.
@@ -256,20 +253,25 @@ export const dummyMessages = {
     statusReportsMissing: 'DUMMY_statusReportsMissing',
   },
   formats: {
-    windowListTitle: (label: string, count: number) => `DUMMY_windowListTitle(${label}, ${count})`,
+    windowListTitle: (label, count) => `DUMMY_windowListTitle(${label}, ${count})`,
     attentionBadge: (count: number) => `DUMMY_attentionBadge(${count})`,
     restoreSelectionCount: (selected: number, total: number) =>
       `DUMMY_restoreSelectionCount(${selected}, ${total})`,
+    restoreOrigin: (parts) => `DUMMY_restoreOrigin(${parts.join(',')})`,
     restoreConfirm: (count: number) => `DUMMY_restoreConfirm(${count})`,
     // The tooltip of a window's waiting-messages mark.
     queuedMessages: (count: number) => `DUMMY_queuedMessages(${count})`,
-    windowRow: (name: string, status: string) => `DUMMY_windowRow(${name}, ${status})`,
-    windowRowAwaitingPermission: (label: string) => `DUMMY_windowRowAwaitingPermission(${label})`,
-    windowHeaderVendorCwd: (vendor: string, cwd: string) =>
-      `DUMMY_windowHeaderVendorCwd(${vendor}, ${cwd})`,
-    windowHeaderCwd: (cwd: string) => `DUMMY_windowHeaderCwd(${cwd})`,
+    windowRow: (name, status) => `DUMMY_windowRow(${name}, ${status})`,
+    windowRowAwaitingPermission: (label) => `DUMMY_windowRowAwaitingPermission(${label})`,
+    windowHeaderVendorCwd: (vendor, cwd) => `DUMMY_windowHeaderVendorCwd(${vendor}, ${cwd})`,
+    windowHeaderCwd: (cwd) => `DUMMY_windowHeaderCwd(${cwd})`,
+    statusWithUnknownReason: (status, reason) =>
+      `DUMMY_statusWithUnknownReason(${status}, ${reason})`,
+    unknownExplanationWithWarning: (explanation, warning) =>
+      `DUMMY_unknownExplanationWithWarning(${explanation}, ${warning})`,
     eventTime: (date: Date) => `DUMMY_eventTime(${date.toISOString()})`,
     chatPostedAt: (atMs: number) => `DUMMY_chatPostedAt(${atMs})`,
+    recordedTime: (epochS: number) => `DUMMY_recordedTime(${epochS})`,
     sentences: (parts: readonly string[]) => `DUMMY_sentences(${parts.join('|')})`,
   },
 
@@ -315,6 +317,16 @@ export const dummyMessages = {
     paste: 'DUMMY_menu_paste',
   },
 
+  keyNames: {
+    cmd: 'DUMMY_keyNames_cmd',
+    ctrl: 'DUMMY_keyNames_ctrl',
+    option: 'DUMMY_keyNames_option',
+    alt: 'DUMMY_keyNames_alt',
+    shift: 'DUMMY_keyNames_shift',
+    win: 'DUMMY_keyNames_win',
+    chord: (parts) => `DUMMY_keyNames_chord(${parts.join(',')})`,
+  },
+
   /** Accessible names for the rail's icons and the `⋯` window-menu button. */
   settings: {
     panelTitle: 'DUMMY_settings_panelTitle',
@@ -345,9 +357,8 @@ export const dummyMessages = {
     },
     profileLimitGuide: 'DUMMY_settings_profileLimitGuide',
     profileCopyLimitGuide: 'DUMMY_settings_profileCopyLimitGuide',
-    profileUsedByRoles: (roles: readonly string[]) =>
-      `DUMMY_settings_profileUsedByRoles(${roles.join(',')})`,
-    profileUpdateFailed: (id: string, reason: string, isEnabled: boolean) =>
+    profileUsedByRoles: (roles) => `DUMMY_settings_profileUsedByRoles(${roles.join(',')})`,
+    profileUpdateFailed: (id, reason, isEnabled) =>
       `DUMMY_settings_profileUpdateFailed(${id},${reason},${isEnabled})`,
     profileShowDetails: 'DUMMY_settings_profileShowDetails',
     profileHideDetails: 'DUMMY_settings_profileHideDetails',
@@ -483,8 +494,7 @@ export const dummyMessages = {
     notificationsRowName: (row: string) => `DUMMY_settings_notificationsRowName(${row})`,
     notificationsRowDescription: (row: string) =>
       `DUMMY_settings_notificationsRowDescription(${row})`,
-    notificationsSwitchLabel: (rowName: string) =>
-      `DUMMY_settings_notificationsSwitchLabel(${rowName})`,
+    notificationsSwitchLabel: (rowName) => `DUMMY_settings_notificationsSwitchLabel(${rowName})`,
     notificationsAlwaysShown: 'DUMMY_settings_notificationsAlwaysShown',
 
     keyboardTab: 'DUMMY_settings_keyboardTab',
@@ -498,13 +508,12 @@ export const dummyMessages = {
     keyboardGroupHeading: (group: string) => `DUMMY_settings_keyboardGroupHeading(${group})`,
     keyboardActionName: (action: string) => `DUMMY_settings_keyboardActionName(${action})`,
     keyboardActionNote: (action: string) => `DUMMY_settings_keyboardActionNote(${action})`,
-    keyboardRejection: (reason: string, chordText: string) =>
+    keyboardRejection: (reason, chordText) =>
       `DUMMY_settings_keyboardRejection(${reason},${chordText})`,
-    keyboardTook: (chordText: string, fromName: string) =>
-      `DUMMY_settings_keyboardTook(${chordText},${fromName})`,
-    keyboardLost: (chordText: string) => `DUMMY_settings_keyboardLost(${chordText})`,
+    keyboardTook: (chordText, fromName) => `DUMMY_settings_keyboardTook(${chordText},${fromName})`,
+    keyboardLost: (chordText) => `DUMMY_settings_keyboardLost(${chordText})`,
     keyboardSaveFailure: (kind: string) => `DUMMY_settings_keyboardSaveFailure(${kind})`,
-    keyboardEditBlocked: (block: string, location: string) =>
+    keyboardEditBlocked: (block, location) =>
       `DUMMY_settings_keyboardEditBlocked(${block},${location})`,
   },
   nav: {
@@ -520,7 +529,7 @@ export const dummyMessages = {
   sidebar: {
     title: 'DUMMY_sidebar_title',
     needsYou: 'DUMMY_sidebar_needsYou',
-    viewMenu: (mode: string) => `DUMMY_sidebar_viewMenu(${mode})`,
+    viewMenu: (mode) => `DUMMY_sidebar_viewMenu(${mode})`,
     focusMode: 'DUMMY_sidebar_focusMode',
     canvasMode: 'DUMMY_sidebar_canvasMode',
     canvasOnly: 'DUMMY_sidebar_canvasOnly',
@@ -547,8 +556,8 @@ export const dummyMessages = {
     newWindow: 'DUMMY_workArea_newWindow',
     commands: 'DUMMY_workArea_commands',
     settings: 'DUMMY_workArea_settings',
-    reopenFromLastSession: (count: number, timestamp: string | null) =>
-      `DUMMY_workArea_reopenFromLastSession(${count},${timestamp})`,
+    reopenFromLastSession: (count: number, savedAtEpochS: number | null) =>
+      `DUMMY_workArea_reopenFromLastSession(${count},${String(savedAtEpochS)})`,
     windowExitedParts,
     windowExitedWithCodeParts,
     windowExited: (name: string) => joinParts(windowExitedParts(name)),
@@ -573,16 +582,15 @@ export const dummyMessages = {
     otherWindowsHeading: 'DUMMY_picker_otherWindowsHeading',
     current: 'DUMMY_picker_current',
     noWindows: 'DUMMY_picker_noWindows',
-    noWindowMatch: (query: string) => `DUMMY_picker_noWindowMatch(${query})`,
+    noWindowMatch: (query) => `DUMMY_picker_noWindowMatch(${query})`,
     noWindowMatchHint: 'DUMMY_picker_noWindowMatchHint',
-    noCommandMatch: (query: string) => `DUMMY_picker_noCommandMatch(${query})`,
+    noCommandMatch: (query) => `DUMMY_picker_noCommandMatch(${query})`,
     noCommandMatchHint: 'DUMMY_picker_noCommandMatchHint',
     windowCount: (count: number) => `DUMMY_picker_windowCount(${count})`,
     commandCount: (count: number) => `DUMMY_picker_commandCount(${count})`,
-    windowRowPlace: (label: string, place: string) =>
-      `DUMMY_picker_windowRowPlace(${label},${place})`,
-    windowRowCurrent: (label: string) => `DUMMY_picker_windowRowCurrent(${label})`,
-    actionRowKey: (name: string, key: string) => `DUMMY_picker_actionRowKey(${name},${key})`,
+    windowRowPlace: (label, place) => `DUMMY_picker_windowRowPlace(${label},${place})`,
+    windowRowCurrent: (label) => `DUMMY_picker_windowRowCurrent(${label})`,
+    actionRowKey: (name, key) => `DUMMY_picker_actionRowKey(${name},${key})`,
     actionKeywords: (action: string) => `DUMMY_picker_actionKeywords(${action})`,
   },
 
@@ -634,10 +642,10 @@ export const dummyMessages = {
     deleteRoomItem: 'DUMMY_chat_deleteRoomItem',
     deleteMainRoomNote: 'DUMMY_chat_deleteMainRoomNote',
     deleteRoomWithWindowsNote: 'DUMMY_chat_deleteRoomWithWindowsNote',
-    clearHistoryConfirmTitle: (name: string) => `DUMMY_chat_clearHistoryConfirmTitle(${name})`,
+    clearHistoryConfirmTitle: (name) => `DUMMY_chat_clearHistoryConfirmTitle(${name})`,
     clearHistoryConfirmMessage: 'DUMMY_chat_clearHistoryConfirmMessage',
     clearHistoryConfirmLabel: 'DUMMY_chat_clearHistoryConfirmLabel',
-    deleteRoomConfirmTitle: (name: string) => `DUMMY_chat_deleteRoomConfirmTitle(${name})`,
+    deleteRoomConfirmTitle: (name) => `DUMMY_chat_deleteRoomConfirmTitle(${name})`,
     deleteRoomConfirmMessage: 'DUMMY_chat_deleteRoomConfirmMessage',
     deleteRoomConfirmLabel: 'DUMMY_chat_deleteRoomConfirmLabel',
     unresolvedMentions: (mentions) => `DUMMY_chat_unresolvedMentions(${mentions.join(',')})`,

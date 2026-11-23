@@ -143,14 +143,14 @@ describe('a snapshot of an open window refreshes that window only', () => {
     expect(entryOf(registry, 'w2')).toMatchObject({
       name: 'name-w2',
       room: null,
-      detectionWarning: null,
+      displayDetectionWarning: null,
       mcpConnected: null,
       statusReportsMissing: null,
     });
     expect(entryOf(registry, 'w1')).toMatchObject({
       name: 'renamed',
-      room: { roomId: 'r1', name: 'room' },
-      detectionWarning: 'bad definition',
+      room: { roomId: 'r1', displayName: 'room' },
+      displayDetectionWarning: 'bad definition',
       mcpConnected: true,
       statusReportsMissing: true,
     });

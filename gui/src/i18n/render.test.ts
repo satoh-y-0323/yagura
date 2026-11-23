@@ -10,6 +10,7 @@ import { describe, it, expect } from 'vitest';
 
 import { resolveMessages } from './messages';
 import { dummyMessages } from '../test-utils/dummy-messages';
+import { formatPathForDisplay, sanitizeForDisplay } from '../display/untrusted-text';
 import type {
   ChatDeliveryOutcome,
   DetectedStatusView,
@@ -30,11 +31,13 @@ import {
   describeThemeIssues,
   describeThemeName,
   describeAttentionBadge,
+  describeRecordedTime,
   describeReopenNotice,
   describeRestoreSelectionCount,
   describeRestoreConfirm,
   describeRoomTitle,
   describeUnknownReasonSuffix,
+  describeStatusLabel,
   describeUnknownExplanation,
   describeUndeliveredUnknownReason,
   describeInterruptHint,
@@ -48,6 +51,16 @@ import {
 } from './render';
 
 const english = resolveMessages();
+
+/** A moment a session was saved at, in Unix epoch seconds. */
+const SAVED_AT_EPOCH_S = 1_735_000_000;
+
+/** The expected local "YYYY-MM-DD HH:mm" of `epochS`, read through Date getters (TZ-independent). */
+function localMinute(epochS: number): string {
+  const date = new Date(epochS * 1000);
+  const pad = (n: number): string => String(n).padStart(2, '0');
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
 
 describe('render.ts: output is driven by the given locale (dummy-locale swap)', () => {
   it('describeStatus: renders the dummy status label instead of the English one', () => {
@@ -117,9 +130,10 @@ describe('render.ts: output is driven by the given locale (dummy-locale swap)', 
   });
 
   it('describeRoomTitle: renders through the dummy formats.windowListTitle(name, count) template', () => {
-    const result = describeRoomTitle(dummyMessages, 'yagura', 2);
-    expect(result).toBe(dummyMessages.formats.windowListTitle('yagura', 2));
-    expect(result).not.toBe(english.formats.windowListTitle('yagura', 2));
+    const name = formatPathForDisplay('yagura');
+    const result = describeRoomTitle(dummyMessages, name, 2);
+    expect(result).toBe(dummyMessages.formats.windowListTitle(name, 2));
+    expect(result).not.toBe(english.formats.windowListTitle(name, 2));
   });
 });
 
@@ -173,15 +187,22 @@ describe('render.ts: plural forms (contract (3), English locale)', () => {
   });
 
   it('describeReopenNotice: includes the given timestamp text when provided', () => {
-    const result = describeReopenNotice(english, 2, '2026-08-29 10:15');
-    expect(result).toContain('2026-08-29 10:15');
+    const result = describeReopenNotice(english, 2, SAVED_AT_EPOCH_S);
+    expect(result).toContain(localMinute(SAVED_AT_EPOCH_S));
   });
 
   it('describeReopenNotice: omits timestamp text when the timestamp is null', () => {
-    const withTimestamp = describeReopenNotice(english, 2, '2026-08-29 10:15');
+    const withTimestamp = describeReopenNotice(english, 2, SAVED_AT_EPOCH_S);
     const withoutTimestamp = describeReopenNotice(english, 2, null);
-    expect(withoutTimestamp).not.toContain('2026-08-29 10:15');
+    expect(withoutTimestamp).not.toContain(localMinute(SAVED_AT_EPOCH_S));
     expect(withoutTimestamp).not.toBe(withTimestamp);
+  });
+
+  it('describeRecordedTime: formats a positive epoch as local YYYY-MM-DD HH:mm, and gives null for no plausible time', () => {
+    expect(describeRecordedTime(english, SAVED_AT_EPOCH_S)).toBe(localMinute(SAVED_AT_EPOCH_S));
+    for (const epochS of [0, -1, NaN, Infinity]) {
+      expect(describeRecordedTime(english, epochS)).toBeNull();
+    }
   });
 });
 
@@ -195,8 +216,10 @@ describe('render.ts: unknown external keys fall back safely (contract (10), Engl
     expect(describePaneNotice(english, 'attached')).toBeNull();
   });
 
-  it('describeThemeName: returns the name unchanged for an unrecognized (user-defined) theme', () => {
+  it('describeThemeName: returns the name of an unrecognized (user-defined) theme, prepared for display', () => {
     expect(describeThemeName(english, 'my-custom-theme')).toBe('my-custom-theme');
+    const hidden = String.fromCodePoint(0x202e);
+    expect(describeThemeName(english, `my-${hidden}theme`)).toBe('my-theme');
   });
 });
 
@@ -229,55 +252,57 @@ function undeliveredUnknown(reason: UnknownReason | null): ChatDeliveryOutcome {
   return { state: 'undelivered_unknown', reason };
 }
 
+/** A detection-load warning as the registry carries it. */
+const NO_REASON_WARNING = sanitizeForDisplay('a warning with no reason');
+
 describe('describeUnknownReasonSuffix', () => {
-  it('returns the empty string for an unknown status carrying no reason (no reason to show)', () => {
-    expect(describeUnknownReasonSuffix(english, unknownPair(null))).toBe('');
+  it('returns null for an unknown status carrying no reason (no reason to show)', () => {
+    expect(describeUnknownReasonSuffix(english, unknownPair(null))).toBeNull();
   });
 
-  it('returns the empty string for every arm that is not the unknown one', () => {
-    expect(describeUnknownReasonSuffix(english, { status: 'running' })).toBe('');
-    expect(describeUnknownReasonSuffix(english, { status: 'waiting_approval' })).toBe('');
-    expect(describeUnknownReasonSuffix(english, { status: 'exited' })).toBe('');
+  it('returns null for every arm that is not the unknown one', () => {
+    expect(describeUnknownReasonSuffix(english, { status: 'running' })).toBeNull();
+    expect(describeUnknownReasonSuffix(english, { status: 'waiting_approval' })).toBeNull();
+    expect(describeUnknownReasonSuffix(english, { status: 'exited' })).toBeNull();
   });
 
   it('renders the six reasons as six distinct, non-empty suffixes', () => {
     const rendered = UNKNOWN_REASONS.map((reason) =>
       describeUnknownReasonSuffix(english, unknownPair(reason))
     );
-    expect(rendered.every((suffix) => suffix.length > 0)).toBe(true);
+    expect(rendered.every((suffix) => suffix !== null && suffix.length > 0)).toBe(true);
     expect(new Set(rendered).size).toBe(UNKNOWN_REASONS.length);
   });
 
-  it('joins the short label with " · " (the connector the pill uses)', () => {
-    expect(describeUnknownReasonSuffix(english, unknownPair('no_definition'))).toBe(
-      ` · ${english.unknownReasons.short.no_definition}`
+  it('is followed by the status word with " · " (the connector the pill uses)', () => {
+    const reason = describeUnknownReasonSuffix(english, unknownPair('no_definition'));
+    expect(reason).toBe(english.unknownReasons.short.no_definition);
+    expect(describeStatusLabel(english, 'unknown', reason)).toBe(
+      `${english.statusLabels.unknown} · ${english.unknownReasons.short.no_definition}`
     );
+    expect(describeStatusLabel(english, 'running', null)).toBe(english.statusLabels.running);
   });
 
   it('renders through the dummy locale, not the English one (locale-driven, not hardcoded)', () => {
     const result = describeUnknownReasonSuffix(dummyMessages, unknownPair('screen_lost'));
-    expect(result).toBe(` · ${dummyMessages.unknownReasons.short.screen_lost}`);
+    expect(result).toBe(dummyMessages.unknownReasons.short.screen_lost);
     expect(result).not.toContain(english.unknownReasons.short.screen_lost);
   });
 });
 
 describe('describeUnknownExplanation', () => {
-  it('returns the empty string for an unknown status carrying no reason, the same fail-safe shape describeUnknownReasonSuffix takes', () => {
-    expect(describeUnknownExplanation(english, unknownPair(null), null)).toBe('');
-    expect(describeUnknownExplanation(english, unknownPair(null), 'a warning with no reason')).toBe(
-      ''
-    );
+  it('returns null for an unknown status carrying no reason, the same fail-safe shape describeUnknownReasonSuffix takes', () => {
+    expect(describeUnknownExplanation(english, unknownPair(null), null)).toBeNull();
+    expect(describeUnknownExplanation(english, unknownPair(null), NO_REASON_WARNING)).toBeNull();
   });
 
-  it('returns the empty string for every arm that is not the unknown one (nothing to explain)', () => {
-    expect(describeUnknownExplanation(english, { status: 'running' }, null)).toBe('');
-    expect(
-      describeUnknownExplanation(english, { status: 'idle' }, 'a warning with no reason')
-    ).toBe('');
+  it('returns null for every arm that is not the unknown one (nothing to explain)', () => {
+    expect(describeUnknownExplanation(english, { status: 'running' }, null)).toBeNull();
+    expect(describeUnknownExplanation(english, { status: 'idle' }, NO_REASON_WARNING)).toBeNull();
   });
 
   it('renders the explanation alone when there is no warning (null, empty, or whitespace only)', () => {
-    for (const warning of [null, '', '   ']) {
+    for (const warning of [null, sanitizeForDisplay(''), sanitizeForDisplay('   ')]) {
       expect(describeUnknownExplanation(english, unknownPair('no_definition'), warning)).toBe(
         english.unknownReasons.explanation.no_definition
       );
@@ -289,7 +314,7 @@ describe('describeUnknownExplanation', () => {
       describeUnknownExplanation(
         english,
         unknownPair('no_definition'),
-        'profile.toml has no [detection]'
+        sanitizeForDisplay('profile.toml has no [detection]')
       )
     ).toBe(`${english.unknownReasons.explanation.no_definition} (profile.toml has no [detection])`);
   });
@@ -420,18 +445,22 @@ describe('describeActionBlock: which message each reason picks', () => {
   });
 });
 
+/** What was typed into the picker, as its model quotes it back. */
+const REV = sanitizeForDisplay('rev');
+const ZZZ = sanitizeForDisplay('zzz');
+
 describe('describePickerEmpty and describePickerResults', () => {
   it('names each kind of empty result, quoting what was typed and pointing to the other mode', () => {
     expect(describePickerEmpty(dummyMessages, { kind: 'no-windows' })).toEqual({
       title: dummyMessages.picker.noWindows,
       hint: null,
     });
-    expect(describePickerEmpty(dummyMessages, { kind: 'no-window-match', query: 'rev' })).toEqual({
-      title: dummyMessages.picker.noWindowMatch('rev'),
+    expect(describePickerEmpty(dummyMessages, { kind: 'no-window-match', query: REV })).toEqual({
+      title: dummyMessages.picker.noWindowMatch(REV),
       hint: dummyMessages.picker.noWindowMatchHint,
     });
-    expect(describePickerEmpty(dummyMessages, { kind: 'no-command-match', query: 'zzz' })).toEqual({
-      title: dummyMessages.picker.noCommandMatch('zzz'),
+    expect(describePickerEmpty(dummyMessages, { kind: 'no-command-match', query: ZZZ })).toEqual({
+      title: dummyMessages.picker.noCommandMatch(ZZZ),
       hint: dummyMessages.picker.noCommandMatchHint,
     });
   });
@@ -444,14 +473,14 @@ describe('describePickerEmpty and describePickerResults', () => {
       dummyMessages.picker.windowCount(3)
     );
     expect(
-      describePickerResults(dummyMessages, 'windows', 0, { kind: 'no-window-match', query: 'rev' })
-    ).toBe(dummyMessages.picker.noWindowMatch('rev'));
+      describePickerResults(dummyMessages, 'windows', 0, { kind: 'no-window-match', query: REV })
+    ).toBe(dummyMessages.picker.noWindowMatch(REV));
     expect(
       describePickerResults(dummyMessages, 'commands', 0, {
         kind: 'no-command-match',
-        query: 'zzz',
+        query: ZZZ,
       })
-    ).toBe(dummyMessages.picker.noCommandMatch('zzz'));
+    ).toBe(dummyMessages.picker.noCommandMatch(ZZZ));
     // With no window open, the New window offer is a row while the empty title is read.
     expect(describePickerResults(dummyMessages, 'windows', 1, { kind: 'no-windows' })).toBe(
       dummyMessages.picker.noWindows
@@ -459,19 +488,25 @@ describe('describePickerEmpty and describePickerResults', () => {
   });
 });
 
+/** A window's display name, room name, vendor and folder, as the registry prepares them. */
+const REVIEWER = sanitizeForDisplay('reviewer');
+const YAGURA_ROOM = formatPathForDisplay('yagura');
+const VENDOR = sanitizeForDisplay('claude-code');
+const CWD = formatPathForDisplay('/work/yagura');
+
 describe('describePickerWindowRow and describePickerActionRow', () => {
   const facts: PickerWindowRowFacts = {
-    name: 'reviewer',
+    name: REVIEWER,
     status: 'waiting_input',
     isAwaitingPermission: true,
-    place: 'yagura',
+    place: YAGURA_ROOM,
     isCurrent: false,
   };
 
   it('reads a window row as its sidebar row, then its place, then Current only for the current window', () => {
     const placed = dummyMessages.picker.windowRowPlace(
-      describeWindowRow(dummyMessages, 'reviewer', 'waiting_input', true),
-      'yagura'
+      describeWindowRow(dummyMessages, REVIEWER, 'waiting_input', true),
+      YAGURA_ROOM
     );
     expect(describePickerWindowRow(dummyMessages, facts)).toBe(placed);
     expect(describePickerWindowRow(dummyMessages, { ...facts, isCurrent: true })).toBe(
@@ -480,24 +515,29 @@ describe('describePickerWindowRow and describePickerActionRow', () => {
   });
 
   it('reads an action row as its name, with its key only when it has one', () => {
-    expect(describePickerActionRow(dummyMessages, 'tile-name', null)).toBe('tile-name');
-    expect(describePickerActionRow(dummyMessages, 'tile-name', 'key-text')).toBe(
-      dummyMessages.picker.actionRowKey('tile-name', 'key-text')
+    const name = dummyMessages.settings.keyboardActionName('tile-windows');
+    const key = dummyMessages.keyNames.chord([
+      dummyMessages.keyNames.ctrl,
+      sanitizeForDisplay('T'),
+    ]);
+    expect(describePickerActionRow(dummyMessages, name, null)).toBe(name);
+    expect(describePickerActionRow(dummyMessages, name, key)).toBe(
+      dummyMessages.picker.actionRowKey(name, key)
     );
   });
 });
 
 describe('describeWindowRow', () => {
   it('names the window and its status word', () => {
-    expect(describeWindowRow(dummyMessages, 'reviewer', 'waiting_input', false)).toBe(
-      dummyMessages.formats.windowRow('reviewer', dummyMessages.statusLabels.waiting_input)
+    expect(describeWindowRow(dummyMessages, REVIEWER, 'waiting_input', false)).toBe(
+      dummyMessages.formats.windowRow(REVIEWER, dummyMessages.statusLabels.waiting_input)
     );
   });
 
   it('adds the permission wait only while the window waits for the user', () => {
-    expect(describeWindowRow(dummyMessages, 'reviewer', 'waiting_input', true)).toBe(
+    expect(describeWindowRow(dummyMessages, REVIEWER, 'waiting_input', true)).toBe(
       dummyMessages.formats.windowRowAwaitingPermission(
-        dummyMessages.formats.windowRow('reviewer', dummyMessages.statusLabels.waiting_input)
+        dummyMessages.formats.windowRow(REVIEWER, dummyMessages.statusLabels.waiting_input)
       )
     );
   });
@@ -506,8 +546,8 @@ describe('describeWindowRow', () => {
 describe('describeWindowLocation', () => {
   it('is the header description without any mark', () => {
     const facts: WindowHeaderFacts = {
-      vendor: 'claude-code',
-      cwd: '/work/yagura',
+      vendor: VENDOR,
+      cwd: CWD,
       showsMcpMark: false,
       showsStatusReportMark: false,
       queuedCount: undefined,
@@ -523,8 +563,8 @@ describe('describeWindowLocation', () => {
 
 describe('describeWindowHeader', () => {
   const NO_MARKS: WindowHeaderFacts = {
-    vendor: 'claude-code',
-    cwd: '/work/yagura',
+    vendor: VENDOR,
+    cwd: CWD,
     showsMcpMark: false,
     showsStatusReportMark: false,
     queuedCount: undefined,
@@ -532,15 +572,13 @@ describe('describeWindowHeader', () => {
 
   it('says only where the window runs while no mark shows', () => {
     expect(describeWindowHeader(dummyMessages, NO_MARKS)).toBe(
-      dummyMessages.formats.sentences([
-        dummyMessages.formats.windowHeaderVendorCwd('claude-code', '/work/yagura'),
-      ])
+      dummyMessages.formats.sentences([dummyMessages.formats.windowHeaderVendorCwd(VENDOR, CWD)])
     );
   });
 
   it('names only the working directory for a window without a vendor', () => {
     expect(describeWindowHeader(dummyMessages, { ...NO_MARKS, vendor: null })).toBe(
-      dummyMessages.formats.sentences([dummyMessages.formats.windowHeaderCwd('/work/yagura')])
+      dummyMessages.formats.sentences([dummyMessages.formats.windowHeaderCwd(CWD)])
     );
   });
 
@@ -553,7 +591,7 @@ describe('describeWindowHeader', () => {
     };
     expect(describeWindowHeader(dummyMessages, facts)).toBe(
       dummyMessages.formats.sentences([
-        dummyMessages.formats.windowHeaderVendorCwd('claude-code', '/work/yagura'),
+        dummyMessages.formats.windowHeaderVendorCwd(VENDOR, CWD),
         dummyMessages.hints.mcpConnected,
         dummyMessages.hints.statusReportsMissing,
         dummyMessages.formats.queuedMessages(3),
@@ -570,7 +608,7 @@ describe('describeWindowHeader', () => {
     });
     expect(text).toBe(
       [
-        `${english.formats.windowHeaderVendorCwd('claude-code', '/work/yagura')}.`,
+        `${english.formats.windowHeaderVendorCwd(VENDOR, CWD)}.`,
         `${english.hints.mcpConnected}.`,
         english.hints.statusReportsMissing,
         `${english.formats.queuedMessages(1)}.`,

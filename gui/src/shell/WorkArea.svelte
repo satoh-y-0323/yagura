@@ -10,6 +10,7 @@
   import type { KeyboardPlatform } from '../keymap/keyboard-platform';
   import type { Keys } from '../keymap/keymap-model';
   import type { Size } from '../layout/float-layout';
+  import type { ReopenOffer } from '../notices/notice-model';
   import { isWindowVisibleFor, type WorkView } from '../session/current-window';
   import type { Pane } from '../session/pane-plan';
   import type { ExitedCard as ExitedCardState } from '../session/shell-state';
@@ -40,7 +41,7 @@
   export let keys: Keys;
   export let platform: KeyboardPlatform;
   /** The last session's windows on offer in the work area, `null` while none are. */
-  export let reopen: { count: number; timestamp: string | null } | null;
+  export let reopen: ReopenOffer | null;
   export let onNewWindow: () => void;
   export let onChooseWindows: () => void;
   export let onExitedCardGoTo: () => void;

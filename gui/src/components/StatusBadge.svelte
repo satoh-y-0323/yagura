@@ -5,22 +5,23 @@
    * `icon` is a bare icon that names the status as an image; `label` is a pill
    * with the status word beside it; `count` is the small pill a group of windows
    * wears: the mark of its highest-ranked status and how many windows need the
-   * user. `detail` is appended to the word as given (the reason of an unknown
-   * status).
+   * user. `reason` follows the word (why an unknown status is unknown).
    */
+  import type { UiText } from '../display/ui-text';
   import type { WindowStatus } from '../ipc/session-boundary';
   import { STATUS_PRESENTATION } from '../status-presentation';
-  import { describeAttentionBadge, describeStatus } from '../ui-messages';
+  import { describeAttentionBadge, describeStatusLabel } from '../ui-messages';
   import Icon from './Icon.svelte';
 
   export let status: WindowStatus;
   export let variant: 'icon' | 'label' | 'count';
-  export let detail = '';
+  /** The short reason the word is followed by, `null` for none. */
+  export let reason: UiText | null = null;
   /** Windows that need the user; read by the `count` variant only. */
   export let count = 0;
 
   $: presentation = STATUS_PRESENTATION[status];
-  $: text = `${describeStatus(status)}${detail}`;
+  $: text = describeStatusLabel(status, reason);
 </script>
 
 {#if variant === 'icon'}

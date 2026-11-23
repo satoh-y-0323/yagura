@@ -190,6 +190,7 @@
     type ProfileDetailActions,
     type ProfileDetailsState,
   } from '../settings/profile-detail-model';
+  import type { ProfileSwitchTarget } from '../settings/profile-settings-model';
   import type {
     McpRegistrationAction,
     McpRegistrationResultPayload,
@@ -269,7 +270,7 @@
   } from '../settings/panel-size';
   import { type SettingsTab } from '../settings/settings-tabs';
   import { startLayoutSync } from '../session/layout-sync';
-  import { confirmCopy, type ConfirmOperation } from '../session/confirm-target';
+  import { confirmCopy, type ConfirmSubject } from '../session/confirm-target';
   import { pairPanes, type Pane } from '../session/pane-plan';
   import { createAttentionNavigation } from '../session/attention-navigation';
   import { currentWindowFor, type WorkMode } from '../session/current-window';
@@ -315,7 +316,6 @@
     applyLayoutSteps,
     applySelectionOverrides,
     defaultSelection,
-    formatRestoreTimestamp,
     planLayoutApplication,
     layoutTargetsForOpened,
     layoutStepsForSnapshot,
@@ -564,11 +564,10 @@
 
   // Confirmation dialog state
   // `windowId` is the window the operation is about, null for a room or a broadcast.
-  let confirmDialog = {
+  let confirmDialog: { isOpen: boolean; subject: ConfirmSubject; windowId: string | null } = {
     isOpen: false,
-    operation: 'close' as ConfirmOperation,
-    roomName: '',
-    windowId: null as string | null,
+    subject: { operation: 'close' },
+    windowId: null,
   };
   let pendingConfirm: ((approved: boolean) => void) | null = null;
 
@@ -665,7 +664,7 @@
   let savingProfileId: string | null = null;
   // Why the last switch was refused, `null` while none was, or once a later
   // switch or closing the panel supersedes it.
-  let profileUpdateFailure: string | null = null;
+  let profileUpdateFailure: UiText | null = null;
   // The profile whose details are open in the Profiles tab, what was read
   // for it, and the state of a command save or reset for it.
   let openProfileDetailId: string | null = null;
@@ -684,7 +683,7 @@
   // switch on the tab, mirroring the Profiles tab above.
   let approvalSettings: ApprovalSettingsInfo | null = null;
   let isApprovalSaving = false;
-  let approvalSwitchFailure: string | null = null;
+  let approvalSwitchFailure: UiText | null = null;
 
   // The Models tab. The model lists are read once per profile while the panel
   // is open and forgotten when it closes; each request's id is recorded as the
@@ -708,7 +707,7 @@
   let integrationStatuses: ReadonlyMap<string, McpRegistrationStatusInfo> = new Map();
   let integrationRunning: string | null = null;
   let integrationResults: ReadonlyMap<string, McpRegistrationResultPayload> = new Map();
-  let integrationsFailure: string | null = null;
+  let integrationsFailure: UiText | null = null;
   let integrationsListRequestId: number | null = null;
   let integrationsRunRequestId: number | null = null;
   let lastIntegrationsRequestId = 0;
@@ -864,11 +863,7 @@
     profilesNeedingNativeProgram: profilesNeedingNativeProgram(profileOptions),
     lastSession:
       restoreCandidates.length > 0
-        ? {
-            count: restoreCandidates.length,
-            timestamp:
-              restoreTakenAtEpochS === null ? null : formatRestoreTimestamp(restoreTakenAtEpochS),
-          }
+        ? { count: restoreCandidates.length, savedAtEpochS: restoreTakenAtEpochS }
         : null,
     hasOpenWindows: $registry.windows.length > 0,
   } satisfies NoticeSourceState;
@@ -910,12 +905,12 @@
 
   $: currentRoomName = roomDisplayName(chatRooms.get(currentRoomId), currentRoomId);
   $: confirmWording =
-    confirmDialog.operation === 'broadcast'
+    confirmDialog.subject.operation === 'broadcast'
       ? {
-          ...confirmCopy(confirmDialog.operation),
+          ...confirmCopy(confirmDialog.subject),
           message: chat.broadcastConfirmRoomMessage(currentRoomName),
         }
-      : confirmCopy(confirmDialog.operation, confirmDialog.roomName);
+      : confirmCopy(confirmDialog.subject);
 
   $: approvalRequest = approvalQueue.head(approvals);
   $: isApprovalDialogOpen =
@@ -989,11 +984,10 @@
    * dialog and answers the operation with what the user chose.
    */
   const confirmPort: ConfirmPort = (operation, entry) =>
-    requestConfirmation(operation, '', entry.windowId);
+    requestConfirmation({ operation }, entry.windowId);
 
   function requestConfirmation(
-    operation: ConfirmOperation,
-    roomName = '',
+    subject: ConfirmSubject,
     windowId: string | null = null
   ): Promise<boolean> {
     return new Promise<boolean>((resolve) => {
@@ -1001,7 +995,7 @@
       // replaced here. Deny it instead of leaving its caller waiting forever.
       answerConfirm(false);
       pendingConfirm = resolve;
-      confirmDialog = { isOpen: true, operation, roomName, windowId };
+      confirmDialog = { isOpen: true, subject, windowId };
     });
   }
 
@@ -1189,7 +1183,7 @@
     operation: 'clear_room' | 'delete_room',
     room: ChatRoomInfo
   ): Promise<void> {
-    if (!(await requestConfirmation(operation, room.displayName))) {
+    if (!(await requestConfirmation({ operation, roomName: room.displayName }))) {
       return;
     }
     try {
@@ -1220,7 +1214,7 @@
   }
 
   async function broadcastChat(body: string): Promise<ChatPosted | null> {
-    if (!(await requestConfirmation('broadcast'))) {
+    if (!(await requestConfirmation({ operation: 'broadcast' }))) {
       return null;
     }
     return postChat(body, true);
@@ -1458,18 +1452,21 @@
    * the switch is left as it was and the panel shows why; either way the row
    * stops showing as saving.
    */
-  async function handleSetProfileEnabled(id: string, enabled: boolean): Promise<void> {
-    savingProfileId = id;
+  async function handleSetProfileEnabled(
+    profile: ProfileSwitchTarget,
+    enabled: boolean
+  ): Promise<void> {
+    savingProfileId = profile.id;
     profileUpdateFailure = null;
     try {
-      await invokeSetProfileEnabled(id, enabled);
+      await invokeSetProfileEnabled(profile.id, enabled);
       await loadProfiles();
     } catch (error) {
       const reason = foldedFailureReason(error);
       // The request asked for `enabled`; a refusal leaves the profile at the
       // opposite of that.
       profileUpdateFailure = commandFailureLine(error, () =>
-        settings.profileUpdateFailed(id, reason, !enabled)
+        settings.profileUpdateFailed(profile.displayId, reason, !enabled)
       );
     } finally {
       savingProfileId = null;
@@ -4177,7 +4174,7 @@
   title={confirmWording.title}
   message={confirmWording.message}
   confirmLabel={confirmWording.confirmLabel}
-  operation={confirmDialog.operation}
+  operation={confirmDialog.subject.operation}
   subject={confirmDialog.windowId}
   onConfirm={() => answerConfirm(true)}
   onCancel={() => answerConfirm(false)}

@@ -38,20 +38,12 @@ function tailStart(name: string): number {
 }
 
 /**
- * Splits a name for an ellipsis in the middle: `head` shrinks behind the
- * ellipsis while `tail` stays visible. Names of more than 16 graphemes keep
- * their last 8 graphemes as `tail`; shorter names come back whole in `head`.
- * `head + tail` always equals `name`, and neither a grapheme nor a
- * written-out character (`\u{200B}`) is ever split; the latter counts as one.
- */
-export function splitForMiddleEllipsis(name: string): { head: string; tail: string } {
-  const cut = tailStart(name);
-  return { head: name.slice(0, cut), tail: name.slice(cut) };
-}
-
-/**
- * {@link splitForMiddleEllipsis} for text prepared for display: both parts
- * keep the kind of `name`.
+ * Splits a name prepared for display for an ellipsis in the middle: `head`
+ * shrinks behind the ellipsis while `tail` stays visible. Names of more than
+ * 16 graphemes keep their last 8 graphemes as `tail`; shorter names come back
+ * whole in `head`. `head + tail` always equals `name`, both parts keep the
+ * kind of `name`, and neither a grapheme nor a written-out character
+ * (`\u{200B}`) is ever split; the latter counts as one.
  */
 export function splitPreparedForMiddleEllipsis<T extends DisplayLine | DisplayBlock>(
   name: T

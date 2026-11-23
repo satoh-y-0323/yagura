@@ -5,13 +5,14 @@
  */
 import { describe, it, expect } from 'vitest';
 
+import { describeThemeName, themes } from '../ui-messages';
 import { themeMarkOf } from './theme-mark';
 
 const OPTIONS = [
-  { value: 'dark', label: 'Dark' },
-  { value: 'light', label: 'Light' },
-  { value: 'system', label: 'System' },
-  { value: 'solarized', label: 'solarized' },
+  { value: 'dark', label: describeThemeName('dark') },
+  { value: 'light', label: describeThemeName('light') },
+  { value: 'system', label: themes.systemOption },
+  { value: 'solarized', label: describeThemeName('solarized') },
 ];
 
 describe('themeMarkOf', () => {
@@ -32,8 +33,10 @@ describe('themeMarkOf', () => {
     expect(themeMarkOf('solarized', OPTIONS).tooltip).toBe('Theme: solarized');
   });
 
-  it('falls back to the value itself when no option carries it', () => {
+  it('falls back to the theme name, prepared for display, when no option carries it', () => {
     expect(themeMarkOf('gone', OPTIONS)).toEqual({ icon: 'palette', tooltip: 'Theme: gone' });
+    const hidden = String.fromCodePoint(0x202e);
+    expect(themeMarkOf(`go${hidden}ne`, OPTIONS).tooltip).toBe('Theme: gone');
   });
 });
 

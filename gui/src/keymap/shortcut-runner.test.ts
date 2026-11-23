@@ -6,6 +6,7 @@
  */
 import { describe, expect, it } from 'vitest';
 
+import { formatPathForDisplay } from '../display/untrusted-text';
 import type { WindowStatus } from '../ipc/session-boundary';
 import type { PlacedWindow } from '../session/current-window';
 import type { ExitedCard } from '../session/shell-state';
@@ -73,7 +74,7 @@ function groupsOf(order: readonly Win[]): RoomGroup<Win>[] {
       groups.push({
         kind: 'folder',
         roomId: entry.roomId,
-        name: entry.roomId,
+        name: formatPathForDisplay(entry.roomId),
         entries: [entry],
         minimized: 0,
         collapsed: true,

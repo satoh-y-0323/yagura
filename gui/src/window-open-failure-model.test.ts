@@ -10,12 +10,13 @@
  */
 import { describe, it, expect } from 'vitest';
 
+import { sanitizeForDisplay } from './display/untrusted-text';
 import type { CommandFailure } from './ipc/session-boundary';
 import { describeWindowOpenFailure, shouldDropRememberedCwd } from './window-open-failure-model';
 import { banners } from './ui-messages';
 
-/** Operation-specific wording the caller supplies; never read from `i18n/`. */
-const SUMMARY = 'Launch refused';
+/** What the caller names the launch by, as a restore names a window; never read from `i18n/`. */
+const SUMMARY = sanitizeForDisplay('Launch refused');
 
 /** The argument name the daemon uses for a refused working directory. */
 const CWD_ARGUMENT = 'cwd';

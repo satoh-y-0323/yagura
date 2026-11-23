@@ -2,13 +2,16 @@
  * The choices a window's theme select offers, built in one place so every
  * menu that overrides a window's theme lists the same names in the same order.
  */
+import type { UiText } from '../display/ui-text';
+import type { DisplayLine } from '../display/untrusted-text';
 import { describeThemeName, themes } from '../ui-messages';
 import type { BUILT_IN_PALETTES } from './palette';
 
 /** One option of a theme select; `value` is what the selection stores. */
 export interface ThemeOption {
   value: string;
-  label: string;
+  /** The theme's name as the option shows it. */
+  label: UiText | DisplayLine;
 }
 
 const BUILT_IN_NAMES: readonly (keyof typeof BUILT_IN_PALETTES)[] = ['dark', 'light'];

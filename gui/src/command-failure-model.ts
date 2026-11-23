@@ -8,6 +8,7 @@
  * failure is the operation's own and shows the operation's line.
  */
 
+import type { UiText } from './display/ui-text';
 import { caughtValueText } from './display/untrusted-text';
 import { CommandFailureError, type CommandFailure } from './ipc/session-boundary';
 import { banners } from './ui-messages';
@@ -42,9 +43,12 @@ export function commandRejectionCode(error: unknown): string | null {
  *
  * @param error the value the operation rejected with
  * @param describe builds the operation's own line, for every failure the
- * daemon's wire revision did not cause
+ * daemon's wire revision did not cause; the line keeps the type it is built with
  */
-export function commandFailureLine(error: unknown, describe: () => string): string {
+export function commandFailureLine<L extends string>(
+  error: unknown,
+  describe: () => L
+): L | UiText {
   return lineForFailure(commandFailureOf(error), describe);
 }
 
@@ -55,6 +59,9 @@ export function commandFailureLine(error: unknown, describe: () => string): stri
  * @param failure why the operation failed
  * @param describe builds the operation's own line
  */
-export function lineForFailure(failure: CommandFailure, describe: () => string): string {
+export function lineForFailure<L extends string>(
+  failure: CommandFailure,
+  describe: () => L
+): L | UiText {
   return failure.kind === 'unsupported' ? banners.daemonIncompatible : describe();
 }

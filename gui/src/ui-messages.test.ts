@@ -5,9 +5,10 @@
  */
 import { describe, it, expect } from 'vitest';
 
+import { sanitizeForDisplay } from './display/untrusted-text';
 import { describeDetectionWarning, describeOperationFailure } from './ui-messages';
 
-const SUMMARY = 'Could not close the window';
+const SUMMARY = sanitizeForDisplay('Could not close the window');
 
 /**
  * The `errors.detectionLoadFailed` value of `messages-en.ts`, restated here so that a
@@ -228,7 +229,7 @@ describe('describeDetectionWarning: Japanese summary, folding and capping', () =
     const detail =
       'the definition path resolves into a build artifact directory\r\n(or cannot be resolved)';
     expect(describeDetectionWarning(detail)).toBe(
-      describeOperationFailure(DETECTION_WARNING_SUMMARY, detail)
+      describeOperationFailure(sanitizeForDisplay(DETECTION_WARNING_SUMMARY), detail)
     );
   });
 });

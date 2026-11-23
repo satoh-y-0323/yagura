@@ -14,7 +14,8 @@
   import KeyboardSettings from './KeyboardSettings.svelte';
   import NotificationSettings from './NotificationSettings.svelte';
   import { closeOnEscape } from './panel-focus';
-  import type { RoleEntry } from '../ipc/plan-boundary';
+  import type { UiText } from '../display/ui-text';
+  import type { RoleInfo } from '../ipc/plan-boundary';
   import type { ApprovalSettingsInfo } from '../ipc/session-client';
   import type {
     McpRegistrationAction,
@@ -29,6 +30,7 @@
   import type { NoticeCategory } from '../notices/notice-model';
   import type { NotificationPreferences } from '../notices/notification-preferences';
   import type { ProfileDetailActions, ProfileDetailsState } from '../settings/profile-detail-model';
+  import type { ProfileSwitchTarget } from '../settings/profile-settings-model';
   import { SETTINGS_TABS, type SettingsTab } from '../settings/settings-tabs';
   import { observeSize } from './observe-size';
   import { PANEL_MIN_SIZE, type PanelSize } from '../settings/panel-size';
@@ -38,25 +40,25 @@
   export let onSelectTab: (tab: SettingsTab) => void;
   export let onClose: () => void;
   export let profileOptions: readonly ProfileOption[];
-  export let roles: readonly RoleEntry[];
+  export let roles: readonly RoleInfo[];
   export let savingProfileId: string | null;
-  export let updateFailure: string | null;
-  export let onSetProfileEnabled: (id: string, enabled: boolean) => void;
+  export let updateFailure: UiText | null;
+  export let onSetProfileEnabled: (profile: ProfileSwitchTarget, enabled: boolean) => void;
   export let profileDetails: ProfileDetailsState;
   export let profileDetailActions: ProfileDetailActions;
   export let approvalSettings: ApprovalSettingsInfo | null;
-  export let approvalNotice: string | null;
+  export let approvalNotice: UiText | null;
   export let isApprovalReadOnly: boolean;
   export let isApprovalSaving: boolean;
-  export let approvalUpdateFailure: string | null;
+  export let approvalUpdateFailure: UiText | null;
   export let onSetAutoApprove: (tool: string, autoApprove: boolean) => void;
   export let onSetPlanApprovalRequired: (required: boolean) => void;
   export let integrationsListed: McpRegistrationsListed | null;
   export let integrationStatuses: ReadonlyMap<string, McpRegistrationStatusInfo>;
   export let integrationRunning: string | null;
   export let integrationResults: ReadonlyMap<string, McpRegistrationResultPayload>;
-  export let integrationsNotice: string | null;
-  export let integrationsFailure: string | null;
+  export let integrationsNotice: UiText | null;
+  export let integrationsFailure: UiText | null;
   export let onRunMcpRegistration: (profile: string, action: McpRegistrationAction) => void;
   export let keys: Keys;
   export let platform: KeyboardPlatform;
@@ -73,7 +75,7 @@
   export let onResize: (size: PanelSize) => void;
 
   /** The tab strip's display text, keyed by tab id. */
-  const TAB_LABELS: Record<SettingsTab, string> = {
+  const TAB_LABELS: Record<SettingsTab, UiText> = {
     profiles: settings.profilesTab,
     approvals: settings.approvalsTab,
     integrations: settings.integrationsTab,

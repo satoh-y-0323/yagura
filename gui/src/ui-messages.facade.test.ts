@@ -7,6 +7,7 @@ import { describe, it, expect } from 'vitest';
 import { resolveMessages } from './i18n/messages';
 import * as render from './i18n/render';
 import * as facade from './ui-messages';
+import { formatPathForDisplay, sanitizeForDisplay } from './display/untrusted-text';
 import type { DetectedStatusView } from './ipc/session-boundary';
 import type { ConfirmTarget } from './session/confirm-target';
 
@@ -14,9 +15,12 @@ const messages = resolveMessages();
 
 const UNKNOWN_WITH_REASON: DetectedStatusView = { status: 'unknown', reason: 'no_rule_matched' };
 const BLOCKED: ConfirmTarget = { allowed: false, requiresConfirmation: false, reason: 'exited' };
+const REVIEWER = sanitizeForDisplay('reviewer');
+const WARNING = sanitizeForDisplay('a warning');
+const SAVED_AT_EPOCH_S = 1_767_315_840;
 const HEADER_FACTS: render.WindowHeaderFacts = {
-  vendor: 'claude-code',
-  cwd: '/work/yagura',
+  vendor: sanitizeForDisplay('claude-code'),
+  cwd: formatPathForDisplay('/work/yagura'),
   showsMcpMark: true,
   showsStatusReportMark: false,
   queuedCount: 2,
@@ -45,8 +49,8 @@ const CASES: ReadonlyArray<[string, () => unknown, () => unknown]> = [
   ],
   [
     'describeWindowRow',
-    () => facade.describeWindowRow('reviewer', 'waiting_input', true),
-    () => render.describeWindowRow(messages, 'reviewer', 'waiting_input', true),
+    () => facade.describeWindowRow(REVIEWER, 'waiting_input', true),
+    () => render.describeWindowRow(messages, REVIEWER, 'waiting_input', true),
   ],
   [
     'describeWindowHeader',
@@ -100,8 +104,13 @@ const CASES: ReadonlyArray<[string, () => unknown, () => unknown]> = [
   ],
   [
     'describeReopenOffer',
-    () => facade.describeReopenOffer(6, '2026-01-02 03:04'),
-    () => render.describeReopenOffer(messages, 6, '2026-01-02 03:04'),
+    () => facade.describeReopenOffer(6, SAVED_AT_EPOCH_S),
+    () => render.describeReopenOffer(messages, 6, SAVED_AT_EPOCH_S),
+  ],
+  [
+    'describeRecordedTime',
+    () => facade.describeRecordedTime(SAVED_AT_EPOCH_S),
+    () => render.describeRecordedTime(messages, SAVED_AT_EPOCH_S),
   ],
   [
     'describeStatus',
@@ -130,8 +139,8 @@ const CASES: ReadonlyArray<[string, () => unknown, () => unknown]> = [
   ],
   [
     'describeReopenNotice',
-    () => facade.describeReopenNotice(3, '2026-01-02 03:04'),
-    () => render.describeReopenNotice(messages, 3, '2026-01-02 03:04'),
+    () => facade.describeReopenNotice(3, SAVED_AT_EPOCH_S),
+    () => render.describeReopenNotice(messages, 3, SAVED_AT_EPOCH_S),
   ],
   [
     'describeRestoreSelectionCount',
@@ -145,8 +154,8 @@ const CASES: ReadonlyArray<[string, () => unknown, () => unknown]> = [
   ],
   [
     'describeRoomTitle',
-    () => facade.describeRoomTitle('main', 2),
-    () => render.describeRoomTitle(messages, 'main', 2),
+    () => facade.describeRoomTitle(formatPathForDisplay('main'), 2),
+    () => render.describeRoomTitle(messages, formatPathForDisplay('main'), 2),
   ],
   [
     'describeUnknownReasonSuffix',
@@ -155,8 +164,19 @@ const CASES: ReadonlyArray<[string, () => unknown, () => unknown]> = [
   ],
   [
     'describeUnknownExplanation',
-    () => facade.describeUnknownExplanation(UNKNOWN_WITH_REASON, 'a warning'),
-    () => render.describeUnknownExplanation(messages, UNKNOWN_WITH_REASON, 'a warning'),
+    () => facade.describeUnknownExplanation(UNKNOWN_WITH_REASON, WARNING),
+    () => render.describeUnknownExplanation(messages, UNKNOWN_WITH_REASON, WARNING),
+  ],
+  [
+    'describeStatusLabel',
+    () => facade.describeStatusLabel('unknown', messages.unknownReasons.short.screen_lost),
+    () =>
+      render.describeStatusLabel(messages, 'unknown', messages.unknownReasons.short.screen_lost),
+  ],
+  [
+    'describeRestoreOrigin',
+    () => facade.describeRestoreOrigin(REVIEWER, sanitizeForDisplay('claude-code')),
+    () => render.describeRestoreOrigin(messages, REVIEWER, sanitizeForDisplay('claude-code')),
   ],
   [
     'describeUndeliveredUnknownReason',

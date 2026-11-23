@@ -59,11 +59,15 @@ function listed(
   name: string,
   status: 'running' | 'idle' | 'exited'
 ): BoardWindow {
-  return { windowId, displayName: name, detected: { status } };
+  return { windowId, displayName: sanitizeForDisplay(name), detected: { status } };
 }
 
 function unknownWindow(windowId: string, name: string): BoardWindow {
-  return { windowId, displayName: name, detected: { status: 'unknown', reason: null } };
+  return {
+    windowId,
+    displayName: sanitizeForDisplay(name),
+    detected: { status: 'unknown', reason: null },
+  };
 }
 
 const CLAUDE: TaskAssignment = { profile: 'claude', model: 'opus', effort: 'high' };

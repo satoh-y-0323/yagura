@@ -9,7 +9,7 @@
 
   import { defaultKeysFor } from '../keymap/default-keymap';
   import type { KeyboardPlatform } from '../keymap/keyboard-platform';
-  import { formatChord } from '../keymap/key-chord';
+  import { chordText as chordTextOf, formatChord } from '../keymap/key-chord';
   import type { KeymapSaveFailureKind } from '../keymap/keymap-store';
   import type { Keys } from '../keymap/keymap-model';
   import {
@@ -19,6 +19,7 @@
     keymapFileLocation,
     type KeymapLoadStatus,
   } from '../settings/keyboard-settings-model';
+  import type { UiText } from '../display/ui-text';
   import { settings } from '../ui-messages';
 
   export let keys: Keys;
@@ -47,8 +48,8 @@
   $: block = keymapEditBlock(loadStatus);
 
   /** A chord as the sentences of the notices quote it. */
-  function chordText(chord: string): string {
-    return formatChord(chord, platform).join('+');
+  function chordText(chord: string): UiText {
+    return chordTextOf(chord, platform);
   }
 </script>
 

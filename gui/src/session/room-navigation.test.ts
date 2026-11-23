@@ -9,6 +9,7 @@
  */
 import { describe, it, expect } from 'vitest';
 
+import { formatPathForDisplay } from '../display/untrusted-text';
 import type { RoomGroup } from '../sidebar/room-groups';
 
 // ---------------------------------------------------------------------------
@@ -55,7 +56,14 @@ interface Win {
 }
 
 function group(roomId: string, entries: Win[]): RoomGroup<Win> {
-  return { kind: 'folder', roomId, name: roomId, entries, minimized: 0, collapsed: true };
+  return {
+    kind: 'folder',
+    roomId,
+    name: formatPathForDisplay(roomId),
+    entries,
+    minimized: 0,
+    collapsed: true,
+  };
 }
 
 const A1: Win = { windowId: 'a1' };

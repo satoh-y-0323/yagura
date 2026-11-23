@@ -12,7 +12,11 @@ import { get, writable, type Readable } from 'svelte/store';
 
 import { bringToFront, MIN_WINDOW_SIZE, type Rect, type Size } from '../layout/float-layout';
 import { tileRects } from '../layout/tile-layout';
-import { formatPathForDisplay, sanitizeForDisplay } from '../display/untrusted-text';
+import {
+  formatPathForDisplay,
+  sanitizeForDisplay,
+  type DisplayLine,
+} from '../display/untrusted-text';
 import { reorderTabs } from '../sidebar/row-order';
 import {
   type DetectedStatusView,
@@ -54,15 +58,15 @@ export interface WindowEntry {
   /** Name of the window as the daemon sent it; for operations, never drawn. */
   name: string;
   /** `name` prepared for display; the only form a view draws. */
-  displayName: string;
+  displayName: DisplayLine;
   /** Vendor identifier, `null` when the window is not attributed to one. */
   vendor: string | null;
   /** `vendor` prepared for display, `null` when `vendor` is. */
-  displayVendor: string | null;
+  displayVendor: DisplayLine | null;
   /** Absolute working directory of the child process, as sent; never drawn. */
   cwd: string;
   /** `cwd` prepared for display. */
-  displayCwd: string;
+  displayCwd: DisplayLine;
   /** Last known status of the child process, with the reason it is `'unknown'`. */
   detected: DetectedStatusView;
   /**
@@ -74,13 +78,14 @@ export interface WindowEntry {
   statusBoot: StatusBoot | null;
   /**
    * The room the window belongs to, `null` when the daemon reported none.
-   * `displayName` is `name` prepared for display.
+   * `displayName` is the room's name prepared for display.
    */
-  room: { roomId: string; name: string; displayName: string } | null;
-  /** Detection-load warning describing a definition that failed to load, `null` when there is none. */
-  detectionWarning: string | null;
-  /** `detectionWarning` prepared for display. */
-  displayDetectionWarning: string | null;
+  room: { roomId: string; displayName: DisplayLine } | null;
+  /**
+   * The detection-load warning describing a definition that failed to load,
+   * prepared for display; `null` when there is none.
+   */
+  displayDetectionWarning: DisplayLine | null;
   /**
    * Whether the window's child is currently connected to the daemon over
    * MCP, `null` while the daemon has reported nothing about it.
@@ -488,7 +493,7 @@ function withQueuedCount(entry: WindowEntry, count: number | null): WindowEntry 
 }
 
 /** `text` prepared for display, `null` staying `null`. */
-function displayOrNull(text: string | null): string | null {
+function displayOrNull(text: string | null): DisplayLine | null {
   return text === null ? null : sanitizeForDisplay(text);
 }
 
@@ -498,24 +503,15 @@ function displayOrNull(text: string | null): string | null {
  */
 function snapshotFields(
   info: WindowInfo
-): Pick<
-  WindowEntry,
-  'name' | 'displayName' | 'room' | 'detectionWarning' | 'displayDetectionWarning'
-> {
-  const detectionWarning = info.detection_warning ?? null;
+): Pick<WindowEntry, 'name' | 'displayName' | 'room' | 'displayDetectionWarning'> {
   return {
     name: info.name,
     displayName: sanitizeForDisplay(info.name),
     room:
       info.room === undefined
         ? null
-        : {
-            roomId: info.room.room_id,
-            name: info.room.name,
-            displayName: formatPathForDisplay(info.room.name),
-          },
-    detectionWarning,
-    displayDetectionWarning: displayOrNull(detectionWarning),
+        : { roomId: info.room.room_id, displayName: formatPathForDisplay(info.room.name) },
+    displayDetectionWarning: displayOrNull(info.detection_warning ?? null),
   };
 }
 

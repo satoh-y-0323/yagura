@@ -4,7 +4,7 @@
   import { readClipboardText, writeClipboardText } from '../ipc/clipboard';
   import { forms } from '../ui-messages';
   import { CLIPBOARD_CHORDS } from '../keymap/clipboard-chords';
-  import { formatChord } from '../keymap/key-chord';
+  import { chordText } from '../keymap/key-chord';
   import { hostKeyboardPlatform } from '../keymap/keyboard-platform';
   import { appHidden } from '../session/app-visibility';
   import { effectiveVisibility } from '../session/effective-visibility';
@@ -36,8 +36,8 @@
 
   const platform = hostKeyboardPlatform();
   const clipboardKeys = {
-    copy: formatChord(CLIPBOARD_CHORDS[platform].copy, platform).join('+'),
-    paste: formatChord(CLIPBOARD_CHORDS[platform].paste, platform).join('+'),
+    copy: chordText(CLIPBOARD_CHORDS[platform].copy, platform),
+    paste: chordText(CLIPBOARD_CHORDS[platform].paste, platform),
   };
   let menuAt: { x: number; y: number } | null = null;
   let canCopy = false;

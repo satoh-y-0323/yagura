@@ -6,6 +6,7 @@
  */
 import { writable, type Readable } from 'svelte/store';
 
+import { formatPathForDisplay, type DisplayLine } from '../display/untrusted-text';
 import type { LoadKeymapResult } from '../ipc/session-client';
 import { validateBinding, type BindingRejection } from '../keymap/binding-rules';
 import type { DefaultKeys } from '../keymap/default-keymap';
@@ -119,13 +120,14 @@ const DOCUMENTED_KEYMAP_LOCATION: Readonly<Record<KeyboardPlatform, string>> = {
 
 /**
  * The location of keymap.toml to show: the path the app reads when it has
- * reported one, else the documented default location of `platform`.
+ * reported one, else the documented default location of `platform`. Either
+ * points at a place, so it is prepared for display as a path.
  */
 export function keymapFileLocation(
   platform: KeyboardPlatform,
   reportedPath: string | null = null
-): string {
-  return reportedPath ?? DOCUMENTED_KEYMAP_LOCATION[platform];
+): DisplayLine {
+  return formatPathForDisplay(reportedPath ?? DOCUMENTED_KEYMAP_LOCATION[platform]);
 }
 
 /** A line under a row: why a chord was refused, or that a chord moved between two rows. */

@@ -7,6 +7,7 @@
  */
 import { describe, it, expect, vi, beforeEach, type Mock } from 'vitest';
 
+import { formatPathForDisplay, sanitizeForDisplay } from '../display/untrusted-text';
 import type { WindowStatus } from '../ipc/session-boundary';
 import type { WindowEntry } from '../stores/window-registry';
 import * as confirmTargetModule from './confirm-target';
@@ -31,16 +32,15 @@ function makeEntry(overrides: Partial<WindowEntry> & { status?: WindowStatus } =
   return {
     windowId: 'w-1',
     name: 'w-1',
-    displayName: 'w-1',
+    displayName: sanitizeForDisplay('w-1'),
     vendor: null,
     displayVendor: null,
     cwd: 'C:\\Users\\dev\\project',
-    displayCwd: 'C:\\Users\\dev\\project',
+    displayCwd: formatPathForDisplay('C:\\Users\\dev\\project'),
     detected: status === 'unknown' ? { status, reason: null } : { status },
     statusRev: null,
     statusBoot: null,
     room: null,
-    detectionWarning: null,
     displayDetectionWarning: null,
     mcpConnected: null,
     statusReportsMissing: null,

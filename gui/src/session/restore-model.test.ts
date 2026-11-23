@@ -10,7 +10,6 @@ import {
   defaultSelection,
   applySelectionOverrides,
   parseLayoutJson,
-  formatRestoreTimestamp,
   planLayoutApplication,
   applyLayoutSteps,
   layoutTargetsForOpened,
@@ -25,14 +24,22 @@ import {
   type LayoutApplicationTarget,
   type RestoreLaunch,
 } from './restore-model';
+import {
+  formatCommandLine,
+  formatPathForDisplay,
+  sanitizeForDisplay,
+} from '../display/untrusted-text';
 import { CommandFailureError } from '../ipc/session-boundary';
 import type { CommandFailure, RestoreEntry, WindowInfo } from '../ipc/session-boundary';
 import { describeWindowOpenFailure } from '../window-open-failure-model';
 import { banners, EXTERNAL_TEXT_MAX_CODE_POINTS } from '../ui-messages';
 
-/** Builds a minimal RestoreEntry, overriding only the fields a case cares about. */
+/**
+ * Builds a minimal RestoreEntry, overriding only the fields a case cares about.
+ * The display fields are made from the raw ones the way the boundary makes them.
+ */
 function makeEntry(overrides: Partial<RestoreEntry> = {}): RestoreEntry {
-  return {
+  const raw = {
     position: 0,
     command: ['claude'],
     cwd: '/home/user/project',
@@ -40,17 +47,25 @@ function makeEntry(overrides: Partial<RestoreEntry> = {}): RestoreEntry {
     vendor: null,
     detection: null,
     layout: null,
-    displayCommand: 'claude',
-    displayCwd: '/home/user/project',
-    displayName: 'main',
-    displayVendor: null,
-    displayDetection: null,
     profile: null,
     model: null,
     effort: null,
     ...overrides,
   };
+  return {
+    ...raw,
+    displayCommand: formatCommandLine(raw.command),
+    displayCwd: formatPathForDisplay(raw.cwd),
+    displayName: sanitizeForDisplay(raw.name),
+    displayVendor: raw.vendor === null ? null : sanitizeForDisplay(raw.vendor),
+    displayDetection: raw.detection === null ? null : sanitizeForDisplay(raw.detection),
+    displayProfile: raw.profile === null ? null : sanitizeForDisplay(raw.profile),
+    ...overrides,
+  };
 }
+
+/** A window's name, prepared for display as a restore candidate's is. */
+const displayed = sanitizeForDisplay;
 
 function makeLayout(overrides: Partial<LayoutV1> = {}): LayoutV1 {
   return {
@@ -209,36 +224,6 @@ describe('parseLayoutJson', () => {
     expect(result).not.toBeNull();
     expect(result?.pos).toBeNull();
     expect(result?.size).toBeNull();
-  });
-});
-
-describe('formatRestoreTimestamp', () => {
-  /** Builds the expected local "YYYY-MM-DD HH:mm" string via Date getters (TZ-independent). */
-  function expected(epochS: number): string {
-    const date = new Date(epochS * 1000);
-    const pad = (n: number): string => String(n).padStart(2, '0');
-    return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
-  }
-
-  it('formats a positive epoch value as local YYYY-MM-DD HH:mm', () => {
-    const epochS = 1_735_000_000;
-    expect(formatRestoreTimestamp(epochS)).toBe(expected(epochS));
-  });
-
-  it('returns null for zero', () => {
-    expect(formatRestoreTimestamp(0)).toBeNull();
-  });
-
-  it('returns null for a negative value', () => {
-    expect(formatRestoreTimestamp(-1)).toBeNull();
-  });
-
-  it('returns null for NaN', () => {
-    expect(formatRestoreTimestamp(NaN)).toBeNull();
-  });
-
-  it('returns null for Infinity', () => {
-    expect(formatRestoreTimestamp(Infinity)).toBeNull();
   });
 });
 
@@ -576,7 +561,6 @@ describe('restoreSelected', () => {
     position: 0,
     command: ['claude', '--model', 'opus'],
     name: 'review-pane',
-    displayName: 'review-pane',
     vendor: 'claude-code',
     detection: 'claude-code',
     profile: 'claude-code',
@@ -586,7 +570,6 @@ describe('restoreSelected', () => {
     position: 1,
     command: ['bash', '-l'],
     name: 'shell',
-    displayName: 'shell',
     vendor: 'generic',
     detection: 'shell',
     profile: null,
@@ -594,7 +577,6 @@ describe('restoreSelected', () => {
   const secondProfileCandidate = makeEntry({
     position: 2,
     name: 'build-runner',
-    displayName: 'build-runner',
     profile: 'codex-cli',
   });
 
@@ -643,7 +625,7 @@ describe('restoreSelected', () => {
       }
       return { windowId: `id-${launch.name}` };
     });
-    const tail = makeEntry({ position: 3, name: 'docs-writer', displayName: 'docs-writer' });
+    const tail = makeEntry({ position: 3, name: 'docs-writer' });
 
     const result = await restoreSelected(
       [profileCandidate, argvCandidate, secondProfileCandidate, tail],
@@ -651,7 +633,7 @@ describe('restoreSelected', () => {
     );
 
     expect(result.failed).toEqual([
-      { name: 'review-pane', failure: notFound },
+      { name: displayed('review-pane'), failure: notFound },
       { name: 'shell', failure: { kind: 'bare', text: 'bridge failed' } },
     ]);
     expect(result.opened).toEqual([
@@ -696,7 +678,10 @@ describe('restoreNoticeForFailures', () => {
   it('names one window with its reason', () => {
     expect(
       restoreNoticeForFailures([
-        { name: 'review-pane', failure: rejected('profile_not_found', 'unknown launch profile') },
+        {
+          name: displayed('review-pane'),
+          failure: rejected('profile_not_found', 'unknown launch profile'),
+        },
       ])
     ).toBe('Not restored: review-pane: unknown launch profile');
   });
@@ -704,9 +689,12 @@ describe('restoreNoticeForFailures', () => {
   it('counts several windows and lists each with its reason in the order given', () => {
     expect(
       restoreNoticeForFailures([
-        { name: 'review-pane', failure: rejected('profile_not_found', 'unknown launch profile') },
         {
-          name: 'build-runner',
+          name: displayed('review-pane'),
+          failure: rejected('profile_not_found', 'unknown launch profile'),
+        },
+        {
+          name: displayed('build-runner'),
           failure: rejected('profile_disabled', 'the launch profile is disabled'),
         },
       ])
@@ -717,16 +705,16 @@ describe('restoreNoticeForFailures', () => {
 
   it('builds each line the way a failed window launch is described', () => {
     const failed = [
-      { name: 'b', failure: rejected('spawn_failed', '') },
+      { name: displayed('b'), failure: rejected('spawn_failed', '') },
       {
-        name: 'c',
+        name: displayed('c'),
         failure: {
           kind: 'unsupported',
           requestType: 'open_window',
           text: 'not sent, as the connected daemon speaks another wire revision: open_window',
         } as const,
       },
-      { name: 'd', failure: { kind: 'local', text: 'line\nbreak' } as const },
+      { name: displayed('d'), failure: { kind: 'local', text: 'line\nbreak' } as const },
     ];
 
     expect(restoreNoticeForFailures(failed)).toBe(
@@ -737,11 +725,17 @@ describe('restoreNoticeForFailures', () => {
   it('keeps a repeated line once, in first-seen order, but keeps the same name with another reason', () => {
     expect(
       restoreNoticeForFailures([
-        { name: 'review-pane', failure: rejected('profile_not_found', 'unknown launch profile') },
-        { name: 'build-runner', failure: { kind: 'bare', text: 'bridge failed' } },
-        { name: 'review-pane', failure: rejected('profile_not_found', 'unknown launch profile') },
         {
-          name: 'review-pane',
+          name: displayed('review-pane'),
+          failure: rejected('profile_not_found', 'unknown launch profile'),
+        },
+        { name: displayed('build-runner'), failure: { kind: 'bare', text: 'bridge failed' } },
+        {
+          name: displayed('review-pane'),
+          failure: rejected('profile_not_found', 'unknown launch profile'),
+        },
+        {
+          name: displayed('review-pane'),
           failure: rejected('profile_disabled', 'the launch profile is disabled'),
         },
       ])
@@ -752,16 +746,19 @@ describe('restoreNoticeForFailures', () => {
 
   it('puts a not-found, a disabled, a working-directory and a bare failure in one line, each with its own reason', () => {
     const notice = restoreNoticeForFailures([
-      { name: 'r-a', failure: rejected('profile_not_found', 'unknown launch profile', 'profile') },
       {
-        name: 'r-b',
+        name: displayed('r-a'),
+        failure: rejected('profile_not_found', 'unknown launch profile', 'profile'),
+      },
+      {
+        name: displayed('r-b'),
         failure: rejected('profile_disabled', 'the launch profile is disabled', 'profile'),
       },
       {
-        name: 'r-d',
+        name: displayed('r-d'),
         failure: rejected('invalid_argument', 'the working directory does not exist', 'cwd'),
       },
-      { name: 'r-e', failure: { kind: 'bare', text: 'bridge failed' } },
+      { name: displayed('r-e'), failure: { kind: 'bare', text: 'bridge failed' } },
     ]);
 
     expect(notice).toBe(
@@ -785,7 +782,7 @@ describe('restoreNoticeForFailures', () => {
         EXTERNAL_TEXT_MAX_CODE_POINTS - firstLength - separator.length - moreAfterSecond + overCap;
       const lengths = [firstLength, secondLength, ...Array<number>(8).fill(60)];
       const failed = lengths.map((length, index) => {
-        const name = `w-${String(index + 1).padStart(2, '0')}`;
+        const name = displayed(`w-${String(index + 1).padStart(2, '0')}`);
         return {
           name,
           failure: { kind: 'bare', text: 'x'.repeat(length - name.length - 2) } as const,
@@ -815,7 +812,7 @@ describe('restoreNoticeForFailures', () => {
 
   it('always shows the first line whole, even when it alone is longer than the cap', () => {
     const first = {
-      name: 'long-pane',
+      name: displayed('long-pane'),
       failure: { kind: 'bare', text: 'y'.repeat(300) } as const,
     };
     const firstLine = describeWindowOpenFailure(first.name, first.failure);
@@ -824,7 +821,7 @@ describe('restoreNoticeForFailures', () => {
     const notice =
       restoreNoticeForFailures([
         first,
-        { name: 'short-pane', failure: { kind: 'bare', text: 'bridge failed' } },
+        { name: displayed('short-pane'), failure: { kind: 'bare', text: 'bridge failed' } },
       ]) ?? '';
 
     expect(notice.startsWith(`Not restored (2): ${firstLine}`)).toBe(true);

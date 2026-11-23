@@ -6,7 +6,7 @@ import type { ProfileOption } from '../components/add-window-dialog-types';
 import type { DisplayLine } from '../display/untrusted-text';
 import type { UiText } from '../display/ui-text';
 import type { ProfileGuidance } from '../ipc/session-client';
-import type { RoleEntry } from '../ipc/plan-boundary';
+import type { RoleInfo } from '../ipc/plan-boundary';
 import {
   limitGuidance,
   unavailableText,
@@ -45,17 +45,21 @@ export interface ProfileSettingsRow {
   /** Whether the user left this profile switched on. */
   enabled: boolean;
   /**
-   * The roles that still point at this profile, only while it is disabled:
-   * those roles' tasks cannot open windows until it is switched back on.
+   * The display names of the roles that still point at this profile, only
+   * while it is disabled: those roles' tasks cannot open windows until it is
+   * switched back on.
    */
-  rolesUsing: string[];
+  rolesUsing: DisplayLine[];
   /** What this profile cannot do here although it is launchable; `null` when nothing. */
   limitNote: ProfileLimitNote | null;
 }
 
+/** The profile a switch press is about: its id to send, and its id as the row shows it. */
+export type ProfileSwitchTarget = Pick<ProfileSettingsRow, 'id' | 'displayId'>;
+
 /** Names the roles whose profile is exactly `profileId`, in table order. */
-export function rolesUsingProfile(roles: readonly RoleEntry[], profileId: string): string[] {
-  return roles.filter((role) => role.profile === profileId).map((role) => role.name);
+export function rolesUsingProfile(roles: readonly RoleInfo[], profileId: string): DisplayLine[] {
+  return roles.filter((role) => role.profile === profileId).map((role) => role.displayName);
 }
 
 function unavailableLine(profile: ProfileOption): UiText {
@@ -84,7 +88,7 @@ function limitNoteOf(profile: ProfileOption): ProfileLimitNote | null {
 /** Builds one row per profile, in the order the profiles arrived in. */
 export function profileSettingsRows(
   profiles: readonly ProfileOption[],
-  roles: readonly RoleEntry[]
+  roles: readonly RoleInfo[]
 ): ProfileSettingsRow[] {
   return profiles.map((profile) => ({
     id: profile.id,

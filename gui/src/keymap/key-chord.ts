@@ -1,3 +1,6 @@
+import type { UiText } from '../display/ui-text';
+import { sanitizeForDisplay, type DisplayLine } from '../display/untrusted-text';
+import { keyNames } from '../ui-messages';
 import { chordOf } from './key-binding';
 import type { KeyboardPlatform } from './keyboard-platform';
 
@@ -87,23 +90,37 @@ function partsOf(chord: string): { names: string[]; key: string } {
   };
 }
 
+// The words the canonical modifiers are shown by outside macOS.
+const MODIFIER_WORDS: ReadonlyMap<string, UiText> = new Map([
+  ['Ctrl', keyNames.ctrl],
+  ['Alt', keyNames.alt],
+  ['Shift', keyNames.shift],
+  ['Meta', keyNames.win],
+]);
+
 /**
  * Splits a canonical chord into the parts a user reads: modifiers named for
  * the platform, then the key (letters upper-cased). On macOS Cmd comes first.
+ * The key comes from `keymap.toml`, so it is prepared for display.
  */
-export function formatChord(chord: string, platform: KeyboardPlatform): string[] {
+export function formatChord(chord: string, platform: KeyboardPlatform): (UiText | DisplayLine)[] {
   const { names, key } = partsOf(chord);
-  const keyLabel = isAsciiLetter(key) ? key.toUpperCase() : key;
+  const keyLabel = sanitizeForDisplay(isAsciiLetter(key) ? key.toUpperCase() : key);
   if (platform === 'mac') {
     const modifiers = new Set(names);
-    const labels: string[] = [];
-    if (modifiers.has('Meta')) labels.push('Cmd');
-    if (modifiers.has('Ctrl')) labels.push('Ctrl');
-    if (modifiers.has('Alt')) labels.push('Option');
-    if (modifiers.has('Shift')) labels.push('Shift');
+    const labels: UiText[] = [];
+    if (modifiers.has('Meta')) labels.push(keyNames.cmd);
+    if (modifiers.has('Ctrl')) labels.push(keyNames.ctrl);
+    if (modifiers.has('Alt')) labels.push(keyNames.option);
+    if (modifiers.has('Shift')) labels.push(keyNames.shift);
     return [...labels, keyLabel];
   }
-  return [...names.map((name) => (name === 'Meta' ? 'Win' : name)), keyLabel];
+  return [...names.map((name) => MODIFIER_WORDS.get(name) ?? sanitizeForDisplay(name)), keyLabel];
+}
+
+/** A canonical chord as one text, the way a key hint or a sentence quotes it. */
+export function chordText(chord: string, platform: KeyboardPlatform): UiText {
+  return keyNames.chord(formatChord(chord, platform));
 }
 
 // UI Events key values; of the canonical modifiers only Ctrl is spelled differently.

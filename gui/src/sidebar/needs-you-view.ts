@@ -4,6 +4,7 @@
  * settled) and a window that starts needing the user is appended, so no row
  * moves without the user asking.
  */
+import type { DisplayLine } from '../display/untrusted-text';
 import { needsYou, type NeedsYouInput } from '../status-tone';
 import { windowsInDisplayOrder, type RoomGroup } from './room-groups';
 
@@ -15,7 +16,7 @@ export interface NeedsYouRow {
   /** The window's room as the sidebar keys it ({@link RoomGroup.roomId}). */
   roomId: string;
   /** The room's display name ({@link RoomGroup.name}), never the raw value. */
-  roomName: string;
+  roomName: DisplayLine;
 }
 
 /** What the filter shows. */
@@ -31,7 +32,7 @@ export interface NeedsYouView {
 /** A run of consecutive rows of one room, drawn under one heading. */
 export interface NeedsYouSection {
   roomId: string;
-  name: string;
+  name: DisplayLine;
   rows: NeedsYouRow[];
 }
 

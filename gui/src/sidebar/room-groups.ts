@@ -5,14 +5,16 @@
  * `tabOrder` sorts to the end), so the sidebar never re-derives either.
  */
 
+import type { DisplayLine } from '../display/untrusted-text';
+
 /**
  * The part of a window entry that decides which room it belongs to. A window
  * without a room stands for a room of its own, keyed by its working directory.
  */
 interface RoomMember {
   cwd: string;
-  displayCwd: string;
-  room: { roomId: string; displayName: string } | null;
+  displayCwd: DisplayLine;
+  room: { roomId: string; displayName: DisplayLine } | null;
 }
 
 /** One room's windows, with the counts its heading shows. */
@@ -20,7 +22,7 @@ export interface RoomGroup<T> {
   /** Identifier of the room, or the working directory when it has no room. */
   roomId: string;
   /** Display name of the room, or the displayed working directory when it has no room. */
-  name: string;
+  name: DisplayLine;
   /** The room's windows, ordered by their position in `tabOrder` (absent ids last). */
   entries: T[];
   /** Number of minimized windows. */
@@ -36,7 +38,7 @@ function roomIdOf(entry: RoomMember): string {
 }
 
 /** The name a window's place is shown by: its room's, or its working directory without one. */
-export function roomNameOf(entry: RoomMember): string {
+export function roomNameOf(entry: RoomMember): DisplayLine {
   return entry.room?.displayName ?? entry.displayCwd;
 }
 
@@ -82,7 +84,7 @@ export function groupByRoom<
   collapsed: ReadonlySet<string>,
   tabOrder: readonly string[]
 ): RoomGroup<T>[] {
-  const rooms = new Map<string, { name: string; entries: T[] }>();
+  const rooms = new Map<string, { name: DisplayLine; entries: T[] }>();
   for (const entry of entries) {
     const roomId = roomIdOf(entry);
     const room = rooms.get(roomId);

@@ -34,11 +34,13 @@
     type PickerState,
     type PickerWindow,
   } from '../command-picker/picker-model';
-  import { splitForMiddleEllipsis } from '../chat/middle-ellipsis';
+  import { splitPreparedForMiddleEllipsis } from '../chat/middle-ellipsis';
+  import type { UiText } from '../display/ui-text';
+  import type { DisplayLine } from '../display/untrusted-text';
   import type { ActionVerdict } from '../keymap/action-availability';
   import { defaultKeysFor } from '../keymap/default-keymap';
   import type { ActionId } from '../keymap/key-binding';
-  import { chordOfEvent, formatChord, isImeKey } from '../keymap/key-chord';
+  import { chordOfEvent, chordText, isImeKey } from '../keymap/key-chord';
   import type { KeyboardPlatform } from '../keymap/keyboard-platform';
   import type { Keys } from '../keymap/keymap-model';
   import { keyboardRows } from '../settings/keyboard-settings-model';
@@ -82,6 +84,11 @@
 
   /** One window as the picker shows it, with the entry a choice hands back. */
   interface PickerEntry extends PickerWindow {
+    name: DisplayLine;
+    place: DisplayLine;
+    cwd: DisplayLine;
+    vendor: DisplayLine | null;
+    statusWords: UiText;
     entry: WindowEntry;
   }
 
@@ -346,20 +353,20 @@
 
   /** The cwd split for an ellipsis in its middle, each half cut into its runs. */
   function markedCwd(
-    cwd: string,
+    cwd: DisplayLine,
     marks: readonly MarkSpan[]
   ): { head: TextPiece[]; tail: TextPiece[] } {
     const points = Array.from(cwd);
-    const headLength = Array.from(splitForMiddleEllipsis(cwd).head).length;
+    const headLength = Array.from(splitPreparedForMiddleEllipsis(cwd).head).length;
     return {
       head: piecesOf(points, marks, 0, headLength),
       tail: piecesOf(points, marks, headLength, points.length),
     };
   }
 
-  function keyLabelOf(currentKeys: Keys, action: ActionId): string | null {
+  function keyLabelOf(currentKeys: Keys, action: ActionId): UiText | null {
     const chord = currentKeys[action];
-    return chord === null ? null : formatChord(chord, platform).join('+');
+    return chord === null ? null : chordText(chord, platform);
   }
 
   function optionId(key: string): string {
@@ -531,7 +538,10 @@
                   on:click={() => chooseByPointer(row.key)}
                 >
                   <span id="{optionId(row.key)}-name" hidden
-                    >{describePickerActionRow(row.action.name, keyLabel)}</span
+                    >{describePickerActionRow(
+                      settings.keyboardActionName(row.action.id),
+                      keyLabel
+                    )}</span
                   >
                   <span class="command-picker__name"
                     >{@render marked(markedText(row.action.name, row.marks.name))}</span

@@ -6,7 +6,12 @@ import type {
   DetectedStatusView,
   WindowStatus,
 } from '../ipc/session-boundary';
-import { caughtValueText, foldExternalText, type DisplayLine } from '../display/untrusted-text';
+import {
+  caughtValueText,
+  foldExternalText,
+  sanitizeForDisplay,
+  type DisplayLine,
+} from '../display/untrusted-text';
 import type { ActionBlockReason } from '../keymap/action-availability';
 // Type-only: the gate itself reaches this module through `ui-messages.ts`, so
 // a value import here would close that loop at runtime.
@@ -121,13 +126,27 @@ export function describeAnnouncement(messages: Messages, sentences: readonly str
   return messages.formats.sentences(sentences);
 }
 
-/** Describes the empty work area's offer to reopen the windows of the last session. */
+/**
+ * Describes when something was recorded; `null` for a value that is no
+ * plausible recording time.
+ *
+ * @param epochS the moment, in Unix epoch seconds
+ */
+export function describeRecordedTime(messages: Messages, epochS: number): UiText | null {
+  return messages.formats.recordedTime(epochS);
+}
+
+/**
+ * Describes the empty work area's offer to reopen the windows of the last session.
+ *
+ * @param savedAtEpochS when that session was saved, `null` when unknown
+ */
 export function describeReopenOffer(
   messages: Messages,
   count: number,
-  timestamp: string | null
+  savedAtEpochS: number | null
 ): UiText {
-  return messages.workArea.reopenFromLastSession(count, timestamp);
+  return messages.workArea.reopenFromLastSession(count, savedAtEpochS);
 }
 
 /**
@@ -138,7 +157,7 @@ export function describeReopenOffer(
  */
 export function describeWindowRow(
   messages: Messages,
-  name: string,
+  name: DisplayLine,
   status: string,
   isAwaitingPermission: boolean
 ): UiText {
@@ -149,9 +168,9 @@ export function describeWindowRow(
 /** What a window header says beyond what it shows as text; see {@link describeWindowHeader}. */
 export interface WindowHeaderFacts {
   /** The window's vendor; `null` when it has none. */
-  vendor: string | null;
+  vendor: DisplayLine | null;
   /** The window's working directory. */
-  cwd: string;
+  cwd: DisplayLine;
   /** Whether the header shows the MCP connection mark. */
   showsMcpMark: boolean;
   /** Whether the header shows the mark that status reports are not arriving. */
@@ -225,7 +244,7 @@ export function describeAttentionBadge(messages: Messages, count: number): UiTex
 }
 
 /** Describes a room heading together with how many windows it holds. */
-export function describeRoomTitle(messages: Messages, name: string, count: number): UiText {
+export function describeRoomTitle(messages: Messages, name: DisplayLine, count: number): UiText {
   return messages.formats.windowListTitle(name, count);
 }
 
@@ -235,42 +254,54 @@ export function describeQueuedMessages(messages: Messages, count: number): UiTex
 }
 
 /**
- * Describes the suffix a status label appends when the pair names the
- * `'unknown'` arm: the connector plus the reason's short label. Empty for
- * any other arm, and for the unknown arm with no reason (fail-safe: a
- * window with no reason to show has nothing to append).
- *
- * Named without `describeStatus` as a substring on purpose:
- * the sidebar's verbatim source scan rejects that literal occurring anywhere
- * else in the file.
+ * Describes the reason's short label a status label is followed by when the
+ * pair names the `'unknown'` arm. `null` for any other arm, and for the
+ * unknown arm with no reason (fail-safe: a window with no reason to show has
+ * nothing to append).
  */
 export function describeUnknownReasonSuffix(
   messages: Messages,
   detected: DetectedStatusView
-): string {
+): UiText | null {
   if (detected.status !== 'unknown' || detected.reason === null) {
-    return '';
+    return null;
   }
-  return ` · ${messages.unknownReasons.short[detected.reason]}`;
+  return messages.unknownReasons.short[detected.reason];
+}
+
+/**
+ * Describes a status label: the status word, followed by the short reason
+ * {@link describeUnknownReasonSuffix} gives when there is one.
+ *
+ * @param reason the short reason, `null` when the label names none
+ */
+export function describeStatusLabel(
+  messages: Messages,
+  status: string,
+  reason: UiText | null
+): UiText {
+  const word = describeStatus(messages, status);
+  return reason === null ? word : messages.formats.statusWithUnknownReason(word, reason);
 }
 
 /**
  * Describes why a window's status is `'unknown'`, for the title-bar tooltip:
  * the reason's explanation, with the detection-load warning appended in
- * parentheses when it is non-blank. Empty for an arm that
- * names no reason, the same fail-safe shape
- * {@link describeUnknownReasonSuffix} takes.
+ * parentheses when it is non-blank. `null` for an arm that names no reason,
+ * the same fail-safe shape {@link describeUnknownReasonSuffix} takes.
  */
 export function describeUnknownExplanation(
   messages: Messages,
   detected: DetectedStatusView,
-  warning: string | null
-): string {
+  warning: DisplayLine | null
+): UiText | null {
   if (detected.status !== 'unknown' || detected.reason === null) {
-    return '';
+    return null;
   }
   const explanation = messages.unknownReasons.explanation[detected.reason];
-  return warning === null || warning.trim() === '' ? explanation : `${explanation} (${warning})`;
+  return warning === null || warning.trim() === ''
+    ? explanation
+    : messages.formats.unknownExplanationWithWarning(explanation, warning);
 }
 
 /**
@@ -299,9 +330,9 @@ export function describeUndeliveredUnknownReason(
 export function describeReopenNotice(
   messages: Messages,
   count: number,
-  timestamp: string | null
+  savedAtEpochS: number | null
 ): UiText {
-  return messages.banners.restoreAvailable(count, timestamp);
+  return messages.banners.restoreAvailable(count, savedAtEpochS);
 }
 
 /** Describes the restore dialog's live selection count. */
@@ -311,6 +342,19 @@ export function describeRestoreSelectionCount(
   total: number
 ): UiText {
   return messages.formats.restoreSelectionCount(selected, total);
+}
+
+/**
+ * Describes where a restore candidate came from: its profile and its vendor,
+ * whichever it recorded; `null` when it recorded neither.
+ */
+export function describeRestoreOrigin(
+  messages: Messages,
+  profile: DisplayLine | null,
+  vendor: DisplayLine | null
+): UiText | null {
+  const parts = [profile, vendor].flatMap((part) => (part === null || part === '' ? [] : [part]));
+  return parts.length === 0 ? null : messages.formats.restoreOrigin(parts);
 }
 
 /** Describes the label of the button that reopens the checked windows. */
@@ -361,10 +405,11 @@ export function describeHaltReason(messages: Messages, reason: string): UiText {
 
 /**
  * Describes a theme name for a select option. A user theme is shown under the
- * name its author gave it; only the built-in ones are translated.
+ * name its author gave it, prepared for display since it comes from the
+ * user's themes file; only the built-in ones are translated.
  */
-export function describeThemeName(messages: Messages, name: string): string {
-  return ownEntry(messages.builtInThemeLabels, name) ?? name;
+export function describeThemeName(messages: Messages, name: string): UiText | DisplayLine {
+  return ownEntry(messages.builtInThemeLabels, name) ?? sanitizeForDisplay(name);
 }
 
 // ---------------------------------------------------------------------------
@@ -387,10 +432,11 @@ export function foldedFailureReason(error: unknown): DisplayLine {
  * detail the daemon reported (an approval-gate rejection, for one) when
  * anything survives {@link foldExternalText}.
  *
- * @param summary the operation-specific message from `errors`, returned as is when no detail is left
+ * @param summary the operation-specific message from `errors`, or the display name of what
+ * failed; returned as is when no detail is left
  * @param detail the rejected value the operation failed with
  */
-export function describeOperationFailure<S extends string>(
+export function describeOperationFailure<S extends UiText | DisplayLine>(
   messages: Messages,
   summary: S,
   detail: unknown
@@ -475,11 +521,11 @@ export function describeActionBlock(messages: Messages, reason: ActionBlockReaso
 /** What a picker window row is read out as; see {@link describePickerWindowRow}. */
 export interface PickerWindowRowFacts {
   /** The window's display name. */
-  name: string;
+  name: DisplayLine;
   status: string;
   isAwaitingPermission: boolean;
   /** The room's display name, or the folder for a window in no room. */
-  place: string;
+  place: DisplayLine;
   isCurrent: boolean;
 }
 
@@ -501,9 +547,9 @@ export function describePickerWindowRow(messages: Messages, facts: PickerWindowR
  */
 export function describePickerActionRow(
   messages: Messages,
-  name: string,
-  key: string | null
-): string {
+  name: UiText,
+  key: UiText | null
+): UiText {
   return key === null ? name : messages.picker.actionRowKey(name, key);
 }
 

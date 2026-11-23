@@ -8,6 +8,8 @@
  */
 
 import { lineForFailure } from './command-failure-model';
+import type { UiText } from './display/ui-text';
+import type { DisplayLine } from './display/untrusted-text';
 import { NAME_TAKEN_CODE, type CommandFailure } from './ipc/session-boundary';
 // The same folding and capping every other operation failure goes through:
 // the reason is external text of the same kind, so it gets the same
@@ -30,15 +32,18 @@ const WORKING_DIRECTORY_ARGUMENT = 'cwd';
  * A taken name is followed by how to get past it: an empty name gets the
  * default name, which the daemon numbers instead of refusing.
  *
- * @param summary the operation-specific wording, supplied by the caller
+ * @param summary the operation-specific wording, or the window's display name, supplied by the caller
  * @param failure why the attempt failed
  */
-export function describeWindowOpenFailure(summary: string, failure: CommandFailure): string {
+export function describeWindowOpenFailure(
+  summary: UiText | DisplayLine,
+  failure: CommandFailure
+): string {
   return lineForFailure(failure, () => describeLaunchFailure(summary, failure));
 }
 
 /** The launch's own line for a failure the daemon's wire revision did not cause. */
-function describeLaunchFailure(summary: string, failure: CommandFailure): string {
+function describeLaunchFailure(summary: UiText | DisplayLine, failure: CommandFailure): string {
   if (failure.kind !== 'rejected') {
     return describeOperationFailure(summary, failure.text);
   }

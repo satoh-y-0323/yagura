@@ -6,7 +6,7 @@ import { describe, it, expect } from 'vitest';
 
 import { profileSettingsRows, rolesUsingProfile } from './profile-settings-model';
 import type { ProfileOption } from '../components/add-window-dialog-types';
-import type { RoleEntry } from '../ipc/plan-boundary';
+import type { RoleInfo } from '../ipc/plan-boundary';
 import type { ProfileGuidance, ProfileLimit } from '../ipc/session-client';
 import {
   foldExternalText,
@@ -57,11 +57,11 @@ const GUIDANCE = guidance(
   'https://example.com/install'
 );
 
-function role(name: string, profile: string): RoleEntry {
-  return { name, profile, model: null, effort: null };
+function role(name: string, profile: string): RoleInfo {
+  return { name, displayName: sanitizeForDisplay(name), profile, model: null, effort: null };
 }
 
-const ROLES: RoleEntry[] = [
+const ROLES: RoleInfo[] = [
   role('reviewer', 'codex-cli'),
   role('implementer', 'claude-code'),
   role('tester', 'codex-cli'),

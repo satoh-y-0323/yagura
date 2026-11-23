@@ -5,6 +5,7 @@
  * which only awaits the injected `open`.
  */
 import { commandFailureOf } from '../command-failure-model';
+import type { DisplayLine } from '../display/untrusted-text';
 import type {
   CommandFailure,
   OnNameTaken,
@@ -159,19 +160,6 @@ export function parseLayoutJson(raw: string): LayoutV1 | null {
     max,
     tab,
   };
-}
-
-/**
- * Formats an epoch-seconds timestamp as local `YYYY-MM-DD HH:mm`. `null` for
- * a non-positive or non-finite value (no plausible recording time).
- */
-export function formatRestoreTimestamp(epochS: number): string | null {
-  if (!Number.isFinite(epochS) || epochS <= 0) {
-    return null;
-  }
-  const date = new Date(epochS * 1000);
-  const pad = (n: number): string => String(n).padStart(2, '0');
-  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
 }
 
 /** One step of a layout application plan, applied in array order. */
@@ -374,7 +362,8 @@ function argvLaunchOf(candidate: RestoreEntry): RestoreLaunch {
 
 /** One restore candidate that could not be opened, and why. */
 export interface RestoreFailure {
-  name: string;
+  /** The candidate's name, prepared for display. */
+  name: DisplayLine;
   failure: CommandFailure;
 }
 

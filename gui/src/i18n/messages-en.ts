@@ -76,6 +76,24 @@ const EVENT_TIME = new Intl.DateTimeFormat('en', {
 // Hours and minutes as the system's locale writes them.
 const CLOCK_TIME = new Intl.DateTimeFormat(undefined, { hour: '2-digit', minute: '2-digit' });
 
+/**
+ * When something was recorded, as local `YYYY-MM-DD HH:mm`; `null` for a
+ * non-positive or non-finite value, which is no plausible recording time.
+ */
+function recordedTime(epochS: number): string | null {
+  if (!Number.isFinite(epochS) || epochS <= 0) {
+    return null;
+  }
+  const date = new Date(epochS * 1000);
+  const pad = (n: number): string => String(n).padStart(2, '0');
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
+/** {@link recordedTime} of a value that may be missing. */
+function recordedTimeOrNull(epochS: number | null): string | null {
+  return epochS === null ? null : recordedTime(epochS);
+}
+
 const NOTIFICATIONS_IN_APP_COLUMN = 'In app';
 
 const APPROVAL_TITLE = 'Approval required';
@@ -175,19 +193,19 @@ const KEYBOARD_ACTION_NOTES: Readonly<Record<string, string>> = {
 };
 
 const KEYBOARD_REJECTIONS = {
-  invalidChord: (chord: string) =>
+  invalidChord: (chord: UiText) =>
     `Not saved: ${chord} is not a key combination yagura understands.`,
   needsModifier: () =>
     'Not saved: add Ctrl (or Cmd on macOS). A key without a modifier would be taken away from the programs in your windows.',
-  altReachesTerminal: (chord: string) =>
+  altReachesTerminal: (chord: UiText) =>
     `Not saved: ${chord} uses Alt or Option, which the programs in your windows use. Use Ctrl+Shift (Cmd on macOS) instead.`,
-  typesCharacters: (chord: string) =>
+  typesCharacters: (chord: UiText) =>
     `Not saved: ${chord} types characters on some keyboard layouts, so it is not accepted.`,
-  reservedForClipboard: (chord: string) => `Not saved: ${chord} is kept for copy and paste.`,
-  reservedByAppMenu: (chord: string) => `Not saved: ${chord} belongs to the app menu.`,
-  reachesTerminal: (chord: string) =>
+  reservedForClipboard: (chord: UiText) => `Not saved: ${chord} is kept for copy and paste.`,
+  reservedByAppMenu: (chord: UiText) => `Not saved: ${chord} belongs to the app menu.`,
+  reachesTerminal: (chord: UiText) =>
     `Not saved: ${chord} reaches the shell or CLI inside your windows (for example, a shell searches its history with it). Add Shift or use another key.`,
-  reservedForReload: (chord: string) =>
+  reservedForReload: (chord: UiText) =>
     `Not saved: ${chord} would reload yagura, so it is kept switched off.`,
 };
 
@@ -199,15 +217,15 @@ const KEYBOARD_SAVE_FAILURES = {
 };
 
 const KEYBOARD_EDIT_BLOCKS = {
-  not_loaded: (location: string) =>
+  not_loaded: (location: DisplayLine) =>
     `The keyboard settings are still loading. Changes are possible once ${location} has been read.`,
-  rejected: (location: string) =>
+  rejected: (location: DisplayLine) =>
     `yagura could not read ${location}, so keyboard changes are turned off to avoid overwriting it.`,
-  read_failed: (location: string) =>
+  read_failed: (location: DisplayLine) =>
     `${location} could not be read, so keyboard changes are turned off to avoid overwriting it.`,
-  invalid_toml: (location: string) =>
+  invalid_toml: (location: DisplayLine) =>
     `${location} is not valid TOML, so keyboard changes are turned off. Fix or delete the file, then restart yagura.`,
-  too_large: (location: string) =>
+  too_large: (location: DisplayLine) =>
     `${location} is too large to read, so keyboard changes are turned off. Make it smaller, then restart yagura.`,
 };
 
@@ -324,7 +342,7 @@ export const messagesEn = {
     systemOption: 'System',
     windowFollowsAppOption: 'Same as app',
     windowSelectLabel: 'Theme for this window',
-    appTooltip: (name: string): string => `Theme: ${name}`,
+    appTooltip: (name: UiText | DisplayLine): string => `Theme: ${name}`,
   },
 
   /**
@@ -372,7 +390,8 @@ export const messagesEn = {
     boundaryDetailWithCount: (count: number, first: string): string =>
       `${count} problems, first: ${first}`,
     /** A failed operation's summary followed by the reason it failed with. */
-    operationFailure: (summary: string, reason: DisplayLine): string => `${summary}: ${reason}`,
+    operationFailure: (summary: UiText | DisplayLine, reason: DisplayLine): string =>
+      `${summary}: ${reason}`,
   },
 
   banners: {
@@ -392,10 +411,11 @@ export const messagesEn = {
         ? 'Excluded 1 invalid theme entry. That theme cannot be selected.'
         : `Excluded ${count} invalid theme entries. Those themes cannot be selected.`,
 
-    restoreAvailable: (count: number, timestamp: string | null): string => {
+    restoreAvailable: (count: number, savedAtEpochS: number | null): string => {
       const subject = count === 1 ? '1 window' : `${count} windows`;
       const base = `${subject} from last time can be reopened`;
-      return timestamp === null ? `${base}.` : `${base} (saved ${timestamp}).`;
+      const saved = recordedTimeOrNull(savedAtEpochS);
+      return saved === null ? `${base}.` : `${base} (saved ${saved}).`;
     },
     restoreLoadFailed: 'Previous session could not be read.',
     daemonWindowsUnavailable:
@@ -404,7 +424,7 @@ export const messagesEn = {
     /** Plural form policy lives with the resource, not the machinery. */
     approvalExpiredUnseen: (
       count: number,
-      latest: { requester: string; tool: string; target: string }
+      latest: { requester: UiText | DisplayLine; tool: DisplayLine; target: UiText | DisplayLine }
     ): string => {
       const subject =
         count === 1 ? '1 approval request expired' : `${count} approval requests expired`;
@@ -530,7 +550,9 @@ export const messagesEn = {
     eventTime: (date: Date): string => EVENT_TIME.format(date),
     /** When a chat message was posted, in the system locale's hours and minutes. */
     chatPostedAt: (atMs: number): string => CLOCK_TIME.format(atMs),
-    windowListTitle: (label: string, count: number): string => `${label} (${count})`,
+    /** When something was recorded, local `YYYY-MM-DD HH:mm`; `null` for no plausible time. */
+    recordedTime,
+    windowListTitle: (label: DisplayLine, count: number): string => `${label} (${count})`,
 
     /** Plural form policy lives with the resource, not the machinery. */
     attentionBadge: (count: number): string =>
@@ -538,6 +560,9 @@ export const messagesEn = {
 
     restoreSelectionCount: (selected: number, total: number): string =>
       `${selected} of ${total} selected`,
+
+    /** Where a restore candidate came from: its profile and its vendor, whichever it recorded. */
+    restoreOrigin: (parts: readonly DisplayLine[]): string => parts.join(' · '),
 
     /** The label of the button that reopens the checked windows. */
     restoreConfirm: (count: number): string =>
@@ -548,13 +573,18 @@ export const messagesEn = {
       `${count} queued ${count === 1 ? 'message' : 'messages'} — delivered on its next turn`,
 
     /** A sidebar row's accessible name: the window's name and its status word. */
-    windowRow: (name: string, status: string): string => `${name}, ${status}`,
+    windowRow: (name: DisplayLine, status: UiText): string => `${name}, ${status}`,
     /** A sidebar row's accessible name when the window waits for the user's permission. */
-    windowRowAwaitingPermission: (label: string): string => `${label}, waiting for your permission`,
+    windowRowAwaitingPermission: (label: UiText): string => `${label}, waiting for your permission`,
 
     /** Where a window runs, opening its header's description. */
-    windowHeaderVendorCwd: (vendor: string, cwd: string): string => `${vendor} in ${cwd}`,
-    windowHeaderCwd: (cwd: string): string => `In ${cwd}`,
+    windowHeaderVendorCwd: (vendor: DisplayLine, cwd: DisplayLine): string => `${vendor} in ${cwd}`,
+    windowHeaderCwd: (cwd: DisplayLine): string => `In ${cwd}`,
+    /** A status word followed by the short reason the status is unknown. */
+    statusWithUnknownReason: (status: UiText, reason: UiText): string => `${status} · ${reason}`,
+    /** Why a status is unknown, followed by the warning the detection definition left. */
+    unknownExplanationWithWarning: (explanation: UiText, warning: DisplayLine): string =>
+      `${explanation} (${warning})`,
     /** Joins sentences into one text, ending each that lacks one with a full stop. */
     sentences: (parts: readonly string[]): string =>
       parts.map((part) => (/[.!?]$/.test(part) ? part : `${part}.`)).join(' '),
@@ -596,6 +626,17 @@ export const messagesEn = {
       not_yet_judged: 'not judged yet',
       declared_unknown: 'reported unknown',
     },
+  },
+
+  /** How a key combination is written: the modifier names, and the parts joined into one text. */
+  keyNames: {
+    cmd: 'Cmd',
+    ctrl: 'Ctrl',
+    option: 'Option',
+    alt: 'Alt',
+    shift: 'Shift',
+    win: 'Win',
+    chord: (parts: readonly (UiText | DisplayLine)[]): string => parts.join('+'),
   },
 
   menus: {
@@ -678,11 +719,11 @@ export const messagesEn = {
     deleteRoomItem: 'Delete room…',
     deleteMainRoomNote: "The main room can't be deleted.",
     deleteRoomWithWindowsNote: "Close this room's windows first.",
-    clearHistoryConfirmTitle: (name: string): string => `Clear the history of “${name}”?`,
+    clearHistoryConfirmTitle: (name: DisplayLine): string => `Clear the history of “${name}”?`,
     clearHistoryConfirmMessage:
       "Every message in this room is deleted, and messages a window has not received yet are taken back. This can't be undone.",
     clearHistoryConfirmLabel: 'Clear history',
-    deleteRoomConfirmTitle: (name: string): string => `Delete the room “${name}”?`,
+    deleteRoomConfirmTitle: (name: DisplayLine): string => `Delete the room “${name}”?`,
     deleteRoomConfirmMessage:
       "The room and all its messages are deleted. If a window in this folder uses chat later, the room comes back empty. This can't be undone.",
     deleteRoomConfirmLabel: 'Delete room',
@@ -861,13 +902,13 @@ export const messagesEn = {
     profileCopyLimitGuide: 'Copy address of the page',
 
     /** List and plural form policy lives with the resource, not the machinery. */
-    profileUsedByRoles: (roles: readonly string[]): string => {
+    profileUsedByRoles: (roles: readonly DisplayLine[]): string => {
       const listed = englishList(roles);
       return roles.length === 1
         ? `Used by the role ${listed}. Its tasks cannot open windows while this profile is disabled.`
         : `Used by the roles ${listed}. Their tasks cannot open windows while this profile is disabled.`;
     },
-    profileUpdateFailed: (id: string, reason: string, isEnabled: boolean): string =>
+    profileUpdateFailed: (id: DisplayLine, reason: DisplayLine, isEnabled: boolean): string =>
       isEnabled
         ? `Could not update ${id}: ${reason}. It is still enabled.`
         : `Could not update ${id}: ${reason}. It is still disabled.`,
@@ -1069,16 +1110,18 @@ export const messagesEn = {
       KEYBOARD_ACTION_NOTES[camelCase(action)] ?? null,
     keyboardRejection: (
       reason: KebabCase<keyof typeof KEYBOARD_REJECTIONS>,
-      chordText: string
-    ): string => lookup<(chord: string) => string>(KEYBOARD_REJECTIONS, reason)(chordText),
-    keyboardTook: (chordText: string, fromName: string): string =>
+      chordText: UiText
+    ): string => lookup<(chord: UiText) => string>(KEYBOARD_REJECTIONS, reason)(chordText),
+    keyboardTook: (chordText: UiText, fromName: UiText): string =>
       `${chordText} was used by “${fromName}”. It now belongs here, and “${fromName}” has no key.`,
-    keyboardLost: (chordText: string): string =>
+    keyboardLost: (chordText: UiText): string =>
       `Now unassigned: ${chordText} moved to another action.`,
     keyboardSaveFailure: (kind: keyof typeof KEYBOARD_SAVE_FAILURES): string =>
       KEYBOARD_SAVE_FAILURES[kind],
-    keyboardEditBlocked: (block: keyof typeof KEYBOARD_EDIT_BLOCKS, location: string): string =>
-      KEYBOARD_EDIT_BLOCKS[block](location),
+    keyboardEditBlocked: (
+      block: keyof typeof KEYBOARD_EDIT_BLOCKS,
+      location: DisplayLine
+    ): string => KEYBOARD_EDIT_BLOCKS[block](location),
 
     // The Notifications tab: which notice kinds may appear on the notification bar.
     notificationsTab: 'Notifications',
@@ -1092,7 +1135,7 @@ export const messagesEn = {
     notificationsRowName: (row: NoticeCategory): string => NOTIFICATION_ROWS[row].name,
     notificationsRowDescription: (row: NoticeCategory): string =>
       NOTIFICATION_ROWS[row].description,
-    notificationsSwitchLabel: (rowName: string): string =>
+    notificationsSwitchLabel: (rowName: UiText): string =>
       `${rowName}, ${NOTIFICATIONS_IN_APP_COLUMN}`,
     notificationsAlwaysShown:
       'Always shown: alerts that keep yagura from working, the approval dialog, and approval ' +
@@ -1113,7 +1156,7 @@ export const messagesEn = {
   sidebar: {
     title: 'Windows',
     needsYou: 'Needs you',
-    viewMenu: (mode: string): string => `View: ${mode}`,
+    viewMenu: (mode: UiText): string => `View: ${mode}`,
     focusMode: 'Focus',
     canvasMode: 'Canvas',
     canvasOnly: 'Canvas only',
@@ -1142,10 +1185,11 @@ export const messagesEn = {
     newWindow: 'New window',
     commands: 'Commands',
     settings: 'Settings',
-    reopenFromLastSession: (count: number, timestamp: string | null): string => {
+    reopenFromLastSession: (count: number, savedAtEpochS: number | null): string => {
       const subject = count === 1 ? '1 window' : `${count} windows`;
       const base = `Reopen ${subject} from your last session`;
-      return timestamp === null ? base : `${base} (saved ${timestamp})`;
+      const saved = recordedTimeOrNull(savedAtEpochS);
+      return saved === null ? base : `${base} (saved ${saved})`;
     },
     windowExitedParts,
     windowExitedWithCodeParts,
@@ -1176,16 +1220,16 @@ export const messagesEn = {
     otherWindowsHeading: 'Other windows',
     current: 'Current',
     noWindows: 'No windows open',
-    noWindowMatch: (query: string): string => `No windows match “${query}”.`,
+    noWindowMatch: (query: DisplayLine): string => `No windows match “${query}”.`,
     noWindowMatchHint: 'Type > to search commands.',
-    noCommandMatch: (query: string): string => `No commands match “${query}”.`,
+    noCommandMatch: (query: DisplayLine): string => `No commands match “${query}”.`,
     noCommandMatchHint: 'Delete > to search windows.',
     windowCount: (count: number): string => (count === 1 ? '1 window' : `${count} windows`),
     commandCount: (count: number): string => (count === 1 ? '1 command' : `${count} commands`),
     /** A window row's accessible name, after the sidebar row's: where the window is. */
-    windowRowPlace: (label: string, place: string): string => `${label}, in ${place}`,
-    windowRowCurrent: (label: string): string => `${label}, current`,
-    actionRowKey: (name: string, key: string): string => `${name}, ${key}`,
+    windowRowPlace: (label: UiText, place: DisplayLine): string => `${label}, in ${place}`,
+    windowRowCurrent: (label: UiText): string => `${label}, current`,
+    actionRowKey: (name: UiText, key: UiText): string => `${name}, ${key}`,
     actionKeywords: (action: KebabCase<keyof typeof KEYBOARD_ACTION_NAMES>): string =>
       lookup(PICKER_ACTION_KEYWORDS, action),
   },

@@ -14,7 +14,7 @@
   import WindowMenu from '../components/WindowMenu.svelte';
   import type { Rect } from '../components/menu-position';
   import type { ActionVerdict } from '../keymap/action-availability';
-  import { ariaKeyShortcutsOf, formatChord } from '../keymap/key-chord';
+  import { ariaKeyShortcutsOf, chordText } from '../keymap/key-chord';
   import type { KeyboardPlatform } from '../keymap/keyboard-platform';
   import type { WorkMode } from '../session/current-window';
   import type { RoomActions } from '../session/room-actions';
@@ -122,8 +122,7 @@
 
   $: needingCount = attentionCount(entries);
   $: isCanvas = workMode === 'canvas';
-  $: goToWindowKey =
-    goToWindowChord === null ? null : formatChord(goToWindowChord, platform).join('+');
+  $: goToWindowKey = goToWindowChord === null ? null : chordText(goToWindowChord, platform);
   $: sections = needsYouView === null ? [] : needsYouSections(needsYouView.rows);
   // The room menu belongs to a heading the full list draws; it goes when that heading does.
   $: menuGroup =

@@ -5,6 +5,7 @@
    * No IPC, no decision of its own -- the shell owns the save state, the
    * failure line, the notice line and every call.
    */
+  import type { UiText } from '../display/ui-text';
   import type { ApprovalSettingsInfo } from '../ipc/session-client';
   import SettingsSwitch from './SettingsSwitch.svelte';
   import {
@@ -15,10 +16,10 @@
   import { settings } from '../ui-messages';
 
   export let info: ApprovalSettingsInfo | null;
-  export let notice: string | null;
+  export let notice: UiText | null;
   export let isReadOnly: boolean;
   export let isSaving: boolean;
-  export let updateFailure: string | null;
+  export let updateFailure: UiText | null;
   export let onSetAutoApprove: (tool: string, autoApprove: boolean) => void;
   export let onSetPlanApprovalRequired: (required: boolean) => void;
 

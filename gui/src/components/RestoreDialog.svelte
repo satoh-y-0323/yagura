@@ -3,11 +3,12 @@
     buttons,
     forms,
     hints,
+    describeRestoreOrigin,
     describeRestoreSelectionCount,
     describeRestoreConfirm,
   } from '../ui-messages';
   import type { RestoreEntry } from '../ipc/session-boundary';
-  import { splitForMiddleEllipsis } from '../chat/middle-ellipsis';
+  import { splitPreparedForMiddleEllipsis } from '../chat/middle-ellipsis';
   import { matchesOpenWindow } from '../session/restore-model';
   import Icon from './Icon.svelte';
   import IconButton from './IconButton.svelte';
@@ -31,13 +32,6 @@
   export let onClearAll: () => void;
   /** Restores the checked candidates. */
   export let onRestore: () => void;
-
-  /** The profile and vendor of a candidate, whichever it recorded. */
-  function describeOrigin(candidate: RestoreEntry): string {
-    return [candidate.profile, candidate.displayVendor]
-      .filter((part): part is string => part !== null && part !== '')
-      .join(' · ');
-  }
 </script>
 
 <ModalDialog {isOpen} {onCancel} maxWidth="560px">
@@ -63,8 +57,8 @@
 
     <ul class="restore-candidate-list">
       {#each candidates as candidate (candidate.position)}
-        {@const origin = describeOrigin(candidate)}
-        {@const cwd = splitForMiddleEllipsis(candidate.displayCwd)}
+        {@const origin = describeRestoreOrigin(candidate.displayProfile, candidate.displayVendor)}
+        {@const cwd = splitPreparedForMiddleEllipsis(candidate.displayCwd)}
         <li class="restore-row">
           <label class="restore-row__label">
             <input
@@ -77,7 +71,7 @@
               <span class="restore-row__chip">{hints.restoreAlreadyOpen}</span>
             {/if}
             <span class="restore-row__meta">
-              {#if origin !== ''}
+              {#if origin !== null}
                 <span class="restore-row__origin">{origin}</span>
               {/if}
               <span class="restore-row__cwd">

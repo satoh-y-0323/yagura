@@ -10,8 +10,8 @@
   import { formatTicketText, sanitizeForDisplay } from '../display/untrusted-text';
   import Icon from './Icon.svelte';
   import type { Ticket, TicketConfig, TicketMilestone } from '../ipc/ticket-boundary';
-  import { formatRestoreTimestamp } from '../session/restore-model';
-  import { tickets as text } from '../ui-messages';
+  import type { UiText } from '../display/ui-text';
+  import { describeRecordedTime, tickets as text } from '../ui-messages';
 
   /** The least of a plan-list entry a plan link reads. */
   interface PlanChoice {
@@ -69,8 +69,8 @@
     return sanitizeForDisplay(entry === undefined ? planId : entry.title);
   }
 
-  function resultTime(at: number): string {
-    return formatRestoreTimestamp(at / 1000) ?? '';
+  function resultTime(at: number): UiText | null {
+    return describeRecordedTime(at / 1000);
   }
 </script>
 

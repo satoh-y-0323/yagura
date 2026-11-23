@@ -57,15 +57,15 @@ function baseState(overrides: Partial<NoticeSourceState> = {}): NoticeSourceStat
 
 function summary(overrides: Partial<ApprovalExpiredSummary> = {}): ApprovalExpiredSummary {
   return {
-    requester: 'builder window',
-    tool: 'close_window',
-    target: 'target window',
+    requester: sanitizeForDisplay('builder window'),
+    tool: sanitizeForDisplay('close_window'),
+    target: sanitizeForDisplay('target window'),
     ...overrides,
   };
 }
 
 const LATEST = summary();
-const LAST_SESSION = { count: 3, timestamp: '2026-11-20 09:15' };
+const LAST_SESSION = { count: 3, savedAtEpochS: 1_795_223_700 };
 
 /** The sentence that states the fact: the detail under a blocking title, else the title itself. */
 function sentenceOf(draft: NoticeDraft): string {
@@ -197,7 +197,7 @@ const NOTICES: { label: string; on: Partial<NoticeSourceState>; notice: ShownNot
     on: { lastSession: LAST_SESSION, hasOpenWindows: true },
     notice: {
       key: 'reopen-offer',
-      sentence: describeReopenNotice(LAST_SESSION.count, LAST_SESSION.timestamp),
+      sentence: describeReopenNotice(LAST_SESSION.count, LAST_SESSION.savedAtEpochS),
       action: { labelKey: 'chooseWindows' },
     },
   },
@@ -501,8 +501,8 @@ describe('recordApprovalExpiredUnseen', () => {
   });
 
   it('increments count and overwrites latest on a second unseen expiry (reason: timeout)', () => {
-    const first = summary({ requester: 'window one' });
-    const second = summary({ requester: 'window two' });
+    const first = summary({ requester: sanitizeForDisplay('window one') });
+    const second = summary({ requester: sanitizeForDisplay('window two') });
     let state = baseState();
     state = recordApprovalExpiredUnseen(state, false, 'timeout', first);
     state = recordApprovalExpiredUnseen(state, false, 'timeout', second);
@@ -516,7 +516,7 @@ describe('recordApprovalExpiredUnseen', () => {
       state,
       true,
       'timeout',
-      summary({ requester: 'other window' })
+      summary({ requester: sanitizeForDisplay('other window') })
     );
     expect(next.approvalExpiredUnseen).toEqual(state.approvalExpiredUnseen);
   });
@@ -537,7 +537,7 @@ describe('recordApprovalExpiredUnseen', () => {
       state,
       false,
       'resolved',
-      summary({ requester: 'other window' })
+      summary({ requester: sanitizeForDisplay('other window') })
     );
     expect(next.approvalExpiredUnseen).toEqual(state.approvalExpiredUnseen);
   });

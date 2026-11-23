@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 
+import { formatPathForDisplay, sanitizeForDisplay } from '../display/untrusted-text';
 import { planPanes, pairPanes, type Pane } from './pane-plan';
 import type { WindowEntry } from '../stores/window-registry';
 
@@ -48,16 +49,15 @@ function makeEntry(windowId: string): WindowEntry {
   return {
     windowId,
     name: windowId,
-    displayName: windowId,
+    displayName: sanitizeForDisplay(windowId),
     vendor: null,
     displayVendor: null,
     cwd: '/home/user/project',
-    displayCwd: '/home/user/project',
+    displayCwd: formatPathForDisplay('/home/user/project'),
     detected: { status: 'running' },
     statusRev: null,
     statusBoot: null,
     room: null,
-    detectionWarning: null,
     displayDetectionWarning: null,
     mcpConnected: null,
     statusReportsMissing: null,

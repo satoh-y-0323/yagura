@@ -4,6 +4,7 @@
  */
 import { describe, it, expect } from 'vitest';
 
+import { formatPathForDisplay, type DisplayLine } from '../display/untrusted-text';
 import type { DetectedStatusView, WindowStatus } from '../ipc/session-boundary';
 import {
   groupByRoom,
@@ -17,18 +18,20 @@ import {
 interface Entry {
   windowId: string;
   cwd: string;
-  displayCwd: string;
+  displayCwd: DisplayLine;
   detected: DetectedStatusView;
-  room: { roomId: string; name: string; displayName: string } | null;
+  room: { roomId: string; displayName: DisplayLine } | null;
   display: { isMinimized: boolean };
 }
 
+/** An entry whose `displayCwd` is its `cwd` prepared for display, as the registry makes it. */
 function makeEntry(overrides: Partial<Entry> & { status?: WindowStatus } = {}): Entry {
   const { status = 'running', ...rest } = overrides;
+  const cwd = rest.cwd ?? 'C:\\Users\\dev\\project';
   return {
     windowId: 'w-a',
-    cwd: 'C:\\Users\\dev\\project',
-    displayCwd: 'C:\\Users\\dev\\project',
+    cwd,
+    displayCwd: formatPathForDisplay(cwd),
     detected: status === 'unknown' ? { status, reason: null } : { status },
     room: null,
     display: { isMinimized: false },
@@ -38,8 +41,8 @@ function makeEntry(overrides: Partial<Entry> & { status?: WindowStatus } = {}): 
 
 describe('groupByRoom', () => {
   it('orders rooms by the order they first appear in entries', () => {
-    const roomA = { roomId: 'room-a', name: 'Room A', displayName: 'Room A' };
-    const roomB = { roomId: 'room-b', name: 'Room B', displayName: 'Room B' };
+    const roomA = { roomId: 'room-a', displayName: formatPathForDisplay('Room A') };
+    const roomB = { roomId: 'room-b', displayName: formatPathForDisplay('Room B') };
     const entries = [
       makeEntry({ windowId: 'w-a', room: roomA }),
       makeEntry({ windowId: 'w-b', room: roomB }),
@@ -58,7 +61,6 @@ describe('groupByRoom', () => {
         windowId: 'w-a',
         room: null,
         cwd: 'C:\\Users\\dev\\solo',
-        displayCwd: 'C:\\Users\\dev\\solo',
       }),
     ];
 
@@ -71,14 +73,13 @@ describe('groupByRoom', () => {
   });
 
   it('names a room and a folder by their display forms, never the raw name or cwd', () => {
-    const room = { roomId: 'room-a', name: 'ya\u202Egura', displayName: 'ya\\u{202E}gura' };
+    const room = { roomId: 'room-a', displayName: formatPathForDisplay('ya\u202Egura') };
     const entries = [
       makeEntry({ windowId: 'w-a', room }),
       makeEntry({
         windowId: 'w-b',
         room: null,
         cwd: 'C:\\so\u202Elo',
-        displayCwd: 'C:\\so\\u{202E}lo',
       }),
     ];
 
@@ -91,7 +92,7 @@ describe('groupByRoom', () => {
   });
 
   it('orders entries within a room by tabOrder position, not by tone', () => {
-    const room = { roomId: 'room-a', name: 'Room A', displayName: 'Room A' };
+    const room = { roomId: 'room-a', displayName: formatPathForDisplay('Room A') };
     const entries = [
       makeEntry({ windowId: 'inactive-1', room, status: 'idle' }),
       makeEntry({ windowId: 'attention-1', room, status: 'waiting_input' }),
@@ -117,7 +118,7 @@ describe('groupByRoom', () => {
   });
 
   it('keeps the within-room order stable when only statuses change, tabOrder unchanged', () => {
-    const room = { roomId: 'room-a', name: 'Room A', displayName: 'Room A' };
+    const room = { roomId: 'room-a', displayName: formatPathForDisplay('Room A') };
     const tabOrder = ['w-a', 'w-b', 'w-c'];
     const before = [
       makeEntry({ windowId: 'w-a', room, status: 'idle' }),
@@ -142,8 +143,8 @@ describe('groupByRoom', () => {
   });
 
   it('keeps room order tied to entries, unaffected by status changes and a reordered tabOrder (rejects path B)', () => {
-    const roomA = { roomId: 'room-a', name: 'Room A', displayName: 'Room A' };
-    const roomB = { roomId: 'room-b', name: 'Room B', displayName: 'Room B' };
+    const roomA = { roomId: 'room-a', displayName: formatPathForDisplay('Room A') };
+    const roomB = { roomId: 'room-b', displayName: formatPathForDisplay('Room B') };
     // `entries` order is fixed: room-a is seen first (w-a1), room-b second (w-b1).
     const entries = [
       makeEntry({ windowId: 'w-a1', room: roomA, status: 'idle' }),
@@ -180,7 +181,7 @@ describe('groupByRoom', () => {
   });
 
   it('sets minimized to the count of entries with display.isMinimized', () => {
-    const room = { roomId: 'room-a', name: 'Room A', displayName: 'Room A' };
+    const room = { roomId: 'room-a', displayName: formatPathForDisplay('Room A') };
     const entries = [
       makeEntry({ windowId: 'w-a', room, display: { isMinimized: true } }),
       makeEntry({ windowId: 'w-b', room, display: { isMinimized: false } }),
@@ -193,8 +194,8 @@ describe('groupByRoom', () => {
   });
 
   it('sets collapsed to true only for rooms present in the collapsed set', () => {
-    const roomA = { roomId: 'room-a', name: 'Room A', displayName: 'Room A' };
-    const roomB = { roomId: 'room-b', name: 'Room B', displayName: 'Room B' };
+    const roomA = { roomId: 'room-a', displayName: formatPathForDisplay('Room A') };
+    const roomB = { roomId: 'room-b', displayName: formatPathForDisplay('Room B') };
     const entries = [
       makeEntry({ windowId: 'w-a', room: roomA }),
       makeEntry({ windowId: 'w-b', room: roomB }),
@@ -211,7 +212,7 @@ describe('groupByRoom', () => {
   });
 
   it('does not mutate its input entries', () => {
-    const room = { roomId: 'room-a', name: 'Room A', displayName: 'Room A' };
+    const room = { roomId: 'room-a', displayName: formatPathForDisplay('Room A') };
     const entries = Object.freeze([
       Object.freeze(makeEntry({ windowId: 'w-a', room })),
       Object.freeze(makeEntry({ windowId: 'w-b', room, status: 'idle' })),
@@ -223,8 +224,8 @@ describe('groupByRoom', () => {
 
 describe('windowIdsOfRoom', () => {
   it('returns the window ids of a room in input order', () => {
-    const room = { roomId: 'room-a', name: 'Room A', displayName: 'Room A' };
-    const other = { roomId: 'room-b', name: 'Room B', displayName: 'Room B' };
+    const room = { roomId: 'room-a', displayName: formatPathForDisplay('Room A') };
+    const other = { roomId: 'room-b', displayName: formatPathForDisplay('Room B') };
     const entries = [
       makeEntry({ windowId: 'w-a', room }),
       makeEntry({ windowId: 'w-b', room: other }),
@@ -238,7 +239,7 @@ describe('windowIdsOfRoom', () => {
     const entries = [
       makeEntry({
         windowId: 'w-a',
-        room: { roomId: 'room-a', name: 'Room A', displayName: 'Room A' },
+        room: { roomId: 'room-a', displayName: formatPathForDisplay('Room A') },
       }),
     ];
 
@@ -251,13 +252,12 @@ describe('roomIdsOf', () => {
     const entries = [
       makeEntry({
         windowId: 'w-a',
-        room: { roomId: 'room-a', name: 'Room A', displayName: 'Room A' },
+        room: { roomId: 'room-a', displayName: formatPathForDisplay('Room A') },
       }),
       makeEntry({
         windowId: 'w-b',
         room: null,
         cwd: 'C:\\Users\\dev\\solo',
-        displayCwd: 'C:\\Users\\dev\\solo',
       }),
     ];
 
@@ -285,8 +285,8 @@ describe('pruneCollapsed', () => {
 });
 
 describe('windowsInDisplayOrder (the sidebar list, top to bottom)', () => {
-  const roomA = { roomId: 'room-a', name: 'Room A', displayName: 'Room A' };
-  const roomB = { roomId: 'room-b', name: 'Room B', displayName: 'Room B' };
+  const roomA = { roomId: 'room-a', displayName: formatPathForDisplay('Room A') };
+  const roomB = { roomId: 'room-b', displayName: formatPathForDisplay('Room B') };
 
   /**
    * Two rooms whose screen order is neither the order the windows were opened
@@ -330,10 +330,10 @@ describe('windowsInDisplayOrder (the sidebar list, top to bottom)', () => {
 describe('groupByRoom: windows missing from the tab order', () => {
   it('keeps the input order among them and puts them after the windows the tab order names', () => {
     const entries = [
-      makeEntry({ windowId: 'w-1', cwd: 'same', displayCwd: 'same' }),
-      makeEntry({ windowId: 'w-2', cwd: 'same', displayCwd: 'same' }),
-      makeEntry({ windowId: 'w-3', cwd: 'same', displayCwd: 'same' }),
-      makeEntry({ windowId: 'w-4', cwd: 'same', displayCwd: 'same' }),
+      makeEntry({ windowId: 'w-1', cwd: 'same' }),
+      makeEntry({ windowId: 'w-2', cwd: 'same' }),
+      makeEntry({ windowId: 'w-3', cwd: 'same' }),
+      makeEntry({ windowId: 'w-4', cwd: 'same' }),
     ];
 
     const groups = groupByRoom(entries, new Set(), ['w-4']);

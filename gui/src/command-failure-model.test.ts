@@ -11,6 +11,7 @@
  */
 import { describe, it, expect, vi } from 'vitest';
 
+import { sanitizeForDisplay } from './display/untrusted-text';
 import { CommandFailureError, type CommandFailure } from './ipc/session-boundary';
 import { banners, describeOperationFailure, foldedFailureReason } from './ui-messages';
 
@@ -19,7 +20,7 @@ async function model(): Promise<typeof import('./command-failure-model')> {
   return import('./command-failure-model');
 }
 
-const SUMMARY = 'Could not delete the plan';
+const SUMMARY = sanitizeForDisplay('Could not delete the plan');
 
 const REJECTED: CommandFailure = {
   kind: 'rejected',

@@ -6,6 +6,8 @@
  * in a test without any of them re-implementing the matrix.
  */
 
+import type { UiText } from '../display/ui-text';
+import type { DisplayLine } from '../display/untrusted-text';
 import type { WindowStatus } from '../ipc/session-boundary';
 import { buttons, chat, dialogs } from '../ui-messages';
 
@@ -18,26 +20,34 @@ export type RoomOperation = 'clear_room' | 'delete_room';
 /** An operation the confirmation dialog can be raised for. */
 export type ConfirmOperation = WindowOperation | 'broadcast' | RoomOperation;
 
+/** An operation to confirm, with the room it acts on when it is a room operation. */
+export type ConfirmSubject =
+  | { operation: Exclude<ConfirmOperation, RoomOperation> }
+  | { operation: RoomOperation; roomName: DisplayLine };
+
 /** What the confirmation dialog shows for one operation. */
 export interface ConfirmCopy {
   /** The dialog heading. */
-  title: string;
+  title: UiText;
   /** The question the dialog asks. */
-  message: string;
+  message: UiText;
   /** The label of the button that carries the operation out. */
-  confirmLabel: string;
+  confirmLabel: UiText;
 }
 
 /**
- * The wording of the confirmation dialog for `operation`.
+ * The wording of the confirmation dialog for an operation.
  *
  * One source for every operation, so the dialog itself carries no
  * per-operation branch.
  *
- * @param operation the operation being confirmed
- * @param roomName the room a room operation acts on; the other operations ignore it
+ * @param subject the operation being confirmed, and the room a room operation acts on
  */
-export function confirmCopy(operation: ConfirmOperation, roomName = ''): ConfirmCopy {
+export function confirmCopy(subject: ConfirmSubject): ConfirmCopy {
+  if (subject.operation === 'clear_room' || subject.operation === 'delete_room') {
+    return roomConfirmCopy(subject.operation, subject.roomName);
+  }
+  const operation = subject.operation;
   switch (operation) {
     case 'close':
       return { title: buttons.close, message: dialogs.closeConfirm, confirmLabel: buttons.close };
@@ -53,23 +63,25 @@ export function confirmCopy(operation: ConfirmOperation, roomName = ''): Confirm
         message: chat.broadcastConfirmMessage,
         confirmLabel: chat.broadcastConfirmLabel,
       };
-    case 'clear_room':
-      return {
-        title: chat.clearHistoryConfirmTitle(roomName),
-        message: chat.clearHistoryConfirmMessage,
-        confirmLabel: chat.clearHistoryConfirmLabel,
-      };
-    case 'delete_room':
-      return {
-        title: chat.deleteRoomConfirmTitle(roomName),
-        message: chat.deleteRoomConfirmMessage,
-        confirmLabel: chat.deleteRoomConfirmLabel,
-      };
     default: {
       const unreachable: never = operation;
       return unreachable;
     }
   }
+}
+
+function roomConfirmCopy(operation: RoomOperation, roomName: DisplayLine): ConfirmCopy {
+  return operation === 'clear_room'
+    ? {
+        title: chat.clearHistoryConfirmTitle(roomName),
+        message: chat.clearHistoryConfirmMessage,
+        confirmLabel: chat.clearHistoryConfirmLabel,
+      }
+    : {
+        title: chat.deleteRoomConfirmTitle(roomName),
+        message: chat.deleteRoomConfirmMessage,
+        confirmLabel: chat.deleteRoomConfirmLabel,
+      };
 }
 
 /** Why `interrupt` may not be offered for a window. */

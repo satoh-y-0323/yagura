@@ -6,6 +6,7 @@
  */
 import { describe, it, expect } from 'vitest';
 
+import { formatPathForDisplay, type DisplayLine } from '../display/untrusted-text';
 import type { DetectedStatusView, TaskReportMark, WindowStatus } from '../ipc/session-boundary';
 import { groupByRoom } from './room-groups';
 import {
@@ -18,10 +19,10 @@ import {
 interface Entry {
   windowId: string;
   cwd: string;
-  displayCwd: string;
+  displayCwd: DisplayLine;
   detected: DetectedStatusView;
   taskReport?: TaskReportMark;
-  room: { roomId: string; name: string; displayName: string } | null;
+  room: { roomId: string; displayName: DisplayLine } | null;
   display: { isMinimized: boolean };
 }
 
@@ -29,7 +30,7 @@ function makeEntry(windowId: string, status: WindowStatus, overrides: Partial<En
   return {
     windowId,
     cwd: 'C:\\work',
-    displayCwd: 'C:\\work',
+    displayCwd: formatPathForDisplay('C:\\work'),
     detected: status === 'unknown' ? { status, reason: null } : { status },
     room: null,
     display: { isMinimized: false },
@@ -42,8 +43,8 @@ function groupsOf(entries: readonly Entry[], order = entries.map((entry) => entr
   return groupByRoom(entries, new Set(), order);
 }
 
-const ROOM_A = { roomId: 'room-a', name: 'Room A', displayName: 'Room A' };
-const ROOM_B = { roomId: 'room-b', name: 'Room B', displayName: 'Room B' };
+const ROOM_A = { roomId: 'room-a', displayName: formatPathForDisplay('Room A') };
+const ROOM_B = { roomId: 'room-b', displayName: formatPathForDisplay('Room B') };
 
 describe('nextNeedsYouView: rebuilding on a user operation', () => {
   it('lists the windows that need you in the sidebar order, room by room', () => {
@@ -364,9 +365,18 @@ describe('needsYouSections: a heading per run of rows of one room', () => {
     const view = nextNeedsYouView(
       null,
       groupsOf([
-        makeEntry('f1', 'waiting_input', { cwd: '/raw/one', displayCwd: 'one' }),
-        makeEntry('f2', 'waiting_input', { cwd: '/raw/one', displayCwd: 'one' }),
-        makeEntry('g1', 'waiting_input', { cwd: '/raw/two', displayCwd: 'two' }),
+        makeEntry('f1', 'waiting_input', {
+          cwd: '/raw/one',
+          displayCwd: formatPathForDisplay('one'),
+        }),
+        makeEntry('f2', 'waiting_input', {
+          cwd: '/raw/one',
+          displayCwd: formatPathForDisplay('one'),
+        }),
+        makeEntry('g1', 'waiting_input', {
+          cwd: '/raw/two',
+          displayCwd: formatPathForDisplay('two'),
+        }),
       ]),
       true
     );

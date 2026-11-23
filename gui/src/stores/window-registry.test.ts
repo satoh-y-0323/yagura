@@ -229,8 +229,7 @@ function openedEntry(
     detected: { status: 'running' },
     statusRev: null,
     statusBoot: null,
-    room: room === null ? null : { ...room, displayName: room.name },
-    detectionWarning: null,
+    room: room === null ? null : { roomId: room.roomId, displayName: room.name },
     displayDetectionWarning: null,
     mcpConnected: null,
     statusReportsMissing: null,
@@ -323,10 +322,8 @@ describe('createWindowRegistry: what the view draws of a newly opened window', (
     expect(a?.displayCwd).toBe(`C:\\work\\\\u{202E}${'a'.repeat(MAX_DISPLAY_FIELD_CHARS - 9)}…`);
     expect(a?.room).toEqual({
       roomId: 'r-alpha',
-      name: 'ya\u200Bgura\uFEFF',
       displayName: 'ya\\u{200B}gura\\u{FEFF}',
     });
-    expect(a?.detectionWarning).toBe('the profile\u2028 did not\u001b resolve');
     expect(a?.displayDetectionWarning).toBe('the profile did not resolve');
     expect(entryOf(registry, 'w-b')?.displayVendor).toBeNull();
   });
@@ -453,7 +450,7 @@ describe('createWindowRegistry: the status and its reason are one value on the e
 
     const entry = entryOf(registry, 'w-a');
     expect(entry?.detected).toEqual({ status: 'running' });
-    expect(entry?.detectionWarning).toBeNull();
+    expect(entry?.displayDetectionWarning).toBeNull();
     expect(entry?.statusRev).toBeNull();
   });
 
@@ -470,7 +467,7 @@ describe('createWindowRegistry: the status and its reason are one value on the e
 
     const entry = entryOf(registry, 'w-a');
     expect(entry?.detected).toEqual({ status: 'unknown', reason: 'no_definition' });
-    expect(entry?.detectionWarning).toBe('the profile did not resolve a definition');
+    expect(entry?.displayDetectionWarning).toBe('the profile did not resolve a definition');
   });
 
   it('replaces the whole pair on a status change', () => {
@@ -507,7 +504,7 @@ describe('createWindowRegistry: the status and its reason are one value on the e
 
     registry.setStatus('w-a', unknownPair('screen_lost'), null, null);
 
-    expect(entryOf(registry, 'w-a')?.detectionWarning).toBe('kept across status changes');
+    expect(entryOf(registry, 'w-a')?.displayDetectionWarning).toBe('kept across status changes');
   });
 });
 
@@ -838,10 +835,8 @@ describe('createWindowRegistry: an older generation costs the pair alone', () =>
     expect(entry?.displayName).toBe('renamed');
     expect(entry?.room).toEqual({
       roomId: 'r-beta',
-      name: 'oth\u202Der\u2060',
       displayName: 'oth\\u{202D}er\\u{2060}',
     });
-    expect(entry?.detectionWarning).toBe('second\u200F warning\u009b');
     expect(entry?.displayDetectionWarning).toBe('second warning');
     expect(entry?.detected).toEqual({ status: 'waiting_input' });
   });
@@ -861,7 +856,7 @@ describe('createWindowRegistry: an older generation costs the pair alone', () =>
 
     const entry = entryOf(registry, 'w-a');
     expect(entry?.room).toBeNull();
-    expect(entry?.detectionWarning).toBeNull();
+    expect(entry?.displayDetectionWarning).toBeNull();
     expect(entry?.detected).toEqual({ status: 'waiting_input' });
   });
 });

@@ -8,11 +8,11 @@
  */
 import { describe, it, expect } from 'vitest';
 
-import { foldExternalText } from '../display/untrusted-text';
+import { foldExternalText, sanitizeForDisplay } from '../display/untrusted-text';
 import { resolveMessages } from './messages';
 import { describeOperationFailure } from './render';
 
-const SUMMARY = 'Could not close the window';
+const SUMMARY = sanitizeForDisplay('Could not close the window');
 
 /**
  * Longest external text kept, in code points: the limit `foldExternalText`
