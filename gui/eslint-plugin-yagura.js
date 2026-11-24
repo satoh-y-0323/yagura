@@ -999,8 +999,8 @@ for (const [elements, names] of [
   ],
   // A text area's value is the text being edited, shown as typed.
   [['textarea'], ['value', 'rows', 'cols']],
-  // A value sent or measured, not drawn; an option shows its content or its `label`.
-  [['select', 'option', 'button', 'data', 'li', 'meter', 'progress'], ['value']],
+  // A value sent or measured, not drawn. An option's value is judged by its list.
+  [['select', 'button', 'data', 'li', 'meter', 'progress'], ['value']],
   [['option'], ['selected', 'disabled']],
   [['time', 'del', 'ins'], ['datetime']],
   // `download` names the saved file in a dialog, so it is checked.
@@ -1054,7 +1054,97 @@ function isEditedInputValue(startTag) {
   );
 }
 
-function isUnreadOn(element, name, startTag) {
+// The blocks a template element sits in without them making an element of their own.
+const TRANSPARENT_BLOCKS = new Set([
+  'SvelteIfBlock',
+  'SvelteElseBlock',
+  'SvelteEachBlock',
+  'SvelteKeyBlock',
+  'SvelteAwaitBlock',
+  'SvelteAwaitPendingBlock',
+  'SvelteAwaitThenBlock',
+  'SvelteAwaitCatchBlock',
+]);
+
+/** The nearest html element around `element` in the template, or null when none is known. */
+function enclosingHtmlElement(element) {
+  for (let node = element.parent; node != null; node = node.parent) {
+    if (node.type === 'SvelteElement') {
+      return node.kind === 'html' ? node : null;
+    }
+    if (!TRANSPARENT_BLOCKS.has(node.type)) {
+      return null;
+    }
+  }
+  return null;
+}
+
+/** How attribute `name` of `startTag` is written: one literal, or one expression's source. */
+function attributeSpelling(startTag, name, sourceCode) {
+  const attribute = startTag.attributes.find(
+    (a) =>
+      (a.type === 'SvelteAttribute' || a.type === 'SvelteShorthandAttribute') && a.key.name === name
+  );
+  if (attribute === undefined) {
+    return null;
+  }
+  if (attribute.type === 'SvelteShorthandAttribute') {
+    return `expression:${sourceCode.getText(attribute.value)}`;
+  }
+  if (attribute.value.every((part) => part.type === 'SvelteLiteral')) {
+    return `literal:${attribute.value.map((part) => part.value).join('')}`;
+  }
+  const [only] = attribute.value;
+  return attribute.value.length === 1 && only.type === 'SvelteMustacheTag'
+    ? `expression:${sourceCode.getText(only.expression)}`
+    : null;
+}
+
+function htmlElementsNamed(root, name, visitorKeys) {
+  const found = [];
+  const pending = [root];
+  while (pending.length > 0) {
+    const node = pending.pop();
+    if (node.type === 'SvelteElement' && node.kind === 'html' && node.name.name === name) {
+      found.push(node);
+    }
+    for (const key of visitorKeys[node.type] ?? []) {
+      const children = [node[key]].flat();
+      children.forEach((child) => typeof child?.type === 'string' && pending.push(child));
+    }
+  }
+  return found;
+}
+
+/**
+ * True if `datalist` lists the suggestions of an input of this component whose value is the
+ * text being edited: picking one makes it that value, so it is shown as the value is (I-1).
+ * The two are matched by the spelling of the datalist's `id` and the input's `list`.
+ */
+function isEditedInputCandidate(datalist, sourceCode) {
+  const id = attributeSpelling(datalist.startTag, 'id', sourceCode);
+  return (
+    id !== null &&
+    htmlElementsNamed(sourceCode.ast, 'input', sourceCode.visitorKeys).some(
+      (input) =>
+        attributeSpelling(input.startTag, 'list', sourceCode) === id &&
+        isEditedInputValue(input.startTag)
+    )
+  );
+}
+
+// An option's value is only sent from a select; a datalist shows it as a suggestion.
+function isUnreadOptionValue(startTag, sourceCode) {
+  const list = enclosingHtmlElement(startTag.parent);
+  const owner = list?.name.name;
+  return (
+    owner === 'select' ||
+    owner === 'optgroup' ||
+    (owner === 'datalist' && isEditedInputCandidate(list, sourceCode))
+  );
+}
+
+function isUnreadOn(element, name, startTag, sourceCode) {
   if (
     UNREAD_ON_ANY_ELEMENT.has(name) ||
     UNREAD_PREFIXES_ON_ANY_ELEMENT.some((prefix) => name.startsWith(prefix))
@@ -1067,15 +1157,23 @@ function isUnreadOn(element, name, startTag) {
   if (element === 'input' && name === 'value') {
     return isEditedInputValue(startTag);
   }
+  if (element === 'option' && name === 'value') {
+    return isUnreadOptionValue(startTag, sourceCode);
+  }
   return UNREAD_BY_ELEMENT.get(element)?.has(name) ?? false;
 }
 
 /** True if no one reads attribute `name` on any of `elements` (`null`: not known which). */
-function isUnreadOnAll(elements, name, startTag) {
+function isUnreadOnAll(elements, name, startTag, sourceCode) {
   return elements === null
-    ? isUnreadOn(null, name, startTag)
-    : elements.every((element) => isUnreadOn(element, name, startTag));
+    ? isUnreadOn(null, name, startTag, sourceCode)
+    : elements.every((element) => isUnreadOn(element, name, startTag, sourceCode));
 }
+
+// Markup or text these put into the page is not escaped or checked by the template: an
+// iframe's `srcdoc` is read as a document, whatever brand its value has.
+const RAW_MARKUP_ATTRIBUTE = 'srcdoc';
+const RAW_MARKUP_BINDINGS = new Set(['innerHTML', 'outerHTML', 'textContent', 'innerText']);
 
 const displayText = {
   meta: {
@@ -1093,6 +1191,8 @@ const displayText = {
         'This shows a value typed {{type}}, so nothing checks how it was prepared; give it the type of the text it holds.',
       multiline:
         'An attribute shows one line, but {{type}} may hold line breaks; prepare it with a one-line maker from display/untrusted-text.',
+      rawMarkup:
+        '{{name}} puts markup or text into the page past the template, so no brand makes it safe; show the text in the template instead.',
     },
   },
   create(context) {
@@ -1179,10 +1279,33 @@ const displayText = {
       );
     }
 
+    const { sourceCode } = context;
+
+    function isRawMarkupAttribute(startTag, name) {
+      return isElementTag(startTag) && name.toLowerCase() === RAW_MARKUP_ATTRIBUTE;
+    }
+
+    function reportRawMarkup(node, name) {
+      context.report({ node, messageId: 'rawMarkup', data: { name } });
+    }
+
     function checkAttribute(startTag, name, expression) {
-      if (isElementTag(startTag) && !isUnreadOnAll(elementsOf(startTag), name, startTag)) {
+      if (
+        isElementTag(startTag) &&
+        !isRawMarkupAttribute(startTag, name) &&
+        !isUnreadOnAll(elementsOf(startTag), name, startTag, sourceCode)
+      ) {
         check(expression, true);
       }
+    }
+
+    // A spread's names are lowercased as attributes, so an index signature of any string
+    // key may write `srcdoc` on an element that may be an iframe.
+    function mayWriteRawMarkup(elements, keyType) {
+      return (
+        (elements === null || elements.includes('iframe')) &&
+        checker.isTypeAssignableTo(checker.getStringLiteralType(RAW_MARKUP_ATTRIBUTE), keyType)
+      );
     }
 
     // An index signature whose every key starts with an unread prefix (`data-${string}`).
@@ -1209,8 +1332,12 @@ const displayText = {
           return;
         }
         for (const property of checker.getPropertiesOfType(member)) {
+          if (isRawMarkupAttribute(startTag, property.name)) {
+            reportRawMarkup(node, property.name);
+            continue;
+          }
           const propertyType = checker.getTypeOfSymbol(property);
-          const messageId = isUnreadOnAll(elements, property.name, startTag)
+          const messageId = isUnreadOnAll(elements, property.name, startTag, sourceCode)
             ? undefined
             : problemOf(propertyType, true);
           if (messageId !== undefined) {
@@ -1219,6 +1346,9 @@ const displayText = {
         }
         // An index signature's names are not known, so its values are checked as read.
         for (const info of checker.getIndexInfosOfType(member)) {
+          if (mayWriteRawMarkup(elements, info.keyType)) {
+            reportRawMarkup(node, `[${checker.typeToString(info.keyType)}]`);
+          }
           const messageId = isUnreadIndex(info.keyType) ? undefined : problemOf(info.type, true);
           if (messageId !== undefined) {
             report(
@@ -1238,10 +1368,425 @@ const displayText = {
         checkAttribute(node.parent.parent, node.parent.key.name, node.expression);
       },
       'SvelteStartTag > SvelteShorthandAttribute'(node) {
-        checkAttribute(node.parent, node.key.name, node.value);
+        if (isRawMarkupAttribute(node.parent, node.key.name)) {
+          reportRawMarkup(node, node.key.name);
+        } else {
+          checkAttribute(node.parent, node.key.name, node.value);
+        }
+      },
+      // Whether written as a literal or an expression.
+      'SvelteStartTag > SvelteAttribute'(node) {
+        if (isRawMarkupAttribute(node.parent, node.key.name)) {
+          reportRawMarkup(node, node.key.name);
+        }
       },
       'SvelteStartTag > SvelteSpreadAttribute': checkSpread,
+      'SvelteDirective[kind="Binding"]'(node) {
+        if (RAW_MARKUP_BINDINGS.has(node.key.name.name)) {
+          reportRawMarkup(node, `bind:${node.key.name.name}`);
+        }
+      },
     };
+  },
+};
+
+// The parameters of a DOM method that it looks up by as a name, never shown or read out, by
+// their names in lib.dom. A name a drawing parameter also has would let text through, so
+// adding one takes the user's ruling.
+const NAME_PARAMETERS = new Set([
+  'selector',
+  'selectors',
+  'type',
+  'qualifiedName',
+  'elementId',
+  'tagName',
+  'contextId',
+  'query',
+]);
+
+// What the DOM objects are: the document's nodes, the accessibility tree and the window,
+// whose alert, confirm and prompt the user agent shows.
+const DOM_INTERFACES = ['Node', 'ARIAMixin', 'Window'];
+// Input fields are given back the value the user typed, in the form it is sent (I-1).
+const EDITED_FIELD_INTERFACES = ['HTMLInputElement', 'HTMLTextAreaElement'];
+// What the user agent shows outside the document: a system notification, speech and the
+// media session. No door takes a brand for them yet, so a first use is refused until one does.
+const UA_SHOWN_INTERFACES = ['Notification', 'SpeechSynthesisUtterance', 'MediaMetadata'];
+const UA_SHOWING_METHODS = [
+  ['Navigator', 'share'],
+  ['ServiceWorkerRegistration', 'showNotification'],
+];
+// The Tauri modules that put text on the OS: window titles, menus, the tray and dialogs.
+const OS_SHOWING_DECLARATIONS =
+  /\/node_modules\/@tauri-apps\/(api\/(window|webviewWindow|tray)\.d\.ts$|api\/menu(\.d\.ts$|\/)|plugin-(dialog|notification)\/)/;
+// The functions ECMAScript gives for defining or setting the properties of an argument.
+const REFLECTIVE_WRITES = [
+  ['ObjectConstructor', 'assign'],
+  ['ObjectConstructor', 'defineProperty'],
+  ['ObjectConstructor', 'defineProperties'],
+  ['Reflect', 'set'],
+  ['Reflect', 'defineProperty'],
+];
+// Svelte reads what this renders as HTML and puts it in the DOM.
+const SVELTE_RAW_HTML = 'createRawSnippet';
+const SVELTE_DECLARATIONS = /\/node_modules\/svelte\//;
+
+/** The name of the interface or namespace `declaration` is a member of. */
+function containerName(declaration) {
+  const parent = declaration.parent;
+  if (parent !== undefined && ts.isInterfaceDeclaration(parent)) {
+    return parent.name.text;
+  }
+  const module = parent !== undefined && ts.isModuleBlock(parent) ? parent.parent : undefined;
+  return module !== undefined && ts.isIdentifier(module.name) ? module.name.text : undefined;
+}
+
+function isMemberOf(declaration, pairs) {
+  const name = declaration.name !== undefined && ts.isIdentifier(declaration.name);
+  return pairs.some(
+    ([container, member]) =>
+      name && declaration.name.text === member && containerName(declaration) === container
+  );
+}
+
+const domReaders = new WeakMap();
+
+/** What the rule needs of lib.dom in `program`, or null when the program has no DOM. */
+function domReaderOf(program) {
+  if (!domReaders.has(program)) {
+    domReaders.set(program, createDomReader(program));
+  }
+  return domReaders.get(program);
+}
+
+function createDomReader(program) {
+  const checker = program.getTypeChecker();
+  const interfaceNamed = (file, name) =>
+    file.statements.find(
+      (statement) => ts.isInterfaceDeclaration(statement) && statement.name.text === name
+    );
+  // Found by what it declares rather than by its file name.
+  const file = program
+    .getSourceFiles()
+    .find((f) => program.isSourceFileDefaultLibrary(f) && interfaceNamed(f, 'Node') !== undefined);
+  if (file === undefined) {
+    return null;
+  }
+  const typesOf = (names) =>
+    names
+      .map((name) => interfaceNamed(file, name))
+      .filter((declaration) => declaration !== undefined)
+      .map((declaration) => checker.getTypeAtLocation(declaration.name));
+  const domTypes = typesOf(DOM_INTERFACES);
+  const editedFieldTypes = typesOf(EDITED_FIELD_INTERFACES);
+  const uaShownTypes = typesOf(UA_SHOWN_INTERFACES);
+  const [nodeType] = typesOf(['Node']);
+  const stringType = checker.getStringType();
+
+  // A type parameter is what its constraint lets in.
+  function membersOf(type) {
+    const nonNull = checker.getNonNullableType(type);
+    return (nonNull.isUnion() ? nonNull.types : [nonNull]).map((member) =>
+      (member.flags & ts.TypeFlags.Instantiable) !== 0
+        ? (checker.getBaseConstraintOfType(member) ?? checker.getUnknownType())
+        : member
+    );
+  }
+
+  function isOneOf(type, targets) {
+    return membersOf(type).some(
+      (member) =>
+        (member.flags & (OPAQUE_FLAGS | ts.TypeFlags.Never)) === 0 &&
+        targets.some((target) => checker.isTypeAssignableTo(member, target))
+    );
+  }
+
+  /** True if a value of `type` may be text, or nothing says it is not. */
+  function holdsText(type, depth = 0) {
+    if (depth > MAX_DEPTH || (type.flags & (OPAQUE_FLAGS | ts.TypeFlags.StringLike)) !== 0) {
+      return true;
+    }
+    if (type.isUnionOrIntersection()) {
+      return type.types.some((member) => holdsText(member, depth + 1));
+    }
+    if ((type.flags & ts.TypeFlags.Instantiable) !== 0) {
+      const constraint = checker.getBaseConstraintOfType(type);
+      return (
+        constraint === undefined ||
+        checker.isTypeAssignableTo(stringType, constraint) ||
+        holdsText(constraint, depth + 1)
+      );
+    }
+    return false;
+  }
+
+  /** `holdsText` through the members of objects, as an options bag is read. */
+  function holdsTextWithin(type, depth = 0, seen = new Set()) {
+    if (holdsText(type) || depth > MAX_DEPTH) {
+      return true;
+    }
+    if (seen.has(type)) {
+      return false;
+    }
+    seen.add(type);
+    if (type.isUnionOrIntersection()) {
+      return type.types.some((member) => holdsTextWithin(member, depth + 1, seen));
+    }
+    if (
+      (type.flags & ts.TypeFlags.Object) === 0 ||
+      type.getCallSignatures().length > 0 ||
+      type.getConstructSignatures().length > 0
+    ) {
+      return false;
+    }
+    return [
+      ...checker.getPropertiesOfType(type).map((property) => checker.getTypeOfSymbol(property)),
+      ...checker.getIndexInfosOfType(type).map((info) => info.type),
+    ].some((inner) => holdsTextWithin(inner, depth + 1, seen));
+  }
+
+  return {
+    isDomDeclaration: (declaration) => declaration.getSourceFile() === file,
+    isDomObject: (type) => isOneOf(type, domTypes),
+    isEditedField: (type) =>
+      membersOf(type).every((member) =>
+        editedFieldTypes.some((target) => checker.isTypeAssignableTo(member, target))
+      ),
+    isUaShown: (type) => isOneOf(type, uaShownTypes),
+    holdsNode: (type) => nodeType !== undefined && isOneOf(type, [nodeType]),
+    isWindowMember: (declaration) => containerName(declaration) === 'Window',
+    holdsText,
+    holdsTextWithin,
+  };
+}
+
+const noTextOutsideTemplate = {
+  meta: {
+    type: 'problem',
+    docs: {
+      description:
+        'Text reaches the DOM only through the template: script writes no text to a DOM object and hands it none.',
+    },
+    schema: [],
+    messages: {
+      noTypes: 'yagura/no-text-outside-template needs type information for this file.',
+      outsideTemplate:
+        'Script must not write text to the DOM or hand it to the DOM; show it in the template, where yagura/display-text checks how it was prepared.',
+      outsideDocument:
+        'This hands text to the OS or the user agent to show outside the document, and no door checks it yet; design one that takes a prepared brand before showing text here.',
+    },
+  },
+  create(context) {
+    const services = context.sourceCode.parserServices;
+    const dom =
+      services?.program == null || services.esTreeNodeToTSNodeMap === undefined
+        ? null
+        : domReaderOf(services.program);
+    if (dom === null) {
+      return {
+        Program(node) {
+          context.report({ node, messageId: 'noTypes' });
+        },
+      };
+    }
+    const checker = services.program.getTypeChecker();
+    const tsNode = (node) => services.esTreeNodeToTSNodeMap.get(node);
+    const typeOf = (node) => checker.getTypeAtLocation(tsNode(node));
+
+    function memberName(member) {
+      if (!member.computed) {
+        return member.property.type === 'Identifier' ? member.property.name : undefined;
+      }
+      return member.property.type === 'Literal' && typeof member.property.value === 'string'
+        ? member.property.value
+        : undefined;
+    }
+
+    function checkWrite(member, written, node, { editedFieldException }) {
+      if (member.object.type === 'Super') {
+        return;
+      }
+      if (!dom.holdsText(written)) {
+        return;
+      }
+      const receiver = typeOf(member.object);
+      const isEditedValue =
+        editedFieldException && memberName(member) === 'value' && dom.isEditedField(receiver);
+      if (dom.isDomObject(receiver) && !isEditedValue) {
+        context.report({ node, messageId: 'outsideTemplate' });
+      } else if (dom.isUaShown(receiver)) {
+        context.report({ node, messageId: 'outsideDocument' });
+      }
+    }
+
+    // A destructuring target is written whatever the source holds, so the target's own type
+    // stands for what is written.
+    function checkTargets(pattern) {
+      switch (pattern?.type) {
+        case 'MemberExpression':
+          checkWrite(pattern, typeOf(pattern), pattern, { editedFieldException: false });
+          break;
+        case 'ObjectPattern':
+          pattern.properties.forEach((property) =>
+            checkTargets(property.type === 'RestElement' ? property.argument : property.value)
+          );
+          break;
+        case 'ArrayPattern':
+          pattern.elements.forEach(checkTargets);
+          break;
+        case 'AssignmentPattern':
+          checkTargets(pattern.left);
+          break;
+        case 'RestElement':
+          checkTargets(pattern.argument);
+          break;
+        default:
+          break;
+      }
+    }
+
+    /** The type a spread argument hands each parameter it fills. */
+    function spreadElementType(type) {
+      return checker.getIndexInfoOfType(type, ts.IndexKind.Number)?.type ?? checker.getAnyType();
+    }
+
+    // A parameter declared `any` takes any value and turns it into text (WebIDL).
+    function takesAny(parameter) {
+      const type = checker.getTypeOfSymbol(parameter);
+      const declared = parameter.valueDeclaration;
+      const taken =
+        declared !== undefined && ts.isParameter(declared) && declared.dotDotDotToken !== undefined
+          ? spreadElementType(type)
+          : type;
+      return (taken.isUnion() ? taken.types : [taken]).some(
+        (member) => (member.flags & ts.TypeFlags.Any) !== 0
+      );
+    }
+
+    /** Each argument with the parameter it fills; a tagged template's strings are left out. */
+    function argumentsOf(node, signature) {
+      const parameters = signature?.getParameters() ?? [];
+      const [written, offset] =
+        node.type === 'TaggedTemplateExpression'
+          ? [node.quasi.expressions, 1]
+          : [node.arguments ?? [], 0];
+      return written.map((argument, index) => ({
+        argument,
+        parameter: parameters[Math.min(index + offset, parameters.length - 1)],
+        type:
+          argument.type === 'SpreadElement'
+            ? spreadElementType(typeOf(argument.argument))
+            : typeOf(argument),
+      }));
+    }
+
+    function receiverOf(node) {
+      const callee = node.type === 'TaggedTemplateExpression' ? node.tag : node.callee;
+      return callee.type === 'MemberExpression' && callee.object.type !== 'Super'
+        ? callee.object
+        : undefined;
+    }
+
+    function checkDomCall(node, signature, declaration) {
+      const receiver = receiverOf(node);
+      const onDomObject = receiver !== undefined && dom.isDomObject(typeOf(receiver));
+      const isDom = declaration !== undefined && dom.isDomDeclaration(declaration);
+      // A call whose signature cannot be resolved is judged by its receiver alone.
+      const counted = isDom
+        ? onDomObject ||
+          (ts.isFunctionDeclaration(declaration) && ts.isSourceFile(declaration.parent)) ||
+          dom.isWindowMember(declaration) ||
+          dom.holdsNode(signature.getReturnType())
+        : declaration === undefined && onDomObject;
+      if (!counted) {
+        return;
+      }
+      const handed = argumentsOf(node, signature).find(
+        ({ parameter, type }) =>
+          !(isDom && parameter !== undefined && NAME_PARAMETERS.has(parameter.name)) &&
+          (dom.holdsText(type) || (parameter !== undefined && takesAny(parameter)))
+      );
+      if (handed !== undefined) {
+        context.report({ node: handed.argument, messageId: 'outsideTemplate' });
+      }
+    }
+
+    function isOutsideDocumentCall(node, signature, declaration) {
+      if (OS_SHOWING_DECLARATIONS.test(slashed(declaration.getSourceFile().fileName))) {
+        return true;
+      }
+      if (!dom.isDomDeclaration(declaration)) {
+        return false;
+      }
+      return (
+        isMemberOf(declaration, UA_SHOWING_METHODS) ||
+        (node.type === 'NewExpression' && dom.isUaShown(signature.getReturnType()))
+      );
+    }
+
+    function checkCall(node) {
+      const signature = checker.getResolvedSignature(tsNode(node));
+      const declaration = signature?.getDeclaration();
+      if (declaration !== undefined && isMemberOf(declaration, REFLECTIVE_WRITES)) {
+        const [target] = node.arguments;
+        if (
+          target !== undefined &&
+          target.type !== 'SpreadElement' &&
+          dom.isDomObject(typeOf(target))
+        ) {
+          context.report({ node, messageId: 'outsideTemplate' });
+        }
+        return;
+      }
+      if (
+        declaration !== undefined &&
+        ts.isFunctionDeclaration(declaration) &&
+        declaration.name?.text === SVELTE_RAW_HTML &&
+        SVELTE_DECLARATIONS.test(slashed(declaration.getSourceFile().fileName))
+      ) {
+        context.report({ node, messageId: 'outsideTemplate' });
+        return;
+      }
+      if (declaration !== undefined && isOutsideDocumentCall(node, signature, declaration)) {
+        const handed = argumentsOf(node, signature).find(({ type }) => dom.holdsTextWithin(type));
+        if (handed !== undefined) {
+          context.report({ node: handed.argument, messageId: 'outsideDocument' });
+        }
+        return;
+      }
+      checkDomCall(node, signature, declaration);
+    }
+
+    const visitors = {
+      AssignmentExpression(node) {
+        if (node.left.type === 'MemberExpression') {
+          checkWrite(node.left, typeOf(node.operator === '=' ? node.right : node), node, {
+            editedFieldException: true,
+          });
+        } else {
+          checkTargets(node.left);
+        }
+      },
+      'ForOfStatement, ForInStatement'(node) {
+        if (node.left.type !== 'VariableDeclaration') {
+          checkTargets(node.left);
+        }
+      },
+      CallExpression: checkCall,
+      NewExpression: checkCall,
+      TaggedTemplateExpression: checkCall,
+    };
+    // A Svelte node with no TypeScript counterpart is not script.
+    return Object.fromEntries(
+      Object.entries(visitors).map(([selector, visit]) => [
+        selector,
+        (node) => {
+          if (tsNode(node) !== undefined) {
+            visit(node);
+          }
+        },
+      ])
+    );
   },
 };
 
@@ -1250,5 +1795,6 @@ export default {
   rules: {
     'no-brand-forging': noBrandForging,
     'display-text': displayText,
+    'no-text-outside-template': noTextOutsideTemplate,
   },
 };

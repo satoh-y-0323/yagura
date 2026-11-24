@@ -40,90 +40,6 @@ const BRANDS = [
   },
 ];
 
-// Every template's shown text must be one of the brands.
-const DISPLAY_TEXT_TEMPLATES = ['src/**/*.svelte'];
-
-/** The rules that together keep a brand from being claimed for text no maker prepared. */
-export const BRAND_GUARD_RULES = [
-  'yagura/no-brand-forging',
-  'yagura/display-text',
-  '@typescript-eslint/ban-ts-comment',
-  '@typescript-eslint/no-unsafe-assignment',
-  '@typescript-eslint/no-unsafe-argument',
-  '@typescript-eslint/no-unsafe-return',
-  '@typescript-eslint/no-unsafe-call',
-  '@typescript-eslint/no-unsafe-member-access',
-  '@typescript-eslint/no-explicit-any',
-  '@typescript-eslint/consistent-type-assertions',
-];
-
-// Text reaching the DOM goes through Svelte's escaping; `{@html}` is refused by svelte/no-at-html-tags.
-const RAW_HTML_MESSAGE = 'Render text through Svelte expressions, not raw HTML.';
-const NO_RAW_HTML = [
-  {
-    selector: 'MemberExpression[property.name=/^(innerHTML|outerHTML)$/]',
-    message: RAW_HTML_MESSAGE,
-  },
-  {
-    selector: 'MemberExpression[property.value=/^(innerHTML|outerHTML)$/]',
-    message: RAW_HTML_MESSAGE,
-  },
-  {
-    selector: "CallExpression[callee.property.name='insertAdjacentHTML']",
-    message: RAW_HTML_MESSAGE,
-  },
-  {
-    selector: 'CallExpression[callee.property.name=/^(createContextualFragment|setHTMLUnsafe)$/]',
-    message: RAW_HTML_MESSAGE,
-  },
-  {
-    selector:
-      "CallExpression[callee.object.name='document'][callee.property.name=/^(write|writeln)$/]",
-    message: RAW_HTML_MESSAGE,
-  },
-  {
-    selector: "SvelteAttribute[key.name='srcdoc']",
-    message: RAW_HTML_MESSAGE,
-  },
-  {
-    selector: "SvelteDirective[kind='Binding'][key.name.name=/^(innerHTML|outerHTML)$/]",
-    message: RAW_HTML_MESSAGE,
-  },
-];
-
-// The template is the one place text is drawn, so yagura/display-text sees every shown value.
-const DOM_TEXT_MESSAGE =
-  'Draw text through the template, where its type is checked, not by writing it to the DOM.';
-const DOM_TEXT_PROPERTIES = '/^(textContent|innerText|outerText|nodeValue|title|aria[A-Z]\\w*)$/';
-const NO_DOM_TEXT = [
-  {
-    selector: `AssignmentExpression > MemberExpression.left[property.name=${DOM_TEXT_PROPERTIES}]`,
-    message: DOM_TEXT_MESSAGE,
-  },
-  {
-    selector: `AssignmentExpression > MemberExpression.left[property.value=${DOM_TEXT_PROPERTIES}]`,
-    message: DOM_TEXT_MESSAGE,
-  },
-  {
-    selector:
-      'CallExpression[callee.property.name=/^(setAttribute|setAttributeNS|insertAdjacentText|createTextNode)$/]',
-    message: DOM_TEXT_MESSAGE,
-  },
-  {
-    selector: 'CallExpression[callee.name=/^(alert|confirm|prompt)$/]',
-    message: DOM_TEXT_MESSAGE,
-  },
-  {
-    selector:
-      'CallExpression[callee.object.name=/^(window|globalThis|self)$/][callee.property.name=/^(alert|confirm|prompt)$/]',
-    message: DOM_TEXT_MESSAGE,
-  },
-  {
-    selector: "SvelteDirective[kind='Binding'][key.name.name=/^(textContent|innerText)$/]",
-    message: DOM_TEXT_MESSAGE,
-  },
-];
-
 // UI text is English and lives in i18n/messages-en.ts; comments are not UI text.
 const JAPANESE = '[\\u3040-\\u30ff\\u4e00-\\u9fff]';
 const JAPANESE_MESSAGE = 'UI text is English; put it in i18n/messages-en.ts.';
@@ -253,14 +169,7 @@ const NO_DYNAMIC_INVOKE = [
   },
 ];
 
-/** The messages of the selectors that keep text from reaching the screen past the template. */
-export const DISPLAY_SINK_MESSAGES = [
-  ...new Set([...NO_RAW_HTML, ...NO_DOM_TEXT, ...NO_TITLE_ATTRIBUTE].map(({ message }) => message)),
-];
-
 const COMMAND_DOOR_SYNTAX = [
-  ...NO_RAW_HTML,
-  ...NO_DOM_TEXT,
   ...NO_JAPANESE_TEXT,
   ...NO_GLOBAL_KEYDOWN,
   ...NO_BARE_LABELLED_BUTTON,
@@ -268,6 +177,40 @@ const COMMAND_DOOR_SYNTAX = [
   ...NO_TITLE_ATTRIBUTE,
 ];
 const SOURCE_SYNTAX = [...COMMAND_DOOR_SYNTAX, ...NO_DYNAMIC_INVOKE];
+
+/**
+ * The display guards. Text reaches the DOM only through the template: yagura/display-text
+ * checks what it shows and svelte/no-at-html-tags refuses `{@html}`, while script writes and
+ * hands the DOM no text (yagura/no-text-outside-template). The brand rules keep a brand from
+ * being claimed for text no maker prepared, and the `any` rules keep a value from passing
+ * them untyped.
+ *
+ * The block comes last, so no earlier block can loosen a guard. A guard that takes options
+ * spells them out: an entry of a severity alone keeps the options an earlier block gave.
+ */
+export const DISPLAY_GUARDS = {
+  name: 'yagura/display-guards',
+  files: PRODUCTION_SOURCES,
+  ignores: [...TEST_SOURCES, 'src/test-utils/**'],
+  plugins: { yagura },
+  rules: {
+    'yagura/no-brand-forging': ['error', { brands: BRANDS }],
+    'yagura/display-text': ['error', { brands: BRANDS }],
+    'yagura/no-text-outside-template': ['error'],
+    'svelte/no-at-html-tags': ['error'],
+    // A silenced type error is a brand claimed with no check, whatever the reason given.
+    '@typescript-eslint/ban-ts-comment': [
+      'error',
+      { 'ts-expect-error': true, 'ts-ignore': true, 'ts-nocheck': true, 'ts-check': false },
+    ],
+    '@typescript-eslint/no-unsafe-assignment': ['error'],
+    '@typescript-eslint/no-unsafe-argument': ['error'],
+    '@typescript-eslint/no-unsafe-return': ['error'],
+    '@typescript-eslint/no-unsafe-call': ['error'],
+    '@typescript-eslint/no-unsafe-member-access': ['error', { allowOptionalChaining: false }],
+    '@typescript-eslint/no-explicit-any': ['error', { fixToUnknown: false, ignoreRestArgs: false }],
+  },
+};
 
 export default [
   js.configs.recommended,
@@ -303,26 +246,6 @@ export default [
     // The local plugin is plain JavaScript with no types to read; its own lint keeps the rest.
     ...tseslint.configs.disableTypeChecked,
     files: [LOCAL_PLUGIN],
-  },
-  {
-    files: PRODUCTION_SOURCES,
-    ignores: [...TEST_SOURCES, 'src/test-utils/**'],
-    plugins: { yagura },
-    rules: {
-      'yagura/no-brand-forging': ['error', { brands: BRANDS }],
-      // A silenced type error is a brand claimed with no check, whatever the reason given.
-      '@typescript-eslint/ban-ts-comment': [
-        'error',
-        { 'ts-expect-error': true, 'ts-ignore': true, 'ts-nocheck': true },
-      ],
-    },
-  },
-  {
-    files: DISPLAY_TEXT_TEMPLATES,
-    plugins: { yagura },
-    rules: {
-      'yagura/display-text': ['error', { brands: BRANDS }],
-    },
   },
   {
     files: ['**/*.ts', '**/*.svelte'],
@@ -367,8 +290,6 @@ export default [
     rules: {
       'no-restricted-syntax': [
         'error',
-        ...NO_RAW_HTML,
-        ...NO_DOM_TEXT,
         ...NO_JAPANESE_TEXT,
         ...NO_BARE_LABELLED_BUTTON,
         ...NO_TEXT_SUBSTITUTION,
@@ -505,6 +426,7 @@ export default [
       ],
     },
   },
+  DISPLAY_GUARDS,
   {
     ignores: [
       'dist/**',
