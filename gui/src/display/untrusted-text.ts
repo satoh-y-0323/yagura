@@ -42,18 +42,22 @@ export const MAX_BLOCK_TEXT_CHARS = 16 * 1024;
 export const EXTERNAL_TEXT_MAX_CODE_POINTS = 200;
 
 const LINE_SPACE_CLASS = String.raw`\p{Cc}\p{Zl}\p{Zp}`;
-const HIDDEN_CLASS = String.raw`${LINE_SPACE_CLASS}\p{Cf}\p{Default_Ignorable_Code_Point}`;
+// U+FFFC only holds the place of an embedded object and has no ink of its own:
+// WebKit on macOS and on Linux draws nothing for it.
+const OBJECT_REPLACEMENT = String.raw`￼`;
+const HIDDEN_CLASS = String.raw`${LINE_SPACE_CLASS}\p{Cf}\p{Default_Ignorable_Code_Point}${OBJECT_REPLACEMENT}`;
 // `Mc` is left out: a spacing mark takes width and ink of its own.
 const MARK_CLASS = String.raw`\p{Mn}\p{Me}`;
 
 /**
  * The characters written out rather than drawn, taken from Unicode properties:
- * controls, format characters, line and paragraph separators, and every default
- * ignorable code point (group 1). They break a line, reorder what is drawn, or
- * show nothing, so removing them would make one value look like another. A
- * nonspacing or enclosing mark is matched too, and written out where it has no
- * base (a defective combining sequence, Unicode D57), since it would draw onto
- * whatever the page puts before it.
+ * controls, format characters, line and paragraph separators, every default
+ * ignorable code point, and U+FFFC (group 1). They break a line, reorder what is
+ * drawn, or show nothing, so removing them would make one value look like
+ * another. A nonspacing or enclosing mark is matched too, and written out
+ * unless its base and every mark between are drawn: with no base (a defective
+ * combining sequence, Unicode D57) it would draw onto whatever the page puts
+ * before it, and after a written-out character onto the escape's closing brace.
  */
 const WRITTEN_OUT_CHARS = new RegExp(`([${HIDDEN_CLASS}])|[${MARK_CLASS}]`, 'gu');
 
@@ -217,30 +221,35 @@ type KeepsChar = (char: string, offset: number, text: string) => boolean;
 /**
  * The one test of whether a character matched in `text` is written out: a
  * listed (hidden) one that `keeps` does not keep, or a nonspacing or enclosing
- * mark with no base. Marks look back past every mark, drawn or written out,
- * since the combining sequence is made by the characters themselves. Matches
- * must come in order of offset: each run of marks is then walked back once.
+ * mark whose base or any mark between is not drawn. A mark `keeps` keeps counts
+ * as drawn between; a control it keeps is neither a base nor a mark. Matches
+ * must come in order of offset: each run of marks is then walked back once, to
+ * the last match, whose outcome is carried as whether it ends on a drawn base.
  */
 function writtenOutTest(
   text: string,
   keeps: KeepsChar
 ): (char: string, listed: boolean, offset: number) => boolean {
-  let knownEnd = -1;
-  let knownHasBase = false;
-  const hasBase = (char: string, offset: number): boolean => {
+  let lastEnd = -1;
+  let lastOnDrawnBase = false;
+  // The walk crosses only unmatched marks: spacing marks, which are always drawn.
+  const onDrawnBase = (offset: number): boolean => {
     let at = offset;
     let before = codePointBefore(text, at);
-    while (at !== knownEnd && ANY_MARK.test(before)) {
+    while (at !== lastEnd && ANY_MARK.test(before)) {
       at -= before.length;
       before = codePointBefore(text, at);
     }
-    knownHasBase = at === knownEnd ? knownHasBase : BASE_CHAR.test(before);
-    knownEnd = offset + char.length;
-    return knownHasBase;
+    return at === lastEnd ? lastOnDrawnBase : BASE_CHAR.test(before);
   };
-  return (char, listed, offset) =>
-    (listed && !keeps(char, offset, text)) ||
-    ((!listed || NONSPACING_OR_ENCLOSING_MARK.test(char)) && !hasBase(char, offset));
+  return (char, listed, offset) => {
+    const mark = NONSPACING_OR_ENCLOSING_MARK.test(char);
+    const writesOut =
+      (listed && !keeps(char, offset, text)) || ((!listed || mark) && !onDrawnBase(offset));
+    lastEnd = offset + char.length;
+    lastOnDrawnBase = !writesOut && (mark || BASE_CHAR.test(char));
+    return writesOut;
+  };
 }
 
 /**
@@ -271,8 +280,8 @@ function formatMultilineText(
 
 /**
  * One line to read: each control or separator becomes one space, every other
- * written-out character but an emoji shape, and every mark with no base, is
- * written out, judged on `value` as given. Only then is the line capped at
+ * written-out character but an emoji shape, and every mark not on a drawn base,
+ * is written out, judged on `value` as given. Only then is the line capped at
  * `maxChars` code points, so a line that grows by writing out still fits its
  * place. A cut moves before a written-out character or a code point it would
  * split, and is marked with `…` after the cap.
@@ -299,8 +308,8 @@ function prepareLine(value: string, maxChars: number): DisplayLine {
 /**
  * Prepares one line of a label or of prose for display: each control or
  * separator becomes one space, every invisible character but an emoji shape is
- * written out (`\u{200C}`), and so is a combining mark with no base before it
- * (at the start, or after a control or an invisible character). The result is
+ * written out (`\u{200C}`), and so is a combining mark not on a drawn base (at
+ * the start, after a control, or after a written-out character). The result is
  * capped at {@link MAX_DISPLAY_FIELD_CHARS} code points after writing out. Never use it
  * for a value that points at a place (a path, a room name taken from a path):
  * use {@link formatPathForDisplay}.
@@ -330,7 +339,7 @@ export function formatApprovalBody(value: string): DisplayBlock {
  * from a path) for display. The daemon cannot refuse hidden characters in
  * such a value, and removing them would make it look like another place while
  * drawing them could reorder it, so every one, line breaks and every space but
- * U+0020 included, is written out. Capped at {@link MAX_DISPLAY_FIELD_CHARS}
+ * U+0020 included, is written out, and so is a mark after one. Capped at {@link MAX_DISPLAY_FIELD_CHARS}
  * code points before escaping.
  * @param value the path or path-derived name to display
  */

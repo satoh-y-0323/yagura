@@ -651,7 +651,8 @@ describe('the restore candidates', () => {
 
 /**
  * Characters a path or an approval body writes out: the label set the daemon
- * refuses, plus every default ignorable code point (ZWNJ and ZWJ included).
+ * refuses, every default ignorable code point (ZWNJ and ZWJ included), and
+ * U+FFFC, which a web view may draw as nothing.
  */
 const HIDDEN_WRITTEN_OUT = [
   '\u00AD',
@@ -682,6 +683,7 @@ const HIDDEN_WRITTEN_OUT = [
   '\u3164',
   '\uFE0F',
   '\uFEFF',
+  '\uFFFC',
   '\u{E0041}',
 ];
 
@@ -691,7 +693,7 @@ function escapeOf(char: string): string {
 }
 
 describe('sanitizeForDisplay', () => {
-  it('makes each control one space, writes out every invisible character but an emoji shape, and caps after writing out', () => {
+  it('makes each control one space, writes out every invisible character but an emoji shape and every mark not on a drawn base, and caps after writing out', () => {
     expect(sanitizeForDisplay('a\nb')).toBe('a b');
     expect(sanitizeForDisplay('a\tb')).toBe('a b');
     expect(sanitizeForDisplay('a\u0000b\u007fc\u009fd\u2028e\u2029f')).toBe('a b c d e f');
@@ -719,6 +721,9 @@ describe('sanitizeForDisplay', () => {
     expect(sanitizeForDisplay('\u0301\u0301a')).toBe('\\u{0301}\\u{0301}a');
     expect(sanitizeForDisplay('a\u0007\u0301b')).toBe('a \\u{0301}b');
     expect(sanitizeForDisplay('a\u200B\u0301b')).toBe('a\\u{200B}\\u{0301}b');
+    // A mark after a written-out character would draw onto the escape's closing brace.
+    expect(sanitizeForDisplay('a\uFFFC\u0301')).toBe('a\\u{FFFC}\\u{0301}');
+    expect(sanitizeForDisplay('e\uFE0E\u0301')).toBe('e\\u{FE0E}\\u{0301}');
     expect(sanitizeForDisplay('e\u0301')).toBe('e\u0301');
     expect(sanitizeForDisplay('a \u0301')).toBe('a \u0301');
     expect(foldExternalText(' \u0301x')).toBe('\\u{0301}x');
@@ -745,10 +750,11 @@ describe('sanitizeForDisplay', () => {
 });
 
 describe('formatApprovalBody', () => {
-  it('keeps the lines of a body whole', () => {
+  it('keeps the lines of a body whole and writes out a mark that starts a line', () => {
     expect(formatApprovalBody('command: sh -c "rm -rf x"\ncwd: /work\nfor: handoff')).toBe(
       'command: sh -c "rm -rf x"\ncwd: /work\nfor: handoff'
     );
+    expect(formatApprovalBody('a\n\u0301')).toBe('a\n\\u{0301}');
   });
 
   it('writes other control characters out instead of removing them', () => {
@@ -778,13 +784,14 @@ describe('formatApprovalBody', () => {
 });
 
 describe('formatPathForDisplay', () => {
-  it('writes every hidden character and line break out, and cuts before escaping', () => {
+  it('writes every hidden character, line break and look-alike space out, and a mark after one, and cuts before escaping', () => {
     for (const hidden of HIDDEN_WRITTEN_OUT) {
       expect(formatPathForDisplay(`C:\\work\\a${hidden}b`)).toBe(`C:\\work\\a${escapeOf(hidden)}b`);
     }
     expect(formatPathForDisplay('C:\\re\u0000po\n\t')).toBe('C:\\re\\u{0000}po\\u{000A}\\u{0009}');
     expect(formatPathForDisplay('C:\\work\\yagura')).toBe('C:\\work\\yagura');
     expect(formatPathForDisplay('C:\\a\u00A0b')).toBe('C:\\a\\u{00A0}b');
+    expect(formatPathForDisplay('C:\\a\u00A0\u0301')).toBe('C:\\a\\u{00A0}\\u{0301}');
     expect(formatPathForDisplay('C:\\a\u3000b')).toBe('C:\\a\\u{3000}b');
     expect(formatPathForDisplay('C:\\a\u2800b')).toBe('C:\\a\\u{2800}b');
     expect(formatPathForDisplay('C:\\a b')).toBe('C:\\a b');
@@ -863,12 +870,12 @@ describe('formatChatBody', () => {
     expect(formatChatBody('a\n\u0301b')).toBe('a\n\\u{0301}b');
   });
 
-  it('writes a variation selector out unless it follows a pictograph or completes a keycap', () => {
+  it('writes a variation selector out unless it follows a pictograph or completes a keycap, and the mark after one it writes out', () => {
     expect(formatChatBody('1\uFE0F')).toBe('1\\u{FE0F}');
     expect(formatChatBody('#\uFE0F')).toBe('#\\u{FE0F}');
     expect(formatChatBody('*\uFE0E')).toBe('*\\u{FE0E}');
-    expect(formatChatBody('1\uFE0E\u20E3')).toBe('1\\u{FE0E}\u20E3');
-    expect(formatChatBody('1\uFE0F\uFE0F\u20E3')).toBe('1\\u{FE0F}\\u{FE0F}\u20E3');
+    expect(formatChatBody('1\uFE0E\u20E3')).toBe('1\\u{FE0E}\\u{20E3}');
+    expect(formatChatBody('1\uFE0F\uFE0F\u20E3')).toBe('1\\u{FE0F}\\u{FE0F}\\u{20E3}');
     expect(formatChatBody('\u26A0\uFE0F\uFE0F')).toBe('\u26A0\uFE0F\\u{FE0F}');
   });
 
