@@ -826,12 +826,22 @@ async fn an_older_hook_request_takes_nothing_but_still_records_the_status_and_th
 
 // --- the door's own end, against a stand-in daemon ---------------------------------------
 
-/// A stand-in for a daemon at `instance`'s endpoint: it answers the first frame of the one
-/// door that connects with `answer`, then records what else the door sends until it closes.
-/// Binding claims the endpoint, so the door can reach nothing else.
+/// What a stand-in daemon does with one frame the door sends.
+enum Reply {
+    /// Answers the frame with this message.
+    Answer(serde_json::Value),
+    /// Leaves the frame unanswered and reads on.
+    Silent,
+    /// Closes the connection without answering the frame.
+    Close,
+}
+
+/// A stand-in for a daemon at `instance`'s endpoint: it meets each frame the one door that
+/// connects sends with the next of `replies`, then records what else the door sends until
+/// it closes. Binding claims the endpoint, so the door can reach nothing else.
 async fn stand_in_daemon(
     instance: &str,
-    answer: serde_json::Value,
+    replies: Vec<Reply>,
 ) -> tokio::task::JoinHandle<Vec<serde_json::Value>> {
     use tokio::io::AsyncWriteExt;
 
@@ -839,17 +849,24 @@ async fn stand_in_daemon(
     tokio::spawn(async move {
         let mut conn = accept.await;
         let mut frames = Vec::new();
-        let Some(first) = read_json_frame(&mut conn).await else {
-            return frames;
-        };
-        frames.push(first);
-        let body = serde_json::to_vec(&answer).unwrap();
-        conn.write_all(&yagura_protocol::frame_encode(&body))
-            .await
-            .expect("answer the door");
-        conn.flush().await.expect("answer the door");
+        let mut replies = replies.into_iter();
         while let Some(frame) = read_json_frame(&mut conn).await {
             frames.push(frame);
+            match replies.next().unwrap_or(Reply::Silent) {
+                Reply::Answer(answer) => {
+                    let body = serde_json::to_vec(&answer).unwrap();
+                    let sent = conn
+                        .write_all(&yagura_protocol::frame_encode(&body))
+                        .await
+                        .and(conn.flush().await);
+                    // A door gone before its answer sent all it will; its frames say so.
+                    if sent.is_err() {
+                        return frames;
+                    }
+                }
+                Reply::Silent => {}
+                Reply::Close => return frames,
+            }
         }
         frames
     })
@@ -869,15 +886,15 @@ fn stand_in_doors() -> [(Vec<&'static str>, serde_json::Value); 2] {
     ]
 }
 
-/// Runs the door `args` against a stand-in daemon answering with `answer`; returns the
-/// door's output and every frame it sent.
+/// Runs the door `args` against a stand-in daemon meeting its frames with `replies`; returns
+/// the door's output and every frame it sent.
 async fn run_against_stand_in(
     args: &[&str],
-    answer: serde_json::Value,
+    replies: Vec<Reply>,
 ) -> (Output, Vec<serde_json::Value>) {
     let instance = unique_instance();
     let bases = TempDir::new("yagura-door", "stand-in");
-    let frames = stand_in_daemon(&instance, answer).await;
+    let frames = stand_in_daemon(&instance, replies).await;
     let command = door_command(args, &instance, &bases, Some(("w-stand-in", VALID_TOKEN)));
     let (output, _) = tokio::task::spawn_blocking(move || run_with_input(command, b"{}".to_vec()))
         .await
@@ -906,7 +923,7 @@ async fn a_door_left_less_time_than_its_margin_prints_nothing_and_never_says_it_
             "exit_code": 0,
             "hook_timeout_sec": 0,
         });
-        let (output, frames) = run_against_stand_in(&args, answer).await;
+        let (output, frames) = run_against_stand_in(&args, vec![Reply::Answer(answer)]).await;
         assert_eq!(
             frames.first().map(|read| (&read["type"], &read["door"])),
             Some((&serde_json::json!("door_read"), &door)),
@@ -971,7 +988,7 @@ async fn a_door_whose_daemon_names_no_deadline_prints_then_says_so_and_ends_with
             "stream": "stdout",
             "exit_code": 0,
         });
-        let (output, frames) = run_against_stand_in(&args, answer).await;
+        let (output, frames) = run_against_stand_in(&args, vec![Reply::Answer(answer)]).await;
         assert_eq!(
             output.status.code(),
             Some(0),
@@ -1001,7 +1018,7 @@ async fn a_door_whose_daemon_refuses_its_read_by_name_prints_nothing_and_exits_z
             "code": "unknown_type",
             "message": "unknown message type",
         });
-        let (output, frames) = run_against_stand_in(&args, answer).await;
+        let (output, frames) = run_against_stand_in(&args, vec![Reply::Answer(answer)]).await;
         assert!(
             output.status.code() == Some(0) && output.stdout.is_empty(),
             "{args:?}: {}",
@@ -1009,6 +1026,56 @@ async fn a_door_whose_daemon_refuses_its_read_by_name_prints_nothing_and_exits_z
         );
         assert_eq!(frame_types(&frames), ["door_read"], "{args:?}");
     }
+}
+
+/// A status door reads its daemon's answer up to the `pong` to the `ping` it sends after
+/// its event: a refusal before the `pong` is read past, and a daemon that closes before
+/// the `pong` ends the door with a failure, whatever it answered before.
+#[tokio::test]
+async fn a_status_door_ends_with_the_pong_to_its_ping_or_fails_without_it() {
+    let refused = || {
+        Reply::Answer(serde_json::json!({
+            "type": "error",
+            "code": "auth_failed",
+            "message": "the window's credentials are not valid",
+        }))
+    };
+    let pong = || Reply::Answer(serde_json::json!({ "type": "pong" }));
+    let args = ["--emit-status", "waiting_input", "--source", "hook"];
+    let mut wrong = Vec::new();
+    for (case, replies, ends_with_pong) in [
+        (
+            "an event met with a pong",
+            vec![Reply::Silent, pong()],
+            true,
+        ),
+        (
+            "closed before the pong",
+            vec![Reply::Silent, Reply::Close],
+            false,
+        ),
+        ("a refusal then a pong", vec![refused(), pong()], true),
+        (
+            "a refusal then closed",
+            vec![refused(), Reply::Close],
+            false,
+        ),
+    ] {
+        let (output, frames) = run_against_stand_in(&args, replies).await;
+        let sent = frame_types(&frames);
+        let succeeded = output.status.code() == Some(0);
+        if sent != ["status_event", "ping"] || succeeded != ends_with_pong {
+            wrong.push(format!(
+                "{case}: sent {sent:?}, must exit 0 only with the pong ({ends_with_pong}); {}",
+                describe(&output)
+            ));
+        }
+    }
+    assert!(
+        wrong.is_empty(),
+        "a status door sends its event, then a ping, and ends with 0 only on the pong:\n{}",
+        wrong.join("\n")
+    );
 }
 
 /// The time a window's doors are named is the one its CLI was given at the window's open:

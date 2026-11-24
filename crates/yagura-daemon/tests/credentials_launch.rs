@@ -388,8 +388,8 @@ async fn the_windows_own_hook_reports_into_it() {
     // the nested one is never handed `--credentials`; that the environment holds
     // neither variable is measured on the child itself by
     // `a_launch_windows_child_has_no_window_credentials_even_when_the_daemon_inherited_them`.
-    // The door's report goes over a connection of its own with no answer, so no
-    // later event of this daemon is ordered after it.
+    // A door without a window ends before it reaches the daemon, so no later
+    // event of this daemon is ordered after it.
     assert_eq!(
         nested["code"], 0,
         "a door without a window exits 0: {nested}"
@@ -686,7 +686,7 @@ async fn a_launch_profile_with_settings_that_ignore_the_credentials_file_still_r
     )
     .await;
     let emitted = logged(&logs, "emit_start").expect("the report was made");
-    // `--emit-status` does not read the daemon's reply, so code 0 only says the report was sent.
+    // `--emit-status` ends with 0 only on the daemon's pong, so the report has been handled.
     assert_eq!(emitted["code"], 0, "{emitted}");
 }
 

@@ -997,10 +997,16 @@ fn drain_hook_stdin() -> std::sync::mpsc::Receiver<()> {
 }
 
 /// Connects to `endpoint` and sends one `StatusEvent` (the `--emit-status`
-/// helper). No reply is expected; failing to reach a daemon is an error, so a
-/// hook that reports into nothing does not look successful.
+/// helper), authenticating as the window `credentials` name.
 ///
-/// The event authenticates as the window `credentials` name.
+/// A `Ping` follows the event and the door ends with the `Pong`: the daemon
+/// handles a connection's frames in order, so the event has been handled
+/// before the door ends. A refusal of the event is read past.
+///
+/// # Errors
+///
+/// Fails when no daemon is reached, when the connection ends before the
+/// `Pong`, and when no `Pong` comes within [`DOOR_ANSWER_TIMEOUT`].
 async fn send_status_event(
     ipc: &PlatformIpc,
     endpoint: &str,
@@ -1012,21 +1018,28 @@ async fn send_status_event(
     let mut client = ipc.connect(endpoint).await.with_context(|| {
         format!("failed to connect to the daemon endpoint {endpoint} for --emit-status")
     })?;
-    let frame = frame_encode(&encode_client_message(&ClientMessage::StatusEvent {
+    let event = ClientMessage::StatusEvent {
         source,
         status,
         window_id: Some(window_id),
         token,
-    }));
-    client
-        .write_all(&frame)
+    };
+    send_hook_request(&mut client, &event).await?;
+    send_hook_request(&mut client, &ClientMessage::Ping).await?;
+    tokio::time::timeout(DOOR_ANSWER_TIMEOUT, read_until_pong(&mut client))
         .await
-        .context("failed to send the status event")?;
-    client
-        .flush()
-        .await
-        .context("failed to flush the status event")?;
-    Ok(())
+        .context("the daemon did not answer")?
+}
+
+/// Reads `client` up to the daemon's `Pong`, past any other answer.
+async fn read_until_pong(client: &mut ClientConnection) -> Result<()> {
+    loop {
+        match read_one_daemon_message(client).await {
+            Some(DaemonMessage::Pong) => return Ok(()),
+            Some(_) => {}
+            None => anyhow::bail!("the daemon ended the connection before it answered"),
+        }
+    }
 }
 
 /// Runs one of the commands a CLI's hook uses to reach its window's inbox,
