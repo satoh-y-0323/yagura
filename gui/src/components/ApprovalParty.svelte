@@ -2,8 +2,9 @@
   /**
    * One side of an approval request as a card: who asked, or what it would act
    * on. A window's name is always drawn with its mark, which its name cannot
-   * forge; a client that is no window shows an icon instead, and a window that
-   * does not exist yet an empty card.
+   * forge; a client that is no window shows an icon instead. What a request
+   * names in place of a window (one not opened yet, or a chat room) has no mark,
+   * only the words or the room's name its heading names it by.
    *
    * What the daemon vouches for (the mark, the profile and the status) comes
    * before the name in the markup, and the mark in the card's label, so it is

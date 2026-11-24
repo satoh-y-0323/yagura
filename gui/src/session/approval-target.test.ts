@@ -9,7 +9,7 @@ import { describe, it, expect } from 'vitest';
 import { approvalFactsOf, describeUntargeted } from './approval-target';
 import { formatApprovalBody, sanitizeForDisplay } from '../display/untrusted-text';
 import type { ApprovalRequest, WindowStatus } from '../ipc/session-boundary';
-import type { HeadlineParty } from './approval-types';
+import { partyRuns, type HeadlineParty } from './approval-types';
 import { describeStatus, dialogs } from '../ui-messages';
 
 const REQUESTER_MARK = { cells: 0b010_101_011_100_110, hue: 3 };
@@ -52,14 +52,9 @@ function external(kind: 'external' | 'unknown'): ApprovalRequest['requester'] {
 
 /** The text a party reads as in a sentence. */
 function textOf(party: HeadlineParty): string {
-  switch (party.kind) {
-    case 'name':
-      return party.name;
-    case 'words':
-      return party.words;
-    case 'room':
-      return party.parts.sentence;
-  }
+  return partyRuns(party)
+    .map((run) => run.text)
+    .join('');
 }
 
 /** A handoff that opens its window from a profile, so it carries no target. */
@@ -91,6 +86,11 @@ describe('describeUntargeted', () => {
     expect(describeUntargeted(spaced)).toMatchObject({
       kind: 'room',
       parts: { name: 'Ma\\u{00A0}in' },
+    });
+    const padded = request({ room: { room_id: 'p', name: ' Main ' } });
+    expect(describeUntargeted(padded)).toMatchObject({
+      kind: 'room',
+      parts: { name: '\\u{0020}Main\\u{0020}' },
     });
   });
 

@@ -3,7 +3,7 @@
 import { messagesEn, type HeadlineWords, type TitleWords } from './messages-en';
 import type { UiText, UiTextOf } from '../display/ui-text';
 import type { DisplayBlock, DisplayLine } from '../display/untrusted-text';
-import type { HeadlineParts, HeadlineParty } from '../session/approval-types';
+import { partyRuns, type HeadlineParts, type HeadlineParty } from '../session/approval-types';
 
 /**
  * The shape of a locale, derived from the English resource: a second
@@ -64,19 +64,10 @@ export function headlineParts(
   return { from, verb, tool, toolLink, to, sentence };
 }
 
-function partyText(party: HeadlineParty): UiText | DisplayLine {
-  switch (party.kind) {
-    case 'name':
-      return party.name;
-    case 'words':
-      return party.words;
-    case 'room':
-      return party.parts.sentence;
-    default: {
-      const unknown: never = party;
-      return unknown;
-    }
-  }
+function partyText(party: HeadlineParty): string {
+  return partyRuns(party)
+    .map((run) => run.text)
+    .join('');
 }
 
 /** True when a parameter of type `P` accepts text that was not prepared for display. */

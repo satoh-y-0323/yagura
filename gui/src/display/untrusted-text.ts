@@ -44,7 +44,7 @@ export const EXTERNAL_TEXT_MAX_CODE_POINTS = 200;
 const LINE_SPACE_CLASS = String.raw`\p{Cc}\p{Zl}\p{Zp}`;
 // U+FFFC only holds the place of an embedded object and has no ink of its own:
 // WebKit on macOS and on Linux draws nothing for it.
-const OBJECT_REPLACEMENT = String.raw`￼`;
+const OBJECT_REPLACEMENT = '￼';
 const HIDDEN_CLASS = String.raw`${LINE_SPACE_CLASS}\p{Cf}\p{Default_Ignorable_Code_Point}${OBJECT_REPLACEMENT}`;
 // `Mc` is left out: a spacing mark takes width and ink of its own.
 const MARK_CLASS = String.raw`\p{Mn}\p{Me}`;
@@ -63,11 +63,12 @@ const WRITTEN_OUT_CHARS = new RegExp(`([${HIDDEN_CLASS}])|[${MARK_CLASS}]`, 'gu'
 
 /**
  * The characters written out in a value that points at a place: those of
- * {@link WRITTEN_OUT_CHARS}, every space but U+0020, and U+2800, which all look
- * like a plain space and would make one place look like another.
+ * {@link WRITTEN_OUT_CHARS}, every space, and U+2800, which all look like a
+ * plain space and would make one place look like another. Of these,
+ * {@link keepsInnerSpace} keeps each U+0020 that has other characters on both sides.
  */
 const PLACE_WRITTEN_OUT_CHARS = new RegExp(
-  String.raw`(?! )([${HIDDEN_CLASS}\p{Zs}\u2800])|[${MARK_CLASS}]`,
+  String.raw`([${HIDDEN_CLASS}\p{Zs}\u2800])|[${MARK_CLASS}]`,
   'gu'
 );
 
@@ -338,9 +339,10 @@ export function formatApprovalBody(value: string): DisplayBlock {
  * Prepares one line that points at a place (a path, or a room name taken
  * from a path) for display. The daemon cannot refuse hidden characters in
  * such a value, and removing them would make it look like another place while
- * drawing them could reorder it, so every one, line breaks and every space but
- * U+0020 included, is written out, and so is a mark after one. Capped at {@link MAX_DISPLAY_FIELD_CHARS}
- * code points before escaping.
+ * drawing them could reorder it, so every one is written out, and so is a mark
+ * after one. That takes in line breaks, every space but U+0020, and a U+0020
+ * the value starts or ends with. Capped at {@link MAX_DISPLAY_FIELD_CHARS} code
+ * points before escaping.
  * @param value the path or path-derived name to display
  */
 export function formatPathForDisplay(value: string): DisplayLine {
@@ -348,7 +350,38 @@ export function formatPathForDisplay(value: string): DisplayLine {
 }
 
 function formatPlace(value: string, maxChars: number): string {
-  return formatMultilineText(value, maxChars, NO_CONTROLS, shapesNothing, PLACE_WRITTEN_OUT_CHARS);
+  return formatMultilineText(
+    value,
+    maxChars,
+    NO_CONTROLS,
+    keepsInnerSpace(),
+    PLACE_WRITTEN_OUT_CHARS
+  );
+}
+
+/**
+ * Keeps each U+0020 of a place but those it starts or ends with: with no quotes
+ * around the value, those show as nothing, so ` main` would look like `main`.
+ * The ends are measured once for each text it is asked about.
+ */
+function keepsInnerSpace(): KeepsChar {
+  let measured: string | undefined;
+  let start = 0;
+  let end = 0;
+  return (char, offset, text) => {
+    if (text !== measured) {
+      measured = text;
+      start = 0;
+      while (start < text.length && text[start] === ' ') {
+        start += 1;
+      }
+      end = text.length;
+      while (end > start && text[end - 1] === ' ') {
+        end -= 1;
+      }
+    }
+    return char === ' ' && offset >= start && offset < end;
+  };
 }
 
 /**

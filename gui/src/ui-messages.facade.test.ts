@@ -96,6 +96,11 @@ const CASES: ReadonlyArray<[string, () => unknown, () => unknown]> = [
     () => render.describeGoToCallingWindowParts(messages, REVIEWER),
   ],
   [
+    'describeApprovalRoomParts',
+    () => facade.describeApprovalRoomParts(REVIEWER),
+    () => render.describeApprovalRoomParts(messages, REVIEWER),
+  ],
+  [
     'describeApprovalHeadline',
     () =>
       facade.describeApprovalHeadline(

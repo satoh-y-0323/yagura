@@ -795,6 +795,9 @@ describe('formatPathForDisplay', () => {
     expect(formatPathForDisplay('C:\\a\u3000b')).toBe('C:\\a\\u{3000}b');
     expect(formatPathForDisplay('C:\\a\u2800b')).toBe('C:\\a\\u{2800}b');
     expect(formatPathForDisplay('C:\\a b')).toBe('C:\\a b');
+    expect(formatPathForDisplay(' C:\\a b ')).toBe('\\u{0020}C:\\a b\\u{0020}');
+    expect(formatPathForDisplay('  x')).toBe('\\u{0020}\\u{0020}x');
+    expect(formatPathForDisplay('a  b')).toBe('a  b');
     expect(formatPathForDisplay('\u0301a')).toBe('\\u{0301}a');
     expect(formatPathForDisplay('C:\\a\n\u0301b')).toBe('C:\\a\\u{000A}\\u{0301}b');
     const shown = formatPathForDisplay(`${'a'.repeat(MAX_DISPLAY_FIELD_CHARS - 1)}\u202Etail`);
