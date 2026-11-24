@@ -1170,10 +1170,10 @@ export function narrowDaemonConnectedPayload(value: unknown): DaemonConnectedPay
   const context = SESSION_EVENT.daemonConnected;
   const record = requireRecord(value, context);
   const statusBoot = readOptionalStatusBoot(record, context, 'drop');
-  const warning = readOptionalString(record, 'spawn_warning', context);
+  const warning = readOptionalPrepared(record, 'spawn_warning', context, foldExternalText);
   return {
     status_boot: statusBoot,
-    spawn_warning: warning === null ? null : foldExternalText(warning),
+    spawn_warning: warning,
     compatible: requireBoolean(record, 'compatible', context),
   };
 }
@@ -1411,14 +1411,14 @@ export function narrowApprovalRequest(
   const rawRoom = readOwnField(record, 'room');
   const room =
     rawRoom === null || rawRoom === undefined ? null : narrowRoomRef(rawRoom, `${context}.room`);
-  const text = readOptionalString(record, 'text', context);
+  // An approver must see everything that will run, so the body's hidden characters are written out.
+  const text = readOptionalPrepared(record, 'text', context, formatApprovalBody);
   const base: ApprovalRequest = {
     request_id,
     tool,
     displayTool: sanitizeForDisplay(tool),
     requester,
-    // An approver must see everything that will run, so the body's hidden characters are written out.
-    text: text === null ? null : formatApprovalBody(text),
+    text,
   };
   const withTarget = target === null ? base : { ...base, target };
   return room === null ? withTarget : { ...withTarget, room };
@@ -1468,7 +1468,7 @@ function narrowApprovalRequester(value: unknown, context: string): ApprovalReque
     window_id: windowId,
     displayWindowId: sanitizeForDisplay(windowId),
     name: sanitizeForDisplay(requireString(record, 'name', context)),
-    profile: readOptionalDisplayLine(record, 'profile', context),
+    profile: readOptionalPrepared(record, 'profile', context, sanitizeForDisplay),
     status: requireWindowStatus(record, 'status', context),
     mark: requireWindowMark(record, context),
   };
@@ -1499,7 +1499,7 @@ function narrowApprovalTarget(value: unknown, context: string): ApprovalTarget {
     displayWindowId: sanitizeForDisplay(windowId),
     name: sanitizeForDisplay(requireString(record, 'name', context)),
     status: requireWindowStatus(record, 'status', context),
-    profile: readOptionalDisplayLine(record, 'profile', context),
+    profile: readOptionalPrepared(record, 'profile', context, sanitizeForDisplay),
     mark: requireWindowMark(record, context),
   };
 }
@@ -1530,16 +1530,6 @@ function requireWindowMark(record: UntrustedRecord, context: string): WindowMark
     throw new BoundaryError(`${path}.hue: expected fewer than ${WINDOW_MARK_HUE_STEPS} steps`);
   }
   return { cells, hue };
-}
-
-/** An optional string prepared for display, `null` when the record carries none. */
-function readOptionalDisplayLine(
-  record: UntrustedRecord,
-  key: string,
-  context: string
-): DisplayLine | null {
-  const value = readOptionalString(record, key, context);
-  return value === null ? null : sanitizeForDisplay(value);
 }
 
 /**
@@ -2307,6 +2297,23 @@ export function readOptionalString(
 }
 
 /**
+ * Reads an optional string and prepares it for display, `null` when the record
+ * carries none. Every boundary that draws such a field goes through here, so the
+ * read and the maker are never split apart.
+ *
+ * @throws {BoundaryError} when the field is present with any other type.
+ */
+export function readOptionalPrepared<P extends DisplayLine | DisplayBlock>(
+  record: UntrustedRecord,
+  key: string,
+  context: string,
+  prepare: (value: string) => P
+): P | null {
+  const value = readOptionalString(record, key, context);
+  return value === null ? null : prepare(value);
+}
+
+/**
  * What a route does with a value it decides it cannot keep: refuse the whole
  * record, or drop the field alone. The status-change route carries a single
  * record and refuses, since a record with a value it cannot reconcile is a
@@ -2390,8 +2397,7 @@ function readChatDeliveryOutcome(record: UntrustedRecord, context: string): Chat
     return { state, reason };
   }
   if (state === 'queued') {
-    const note = readOptionalString(record, 'note', context);
-    return { state, note: note === null ? null : sanitizeForDisplay(note) };
+    return { state, note: readOptionalPrepared(record, 'note', context, sanitizeForDisplay) };
   }
   return { state };
 }

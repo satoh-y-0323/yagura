@@ -15,7 +15,7 @@ import {
 } from '../display/untrusted-text';
 import {
   BoundaryError,
-  readOptionalString,
+  readOptionalPrepared,
   readOwnField,
   requireArray,
   requireNonNegativeInteger,
@@ -113,19 +113,14 @@ export function narrowModelChoicesPayload(value: unknown): ModelChoicesPayload {
     choices: requireArray(readOwnField(record, 'choices'), choicesContext).map((entry) => {
       const choice = requireRecord(entry, choicesContext);
       const id = requireString(choice, 'id', choicesContext);
-      const label = readOptionalString(choice, 'label', choicesContext);
       return {
         id,
         displayId: sanitizeForDisplay(id),
-        label: label === null ? null : sanitizeForDisplay(label),
+        label: readOptionalPrepared(choice, 'label', choicesContext, sanitizeForDisplay),
       };
     }),
-    error: foldedOrNull(readOptionalString(record, 'error', context)),
+    error: readOptionalPrepared(record, 'error', context, foldExternalText),
   };
-}
-
-function foldedOrNull(text: string | null): DisplayLine | null {
-  return text === null ? null : foldExternalText(text);
 }
 
 /**

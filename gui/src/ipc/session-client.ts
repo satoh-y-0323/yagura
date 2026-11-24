@@ -58,6 +58,7 @@ import {
   narrowWindowListPayload,
   ownEntries,
   readOptionalInteger,
+  readOptionalPrepared,
   readOptionalString,
   readOwnField,
   requireArray,
@@ -782,26 +783,30 @@ function narrowProfileEntry(value: unknown, context: string): ProfileEntry {
   if (typeof available !== 'boolean') {
     throw new BoundaryError(`${context}.profiles.available: expected a boolean`);
   }
-  const detectionWarning = readOptionalString(record, 'detection_warning', context);
+  const detectionWarning = readOptionalPrepared(
+    record,
+    'detection_warning',
+    context,
+    sanitizeForDisplay
+  );
   const id = requireString(record, 'id', context);
   const displayName = requireString(record, 'display_name', context);
-  const detection = readOptionalString(record, 'detection', context);
+  const detection = readOptionalPrepared(record, 'detection', context, sanitizeForDisplay);
   const cwd = readOptionalString(record, 'cwd', context);
   // The daemon always sends `command` (empty when it has no argv to run),
   // so a missing key is a contract violation rather than "no value".
   const command = narrowStringArray(readOwnField(record, 'command'), `${context}.profiles.command`);
-  const reason = readOptionalString(record, 'unavailable_reason', context);
+  const reason = readOptionalPrepared(record, 'unavailable_reason', context, sanitizeForDisplay);
   return {
     id,
     displayId: sanitizeForDisplay(id),
     displayName: sanitizeForDisplay(displayName),
-    displayDetection: detection === null ? null : sanitizeForDisplay(detection),
-    displayDetectionWarning:
-      detectionWarning === null ? null : sanitizeForDisplay(detectionWarning),
+    displayDetection: detection,
+    displayDetectionWarning: detectionWarning,
     cwd,
     displayCommand: formatCommandLine(command),
     available,
-    reason: reason === null ? null : sanitizeForDisplay(reason),
+    reason,
     unavailableKind: narrowUnavailableKind(readOptionalString(record, 'unavailable_kind', context)),
     guidance: narrowProfileGuidance(
       readOwnField(record, 'unavailable_guidance'),

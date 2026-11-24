@@ -22,6 +22,7 @@ import {
 import {
   BoundaryError,
   readOptionalInteger,
+  readOptionalPrepared,
   readOptionalString,
   readOwnField,
   requireArray,
@@ -204,16 +205,6 @@ function narrowMcpRegistrationCommand(value: unknown, context: string): McpRegis
   };
 }
 
-function readOptionalLine(
-  record: UntrustedRecord,
-  key: string,
-  context: string,
-  prepare: (value: string) => DisplayLine
-): DisplayLine | null {
-  const value = readOptionalString(record, key, context);
-  return value === null ? null : prepare(value);
-}
-
 /** Reads a command field the core serializes as `null`, or leaves out, when the row carries none. */
 function readOptionalCommand(
   record: UntrustedRecord,
@@ -288,7 +279,7 @@ function narrowMcpRegistrationRow(value: unknown, context: string): McpRegistrat
     tomlSet: readOptionalTomlSet(record, context),
     entries: readEntries(record, context),
     // A notice may run past one reason's length, so it is not folded and capped like one.
-    notice: readOptionalLine(record, 'notice', context, sanitizeForDisplay),
+    notice: readOptionalPrepared(record, 'notice', context, sanitizeForDisplay),
   };
 }
 
@@ -304,7 +295,7 @@ export function narrowMcpRegistrationsListed(value: unknown): McpRegistrationsLi
   const rowsContext = `${context}.rows`;
   return {
     requestId: requireNonNegativeInteger(record, 'request_id', context),
-    bridge: readOptionalLine(record, 'bridge', context, formatPathForDisplay),
+    bridge: readOptionalPrepared(record, 'bridge', context, formatPathForDisplay),
     rows: requireArray(readOwnField(record, 'rows'), rowsContext).map((entry) =>
       narrowMcpRegistrationRow(entry, rowsContext)
     ),
@@ -337,10 +328,10 @@ function narrowMcpRegistrationStatusInfo(
     state: normalizeMcpRegistrationState(requireString(record, 'state', context)),
     differsIn,
     displayDiffersIn: differsIn.map(formatPathForDisplay),
-    reason: readOptionalLine(record, 'reason', context, foldExternalText),
+    reason: readOptionalPrepared(record, 'reason', context, foldExternalText),
     add: readOptionalCommand(record, 'add', context),
     remove: readOptionalCommand(record, 'remove', context),
-    refusedByClaim: readOptionalLine(record, 'refused_by_claim', context, formatPathForDisplay),
+    refusedByClaim: readOptionalPrepared(record, 'refused_by_claim', context, formatPathForDisplay),
   };
 }
 
@@ -369,15 +360,6 @@ function narrowMcpRegistrationStep(value: unknown, context: string): McpRegistra
   };
 }
 
-function readOptionalBlock(
-  record: UntrustedRecord,
-  key: string,
-  context: string
-): DisplayBlock | null {
-  const value = readOptionalString(record, key, context);
-  return value === null ? null : formatOutputBlock(value);
-}
-
 /**
  * Validates a `session://mcp-registration-result` payload.
  *
@@ -394,7 +376,7 @@ export function narrowMcpRegistrationResultPayload(value: unknown): McpRegistrat
     steps: requireArray(readOwnField(record, 'steps'), stepsContext).map((entry) =>
       narrowMcpRegistrationStep(entry, stepsContext)
     ),
-    error: readOptionalBlock(record, 'error', context),
+    error: readOptionalPrepared(record, 'error', context, formatOutputBlock),
     status: narrowMcpRegistrationStatusInfo(readOwnField(record, 'status'), `${context}.status`),
   };
 }

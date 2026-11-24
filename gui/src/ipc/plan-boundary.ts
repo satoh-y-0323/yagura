@@ -14,6 +14,7 @@ import {
 } from '../display/untrusted-text';
 import {
   BoundaryError,
+  readOptionalPrepared,
   readOptionalString,
   readOwnField,
   requireArray,
@@ -267,11 +268,11 @@ export function narrowPlanChanged(value: unknown): PlanChanged {
 
 function narrowPlanTaskInfo(value: unknown, context: string): PlanTaskInfo {
   const record = requireRecord(value, context);
-  const role = readOptionalString(record, 'role', context);
+  const role = readOptionalPrepared(record, 'role', context, sanitizeForDisplay);
   return {
     task_id: requireString(record, 'task_id', context),
     title: sanitizeForDisplay(requireString(record, 'title', context)),
-    role: role === null ? null : sanitizeForDisplay(role),
+    role,
     depends_on: requireStringArray(record, 'depends_on', context).map(sanitizeForDisplay),
     writes: requireStringArray(record, 'writes', context).map(formatPathForDisplay),
     wave: requireNonNegativeInteger(record, 'wave', context),
@@ -309,11 +310,11 @@ function readOptionalReport(record: UntrustedRecord, context: string): TaskRepor
   }
   const reportContext = `${context}.report`;
   const report = requireRecord(value, reportContext);
-  const path = readOptionalString(report, 'path', reportContext);
+  const path = readOptionalPrepared(report, 'path', reportContext, formatPathForDisplay);
   return {
     outcome: requireReportOutcome(report, reportContext),
     summary: sanitizeForDisplay(requireString(report, 'summary', reportContext)),
-    path: path === null ? null : formatPathForDisplay(path),
+    path,
     reported_at: requireNonNegativeInteger(report, 'reported_at', reportContext),
   };
 }

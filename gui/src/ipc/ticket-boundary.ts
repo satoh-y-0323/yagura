@@ -21,6 +21,7 @@ import {
   BoundaryError,
   ownEntries,
   readOptionalInteger,
+  readOptionalPrepared,
   readOptionalString,
   readOwnField,
   requireArray,
@@ -196,7 +197,7 @@ export function narrowTicketList(value: unknown): TicketList {
   const context = 'list_tickets';
   const record = requireRecord(value, context);
   const configValue = readOwnField(record, 'config');
-  const configError = readOptionalString(record, 'config_error', context);
+  const configError = readOptionalPrepared(record, 'config_error', context, sanitizeForDisplay);
   const milestonesContext = `${context}.milestones`;
   const ticketsContext = `${context}.tickets`;
   return {
@@ -205,7 +206,7 @@ export function narrowTicketList(value: unknown): TicketList {
       configValue === null || configValue === undefined
         ? null
         : narrowTicketConfig(configValue, `${context}.config`),
-    config_error: configError === null ? null : sanitizeForDisplay(configError),
+    config_error: configError,
     milestones: requireArray(readOwnField(record, 'milestones'), milestonesContext).map((entry) =>
       narrowMilestone(entry, milestonesContext)
     ),
