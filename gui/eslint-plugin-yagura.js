@@ -17,18 +17,19 @@ const realPaths = new Map();
 
 // A junction or symlink gives one file two paths, and this module, the linted file and the
 // program may each name it by a different one, so paths are compared resolved, once each.
-// A path not on disk resolves to itself.
+// A path not on disk resolves to itself, and is not cached: the file may appear later.
 function realPath(fileName) {
-  let real = realPaths.get(fileName);
-  if (real === undefined) {
-    try {
-      real = fs.realpathSync.native(fileName);
-    } catch {
-      real = path.resolve(fileName);
-    }
-    realPaths.set(fileName, real);
+  const cached = realPaths.get(fileName);
+  if (cached !== undefined) {
+    return cached;
   }
-  return real;
+  try {
+    const real = fs.realpathSync.native(fileName);
+    realPaths.set(fileName, real);
+    return real;
+  } catch {
+    return path.resolve(fileName);
+  }
 }
 
 // The gui root, where this file sits. A brand's `declaredIn` and `maker` are paths from it,
@@ -536,6 +537,27 @@ const PARAMETER_ERASING_CALLS = [
 ];
 
 /**
+ * The listeners of a rule whose brand declarations are not all found: a brand it cannot see
+ * would let every value of it pass, so each file is refused until the config is right.
+ */
+function undeclaredBrandListeners(context, undeclared) {
+  return {
+    Program(node) {
+      for (const brand of undeclared) {
+        context.report({
+          node,
+          messageId: 'noBrandDeclaration',
+          data: { brand: brand.type, declaredIn: brand.declaredIn },
+        });
+      }
+    },
+  };
+}
+
+const NO_BRAND_DECLARATION =
+  'The brand {{brand}} is not declared as a type alias in {{declaredIn}}, so this rule cannot see it; fix the brand in the rule options.';
+
+/**
  * `yagura/no-brand-forging`: only the maker of a brand makes a value of it.
  *
  * Outside every maker, an assertion or a type predicate whose source or target holds a
@@ -571,27 +593,6 @@ const PARAMETER_ERASING_CALLS = [
  *   passes. Back when a maker holds an assertion touching a foreign brand other than typing
  *   the message resource as `Messages`.
  */
-/**
- * The listeners of a rule whose brand declarations are not all found: a brand it cannot see
- * would let every value of it pass, so each file is refused until the config is right.
- */
-function undeclaredBrandListeners(context, undeclared) {
-  return {
-    Program(node) {
-      for (const brand of undeclared) {
-        context.report({
-          node,
-          messageId: 'noBrandDeclaration',
-          data: { brand: brand.type, declaredIn: brand.declaredIn },
-        });
-      }
-    },
-  };
-}
-
-const NO_BRAND_DECLARATION =
-  'The brand {{brand}} is not declared as a type alias in {{declaredIn}}, so this rule cannot see it; fix the brand in the rule options.';
-
 const noBrandForging = {
   meta: {
     type: 'problem',

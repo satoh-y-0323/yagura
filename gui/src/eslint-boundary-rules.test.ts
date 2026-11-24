@@ -914,15 +914,19 @@ const BRAND_AT_DECLARATION: readonly CaseLine[] = [
 ];
 
 /**
- * The rule configured with one brand declared in `declaredIn`, linted over BRAND_AT_DECLARATION
- * as the guard case: what the rule reports, or `threw` when the lint stops on the rule.
+ * A brand rule configured with one brand declared in `declaredIn`, linted over
+ * BRAND_AT_DECLARATION as the guard case: what the rule reports, or `threw` when the lint
+ * stops on the rule.
  */
-async function brandRuleWithDeclaration(declaredIn: string): Promise<string[] | 'threw'> {
+async function brandRuleWithDeclaration(
+  rule: string,
+  declaredIn: string
+): Promise<string[] | 'threw'> {
   const linter = new ESLint({
     cwd: guiRoot(),
     overrideConfig: {
       rules: {
-        [BRAND_FORGING_RULE]: [
+        [rule]: [
           'error',
           {
             brands: [
@@ -940,7 +944,7 @@ async function brandRuleWithDeclaration(declaredIn: string): Promise<string[] | 
   });
   try {
     const messages = await lintCase(linter, GUARD_CASE_TS, BRAND_AT_DECLARATION);
-    return reportsOf(BRAND_FORGING_RULE, BRAND_AT_DECLARATION, messages);
+    return reportsOf(rule, BRAND_AT_DECLARATION, messages);
   } catch {
     return 'threw';
   }
@@ -1052,9 +1056,20 @@ describe('the display guards report what they guard', () => {
       const makerRed = await lintCase(eslint, MESSAGES_TS, BRAND_RED_IN_UI_TEXT_MAKER);
       const methods = await lintCase(eslint, GUARD_CASE_TS, METHOD_SIGNATURE_RED);
       const makerNamed = await lintCase(eslint, MAKER_NAMED_TS, BRAND_RED_AT_MAKER_NAMED_PATH);
-      const declared = await brandRuleWithDeclaration('src/display/untrusted-text.ts');
+      const declared = await brandRuleWithDeclaration(
+        BRAND_FORGING_RULE,
+        'src/display/untrusted-text.ts'
+      );
       // A brand whose declaration is not found is a misconfigured rule, not a file free of brands.
-      const undeclared = await brandRuleWithDeclaration('src/display/no-such-declaration.ts');
+      const undeclaredForging = await brandRuleWithDeclaration(
+        BRAND_FORGING_RULE,
+        'src/display/no-such-declaration.ts'
+      );
+      const undeclaredDisplay = await brandRuleWithDeclaration(
+        DISPLAY_TEXT_RULE,
+        'src/display/no-such-declaration.ts'
+      );
+      const noDeclaration = [`noBrandDeclaration: ${codeOf(BRAND_AT_DECLARATION[0]).trim()}`];
 
       expect
         .soft([
@@ -1074,7 +1089,8 @@ describe('the display guards report what they guard', () => {
         .soft(reportsOf(BRAND_FORGING_RULE, BRAND_RED_AT_MAKER_NAMED_PATH, makerNamed))
         .toEqual(expectedReports(BRAND_RED_AT_MAKER_NAMED_PATH));
       expect.soft(declared).toEqual(expectedReports(BRAND_AT_DECLARATION));
-      expect.soft(undeclared).not.toEqual([]);
+      expect.soft(undeclaredForging).toEqual(noDeclaration);
+      expect.soft(undeclaredDisplay).toEqual(noDeclaration);
       expect
         .soft(guardReportsOf(METHOD_SIGNATURE_RED, methods, new Set([METHOD_SIGNATURE_STYLE_RULE])))
         .toEqual(expectedReports(METHOD_SIGNATURE_RED));
