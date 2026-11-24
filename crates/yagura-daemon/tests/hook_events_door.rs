@@ -17,10 +17,12 @@
 
 use crate::common;
 use crate::common::bins;
+use crate::common::door_relay::{
+    Printed, claim_endpoint, door_command, read_json_frame, relay_door, run_door, run_with_input,
+};
 
-use std::io::Write;
 use std::path::PathBuf;
-use std::process::{Command, Output, Stdio};
+use std::process::Output;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use std::time::Duration;
@@ -37,8 +39,6 @@ use common::{
     wait_until_status, write_profile,
 };
 
-const WINDOW_ID_VAR: &str = "YAGURA_WINDOW_ID";
-const STATUS_TOKEN_VAR: &str = "YAGURA_STATUS_TOKEN";
 const PROFILE_ID: &str = "hook-door-fixture";
 const EVENT: &str = "PostToolUse";
 /// Two more events of [`PROFILE_ID`]'s, which name no `skip_if` of their own.
@@ -107,54 +107,6 @@ fn event_form_profile_source() -> String {
     )
 }
 
-fn door_command(
-    args: &[&str],
-    instance: &str,
-    bases: &TempDir,
-    window: Option<(&str, &str)>,
-) -> Command {
-    let mut command = Command::new(bins::daemon_exe());
-    command
-        .args(args)
-        .env("YAGURA_INSTANCE", instance)
-        .env_remove("YAGURA_STORE_DB")
-        .env_remove(WINDOW_ID_VAR)
-        .env_remove(STATUS_TOKEN_VAR)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    if cfg!(windows) {
-        command
-            .env("LOCALAPPDATA", bases.make_dir("local"))
-            .env("APPDATA", bases.make_dir("roaming"));
-    } else {
-        command
-            .env("XDG_DATA_HOME", bases.make_dir("data"))
-            .env("XDG_STATE_HOME", bases.make_dir("state"))
-            .env("XDG_CONFIG_HOME", bases.make_dir("config"))
-            .env("HOME", bases.make_dir("home"));
-    }
-    if let Some((window_id, token)) = window {
-        command
-            .env(WINDOW_ID_VAR, window_id)
-            .env(STATUS_TOKEN_VAR, token);
-    }
-    command
-}
-
-/// Runs `command` with `input` written on its stdin from a thread of its own, as a CLI
-/// writes the hook input; the returned result is that write's.
-fn run_with_input(mut command: Command, input: Vec<u8>) -> (Output, std::io::Result<()>) {
-    let mut child = command
-        .stdin(Stdio::piped())
-        .spawn()
-        .expect("spawn the yagura-daemon binary");
-    let mut pipe = child.stdin.take().expect("stdin");
-    let writer = std::thread::spawn(move || pipe.write_all(&input).and_then(|()| pipe.flush()));
-    let output = child.wait_with_output().expect("wait for the child");
-    let written = writer.join().expect("writer thread");
-    (output, written)
-}
-
 fn describe(output: &Output) -> String {
     format!(
         "exit {:?}; stdout: {:?}; stderr: {:?}",
@@ -172,8 +124,6 @@ fn large_input(tail: &str) -> Vec<u8> {
 
 struct Setup {
     h: Harness,
-    instance: String,
-    bases: TempDir,
     window_id: String,
     profiles_dir: PathBuf,
 }
@@ -266,8 +216,6 @@ impl Setup {
         };
         Self {
             h,
-            instance,
-            bases: TempDir::new("yagura-door", "bases"),
             window_id,
             profiles_dir,
         }
@@ -288,15 +236,7 @@ impl Setup {
         args: &[&str],
         input: Vec<u8>,
     ) -> (Output, std::io::Result<()>) {
-        let command = door_command(
-            args,
-            &self.instance,
-            &self.bases,
-            Some((window_id, VALID_TOKEN)),
-        );
-        tokio::task::spawn_blocking(move || run_with_input(command, input))
-            .await
-            .expect("join")
+        run_door(&self.h, window_id, args, input).await
     }
 
     async fn status(&self) -> WindowStatus {
@@ -886,26 +826,6 @@ async fn an_older_hook_request_takes_nothing_but_still_records_the_status_and_th
 
 // --- the door's own end, against a stand-in daemon ---------------------------------------
 
-/// Reads one frame of a door's as JSON; `None` once the door has closed.
-async fn read_json_frame<S: tokio::io::AsyncRead + Unpin>(
-    stream: &mut S,
-) -> Option<serde_json::Value> {
-    use tokio::io::AsyncReadExt;
-    let guard = yagura_test_support::HANG_GUARD;
-    let mut len = [0u8; 4];
-    match tokio::time::timeout(guard, stream.read_exact(&mut len)).await {
-        Ok(Ok(_)) => {}
-        Ok(Err(_)) => return None,
-        Err(_) => panic!("the door neither wrote nor closed within {guard:?}"),
-    }
-    let mut body = vec![0u8; u32::from_le_bytes(len) as usize];
-    tokio::time::timeout(guard, stream.read_exact(&mut body))
-        .await
-        .expect("the door finishes a frame it began")
-        .expect("the door finishes a frame it began");
-    Some(serde_json::from_slice(&body).expect("a door writes JSON frames"))
-}
-
 /// A stand-in for a daemon at `instance`'s endpoint: it answers the first frame of the one
 /// door that connects with `answer`, then records what else the door sends until it closes.
 /// Binding claims the endpoint, so the door can reach nothing else.
@@ -933,32 +853,6 @@ async fn stand_in_daemon(
         }
         frames
     })
-}
-
-/// Claims `instance`'s endpoint; the returned future accepts the one door that connects.
-async fn claim_endpoint(
-    instance: &str,
-) -> impl std::future::Future<Output = <yagura_os::PlatformIpc as yagura_os::PeerAuth>::Connection>
-+ Send
-+ 'static {
-    use yagura_os::{IpcTransport, PeerAuth, PlatformIpc};
-
-    let ipc = PlatformIpc::default();
-    let user = ipc.current_user_id().expect("the current user id resolves");
-    let namespace = yagura_os::resolve_instance_from(Some(std::ffi::OsStr::new(instance)))
-        .expect("the test's instance id is valid");
-    let endpoint = yagura_os::default_endpoint_owning(&user, &namespace);
-    let security = ipc.endpoint_security().expect("endpoint security resolves");
-    let mut listener = ipc
-        .bind(&endpoint, security)
-        .await
-        .unwrap_or_else(|err| panic!("the stand-in must claim {endpoint:?}: {err}"));
-    async move {
-        tokio::time::timeout(yagura_test_support::HANG_GUARD, ipc.accept(&mut listener))
-            .await
-            .expect("the door connects")
-            .expect("the door connects")
-    }
 }
 
 /// The doors a stand-in daemon is asked by, with the door each one's read must name.
@@ -1355,87 +1249,6 @@ async fn a_stop_hands_everything_waiting_in_one_block_only_when_it_is_not_a_cont
 
 // --- a stop's status is decided where its door ends --------------------------------------
 
-/// What a relay between a door and its daemon does with the door's notice that it printed.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Printed {
-    /// Passes it on, as a door's own connection does.
-    Forward,
-    /// Drops it: the daemon sees the read end without it once the relay lets go.
-    Withhold,
-}
-
-/// A door run through a relay to its daemon.
-pub(crate) struct Relayed {
-    /// What the door printed and how it ended.
-    pub(crate) output: Output,
-    /// Every frame the door sent, in order.
-    pub(crate) sent: Vec<serde_json::Value>,
-    /// The relay's connection to the daemon, which stays open until it is dropped.
-    pub(crate) upstream: yagura_test_support::ipc::Connection,
-}
-
-/// Runs the door `args` in `window_id` with `input` on its stdin, relaying every frame
-/// between it and `h`'s daemon over one connection of the relay's own, and dealing with
-/// the door's notice that it printed as `printed` says.
-pub(crate) async fn relay_door(
-    h: &Harness,
-    window_id: &str,
-    args: &[&str],
-    input: Vec<u8>,
-    printed: Printed,
-) -> Relayed {
-    let instance = unique_instance();
-    let bases = TempDir::new("yagura-door", "relay");
-    let accept = claim_endpoint(&instance).await;
-    let mut upstream = h.connect().await;
-    let command = door_command(args, &instance, &bases, Some((window_id, VALID_TOKEN)));
-    let door = tokio::task::spawn_blocking(move || run_with_input(command, input));
-    let mut conn = accept.await;
-    let mut sent = Vec::new();
-    while let Some(frame) = read_json_frame(&mut conn).await {
-        let notice = frame["type"] == "deliver_printed";
-        sent.push(frame.clone());
-        if notice {
-            if printed == Printed::Forward {
-                write_json_frame(&mut upstream, &frame).await;
-            }
-            continue;
-        }
-        write_json_frame(&mut upstream, &frame).await;
-        let answer = loop {
-            let answer = read_json_frame(&mut upstream)
-                .await
-                .expect("the daemon answers the door's read");
-            if !answer["type"]
-                .as_str()
-                .is_some_and(|kind| kind.ends_with("_changed"))
-            {
-                break answer;
-            }
-        };
-        write_json_frame(&mut conn, &answer).await;
-    }
-    let (output, _) = door.await.expect("join");
-    Relayed {
-        output,
-        sent,
-        upstream,
-    }
-}
-
-async fn write_json_frame<S: tokio::io::AsyncWrite + Unpin>(
-    stream: &mut S,
-    frame: &serde_json::Value,
-) {
-    use tokio::io::AsyncWriteExt;
-    let body = serde_json::to_vec(frame).expect("a frame encodes");
-    stream
-        .write_all(&yagura_protocol::frame_encode(&body))
-        .await
-        .expect("relay a frame");
-    stream.flush().await.expect("relay a frame");
-}
-
 /// A stop's door decides the window's status where it ends: a block the door printed
 /// leaves the turn running; a read that ends without that notice leaves the window
 /// waiting for input.
@@ -1698,8 +1511,6 @@ enum StopForm {
 /// reports a turn.
 struct Turns {
     h: Harness,
-    instance: String,
-    bases: TempDir,
     window_id: String,
     profile: &'static str,
 }
@@ -1796,8 +1607,6 @@ impl Turns {
         }
         Self {
             h,
-            instance,
-            bases: TempDir::new("yagura-door", "turns"),
             window_id,
             profile,
         }
@@ -1810,16 +1619,13 @@ impl Turns {
     /// Runs the window's CLI's hook for `event` with `input`; it must take the input and
     /// end with 0.
     async fn hook(&self, event: &str, input: &str) -> Output {
-        let command = door_command(
+        let (output, written) = run_door(
+            &self.h,
+            &self.window_id,
             &["--hook", self.profile, event],
-            &self.instance,
-            &self.bases,
-            Some((&self.window_id, VALID_TOKEN)),
-        );
-        let input = input.as_bytes().to_vec();
-        let (output, written) = tokio::task::spawn_blocking(move || run_with_input(command, input))
-            .await
-            .expect("join");
+            input.as_bytes().to_vec(),
+        )
+        .await;
         assert!(written.is_ok(), "{} {event}: {written:?}", self.profile);
         assert_eq!(
             output.status.code(),

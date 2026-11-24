@@ -15,11 +15,10 @@
 //! directory, so it never reaches a running daemon of the user.
 
 use crate::common;
-use crate::common::bins;
+use crate::common::door_relay::{door_command, run_door, run_door_as, run_with_input};
 
-use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output, Stdio};
+use std::process::{Output, Stdio};
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use yagura_daemon::inbox::Parcel;
@@ -28,8 +27,6 @@ use yagura_test_support::paths::TempDir;
 
 use common::{Harness, VALID_TOKEN, approver_base_config, detection_config, unique_temp_dir};
 
-const WINDOW_ID_VAR: &str = "YAGURA_WINDOW_ID";
-const STATUS_TOKEN_VAR: &str = "YAGURA_STATUS_TOKEN";
 const SKIP_IF_SUBAGENT: [&str; 2] = ["--skip-if", "/subagentType"];
 const LARGE_INPUT_BYTES: usize = 1024 * 1024;
 
@@ -52,54 +49,6 @@ fn every_door() -> Vec<Vec<&'static str>> {
         vec!["--deliver-wait"],
         vec!["--report-session", "/session_id"],
     ]
-}
-
-fn door_command(
-    args: &[&str],
-    instance: &str,
-    bases: &TempDir,
-    window: Option<(&str, &str)>,
-) -> Command {
-    let mut command = Command::new(bins::daemon_exe());
-    command
-        .args(args)
-        .env("YAGURA_INSTANCE", instance)
-        .env_remove("YAGURA_STORE_DB")
-        .env_remove(WINDOW_ID_VAR)
-        .env_remove(STATUS_TOKEN_VAR)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    if cfg!(windows) {
-        command
-            .env("LOCALAPPDATA", bases.make_dir("local"))
-            .env("APPDATA", bases.make_dir("roaming"));
-    } else {
-        command
-            .env("XDG_DATA_HOME", bases.make_dir("data"))
-            .env("XDG_STATE_HOME", bases.make_dir("state"))
-            .env("XDG_CONFIG_HOME", bases.make_dir("config"))
-            .env("HOME", bases.make_dir("home"));
-    }
-    if let Some((window_id, token)) = window {
-        command
-            .env(WINDOW_ID_VAR, window_id)
-            .env(STATUS_TOKEN_VAR, token);
-    }
-    command
-}
-
-/// Runs `command` with `input` written on its stdin from a thread of its own, as a CLI
-/// writes the hook input; the returned result is that write's.
-fn run_with_input(mut command: Command, input: Vec<u8>) -> (Output, std::io::Result<()>) {
-    let mut child = command
-        .stdin(Stdio::piped())
-        .spawn()
-        .expect("spawn the yagura-daemon binary");
-    let mut pipe = child.stdin.take().expect("stdin");
-    let writer = std::thread::spawn(move || pipe.write_all(&input).and_then(|()| pipe.flush()));
-    let output = child.wait_with_output().expect("wait for the child");
-    let written = writer.join().expect("writer thread");
-    (output, written)
 }
 
 /// A JSON object of about [`LARGE_INPUT_BYTES`] with no `subagentType`.
@@ -168,8 +117,6 @@ fn a_door_outside_a_window_reads_all_of_a_large_input() {
 
 struct Setup {
     h: Harness,
-    instance: String,
-    bases: TempDir,
     window_id: String,
 }
 
@@ -200,12 +147,7 @@ impl Setup {
         // whose transition to idle has been observed.
         let mut client = h.connect().await;
         let window_id = h.open_idle_window(&mut client).await;
-        Self {
-            h,
-            instance,
-            bases: TempDir::new("yagura-door", "bases"),
-            window_id,
-        }
+        Self { h, window_id }
     }
 
     fn entry(&self) -> std::sync::Arc<yagura_daemon::WindowEntry> {
@@ -213,15 +155,7 @@ impl Setup {
     }
 
     async fn run(&self, args: &[&str], input: Vec<u8>) -> (Output, std::io::Result<()>) {
-        let command = door_command(
-            args,
-            &self.instance,
-            &self.bases,
-            Some((&self.window_id, VALID_TOKEN)),
-        );
-        tokio::task::spawn_blocking(move || run_with_input(command, input))
-            .await
-            .expect("join")
+        run_door(&self.h, &self.window_id, args, input).await
     }
 }
 
@@ -396,7 +330,7 @@ const MATCHED_REASON: &str = "NO_TOOL_CALL";
 /// names, for a string and for an integer alike.
 #[tokio::test]
 async fn a_compared_value_reaches_the_daemon_only_as_whether_it_matched() {
-    use crate::hook_events_door::{Printed, relay_door};
+    use crate::common::door_relay::{Printed, relay_door};
 
     let setup = Setup::start_with_fixture_profile(WHEN_FIXTURE).await;
     setup
@@ -466,7 +400,9 @@ async fn a_take_for_another_instance_leaves_the_parcels_and_one_for_this_instanc
         .inbox()
         .deposit(Parcel::new("a", "PARCEL-FOR-THIS-INSTANCE"));
     let other = server_of(Some("other"));
-    let own = server_of(Some(&setup.instance));
+    // The door's `YAGURA_INSTANCE` is the relay's instance, which its hook names as its own.
+    let relay_instance = common::door_relay::unique_instance();
+    let own = server_of(Some(&relay_instance));
 
     let (skipped, written) = setup
         .run(
@@ -482,12 +418,14 @@ async fn a_take_for_another_instance_leaves_the_parcels_and_one_for_this_instanc
         "a take from another instance's hook must leave the parcel in the inbox"
     );
 
-    let (taken, written) = setup
-        .run(
-            &["--for-instance", &own, "--deliver-take"],
-            br#"{"session_id":"s-1"}"#.to_vec(),
-        )
-        .await;
+    let (taken, written) = run_door_as(
+        &setup.h,
+        &relay_instance,
+        &setup.window_id,
+        &["--for-instance", &own, "--deliver-take"],
+        br#"{"session_id":"s-1"}"#.to_vec(),
+    )
+    .await;
     assert!(written.is_ok(), "{written:?}");
     assert_eq!(taken.status.code(), Some(0), "{}", describe(&taken));
     assert!(

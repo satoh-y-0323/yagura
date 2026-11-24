@@ -2757,6 +2757,7 @@ pub fn mcp_cli_stub_profile_with_table(
 pub mod bins;
 pub mod detection_rules;
 pub mod docs;
+pub mod door_relay;
 pub mod global_tracing;
 pub mod real_daemon;
 pub mod relay;
