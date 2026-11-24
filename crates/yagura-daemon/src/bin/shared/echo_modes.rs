@@ -5,6 +5,7 @@
 //! there.
 
 use std::io::{self, Read, Write};
+use std::process::{Command, Stdio};
 use std::sync::Arc;
 
 use crate::composer_paint::{ComposerStyle, Output, Reflect, Scan, accept_byte, spawn_reflector};
@@ -26,6 +27,74 @@ pub(crate) fn echo_until_end_of_input() -> io::Result<()> {
     }
 
     Ok(())
+}
+
+/// [`echo_until_end_of_input`], and every group of lowercase hex digits between `{` and
+/// `}` (not echoed) decodes to an argv, one element per line, that is started as a child of
+/// this process with no stdio of its own: a stand-in for a process of the window's tree.
+// Only `echo_child` runs it; `ready_child` shares this file.
+#[allow(dead_code)]
+pub(crate) fn echo_spawning_until_end_of_input() -> io::Result<()> {
+    let stdin = io::stdin();
+    let mut stdout = io::stdout();
+    let mut buf = vec![0u8; 4096];
+    let mut group: Option<Vec<u8>> = None;
+
+    loop {
+        let n = stdin.lock().read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        let mut echoed = Vec::with_capacity(n);
+        for &byte in &buf[..n] {
+            match (byte, group.as_mut()) {
+                (b'{', _) => group = Some(Vec::new()),
+                (b'}', Some(_)) => {
+                    if let Some(digits) = group.take() {
+                        spawn_argv(&decode_hex(&digits));
+                    }
+                }
+                (b'0'..=b'9' | b'a'..=b'f', Some(digits)) => digits.push(byte),
+                (_, Some(_)) => {}
+                (_, None) => echoed.push(byte),
+            }
+        }
+        stdout.write_all(&echoed)?;
+        stdout.flush()?;
+    }
+
+    Ok(())
+}
+
+fn decode_hex(digits: &[u8]) -> Vec<u8> {
+    let value = |digit: u8| match digit {
+        b'0'..=b'9' => digit - b'0',
+        _ => digit - b'a' + 10,
+    };
+    let (pairs, _) = digits.as_chunks::<2>();
+    pairs
+        .iter()
+        .map(|[high, low]| (value(*high) << 4) | value(*low))
+        .collect()
+}
+
+/// Starts `decoded` (one argv element per line), reaped in the background.
+// Test-only fixture, not the daemon's production spawn path: it starts the child its
+// input names. Only `echo_child` runs it.
+#[allow(dead_code, clippy::disallowed_methods)]
+fn spawn_argv(decoded: &[u8]) {
+    let text = String::from_utf8_lossy(decoded);
+    let mut argv = text.lines();
+    let Some(program) = argv.next() else { return };
+    let spawned = Command::new(program)
+        .args(argv)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn();
+    if let Ok(mut child) = spawned {
+        std::thread::spawn(move || child.wait());
+    }
 }
 
 /// Accumulates input in a painted composer region and echoes it as one line

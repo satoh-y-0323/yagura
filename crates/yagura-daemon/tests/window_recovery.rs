@@ -22,7 +22,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
-use common::real_daemon::{RunningDaemon, Sandbox};
+use common::real_daemon::{
+    ClientCommand, ClientLog, ClientProcess, ClientRead, RunningDaemon, Sandbox,
+};
 use common::store_fixtures::{insert_window_row_with_layout_value, set_meta};
 use common::{read_frame, read_response, send};
 use rusqlite::types::Value as SqlValue;
@@ -39,7 +41,6 @@ use yagura_test_support::ipc::{Connection, connect_with_retry};
 use yagura_test_support::process::{
     COMPOSER_CONTINUATION_PREFIX, COMPOSER_MARKER, COMPOSER_SEPARATOR,
 };
-use yagura_test_support::relay_stdio::RelayProcess;
 
 /// The only token shape `StatusToken::from_override` accepts: the first daemon gives it
 /// to every window it opens, and the next daemon draws its own.
@@ -141,47 +142,44 @@ async fn listed(daemon: &mut RunningDaemon, sandbox: &Sandbox, window_id: &str) 
         })
 }
 
-async fn attach(daemon: &mut RunningDaemon, window_id: &str) {
-    send(
-        &mut daemon.client,
-        &ClientMessage::AttachView {
-            window_id: window_id.to_owned(),
-            size: None,
-        },
-    )
-    .await;
-    match read_response(&mut daemon.client).await {
-        DaemonMessage::Attached { .. } => {}
-        other => panic!("expected attached, got {other:?}"),
+/// The window's own credentials, which a `window_client` reads from its environment.
+const OWN_WINDOW: &str = "$YAGURA_WINDOW_ID";
+const OWN_TOKEN: &str = "$YAGURA_STATUS_TOKEN";
+
+/// A status event of `window_id` with `token`.
+fn status_event(window_id: &str, token: &str) -> ClientMessage {
+    ClientMessage::StatusEvent {
+        source: "cli".to_owned(),
+        status: WindowStatus::Running,
+        window_id: Some(window_id.to_owned()),
+        token: token.to_owned(),
     }
 }
 
-/// Sends a status event and then a ping: the refusal answered before the pong, if any.
-pub(crate) async fn status_event_refusal(
-    daemon: &mut RunningDaemon,
-    window_id: &str,
-    token: &str,
-) -> Option<DaemonMessage> {
-    send(
-        &mut daemon.client,
-        &ClientMessage::StatusEvent {
-            source: "cli".to_owned(),
-            status: WindowStatus::Running,
-            window_id: Some(window_id.to_owned()),
-            token: token.to_owned(),
-        },
-    )
-    .await;
-    send(&mut daemon.client, &ClientMessage::Ping).await;
-    match read_response(&mut daemon.client).await {
-        DaemonMessage::Pong => None,
-        refusal => {
-            match read_response(&mut daemon.client).await {
-                DaemonMessage::Pong => {}
-                other => panic!("expected pong after the refusal, got {other:?}"),
-            }
-            Some(refusal)
-        }
+/// Asks `log`'s client for a status event and then a ping: the refusal the daemon answers
+/// before the pong, if any, is what `refusal` takes from the responses read.
+fn status_event_command(log: &mut ClientLog, window_id: &str, token: &str) -> ClientCommand {
+    let conn = log.new_conn();
+    log.exchange(&conn, &status_event(window_id, token), ClientRead::Pong)
+}
+
+/// The refusal among the responses read before a pong, if any.
+fn refusal(mut answers: Vec<DaemonMessage>) -> Option<DaemonMessage> {
+    assert!(
+        answers.len() <= 1,
+        "a status event is refused at most once before its pong: {answers:?}"
+    );
+    answers.pop()
+}
+
+/// An `identify` of `window_id` with [`TOKEN`], declaring `profile` when given.
+fn identify_message(window_id: &str, profile: Option<&str>) -> ClientMessage {
+    ClientMessage::Identify {
+        window_id: window_id.to_owned(),
+        token: TOKEN.to_owned(),
+        declaration: profile.map(|profile| yagura_protocol::Declaration {
+            profile: profile.to_owned(),
+        }),
     }
 }
 
@@ -285,7 +283,7 @@ async fn a_window_outlives_its_daemon_and_the_next_one_takes_it_back_whole() {
         .start_from(&[("YAGURA_STATUS_TOKEN_OVERRIDE", TOKEN)])
         .await;
     let window_id = first.open_profile_window(&sandbox, "script").await;
-    attach(&mut first, &window_id).await;
+    first.attach(&window_id).await;
     first
         .output_until(&window_id, "the script's marker", |text| {
             text.contains(SCRIPT_MARKER)
@@ -360,7 +358,7 @@ async fn a_window_outlives_its_daemon_and_the_next_one_takes_it_back_whole() {
          while no daemon was there"
     );
 
-    attach(&mut next, &window_id).await;
+    next.attach(&window_id).await;
     // Read before any helper below that skips status pushes.
     let snapshot_boot = loop {
         match read_frame(&mut next.client).await {
@@ -394,12 +392,18 @@ async fn a_window_outlives_its_daemon_and_the_next_one_takes_it_back_whole() {
         String::from_utf8_lossy(before_input)
     );
 
+    // The window's own process names it, as its CLI's hooks do; a token that is not the
+    // window's is refused before the window's tree is asked, so the test process sends it.
+    let mut client = ClientLog::new(&sandbox, "whole");
+    let status = status_event_command(&mut client, OWN_WINDOW, OWN_TOKEN);
+    next.start_client_once(&window_id, &client, std::slice::from_ref(&status))
+        .await;
     assert_eq!(
-        status_event_refusal(&mut next, &window_id, TOKEN).await,
+        refusal(client.messages(&status).await),
         None,
         "the window taken back must accept a status event with the token it had"
     );
-    match status_event_refusal(&mut next, &window_id, OTHER_TOKEN).await {
+    match common::status_event_refusal(&mut next.client, &window_id, OTHER_TOKEN).await {
         Some(DaemonMessage::Error { code, .. }) => assert_eq!(code, "auth_failed"),
         other => panic!("a token that is not the window's must be refused, got {other:?}"),
     }
@@ -475,6 +479,11 @@ impl FakeHolder {
             .expect("the stand-in's stdin is piped");
         writeln!(stdin, "{line}").expect("write to the stand-in's stdin");
         stdin.flush().expect("flush the stand-in's stdin");
+    }
+
+    /// The line that has a `gate` stand-in welcome the daemon, naming its idle child.
+    fn welcome_own_child(&self) -> String {
+        welcome_naming(self.child.id())
     }
 
     fn running(&mut self) -> (bool, bool) {
@@ -559,6 +568,12 @@ async fn replace_holder_with(
 
 fn hello_logged(lines: &[String]) -> bool {
     lines.iter().any(|line| line.starts_with("FRAME Hello"))
+}
+
+/// The line that has a `gate` stand-in welcome the daemon, naming the process `pid` and its
+/// start as the window's child.
+fn welcome_naming(pid: u32) -> String {
+    format!("welcome {pid} {}", start_of(pid))
 }
 
 /// Another connection to the sandbox's daemon.
@@ -679,6 +694,13 @@ async fn a_door_request_during_a_take_back_is_checked_once_the_take_back_ends() 
     )
     .await;
 
+    // The windows that are welcomed ask from a process of their own tree: the child their
+    // holder names. The refused one asks as it is, since its token is never settled.
+    let mut welcomed_log = ClientLog::new(&sandbox, "welcomed");
+    let mut welcomed_client = ClientProcess::spawn(&sandbox, &welcomed_log);
+    let mut rowless_log = ClientLog::new(&sandbox, "rowless");
+    let mut rowless_client = ClientProcess::spawn(&sandbox, &rowless_log);
+
     let mut next = sandbox.start().await;
     for (window_id, fake) in [
         (&welcomed, &welcomed_fake),
@@ -689,20 +711,22 @@ async fn a_door_request_during_a_take_back_is_checked_once_the_take_back_ends() 
         fake.wait_logged("the next daemon's Hello", hello_logged)
             .await;
     }
-    let mut welcomed_door = connect(&sandbox).await;
-    send(&mut welcomed_door, &deliver_take(&welcomed, TOKEN)).await;
+    let welcomed_take =
+        welcomed_log.exchange("door", &deliver_take(&welcomed, TOKEN), ClientRead::One);
+    welcomed_client.command(&welcomed_take);
     let mut refused_door = connect(&sandbox).await;
     send(&mut refused_door, &deliver_take(&refused, TOKEN)).await;
-    let mut rowless_door = connect(&sandbox).await;
-    send(&mut rowless_door, &deliver_take(&rowless, TOKEN)).await;
+    let rowless_take =
+        rowless_log.exchange("door", &deliver_take(&rowless, TOKEN), ClientRead::One);
+    rowless_client.command(&rowless_take);
     for window_id in [&welcomed, &refused, &rowless] {
         until_held(&sandbox, window_id).await;
     }
 
-    welcomed_fake.answer("welcome");
+    welcomed_fake.answer(&welcome_naming(welcomed_client.id()));
     refused_fake.answer("reject");
-    rowless_fake.answer("welcome");
-    match read_response(&mut welcomed_door).await {
+    rowless_fake.answer(&welcome_naming(rowless_client.id()));
+    match welcomed_log.message(&welcomed_take).await {
         DaemonMessage::Delivery { .. } => {}
         other => panic!(
             "a request with the token the holder hands back must pass once the window is \
@@ -714,7 +738,7 @@ async fn a_door_request_during_a_take_back_is_checked_once_the_take_back_ends() 
         read_response(&mut refused_door).await,
         "a request to a window whose take-back failed",
     );
-    match read_response(&mut rowless_door).await {
+    match rowless_log.message(&rowless_take).await {
         DaemonMessage::Delivery { output, .. } => assert!(
             output.contains(KEPT_MARK),
             "a window taken back without a row must serve the request as the window its \
@@ -792,7 +816,7 @@ async fn a_window_being_taken_back_is_listed_closable_and_holds_no_other_window_
         .await;
 
     // The live window is taken back once a write reaches its child.
-    attach(&mut next, &live).await;
+    next.attach(&live).await;
     send(
         &mut next.client,
         &ClientMessage::Text {
@@ -801,8 +825,12 @@ async fn a_window_being_taken_back_is_listed_closable_and_holds_no_other_window_
     )
     .await;
     logged(&log, b"LIVE-MARK", None).await;
+    let mut client = ClientLog::new(&sandbox, "live");
+    let status = status_event_command(&mut client, OWN_WINDOW, OWN_TOKEN);
+    next.start_client_once(&live, &client, std::slice::from_ref(&status))
+        .await;
     assert_eq!(
-        status_event_refusal(&mut next, &live, TOKEN).await,
+        refusal(client.messages(&status).await),
         None,
         "another window's status event must not wait for the windows still being taken back"
     );
@@ -1474,7 +1502,7 @@ async fn a_window_without_a_row_is_taken_back_from_its_holders_launch_record() {
     older_fake
         .wait_logged("the next daemon's Hello", hello_logged)
         .await;
-    older_fake.answer("welcome");
+    older_fake.answer(&older_fake.welcome_own_child());
     until_named(&mut next, &sandbox, &older, OLD_RECORD_NAME).await;
     assert_undeliverable(
         &mut next,
@@ -1498,8 +1526,12 @@ async fn a_window_without_a_row_is_taken_back_from_its_holders_launch_record() {
         "taken back from launch records",
     )
     .await;
+    let mut client = ClientLog::new(&sandbox, "rowless");
+    let status = status_event_command(&mut client, OWN_WINDOW, OWN_TOKEN);
+    next.start_client_once(&window_id, &client, std::slice::from_ref(&status))
+        .await;
     assert_eq!(
-        status_event_refusal(&mut next, &window_id, TOKEN).await,
+        refusal(client.messages(&status).await),
         None,
         "the window taken back from its launch record accepts the token it had"
     );
@@ -1751,32 +1783,74 @@ async fn a_window_whose_row_cannot_be_written_is_refused_before_its_holder_start
     );
 }
 
-/// Has `child` report `summary` to the window that opened it; returns the window the
-/// report was delivered to.
-async fn report_from(sandbox: &Sandbox, child: &str, summary: &str) -> Option<String> {
-    let mut as_child = connect(sandbox).await;
-    common::identify(&mut as_child, child).await;
-    send(
-        &mut as_child,
+/// Has `child`, a window running `window_client serve` for `log`, report `summary` to the
+/// window that opened it; returns the window the report was delivered to.
+async fn report_from(
+    daemon: &mut RunningDaemon,
+    log: &mut ClientLog,
+    child: &str,
+    summary: &str,
+) -> Option<String> {
+    let conn = log.new_conn();
+    let identify = log.exchange(&conn, &identify_message(child, None), ClientRead::One);
+    let report = log.exchange(
+        &conn,
         &ClientMessage::SendReport {
             outcome: yagura_protocol::ReportOutcome::Succeeded,
             summary: summary.to_owned(),
             path: None,
         },
-    )
-    .await;
-    match read_response(&mut as_child).await {
+        ClientRead::One,
+    );
+    daemon.type_command(child, &identify).await;
+    daemon.type_command(child, &report).await;
+    expect_identified(log.message(&identify).await, child);
+    match log.message(&report).await {
         DaemonMessage::ReportSent { delivered_to, .. } => delivered_to,
         other => panic!("expected report_sent, got {other:?}"),
     }
 }
 
-/// A window `opener` opens over a connection identified as it, declaring `profile` the
-/// way the bridge of a window opened from it does.
-async fn opened_by(sandbox: &Sandbox, opener: &str, profile: Option<&str>) -> String {
-    let mut as_opener = connect(sandbox).await;
-    common::identify_declaring(&mut as_opener, opener, profile).await;
-    common::call_open_window(&mut as_opener, bins::echo_child_command()).await
+fn expect_identified(answer: DaemonMessage, window_id: &str) {
+    match answer {
+        DaemonMessage::Identified { window_id: acked } => assert_eq!(acked, window_id),
+        other => panic!("expected identified, got {other:?}"),
+    }
+}
+
+/// The commands that, from the window `opener` (declaring `profile` the way the bridge of
+/// a window opened from it does), open a window running `window_client serve` for
+/// `opened`.
+fn open_as(
+    log: &mut ClientLog,
+    opener: &str,
+    profile: Option<&str>,
+    opened: &ClientLog,
+) -> [ClientCommand; 2] {
+    let conn = log.new_conn();
+    let identify = log.exchange(&conn, &identify_message(opener, profile), ClientRead::One);
+    let open = log.exchange(
+        &conn,
+        &ClientMessage::OpenWindow {
+            command: bins::window_client_command(opened.path()),
+            cwd: None,
+            name: None,
+            vendor: None,
+            detection: None,
+            on_name_taken: Default::default(),
+        },
+        ClientRead::One,
+    );
+    [identify, open]
+}
+
+/// The id of the window the commands of [`open_as`] opened, once they were answered.
+async fn opened_window(log: &mut ClientLog, commands: &[ClientCommand; 2], opener: &str) -> String {
+    expect_identified(log.message(&commands[0]).await, opener);
+    match log.message(&commands[1]).await {
+        DaemonMessage::WindowOpened { window_id, .. } => window_id,
+        other => panic!("expected window_opened, got {other:?}"),
+    }
 }
 
 /// The `(seq, summary)` of each report the store keeps for `window_id`, by place.
@@ -1801,16 +1875,21 @@ fn kept_reports(db: &Path, window_id: &str) -> Vec<(i64, String)> {
         .collect()
 }
 
-/// The text a hook door takes from `window_id`'s inbox now.
-async fn door_output(sandbox: &Sandbox, window_id: &str) -> String {
-    let mut door = connect(sandbox).await;
-    send(&mut door, &deliver_take(window_id, TOKEN)).await;
-    match read_response(&mut door).await {
-        DaemonMessage::Delivery { output, .. } => {
-            // A door says it printed once it has, which ends what it took.
-            send(&mut door, &ClientMessage::DeliverPrinted).await;
-            output
-        }
+/// The text a hook door takes from `window_id`'s inbox now, run by a client started in the
+/// window; it says it printed once it has, which ends what it took.
+async fn door_output(
+    daemon: &mut RunningDaemon,
+    sandbox: &Sandbox,
+    log: &mut ClientLog,
+    window_id: &str,
+) -> String {
+    let conn = log.new_conn();
+    let take = log.exchange(&conn, &deliver_take(window_id, TOKEN), ClientRead::Delivery);
+    daemon
+        .start_client_once(window_id, log, std::slice::from_ref(&take))
+        .await;
+    match log.message(&take).await {
+        DaemonMessage::Delivery { output, .. } => output,
         other => panic!(
             "expected delivery, got {other:?}; daemon log:\n{}",
             sandbox.daemon_log()
@@ -1833,9 +1912,17 @@ async fn a_window_rebuilt_from_its_launch_record_numbers_its_reports_on_and_is_n
     let mut first = start_hooked(&sandbox, &detections).await;
     let parent = first.open_profile_window(&sandbox, HOOKED_PROFILE).await;
     let parent_name = listed(&mut first, &sandbox, &parent).await.name;
-    let child = opened_by(&sandbox, &parent, Some(HOOKED_PROFILE)).await;
+    // The parent's script child starts the client that opens and names the others; the
+    // windows it opens run the client themselves.
+    let mut parent_log = ClientLog::new(&sandbox, "parent");
+    let mut child_log = ClientLog::new(&sandbox, "child");
+    let opening = open_as(&mut parent_log, &parent, Some(HOOKED_PROFILE), &child_log);
+    first
+        .start_client_once(&parent, &parent_log, &opening)
+        .await;
+    let child = opened_window(&mut parent_log, &opening, &parent).await;
     assert_eq!(
-        report_from(&sandbox, &child, "KEPT-REPORT")
+        report_from(&mut first, &mut child_log, &child, "KEPT-REPORT")
             .await
             .as_deref(),
         Some(parent.as_str())
@@ -1868,7 +1955,7 @@ async fn a_window_rebuilt_from_its_launch_record_numbers_its_reports_on_and_is_n
 
     let mut next = start_hooked(&sandbox, &detections).await;
     until_named(&mut next, &sandbox, &parent, &parent_name).await;
-    let kept_notice = door_output(&sandbox, &parent).await;
+    let kept_notice = door_output(&mut next, &sandbox, &mut parent_log, &parent).await;
     assert_eq!(
         count(kept_notice.as_bytes(), NOTICE.as_bytes()),
         1,
@@ -1876,16 +1963,31 @@ async fn a_window_rebuilt_from_its_launch_record_numbers_its_reports_on_and_is_n
     );
 
     // Another window numbered for the first time.
-    let other_parent = common::call_open_window(&mut next.client, bins::echo_child_command()).await;
-    let other_child = opened_by(&sandbox, &other_parent, None).await;
+    let mut other_parent_log = ClientLog::new(&sandbox, "other-parent");
+    let mut other_child_log = ClientLog::new(&sandbox, "other-child");
+    let other_parent = common::call_open_window(
+        &mut next.client,
+        bins::window_client_command(other_parent_log.path()),
+    )
+    .await;
+    let opening = open_as(&mut other_parent_log, &other_parent, None, &other_child_log);
+    for command in &opening {
+        next.type_command(&other_parent, command).await;
+    }
+    let other_child = opened_window(&mut other_parent_log, &opening, &other_parent).await;
     assert_eq!(
-        report_from(&sandbox, &other_child, "OTHER-REPORT")
-            .await
-            .as_deref(),
+        report_from(
+            &mut next,
+            &mut other_child_log,
+            &other_child,
+            "OTHER-REPORT"
+        )
+        .await
+        .as_deref(),
         Some(other_parent.as_str())
     );
     assert_eq!(
-        report_from(&sandbox, &child, "NEXT-REPORT")
+        report_from(&mut next, &mut child_log, &child, "NEXT-REPORT")
             .await
             .as_deref(),
         Some(parent.as_str())
@@ -1898,14 +2000,21 @@ async fn a_window_rebuilt_from_its_launch_record_numbers_its_reports_on_and_is_n
         "the next report takes a place of its own behind the kept one: {kept:?}"
     );
 
-    let mut as_parent = connect(&sandbox).await;
-    common::identify_declaring(&mut as_parent, &parent, Some(HOOKED_PROFILE)).await;
-    send(
-        &mut as_parent,
+    let conn = parent_log.new_conn();
+    let identify = parent_log.exchange(
+        &conn,
+        &identify_message(&parent, Some(HOOKED_PROFILE)),
+        ClientRead::One,
+    );
+    let wait = parent_log.exchange(
+        &conn,
         &ClientMessage::WaitForReport { timeout_sec: 0 },
-    )
-    .await;
-    match read_response(&mut as_parent).await {
+        ClientRead::One,
+    );
+    let waiting = [identify, wait];
+    next.start_client_once(&parent, &parent_log, &waiting).await;
+    expect_identified(parent_log.message(&waiting[0]).await, &parent);
+    match parent_log.message(&waiting[1]).await {
         DaemonMessage::Reports { reports, .. } => assert_eq!(
             reports
                 .iter()
@@ -1917,12 +2026,12 @@ async fn a_window_rebuilt_from_its_launch_record_numbers_its_reports_on_and_is_n
     }
     // The next stretch's notice bounds what came of the first.
     assert_eq!(
-        report_from(&sandbox, &child, "LATER-REPORT")
+        report_from(&mut next, &mut child_log, &child, "LATER-REPORT")
             .await
             .as_deref(),
         Some(parent.as_str())
     );
-    let later_notice = door_output(&sandbox, &parent).await;
+    let later_notice = door_output(&mut next, &sandbox, &mut parent_log, &parent).await;
     assert_eq!(
         count(later_notice.as_bytes(), NOTICE.as_bytes()),
         1,
@@ -3309,7 +3418,7 @@ async fn a_connected_windows_holder_killed_from_outside_ends_the_window_and_is_r
 
     let mut daemon = sandbox.start().await;
     let window_id = daemon.open_profile_window(&sandbox, "script").await;
-    attach(&mut daemon, &window_id).await;
+    daemon.attach(&window_id).await;
     daemon
         .output_until(&window_id, "the script's marker", |text| {
             text.contains(SCRIPT_MARKER)
@@ -3447,6 +3556,26 @@ async fn until_mcp_connected(
     }
 }
 
+/// The answer to the request `id` among the lines the relay `kept` by a window client
+/// writes, skipping every line before it.
+async fn relay_answer(
+    log: &mut ClientLog,
+    kept: &ClientCommand,
+    id: &serde_json::Value,
+) -> serde_json::Value {
+    loop {
+        let result = log.result(kept).await;
+        let line = result["line"]
+            .as_str()
+            .unwrap_or_else(|| panic!("the relay's stdout ended: {result}"));
+        let line: serde_json::Value = serde_json::from_str(line)
+            .unwrap_or_else(|err| panic!("the relay writes JSON-RPC lines ({err}): {line}"));
+        if line.get("method").is_none() && line.get("id") == Some(id) {
+            return line;
+        }
+    }
+}
+
 /// A window's relay names its window to the next daemon after the kill and the
 /// restart without the window typing anything or calling any tool, and a CLI
 /// line it then carries is answered by that daemon's MCP. Killing the relay
@@ -3455,44 +3584,50 @@ async fn until_mcp_connected(
 async fn a_windows_relay_names_its_window_to_the_next_daemon_without_any_call_and_its_end_clears_the_mark()
  {
     let sandbox = Sandbox::new("relay-names");
-    let log = sandbox.tree.path().join("input.log");
-    write_script_profile(&sandbox, "script", &log, None);
+    // The window's process keeps the relay as its child and carries the CLI's lines to it.
+    let mut log = ClientLog::new(&sandbox, "relay");
+    let client: Vec<String> = bins::window_client_command(log.path());
+    let client: Vec<&str> = client.iter().map(String::as_str).collect();
+    sandbox.write_probe_profile("relay-window", &client, "");
     let mut first = sandbox
         .start_from(&[("YAGURA_STATUS_TOKEN_OVERRIDE", TOKEN)])
         .await;
-    let window_id = first.open_profile_window(&sandbox, "script").await;
+    let window_id = first.open_profile_window(&sandbox, "relay-window").await;
 
-    let mut relay = RelayProcess::spawn(
-        &relay_path(),
+    let relay_exe = relay_path();
+    let relay = log.keep(
+        &[utf8(&relay_exe)],
         &[
             (yagura_protocol::INSTANCE_ENV, sandbox.instance.as_str()),
             (yagura_protocol::WINDOW_ID_ENV, window_id.as_str()),
             (yagura_protocol::STATUS_TOKEN_ENV, TOKEN),
         ],
-        &[],
+        &["YAGURA_STORE_DB"],
     );
+    first.type_command(&window_id, &relay).await;
+    log.result(&relay).await;
     until_mcp_connected(&mut first, &sandbox, &window_id, true, "the relay's start").await;
 
     first.kill_keeping_windows();
     let mut next = sandbox.start().await;
     until_mcp_connected(&mut next, &sandbox, &window_id, true, "the next daemon").await;
 
-    relay.send(&common::relay::initialize_line(1)).await;
-    let opened = relay.answer(&serde_json::json!(1)).await;
+    let write = log.write(&relay, &common::relay::initialize_line(1).to_string());
+    next.type_command(&window_id, &write).await;
+    let opened = relay_answer(&mut log, &relay, &serde_json::json!(1)).await;
     assert!(
         opened["result"]["protocolVersion"].is_string(),
         "the next daemon's MCP answers the initialize the relay carries: {opened}"
     );
-    relay.send(&common::relay::initialized_line()).await;
-    relay
-        .send(&common::relay::tool_call_line(
-            2,
-            "list_windows",
-            serde_json::json!({}),
-            false,
-        ))
-        .await;
-    let listing = common::relay::tool_json(&relay.answer(&serde_json::json!(2)).await);
+    for line in [
+        common::relay::initialized_line(),
+        common::relay::tool_call_line(2, "list_windows", serde_json::json!({}), false),
+    ] {
+        let write = log.write(&relay, &line.to_string());
+        next.type_command(&window_id, &write).await;
+    }
+    let listing =
+        common::relay::tool_json(&relay_answer(&mut log, &relay, &serde_json::json!(2)).await);
     let listed_ids: Vec<&str> = listing["windows"]
         .as_array()
         .unwrap_or_else(|| panic!("list_windows answers a windows array: {listing}"))
@@ -3504,7 +3639,8 @@ async fn a_windows_relay_names_its_window_to_the_next_daemon_without_any_call_an
         "the next daemon's list_windows, carried by the relay, lists the window: {listing}"
     );
 
-    relay.kill().await;
+    let end = log.end(&relay);
+    next.type_command(&window_id, &end).await;
     until_mcp_connected(&mut next, &sandbox, &window_id, false, "the relay's end").await;
 }
 
@@ -3595,7 +3731,7 @@ async fn a_typing_mark_an_older_daemon_left_is_dropped_with_a_warning_and_nothin
 
     let mut first = sandbox.start_from(&env).await;
     let window_id = first.open_profile_window(&sandbox, "left-mark").await;
-    attach(&mut first, &window_id).await;
+    first.attach(&window_id).await;
     first
         .output_until(&window_id, "the empty composer", |text| {
             painted_composer(text).is_some()
@@ -3643,7 +3779,7 @@ async fn a_typing_mark_an_older_daemon_left_is_dropped_with_a_warning_and_nothin
         );
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    attach(&mut next, &window_id).await;
+    next.attach(&window_id).await;
     send(
         &mut next.client,
         &ClientMessage::Text {
@@ -3781,19 +3917,30 @@ async fn window_cli_args_logged_in(logs: &std::path::Path) -> Vec<String> {
     }
 }
 
-/// Whether a claim of `window_id` of `profile` with [`TOKEN`] is answered as its window's.
-async fn spoken_for(sandbox: &Sandbox, window_id: &str, profile: &str) -> DaemonMessage {
-    let (mut answers, _) =
-        crate::credentials_launch::claims(sandbox, window_id, profile, TOKEN, 1).await;
-    answers.remove(0)
+/// What the daemon answers a claim of `window_id` of `profile` with [`TOKEN`], made by the
+/// window's own `window_client`: whether it is answered as its window's.
+async fn spoken_for(
+    daemon: &mut RunningDaemon,
+    log: &mut ClientLog,
+    window_id: &str,
+    profile: &str,
+) -> DaemonMessage {
+    let conn = log.new_conn();
+    let claim = log.exchange(
+        &conn,
+        &identify_message(window_id, Some(profile)),
+        ClientRead::One,
+    );
+    daemon.type_command(window_id, &claim).await;
+    log.message(&claim).await
 }
 
-/// Writes the profile `id`: the shipped profile `shipped` whose CLI keeps its window open,
-/// run in another environment with `guest`.
-fn write_overlay_profile(sandbox: &Sandbox, id: &str, shipped: &str, guest: bool) {
-    use crate::credentials_launch::{quiet_cli, shipped_with_command, unchanged_convert};
+/// Writes the profile `id`: the shipped profile `shipped` whose CLI keeps its window open
+/// as a `window_client` writing to `results`, run in another environment with `guest`.
+fn write_overlay_profile(sandbox: &Sandbox, id: &str, shipped: &str, guest: bool, results: &Path) {
+    use crate::credentials_launch::{shipped_with_command, unchanged_convert};
     let convert = unchanged_convert();
-    let cli = quiet_cli(&sandbox.tree.make_dir(&format!("logs-{id}")));
+    let cli = bins::window_client_command(results);
     common::write_profile(
         &sandbox.profiles_dir,
         id,
@@ -3801,15 +3948,40 @@ fn write_overlay_profile(sandbox: &Sandbox, id: &str, shipped: &str, guest: bool
     );
 }
 
-/// The time the daemon names a context read in the name of `window_id` with [`TOKEN`].
-async fn context_time(sandbox: &Sandbox, window_id: &str) -> Option<serde_json::Value> {
-    let answer = crate::hook_events_door::door_answer(
-        sandbox.endpoint(),
-        window_id,
-        TOKEN,
-        serde_json::json!({ "kind": "context" }),
-    )
-    .await;
+/// The time the daemon names a context read in the name of `window_id` with [`TOKEN`], made
+/// by the window's own `window_client`. A hook asked for values of its input reports them
+/// all absent.
+async fn context_time(
+    daemon: &mut RunningDaemon,
+    sandbox: &Sandbox,
+    log: &mut ClientLog,
+    window_id: &str,
+) -> Option<serde_json::Value> {
+    let read = |input: Option<Vec<serde_json::Value>>| -> ClientMessage {
+        let mut door = serde_json::json!({ "kind": "context" });
+        if let Some(input) = input {
+            door["input"] = serde_json::Value::Array(input);
+        }
+        let wire = serde_json::json!({
+            "type": "door_read",
+            "window_id": window_id,
+            "token": TOKEN,
+            "door": door,
+        });
+        serde_json::from_value(wire.clone())
+            .unwrap_or_else(|err| panic!("the wire must know a door's read {wire}: {err}"))
+    };
+    let conn = log.new_conn();
+    let first = log.exchange(&conn, &read(None), ClientRead::One);
+    daemon.type_command(window_id, &first).await;
+    let mut answer = log.message(&first).await;
+    if let DaemonMessage::HookInputWanted { pointers } = &answer {
+        let input = vec![serde_json::json!("absent"); pointers.len()];
+        let second = log.exchange(&conn, &read(Some(input)), ClientRead::One);
+        daemon.type_command(window_id, &second).await;
+        answer = log.message(&second).await;
+    }
+    let answer = serde_json::to_value(&answer).expect("a daemon message serializes");
     assert_eq!(
         answer["type"],
         "delivery",
@@ -3853,13 +4025,16 @@ async fn a_taken_back_window_keeps_whether_its_overlay_was_made() {
     const GUEST: &str = "overlay-kept-guest";
     const GUEST_ROWLESS: &str = "overlay-kept-guest-rowless";
     let sandbox = Sandbox::new("recover-overlay");
+    let mut logs = Vec::new();
     for (id, shipped, guest) in [
         (DIRECT, "grok-build", false),
         (DIRECT_ROWLESS, "grok-build", false),
         (GUEST, "wsl-grok-build", true),
         (GUEST_ROWLESS, "wsl-grok-build", true),
     ] {
-        write_overlay_profile(&sandbox, id, shipped, guest);
+        let log = ClientLog::new(&sandbox, id);
+        write_overlay_profile(&sandbox, id, shipped, guest, log.path());
+        logs.push(log);
     }
 
     let mut first = start_with_token(&sandbox).await;
@@ -3883,11 +4058,12 @@ async fn a_taken_back_window_keeps_whether_its_overlay_was_made() {
     for window_id in &ids {
         listed(&mut next, &sandbox, window_id).await;
     }
-    for ((window_id, profile), opened) in [(&ids[0], DIRECT), (&ids[1], DIRECT_ROWLESS)]
+    for (at, ((window_id, profile), opened)) in [(&ids[0], DIRECT), (&ids[1], DIRECT_ROWLESS)]
         .into_iter()
         .zip(opened)
+        .enumerate()
     {
-        let answer = spoken_for(&sandbox, window_id, profile).await;
+        let answer = spoken_for(&mut next, &mut logs[at], window_id, profile).await;
         assert!(
             matches!(answer, DaemonMessage::Identified { .. }),
             "{profile}: a window run directly made its overlay at its open, got {answer:?}; \
@@ -3895,15 +4071,18 @@ async fn a_taken_back_window_keeps_whether_its_overlay_was_made() {
             sandbox.daemon_log()
         );
         assert_eq!(
-            context_time(&sandbox, window_id).await,
+            context_time(&mut next, &sandbox, &mut logs[at], window_id).await,
             Some(serde_json::json!(opened)),
             "{profile}: a window taken back is named the time its CLI was given at its open, \
              not its rewritten profile's; daemon log:\n{}",
             sandbox.daemon_log()
         );
     }
-    for (window_id, profile) in [(&ids[2], GUEST), (&ids[3], GUEST_ROWLESS)] {
-        let answer = spoken_for(&sandbox, window_id, profile).await;
+    for (at, (window_id, profile)) in [(&ids[2], GUEST), (&ids[3], GUEST_ROWLESS)]
+        .into_iter()
+        .enumerate()
+    {
+        let answer = spoken_for(&mut next, &mut logs[at + 2], window_id, profile).await;
         assert!(
             crate::credentials_launch::refused_as_pending(&answer),
             "{profile}: a guest window whose overlay was never made is still refused after \
@@ -3922,8 +4101,10 @@ async fn a_window_whose_row_predates_the_overlay_fact_is_refused_when_its_profil
     const DECLARED: &str = "overlay-old-declared";
     const PLAIN: &str = "overlay-old-plain";
     let sandbox = Sandbox::new("recover-overlay-old");
-    write_overlay_profile(&sandbox, DECLARED, "grok-build", false);
-    let cli = crate::credentials_launch::quiet_cli(&sandbox.tree.make_dir("logs-plain"));
+    let mut declared_log = ClientLog::new(&sandbox, DECLARED);
+    let mut plain_log = ClientLog::new(&sandbox, PLAIN);
+    write_overlay_profile(&sandbox, DECLARED, "grok-build", false, declared_log.path());
+    let cli = bins::window_client_command(plain_log.path());
     let cli: Vec<&str> = cli.iter().map(String::as_str).collect();
     sandbox.write_probe_profile(PLAIN, &cli, "\n[hook_timeout]\ndefault = 9\n");
 
@@ -3937,19 +4118,19 @@ async fn a_window_whose_row_predates_the_overlay_fact_is_refused_when_its_profil
     let mut next = start_with_token(&sandbox).await;
     listed(&mut next, &sandbox, &declared).await;
     listed(&mut next, &sandbox, &plain).await;
-    let answer = spoken_for(&sandbox, &plain, PLAIN).await;
+    let answer = spoken_for(&mut next, &mut plain_log, &plain, PLAIN).await;
     assert!(
         matches!(answer, DaemonMessage::Identified { .. }),
         "control: an older row whose profile declares no overlay is spoken for, got {answer:?}"
     );
     assert_eq!(
-        context_time(&sandbox, &plain).await,
+        context_time(&mut next, &sandbox, &mut plain_log, &plain).await,
         None,
         "a row older than the time its CLI was given keeps none, so its doors are named none \
          whatever its profile gives now; daemon log:\n{}",
         sandbox.daemon_log()
     );
-    let answer = spoken_for(&sandbox, &declared, DECLARED).await;
+    let answer = spoken_for(&mut next, &mut declared_log, &declared, DECLARED).await;
     assert!(
         crate::credentials_launch::refused_as_pending(&answer),
         "an older row whose profile declares an overlay is refused, got {answer:?}; daemon \
@@ -3967,7 +4148,7 @@ async fn a_window_whose_row_predates_the_overlay_fact_is_refused_when_its_profil
 #[tokio::test]
 async fn a_guest_window_makes_its_overlay_through_its_door_as_a_direct_one_would_and_keeps_it() {
     use crate::credentials_launch::{
-        OVERLAY_VAR, drops_with, overlay_drops, quiet_cli, reported_overlay, shipped_with_command,
+        OVERLAY_VAR, drops_with, overlay_drops, reported_overlay, shipped_with_command,
         unchanged_convert,
     };
     if !cfg!(target_os = "linux") {
@@ -4041,13 +4222,16 @@ async fn a_guest_window_makes_its_overlay_through_its_door_as_a_direct_one_would
         ),
     );
     let logs = sandbox.tree.make_dir("logs-guest");
+    let mut guest_log = ClientLog::new(&sandbox, GUEST);
+    let mut guest_cli = bins::window_client_command(guest_log.path());
+    guest_cli.extend(["--log".to_string(), logs.display().to_string()]);
     common::write_profile(
         &sandbox.profiles_dir,
         GUEST,
         &shipped_with_command(
             GUEST,
             "wsl-grok-build",
-            &guest_argv(quiet_cli(&logs)),
+            &guest_argv(guest_cli),
             Some(&convert),
             &guest_env,
         ),
@@ -4089,7 +4273,7 @@ async fn a_guest_window_makes_its_overlay_through_its_door_as_a_direct_one_would
         !started.iter().any(|arg| arg.contains("yagura-daemon")),
         "the door's path is not handed on to the CLI: {started:?}"
     );
-    let answer = spoken_for(&sandbox, &guest, GUEST).await;
+    let answer = spoken_for(&mut first, &mut guest_log, &guest, GUEST).await;
     assert!(
         matches!(answer, DaemonMessage::Identified { .. }),
         "a guest window whose overlay was made is spoken for, got {answer:?}; daemon log:\n{}",
@@ -4100,7 +4284,7 @@ async fn a_guest_window_makes_its_overlay_through_its_door_as_a_direct_one_would
 
     let mut next = start_with_token(&sandbox).await;
     listed(&mut next, &sandbox, &guest).await;
-    let answer = spoken_for(&sandbox, &guest, GUEST).await;
+    let answer = spoken_for(&mut next, &mut guest_log, &guest, GUEST).await;
     assert!(
         matches!(answer, DaemonMessage::Identified { .. }),
         "the guest window is still spoken for once taken back, got {answer:?}; daemon log:\n{}",
@@ -4265,9 +4449,9 @@ async fn a_window_whose_row_predates_the_wake_record_holds_no_wake_slot() {
 /// Writes the profile `id`: a `launch` window whose CLI keeps it open on this host, with a
 /// `{wake_paths}` answer, and whose `[delivery]` wakes its CLI by answering the wait the CLI
 /// registers, on stderr with exit code 2.
-fn write_wait_wake_profile(sandbox: &Sandbox, id: &str) {
+fn write_wait_wake_profile(sandbox: &Sandbox, id: &str, results: &Path) {
     use crate::hooks_injection::{WAKE_ANSWER, wake_profile};
-    let cli = crate::credentials_launch::quiet_cli(&sandbox.tree.make_dir(&format!("logs-{id}")));
+    let cli = bins::window_client_command(results);
     let source = wake_profile(id, &cli, &[("SessionStart", WAKE_ANSWER)], None);
     common::write_profile(
         &sandbox.profiles_dir,
@@ -4278,25 +4462,32 @@ fn write_wait_wake_profile(sandbox: &Sandbox, id: &str) {
     );
 }
 
-/// Reports that the CLI of `window_id` waits for input, as its hooks do, and waits until the
-/// window can be pushed to (its status is neither `Unknown` nor `Exited`).
-async fn until_pushable(daemon: &mut RunningDaemon, sandbox: &Sandbox, window_id: &str) {
-    let status = WindowStatus::WaitingInput;
-    send(
-        &mut daemon.client,
+/// Reports that the CLI of `window_id` waits for input, as its hooks do (from the window's
+/// own `window_client`), and waits until the window can be pushed to (its status is neither
+/// `Unknown` nor `Exited`).
+async fn until_pushable(
+    daemon: &mut RunningDaemon,
+    sandbox: &Sandbox,
+    log: &mut ClientLog,
+    window_id: &str,
+) {
+    let conn = log.new_conn();
+    let report = log.exchange(
+        &conn,
         &ClientMessage::StatusEvent {
             source: "cli".to_owned(),
-            status,
+            status: WindowStatus::WaitingInput,
             window_id: Some(window_id.to_owned()),
             token: TOKEN.to_owned(),
         },
-    )
-    .await;
-    send(&mut daemon.client, &ClientMessage::Ping).await;
-    match read_response(&mut daemon.client).await {
-        DaemonMessage::Pong => {}
-        other => panic!("the status report must be taken, got {other:?}"),
-    }
+        ClientRead::Pong,
+    );
+    daemon.type_command(window_id, &report).await;
+    let refused = log.messages(&report).await;
+    assert!(
+        refused.is_empty(),
+        "the status report must be taken, got {refused:?}"
+    );
     let deadline = tokio::time::Instant::now() + HANG_GUARD;
     while matches!(
         listed(daemon, sandbox, window_id).await.status,
@@ -4340,7 +4531,8 @@ async fn a_taken_back_wait_window_with_no_wait_is_asked_again_and_its_next_wait_
 {
     const WAKE: &str = "wake-ask";
     let sandbox = Sandbox::new("recover-wake-ask");
-    write_wait_wake_profile(&sandbox, WAKE);
+    let mut log = ClientLog::new(&sandbox, WAKE);
+    write_wait_wake_profile(&sandbox, WAKE, log.path());
     let playbook = sandbox
         .tree
         .make_dir("wake-ask-playbook")
@@ -4360,7 +4552,7 @@ async fn a_taken_back_wait_window_with_no_wait_is_asked_again_and_its_next_wait_
     let paths = sandbox_wake_paths(&sandbox, &window_id)
         .unwrap_or_else(|| panic!("the open of {window_id} names no wake file"));
     let wake = PathBuf::from(&paths[0]);
-    until_pushable(&mut first, &sandbox, &window_id).await;
+    until_pushable(&mut first, &sandbox, &mut log, &window_id).await;
     send_waiting(&mut first, &window_id, "SENT-BEFORE-RESTART").await;
     crate::inbox::until_rewritten(&wake, None).await;
     until_rows_settled(&sandbox, &[&window_id]).await;
@@ -4371,21 +4563,23 @@ async fn a_taken_back_wait_window_with_no_wait_is_asked_again_and_its_next_wait_
 
     let mut next = sandbox.start_from(&env).await;
     listed(&mut next, &sandbox, &window_id).await;
-    until_pushable(&mut next, &sandbox, &window_id).await;
+    until_pushable(&mut next, &sandbox, &mut log, &window_id).await;
     crate::inbox::until_rewritten(&wake, Some(&before)).await;
     send_waiting(&mut next, &window_id, "AFTER-RESTART").await;
 
-    let mut door = connect(&sandbox).await;
-    send(
-        &mut door,
+    // The window's own process asks, and says it printed once it has.
+    let conn = log.new_conn();
+    let wait = log.exchange(
+        &conn,
         &ClientMessage::DoorRead {
             window_id: window_id.clone(),
             token: TOKEN.to_owned(),
             door: yagura_protocol::Door::Wait,
         },
-    )
-    .await;
-    let (output, stream, code) = common::expect_delivery(read_response(&mut door).await);
+        ClientRead::Delivery,
+    );
+    next.type_command(&window_id, &wait).await;
+    let (output, stream, code) = common::expect_delivery(log.message(&wait).await);
     for text in ["KEPT-BEFORE-RESTART", "AFTER-RESTART"] {
         assert!(
             output.contains(text),
@@ -4394,5 +4588,4 @@ async fn a_taken_back_wait_window_with_no_wait_is_asked_again_and_its_next_wait_
     }
     assert_eq!(stream, yagura_protocol::DeliveryStream::Stderr);
     assert_eq!(code, 2);
-    send(&mut door, &ClientMessage::DeliverPrinted).await;
 }

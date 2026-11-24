@@ -8,12 +8,15 @@
 //! the daemon resolves it from, and each daemon runs under an instance identifier of its
 //! own, so a running daemon of the user is never reached.
 
+use std::collections::{HashMap, VecDeque};
 use std::ffi::OsString;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
+use serde_json::{Value, json};
 use yagura_daemon::fault_point::{self, FaultPoint};
 use yagura_daemon::terminal_identity::launcher_terminal_names;
 use yagura_protocol::{ClientMessage, DaemonMessage};
@@ -421,6 +424,64 @@ impl RunningDaemon {
         }
     }
 
+    /// Attaches this connection to `window_id`: its input then goes to that window.
+    pub async fn attach(&mut self, window_id: &str) {
+        send(
+            &mut self.client,
+            &ClientMessage::AttachView {
+                window_id: window_id.to_string(),
+                size: None,
+            },
+        )
+        .await;
+        match read_response(&mut self.client).await {
+            DaemonMessage::Attached { .. } => {}
+            other => panic!("expected attached, got {other:?}"),
+        }
+    }
+
+    /// Types `command` as a line into the window `window_id`, which runs
+    /// `window_client serve` (see [`ClientLog`]). It is attached input, so no
+    /// message gate, composer or detection sees it.
+    pub async fn type_command(&mut self, window_id: &str, command: &ClientCommand) {
+        self.attach(window_id).await;
+        send(
+            &mut self.client,
+            &ClientMessage::Text {
+                text: format!("{}\r", command.line),
+            },
+        )
+        .await;
+    }
+
+    /// Has the child of `window_id` (a `holder_child script` or an `echo_child
+    /// --spawning`) start `window_client once` on `commands` as a child of its own,
+    /// which writes to `log`. The request is one line of the child's input.
+    pub async fn start_client_once(
+        &mut self,
+        window_id: &str,
+        log: &ClientLog,
+        commands: &[ClientCommand],
+    ) {
+        let commands_file = log.write_once_file(commands);
+        let argv = [
+            super::bins::window_client_path().display().to_string(),
+            "once".to_string(),
+            log.path().display().to_string(),
+            commands_file.display().to_string(),
+        ]
+        .join("\n");
+        let hex: String = argv.bytes().map(|byte| format!("{byte:02x}")).collect();
+        self.attach(window_id).await;
+        send(
+            &mut self.client,
+            &ClientMessage::Text {
+                text: format!("{{{hex}}}\r"),
+            },
+        )
+        .await;
+    }
+
     /// Polls the window's output until `done` accepts it, then returns that output; callers
     /// join lines themselves when a long value may have wrapped.
     pub async fn output_until(
@@ -476,5 +537,258 @@ impl RunningDaemon {
             .strip_prefix('=')
             .and_then(|rest| rest.split_once(">>"))
             .map(|(value, _)| value.to_string())
+    }
+}
+
+/// How a `window_client` reads after it sends (see its `exchange` op); without a read it
+/// only sends.
+#[derive(Clone, Copy)]
+pub enum ClientRead {
+    One,
+    Pong,
+    Delivery,
+    // The common module is built whole into the one test binary, whether or not a test
+    // reads a raw frame.
+    #[allow(dead_code)]
+    Frame,
+}
+
+impl ClientRead {
+    fn name(self) -> &'static str {
+        match self {
+            Self::One => "one",
+            Self::Pong => "pong",
+            Self::Delivery => "delivery",
+            Self::Frame => "frame",
+        }
+    }
+}
+
+/// One command line for a `window_client` and the id its result lines carry.
+pub struct ClientCommand {
+    pub id: String,
+    line: String,
+}
+
+/// The results file of a `window_client` and the commands asked of it. A result
+/// is waited for by its command, in the order the client wrote them.
+pub struct ClientLog {
+    path: PathBuf,
+    dir: PathBuf,
+    next: u32,
+    offset: usize,
+    pending: HashMap<String, VecDeque<Value>>,
+}
+
+impl ClientLog {
+    pub fn new(sandbox: &Sandbox, name: &str) -> Self {
+        let dir = sandbox.tree.make_dir(&format!("client-{name}"));
+        Self {
+            path: dir.join("results.jsonl"),
+            dir,
+            next: 0,
+            offset: 0,
+            pending: HashMap::new(),
+        }
+    }
+
+    /// The file the client appends its results to.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// A connection name this log has not used, for the commands of one exchange.
+    pub fn new_conn(&mut self) -> String {
+        self.next += 1;
+        format!("conn{}", self.next)
+    }
+
+    fn command(&mut self, mut body: Value) -> ClientCommand {
+        self.next += 1;
+        let id = format!("c{}", self.next);
+        body["id"] = Value::String(id.clone());
+        ClientCommand {
+            id,
+            line: body.to_string(),
+        }
+    }
+
+    /// Sends `message` on the connection `conn`, then reads as `read` says.
+    pub fn exchange(
+        &mut self,
+        conn: &str,
+        message: &ClientMessage,
+        read: ClientRead,
+    ) -> ClientCommand {
+        self.command(json!({
+            "op": "exchange",
+            "conn": conn,
+            "message": serde_json::to_value(message).expect("a client message encodes"),
+            "read": read.name(),
+        }))
+    }
+
+    /// Sends the JSON `frame` as one frame on the connection `conn`, then reads.
+    // As for `ClientRead::Frame`.
+    #[allow(dead_code)]
+    pub fn exchange_frame(&mut self, conn: &str, frame: &Value, read: ClientRead) -> ClientCommand {
+        self.command(json!({
+            "op": "exchange",
+            "conn": conn,
+            "frame": frame,
+            "read": read.name(),
+        }))
+    }
+
+    /// Reads on the connection `conn` without sending.
+    // As for `ClientRead::Frame`.
+    #[allow(dead_code)]
+    pub fn read(&mut self, conn: &str, read: ClientRead) -> ClientCommand {
+        self.command(json!({ "op": "exchange", "conn": conn, "read": read.name() }))
+    }
+
+    /// Starts `argv` as a child the client keeps; its stdout lines are results
+    /// of the returned command. `env` is set and `env_remove` removed first.
+    pub fn keep(
+        &mut self,
+        argv: &[&str],
+        env: &[(&str, &str)],
+        env_remove: &[&str],
+    ) -> ClientCommand {
+        self.command(json!({
+            "op": "keep",
+            "argv": argv,
+            "env": env,
+            "env_remove": env_remove,
+        }))
+    }
+
+    /// Writes `line` to the stdin of the child the command `target` kept.
+    pub fn write(&mut self, target: &ClientCommand, line: &str) -> ClientCommand {
+        self.command(json!({ "op": "write", "target": target.id, "line": line }))
+    }
+
+    /// Kills the child the command `target` kept.
+    pub fn end(&mut self, target: &ClientCommand) -> ClientCommand {
+        self.command(json!({ "op": "end", "target": target.id }))
+    }
+
+    /// Runs `argv` to its end as a child of the client.
+    // As for `ClientRead::Frame`.
+    #[allow(dead_code)]
+    pub fn run(&mut self, argv: &[&str], stdin: Option<&str>) -> ClientCommand {
+        self.command(json!({ "op": "run", "argv": argv, "stdin": stdin }))
+    }
+
+    fn write_once_file(&self, commands: &[ClientCommand]) -> PathBuf {
+        let first = commands.first().map_or("", |command| command.id.as_str());
+        let path = self.dir.join(format!("once-{first}.jsonl"));
+        let text: String = commands
+            .iter()
+            .map(|command| format!("{}\n", command.line))
+            .collect();
+        std::fs::write(&path, text).expect("write the commands file");
+        path
+    }
+
+    fn collect(&mut self) {
+        let bytes = std::fs::read(&self.path).unwrap_or_default();
+        let fresh = &bytes[self.offset.min(bytes.len())..];
+        let Some(end) = fresh.iter().rposition(|&byte| byte == b'\n') else {
+            return;
+        };
+        for line in fresh[..end].split(|&byte| byte == b'\n') {
+            let value: Value = serde_json::from_slice(line)
+                .unwrap_or_else(|err| panic!("a result line is JSON ({err}): {line:?}"));
+            let id = value["id"].as_str().unwrap_or_default().to_owned();
+            self.pending.entry(id).or_default().push_back(value);
+        }
+        self.offset += end + 1;
+    }
+
+    /// The next result line of `command`, waiting for it; an error the client
+    /// itself reports fails the test.
+    pub async fn result(&mut self, command: &ClientCommand) -> Value {
+        let deadline = tokio::time::Instant::now() + HANG_GUARD;
+        loop {
+            self.collect();
+            if let Some(value) = self
+                .pending
+                .get_mut(&command.id)
+                .and_then(VecDeque::pop_front)
+            {
+                assert!(
+                    value.get("error").is_none(),
+                    "the window client failed {}: {value}",
+                    command.line
+                );
+                return value;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the window client never answered {}; it wrote {:?}",
+                command.line,
+                std::fs::read_to_string(&self.path).unwrap_or_default()
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    /// The responses `command` read, as the client wrote them.
+    pub async fn messages(&mut self, command: &ClientCommand) -> Vec<DaemonMessage> {
+        let result = self.result(command).await;
+        serde_json::from_value(result["messages"].clone())
+            .unwrap_or_else(|err| panic!("the client's responses decode ({err}): {result}"))
+    }
+
+    /// The one response `command` read.
+    pub async fn message(&mut self, command: &ClientCommand) -> DaemonMessage {
+        let mut messages = self.messages(command).await;
+        assert_eq!(messages.len(), 1, "one response was read: {messages:?}");
+        messages.remove(0)
+    }
+}
+
+/// A `window_client serve` the test started itself, as the child a stand-in
+/// holder names: commands are lines on its stdin pipe. Killed on drop.
+pub struct ClientProcess {
+    child: Child,
+}
+
+impl ClientProcess {
+    pub fn spawn(sandbox: &Sandbox, log: &ClientLog) -> Self {
+        let child = Command::new(super::bins::window_client_path())
+            .arg("serve")
+            .arg(log.path())
+            .env("YAGURA_INSTANCE", &sandbox.instance)
+            .env_remove("YAGURA_WINDOW_ID")
+            .env_remove("YAGURA_STATUS_TOKEN")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("start window_client");
+        Self { child }
+    }
+
+    pub fn id(&self) -> u32 {
+        self.child.id()
+    }
+
+    pub fn command(&mut self, command: &ClientCommand) {
+        let stdin = self
+            .child
+            .stdin
+            .as_mut()
+            .expect("the client's stdin is piped");
+        writeln!(stdin, "{}", command.line).expect("write a command to the client");
+        stdin.flush().expect("flush the client's stdin");
+    }
+}
+
+impl Drop for ClientProcess {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
     }
 }

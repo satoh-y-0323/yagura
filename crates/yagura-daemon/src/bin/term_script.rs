@@ -34,6 +34,8 @@
 //! next is logged too. `gate` answers each `Hello` only once a line arrives on
 //! its stdin: `welcome` gets a `Welcome` carrying the content of
 //! `record_file` as the launch record, anything else `VersionRejected`.
+//! `welcome <pid> [<start>]` also names the process `<pid>` as the window's
+//! child, with `<start>` as the start it was seen to have.
 
 use std::io::{self, Read, Write};
 use std::path::Path;
@@ -205,14 +207,18 @@ impl FakeAnswer {
                 })
                 .await
                 .unwrap_or_default();
-                Some(if line.trim() == "welcome" {
+                let mut words = line.split_whitespace();
+                Some(if words.next() == Some("welcome") {
+                    let child_pid = words.next().and_then(|pid| pid.parse().ok());
+                    // The frame has no field for the child's start yet.
+                    let _child_start = words.next();
                     HolderFrame::Welcome {
                         protocol: HOLDER_PROTOCOL,
                         record: record.clone(),
                         cols: 80,
                         rows: 24,
                         exited: false,
-                        child_pid: None,
+                        child_pid,
                     }
                 } else {
                     rejected

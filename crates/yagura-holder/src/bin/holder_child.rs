@@ -47,7 +47,10 @@
 //!   child and in which order. Lowercase hex digits between `<` and `>` are
 //!   written to stdout decoded; a `<` restarts the command, and everything
 //!   else is only logged. With `gate_file` and `hex`, it also writes `hex`
-//!   decoded to stdout once `gate_file` exists, read or not.
+//!   decoded to stdout once `gate_file` exists, read or not. Lowercase hex
+//!   digits between `{` and `}` decode to an argv, one element per line, that
+//!   the child starts as a child of its own (a stand-in for a process of the
+//!   window's tree) and does not wait for.
 //! - `end-race <info_file> <gate_file> <term_file>` (Unix): starts two
 //!   grandchildren: a member of its process group that ignores SIGHUP and,
 //!   on each SIGTERM, appends `TERMED` to `term_file` and lives on; and one in
@@ -234,6 +237,7 @@ fn script(input_log: &Path, gated: Option<(&Path, &str)>) -> io::Result<()> {
     let mut input = io::stdin().lock();
     let mut bytes = [0u8; 4096];
     let mut command: Option<Vec<u8>> = None;
+    let mut spawn: Option<Vec<u8>> = None;
     loop {
         let count = input.read(&mut bytes)?;
         if count == 0 {
@@ -250,14 +254,37 @@ fn script(input_log: &Path, gated: Option<(&Path, &str)>) -> io::Result<()> {
                         stdout.flush()?;
                     }
                 }
+                b'{' => spawn = Some(Vec::new()),
+                b'}' => {
+                    if let Some(digits) = spawn.take() {
+                        spawn_own_child(&decode_hex(&digits));
+                    }
+                }
                 b'0'..=b'9' | b'a'..=b'f' => {
-                    if let Some(digits) = command.as_mut() {
+                    if let Some(digits) = command.as_mut().or(spawn.as_mut()) {
                         digits.push(byte);
                     }
                 }
                 _ => {}
             }
         }
+    }
+}
+
+/// Starts the argv `decoded` (one element per line) as a child of this process,
+/// reaped in the background, with no stdio of its own.
+fn spawn_own_child(decoded: &[u8]) {
+    let text = String::from_utf8_lossy(decoded);
+    let mut argv = text.lines();
+    let Some(program) = argv.next() else { return };
+    let spawned = Command::new(program)
+        .args(argv)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn();
+    if let Ok(mut child) = spawned {
+        std::thread::spawn(move || child.wait());
     }
 }
 

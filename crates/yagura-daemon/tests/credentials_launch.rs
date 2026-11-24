@@ -964,19 +964,6 @@ async fn a_window_run_directly_is_handed_the_union_of_every_drop_and_keeps_the_u
     }
 }
 
-/// A new connection to the sandbox's daemon claiming `window_id` of `profile` with `token`
-/// `times` times, then pinging it: every answer to the claims, and whether the ping was
-/// answered on the same connection.
-pub(crate) async fn claims(
-    sandbox: &Sandbox,
-    window_id: &str,
-    profile: &str,
-    token: &str,
-    times: usize,
-) -> (Vec<DaemonMessage>, bool) {
-    claims_at(sandbox.endpoint(), window_id, profile, token, times).await
-}
-
 /// [`claims`] on a new connection to the daemon serving `endpoint`.
 async fn claims_at(
     endpoint: &str,

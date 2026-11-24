@@ -183,6 +183,22 @@ pub fn mcp_cli_stub_path() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_mcp_cli_stub"))
 }
 
+/// The `window_client` fixture: a process inside a window's tree that speaks the
+/// daemon's IPC with the window's credentials.
+pub fn window_client_path() -> PathBuf {
+    PathBuf::from(env!("CARGO_BIN_EXE_window_client"))
+}
+
+/// The argv of a window running `window_client serve`, which writes its results
+/// to `results` and reads its commands from the window's input.
+pub fn window_client_command(results: &Path) -> Vec<String> {
+    vec![
+        argv_element(&window_client_path()),
+        "serve".to_string(),
+        argv_element(results),
+    ]
+}
+
 /// `path` as one argv element.
 ///
 /// # Panics

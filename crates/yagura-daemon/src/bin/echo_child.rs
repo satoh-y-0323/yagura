@@ -9,6 +9,9 @@
 //! a line only once a submit key arrives. Without them it behaves exactly as
 //! it did before the mode existed, which is what every caller of the
 //! argument-less launcher relies on.
+//!
+//! `echo_child --spawning` echoes like the argument-less launcher and also starts
+//! the argv a `{<hex>}` group in its input decodes to as a child of its own.
 
 use std::io;
 
@@ -18,9 +21,14 @@ mod composer_paint;
 mod echo_modes;
 
 use composer_paint::ComposerStyle;
-use echo_modes::{draw_until_end_of_input, echo_until_end_of_input};
+use echo_modes::{
+    draw_until_end_of_input, echo_spawning_until_end_of_input, echo_until_end_of_input,
+};
 
 fn main() -> io::Result<()> {
+    if std::env::args().nth(1).as_deref() == Some("--spawning") {
+        return echo_spawning_until_end_of_input();
+    }
     match ComposerStyle::from_args(1) {
         Some((style, reflect)) => draw_until_end_of_input("echo_child", None, style, reflect),
         None => echo_until_end_of_input(),
