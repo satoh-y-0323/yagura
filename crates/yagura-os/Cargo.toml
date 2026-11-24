@@ -48,7 +48,8 @@ zbus.workspace = true
 # `Win32_System_LibraryLoader` for LoadLibraryExW / GetProcAddress (the
 # bundled `conpty.dll`). `Win32_System_Registry` and
 # `Win32_System_Environment` build a window's base environment from the
-# persistent variables in the registry.
+# persistent variables in the registry. `Win32_System_Diagnostics_ToolHelp`
+# for the process snapshot a window's lineage is read from.
 windows = { workspace = true, features = [
     "Win32_Storage_FileSystem",
     "Win32_System_SystemServices",
@@ -56,6 +57,7 @@ windows = { workspace = true, features = [
     "Win32_System_LibraryLoader",
     "Win32_System_Registry",
     "Win32_System_Environment",
+    "Win32_System_Diagnostics_ToolHelp",
 ] }
 # `webview::turn_off_browser_accelerator_keys`: pinned to the versions Tauri
 # already links, so the controller the GUI hands over is the same type.

@@ -26,6 +26,7 @@ use std::time::{Duration, Instant};
 
 use crate::ReapGate;
 use crate::process_identity::{ProcessHandle, ProcessStart, process_facts};
+use crate::window_lineage::in_leader_session;
 
 /// The `SIGKILL` rounds that signal something new a sweep runs at most: what
 /// stops a tree that keeps growing as fast as it is ended.
@@ -110,7 +111,7 @@ pub fn window_members(
     }
     let mut members: Vec<u32> = rows
         .iter()
-        .filter(|row| row.pid != leader && row.sid == leader)
+        .filter(|row| row.pid != leader && in_leader_session(row.sid, leader))
         .map(|row| row.pid)
         .collect();
     let mut seen: HashSet<u32> = members.iter().copied().chain([leader]).collect();

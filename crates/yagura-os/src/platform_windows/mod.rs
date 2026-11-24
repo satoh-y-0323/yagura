@@ -722,6 +722,53 @@ fn process_image_path(process_id: u32) -> Option<PathBuf> {
     Some(PathBuf::from(OsString::from_wide(name)))
 }
 
+/// The id of the process that created each process running at one instant,
+/// by the process's id, from one toolhelp snapshot. A creator's id is kept
+/// after the creator exits, so it may since name another process.
+///
+/// # Errors
+///
+/// Returns the operating system's error when the snapshot cannot be taken
+/// or walked to its end.
+pub(crate) fn process_snapshot() -> std::io::Result<std::collections::HashMap<u32, u32>> {
+    use std::os::windows::io::{FromRawHandle as _, OwnedHandle};
+
+    use windows::Win32::Foundation::ERROR_NO_MORE_FILES;
+    use windows::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW,
+        TH32CS_SNAPPROCESS,
+    };
+
+    // SAFETY: CreateToolhelp32Snapshot takes plain values and returns a new
+    // handle or an error.
+    let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) }
+        .map_err(|error| win32_error_to_io(&error))?;
+    // SAFETY: the handle was just returned to this function alone.
+    let snapshot = unsafe { OwnedHandle::from_raw_handle(snapshot.0 as _) };
+    let raw = HANDLE(snapshot.as_raw_handle() as isize);
+
+    let mut entry = PROCESSENTRY32W {
+        dwSize: u32::try_from(mem::size_of::<PROCESSENTRY32W>())
+            .map_err(|_| std::io::Error::other("PROCESSENTRY32W does not fit its size field"))?,
+        ..Default::default()
+    };
+    let mut parents = std::collections::HashMap::new();
+    // SAFETY: the snapshot is open for the call and `entry` is a live local
+    // whose `dwSize` holds its size, as Process32FirstW requires.
+    let mut walked = unsafe { Process32FirstW(raw, &mut entry) };
+    loop {
+        if let Err(error) = walked {
+            if error.code() == ERROR_NO_MORE_FILES.to_hresult() {
+                return Ok(parents);
+            }
+            return Err(win32_error_to_io(&error));
+        }
+        parents.insert(entry.th32ProcessID, entry.th32ParentProcessID);
+        // SAFETY: as for Process32FirstW above.
+        walked = unsafe { Process32NextW(raw, &mut entry) };
+    }
+}
+
 /// SID of the user `process_id` runs as.
 ///
 /// `PROCESS_QUERY_LIMITED_INFORMATION` is all `OpenProcessToken` needs, and

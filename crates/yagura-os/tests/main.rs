@@ -32,3 +32,4 @@ mod spawn_fd_inheritance;
 mod tree_end_unix;
 #[cfg(target_os = "linux")]
 mod user_manager_linux;
+mod window_lineage;

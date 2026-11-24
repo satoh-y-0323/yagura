@@ -40,6 +40,7 @@ pub mod pty;
 mod reap_gate;
 #[cfg(windows)]
 pub mod webview;
+pub mod window_lineage;
 
 pub use capture::{
     CaptureEnv, CaptureLimits, CaptureOutcome, CapturedChild, MarkerOutcome, spawn_captured,
