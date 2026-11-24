@@ -22,6 +22,7 @@ mod mcp_bridge;
 mod os_peer_executable;
 mod os_security;
 mod os_unix;
+mod peer_capture_order;
 mod pipe_accept;
 mod process_identity;
 mod program_resolution;

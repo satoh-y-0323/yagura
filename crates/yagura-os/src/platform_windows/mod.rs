@@ -98,6 +98,7 @@ use crate::DetachedSpawn;
 use crate::IpcTransport;
 use crate::OsError;
 use crate::PeerAuth;
+use crate::peer_capture::CapturedPeer;
 
 fn security_failure(detail: &'static str) -> OsError {
     OsError::Security(detail.to_owned())
@@ -288,6 +289,20 @@ impl PeerAuth for WindowsIpc {
 
     fn peer_executable(&self, conn: &Self::Connection) -> Option<PathBuf> {
         process_image_path(client_process_id(conn)?)
+    }
+
+    fn capture_peer(&self, conn: &Self::Connection) -> Option<CapturedPeer> {
+        let pid = client_process_id(conn)?;
+        let start = crate::process_start(pid).ok().flatten()?;
+        let executable = process_image_path(pid)?;
+        // The image is the peer's only if the id still names the same start
+        // once it has been read.
+        let still = crate::process_start(pid).ok().flatten()?;
+        (still == start).then_some(CapturedPeer {
+            pid,
+            start,
+            executable,
+        })
     }
 
     fn endpoint_allows_only(&self, endpoint: &str, user_id: &str) -> Result<bool, OsError> {

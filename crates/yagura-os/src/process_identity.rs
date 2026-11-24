@@ -92,6 +92,17 @@ pub(crate) fn process_facts(pid: u32) -> io::Result<Option<ProcessFacts>> {
     platform::facts_of(pid)
 }
 
+/// Whether the process a pidfd refers to has exited, from one look that does
+/// not wait.
+///
+/// # Errors
+///
+/// Returns the operating system's error when the descriptor cannot be polled.
+#[cfg(target_os = "linux")]
+pub(crate) fn pidfd_has_exited(pidfd: &std::os::fd::OwnedFd) -> io::Result<bool> {
+    platform::poll_exit(pidfd, 0)
+}
+
 /// The creation time of the process `pid` as the raw 100 ns ticks, which
 /// order processes, and as its start; `None` when no process has that id.
 ///
@@ -432,7 +443,7 @@ mod platform {
 
     /// Polls the process's descriptor, which turns readable once it has
     /// exited, waiting at most `timeout_ms` (`-1` for no limit).
-    fn poll_exit(fd: &OwnedFd, timeout_ms: libc::c_int) -> io::Result<bool> {
+    pub(super) fn poll_exit(fd: &OwnedFd, timeout_ms: libc::c_int) -> io::Result<bool> {
         loop {
             let mut entry = libc::pollfd {
                 fd: fd.as_raw_fd(),

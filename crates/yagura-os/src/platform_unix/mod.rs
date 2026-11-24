@@ -67,6 +67,7 @@ use crate::OsError;
 use crate::PeerAuth;
 use crate::ReapGate;
 use crate::instance::InstanceNamespace;
+use crate::peer_capture::CapturedPeer;
 
 // =========================================================================
 // Endpoint resolution
@@ -464,6 +465,10 @@ impl PeerAuth for UnixIpc {
 
     fn peer_executable(&self, conn: &Self::Connection) -> Option<PathBuf> {
         peer_executable_path(conn)
+    }
+
+    fn capture_peer(&self, conn: &Self::Connection) -> Option<CapturedPeer> {
+        capture_connection_peer(conn)
     }
 
     fn endpoint_allows_only(&self, endpoint: &str, user_id: &str) -> Result<bool, OsError> {
@@ -1062,6 +1067,305 @@ pub(crate) fn executable_path(pid: u32) -> Option<PathBuf> {
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 pub(crate) fn executable_path(_pid: u32) -> Option<PathBuf> {
     None
+}
+
+// =========================================================================
+// Capturing a connection's peer
+// =========================================================================
+
+/// The pidfd of the process that connected to the peer end of `fd`.
+#[cfg(target_os = "linux")]
+fn peer_pidfd(fd: std::os::fd::RawFd) -> io::Result<std::os::fd::OwnedFd> {
+    use std::os::fd::FromRawFd as _;
+
+    let mut pidfd: libc::c_int = -1;
+    let mut len = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
+    // SAFETY: `fd` is open for the call; `pidfd`/`len` are stack locals sized
+    // for the one `int` `SO_PEERPIDFD` writes.
+    let result = unsafe {
+        libc::getsockopt(
+            fd,
+            libc::SOL_SOCKET,
+            libc::SO_PEERPIDFD,
+            std::ptr::addr_of_mut!(pidfd).cast(),
+            &mut len,
+        )
+    };
+    if result != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if pidfd < 0 {
+        return Err(io::Error::other("SO_PEERPIDFD returned no descriptor"));
+    }
+    // SAFETY: the kernel made this descriptor for this call alone.
+    Ok(unsafe { std::os::fd::OwnedFd::from_raw_fd(pidfd) })
+}
+
+/// The pidfd names the process that connected, whatever its id names later,
+/// so the id, start and executable read through `SO_PEERCRED` are that
+/// process's only if the pidfd says it still runs after them.
+#[cfg(target_os = "linux")]
+fn capture_connection_peer(conn: &UnixStream) -> Option<CapturedPeer> {
+    let pidfd = peer_pidfd(conn.as_raw_fd()).ok()?;
+    let pid = peer_pid(conn)?;
+    let start = crate::process_start(pid).ok().flatten()?;
+    let executable = executable_path(pid)?;
+    match crate::process_identity::pidfd_has_exited(&pidfd) {
+        Ok(false) => Some(CapturedPeer {
+            pid,
+            start,
+            executable,
+        }),
+        Ok(true) | Err(_) => None,
+    }
+}
+
+/// Asks a fresh socket pair for its peer's pidfd: the capture's first read.
+///
+/// # Errors
+///
+/// Returns the operating system's error when the pair cannot be made or the
+/// kernel gives no pidfd (`SO_PEERPIDFD` needs Linux 6.5 or later).
+#[cfg(target_os = "linux")]
+pub(crate) fn check_peer_capture() -> io::Result<()> {
+    let (one, _other) = std::os::unix::net::UnixStream::pair()?;
+    peer_pidfd(one.as_raw_fd()).map(drop)
+}
+
+#[cfg(target_os = "macos")]
+fn capture_connection_peer(conn: &UnixStream) -> Option<CapturedPeer> {
+    crate::peer_capture::capture_in_order(&mut macos_peer::SocketReads {
+        fd: conn.as_raw_fd(),
+    })
+}
+
+/// No peer can be captured on the other Unix targets: they fail closed.
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn capture_connection_peer(_conn: &UnixStream) -> Option<CapturedPeer> {
+    None
+}
+
+/// The reads `peer_capture::capture_in_order` makes, as macOS answers them.
+/// The structures follow `sys/proc_info.h` of the SDK up to the fields read;
+/// the kernel's handles in them are only compared, never passed on.
+#[cfg(target_os = "macos")]
+mod macos_peer {
+    use std::io;
+    use std::mem::{offset_of, size_of};
+    use std::os::fd::RawFd;
+    use std::path::PathBuf;
+
+    use crate::ProcessStart;
+    use crate::peer_capture::OrderReads;
+
+    /// `PROC_PIDFDSOCKETINFO` in `sys/proc_info.h`.
+    const PROC_PIDFDSOCKETINFO: libc::c_int = 3;
+    /// `SOCKINFO_UN` in `sys/proc_info.h`: a Unix-domain socket.
+    const SOCKINFO_UN: libc::c_int = 3;
+    /// Descriptors the peer may open between sizing its list and reading it.
+    const LIST_HEADROOM: usize = 16;
+    /// Times the list is read again with twice the room when it comes back
+    /// full.
+    const LIST_GROWTHS: usize = 4;
+
+    /// `audit_token_t` in `bsm/audit.h`.
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct AuditToken {
+        val: [libc::c_uint; 8],
+    }
+
+    #[link(name = "bsm")]
+    unsafe extern "C" {
+        fn audit_token_to_pid(token: AuditToken) -> libc::pid_t;
+        fn audit_token_to_pidversion(token: AuditToken) -> libc::c_int;
+    }
+
+    /// `struct proc_fileinfo`.
+    #[repr(C)]
+    struct ProcFileInfo {
+        _fi_openflags: u32,
+        _fi_status: u32,
+        _fi_offset: i64,
+        _fi_type: i32,
+        _fi_guardflags: u32,
+    }
+
+    /// `struct sockbuf_info`.
+    #[repr(C)]
+    struct SockbufInfo {
+        _sbi_cc: u32,
+        _sbi_hiwat: u32,
+        _sbi_mbcnt: u32,
+        _sbi_mbmax: u32,
+        _sbi_lowat: u32,
+        _sbi_flags: i16,
+        _sbi_timeo: i16,
+    }
+
+    /// The head of `struct un_sockinfo`, the `pri_un` member of the
+    /// `soi_proto` union.
+    #[repr(C)]
+    struct UnSockinfoHead {
+        _unsi_conn_so: u64,
+        unsi_conn_pcb: u64,
+    }
+
+    /// `struct socket_info`, up to the head of `soi_proto`.
+    #[repr(C)]
+    struct SocketInfo {
+        _soi_stat: libc::vinfo_stat,
+        _soi_so: u64,
+        soi_pcb: u64,
+        _soi_type: libc::c_int,
+        _soi_protocol: libc::c_int,
+        _soi_family: libc::c_int,
+        _soi_shorts: [i16; 7],
+        _soi_error: u16,
+        _soi_oobmark: u32,
+        _soi_rcv: SockbufInfo,
+        _soi_snd: SockbufInfo,
+        soi_kind: libc::c_int,
+        _rfu_1: u32,
+        soi_proto_un: UnSockinfoHead,
+    }
+
+    /// `struct socket_fdinfo`, with room after the fields read for the rest
+    /// of the `soi_proto` union, which the kernel writes in full.
+    #[repr(C)]
+    struct SocketFdinfo {
+        _pfi: ProcFileInfo,
+        psi: SocketInfo,
+        _rest_of_proto: [u64; 128],
+    }
+
+    /// The bytes the kernel must have written for the fields read.
+    const READ_THROUGH_CONN_PCB: usize = offset_of!(SocketFdinfo, psi)
+        + offset_of!(SocketInfo, soi_proto_un)
+        + size_of::<UnSockinfoHead>();
+
+    pub(super) struct SocketReads {
+        pub(super) fd: RawFd,
+    }
+
+    impl OrderReads for SocketReads {
+        fn peer_token(&mut self) -> Result<(u32, u32), i32> {
+            let mut token = AuditToken { val: [0; 8] };
+            let mut len = size_of::<AuditToken>() as libc::socklen_t;
+            // SAFETY: `fd` is open for the call; `token`/`len` are stack
+            // locals sized for the `audit_token_t` `LOCAL_PEERTOKEN` writes.
+            let result = unsafe {
+                libc::getsockopt(
+                    self.fd,
+                    libc::SOL_LOCAL,
+                    libc::LOCAL_PEERTOKEN,
+                    std::ptr::addr_of_mut!(token).cast(),
+                    &mut len,
+                )
+            };
+            if result != 0 {
+                return Err(io::Error::last_os_error()
+                    .raw_os_error()
+                    .unwrap_or(libc::EINVAL));
+            }
+            if usize::try_from(len).ok() != Some(size_of::<AuditToken>()) {
+                return Err(libc::EINVAL);
+            }
+            // SAFETY: both take the token by value and only read it.
+            let (pid, version) =
+                unsafe { (audit_token_to_pid(token), audit_token_to_pidversion(token)) };
+            let pid = u32::try_from(pid).map_err(|_| libc::EINVAL)?;
+            Ok((pid, u32::from_ne_bytes(version.to_ne_bytes())))
+        }
+
+        fn start_of(&mut self, pid: u32) -> Option<ProcessStart> {
+            crate::process_start(pid).ok().flatten()
+        }
+
+        fn executable_of(&mut self, pid: u32) -> Option<PathBuf> {
+            super::executable_path(pid)
+        }
+
+        fn own_peer_pcb(&mut self) -> Option<u64> {
+            let info = unix_socket_info(std::process::id(), self.fd)?;
+            Some(info.psi.soi_proto_un.unsi_conn_pcb).filter(|&pcb| pcb != 0)
+        }
+
+        fn peer_holds(&mut self, pid: u32, pcb: u64) -> bool {
+            socket_descriptors(pid).is_some_and(|fds| {
+                fds.into_iter()
+                    .any(|fd| unix_socket_info(pid, fd).is_some_and(|info| info.psi.soi_pcb == pcb))
+            })
+        }
+    }
+
+    /// The socket information of the Unix-domain socket `fd` of the process
+    /// `pid`; `None` for another kind of descriptor or a failed read.
+    fn unix_socket_info(pid: u32, fd: libc::c_int) -> Option<Box<SocketFdinfo>> {
+        let pid = libc::pid_t::try_from(pid).ok()?;
+        // SAFETY: all-zero is a valid value of this plain-data structure,
+        // which proc_pidfdinfo only writes.
+        let mut info: Box<SocketFdinfo> = Box::new(unsafe { std::mem::zeroed() });
+        let size = libc::c_int::try_from(size_of::<SocketFdinfo>()).ok()?;
+        // SAFETY: `info` is a live allocation of `size` bytes.
+        let written = unsafe {
+            libc::proc_pidfdinfo(
+                pid,
+                fd,
+                PROC_PIDFDSOCKETINFO,
+                std::ptr::addr_of_mut!(*info).cast(),
+                size,
+            )
+        };
+        let written = usize::try_from(written).ok()?;
+        (written >= READ_THROUGH_CONN_PCB && info.psi.soi_kind == SOCKINFO_UN).then_some(info)
+    }
+
+    /// The socket descriptors of the process `pid`; `None` when they cannot
+    /// be listed in full.
+    fn socket_descriptors(pid: u32) -> Option<Vec<libc::c_int>> {
+        let pid = libc::pid_t::try_from(pid).ok()?;
+        let entry = size_of::<libc::proc_fdinfo>();
+        // SAFETY: a null buffer of size 0 asks only for the size the list
+        // needs.
+        let needed =
+            unsafe { libc::proc_pidinfo(pid, libc::PROC_PIDLISTFDS, 0, std::ptr::null_mut(), 0) };
+        let mut room = usize::try_from(needed).ok()?.checked_div(entry)? + LIST_HEADROOM;
+        for _ in 0..=LIST_GROWTHS {
+            let mut list = vec![
+                libc::proc_fdinfo {
+                    proc_fd: 0,
+                    proc_fdtype: 0,
+                };
+                room
+            ];
+            let bytes = room.checked_mul(entry)?;
+            let size = libc::c_int::try_from(bytes).ok()?;
+            // SAFETY: `list` is a live allocation of `size` bytes.
+            let written = unsafe {
+                libc::proc_pidinfo(
+                    pid,
+                    libc::PROC_PIDLISTFDS,
+                    0,
+                    list.as_mut_ptr().cast(),
+                    size,
+                )
+            };
+            let written = usize::try_from(written).ok().filter(|&n| n > 0)?;
+            if written < bytes {
+                list.truncate(written / entry);
+                let socket = u32::try_from(libc::PROX_FDTYPE_SOCKET).ok()?;
+                return Some(
+                    list.into_iter()
+                        .filter(|fd| fd.proc_fdtype == socket)
+                        .map(|fd| fd.proc_fd)
+                        .collect(),
+                );
+            }
+            room = room.checked_mul(2)?;
+        }
+        None
+    }
 }
 
 // =========================================================================

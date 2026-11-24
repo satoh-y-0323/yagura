@@ -30,6 +30,7 @@ pub mod hook_path;
 pub mod instance;
 pub mod login_shell;
 pub mod mcp_bridge;
+pub mod peer_capture;
 #[cfg(not(windows))]
 pub mod platform_unix;
 #[cfg(windows)]
@@ -125,6 +126,16 @@ pub trait PeerAuth: Send + Sync + 'static {
     /// and owns the normalization of both sides, so that normalization
     /// happens once per value rather than once per comparison.
     fn peer_executable(&self, conn: &Self::Connection) -> Option<PathBuf>;
+
+    /// Captures the process at the other end of `conn` as it is now: its id,
+    /// its start and its executable. Returns `None` when the operating system
+    /// cannot name that process for certain -- it has ended, its id may name
+    /// another process, or it holds no end of the connection -- so a caller
+    /// treats an uncaptured peer as unknown.
+    ///
+    /// The executable path is reported as the platform gives it, as for
+    /// [`PeerAuth::peer_executable`].
+    fn capture_peer(&self, conn: &Self::Connection) -> Option<peer_capture::CapturedPeer>;
 
     /// Reports whether the *existing* endpoint named `endpoint` grants access
     /// to `user_id` and to nobody else.
