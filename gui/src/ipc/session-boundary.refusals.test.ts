@@ -9,6 +9,7 @@ import { describe, it, expect, vi, afterEach } from 'vitest';
 import blankLookingChars from '../../../crates/yagura-protocol/tests/fixtures/blank-looking-chars.json';
 
 import {
+  foldExternalText,
   formatApprovalBody,
   formatChatBody,
   formatCommandLine,
@@ -713,6 +714,15 @@ describe('sanitizeForDisplay', () => {
     expect(sanitizeForDisplay('a\u00A0b')).toBe('a\u00A0b');
     expect(sanitizeForDisplay('a\u2800b')).toBe('a\u2800b');
 
+    // A combining mark with no base before it would draw onto whatever the page puts there.
+    expect(sanitizeForDisplay('\u0301a')).toBe('\\u{0301}a');
+    expect(sanitizeForDisplay('\u0301\u0301a')).toBe('\\u{0301}\\u{0301}a');
+    expect(sanitizeForDisplay('a\u0007\u0301b')).toBe('a \\u{0301}b');
+    expect(sanitizeForDisplay('a\u200B\u0301b')).toBe('a\\u{200B}\\u{0301}b');
+    expect(sanitizeForDisplay('e\u0301')).toBe('e\u0301');
+    expect(sanitizeForDisplay('a \u0301')).toBe('a \u0301');
+    expect(foldExternalText(' \u0301x')).toBe('\\u{0301}x');
+
     // The longest one-line field the daemon accepts, written out, still fits.
     expect(sanitizeForDisplay('\u00AD'.repeat(512))).toBe('\\u{00AD}'.repeat(512));
     expect(sanitizeForDisplay(`x${'\u00AD'.repeat(512)}`)).toBe(`x${'\\u{00AD}'.repeat(511)}…`);
@@ -778,6 +788,8 @@ describe('formatPathForDisplay', () => {
     expect(formatPathForDisplay('C:\\a\u3000b')).toBe('C:\\a\\u{3000}b');
     expect(formatPathForDisplay('C:\\a\u2800b')).toBe('C:\\a\\u{2800}b');
     expect(formatPathForDisplay('C:\\a b')).toBe('C:\\a b');
+    expect(formatPathForDisplay('\u0301a')).toBe('\\u{0301}a');
+    expect(formatPathForDisplay('C:\\a\n\u0301b')).toBe('C:\\a\\u{000A}\\u{0301}b');
     const shown = formatPathForDisplay(`${'a'.repeat(MAX_DISPLAY_FIELD_CHARS - 1)}\u202Etail`);
     expect(shown).toBe(`${'a'.repeat(MAX_DISPLAY_FIELD_CHARS - 1)}\\u{202E}…`);
   });
@@ -847,6 +859,8 @@ describe('formatChatBody', () => {
     expect(formatChatBody('a\u200Cb')).toBe('a\\u{200C}b');
     expect(formatChatBody('a\uFE00')).toBe('a\\u{FE00}');
     expect(formatChatBody('\u{1F468}\u200Db')).toBe('\u{1F468}\\u{200D}b');
+    expect(formatChatBody('\u0301a')).toBe('\\u{0301}a');
+    expect(formatChatBody('a\n\u0301b')).toBe('a\n\\u{0301}b');
   });
 
   it('writes a variation selector out unless it follows a pictograph or completes a keycap', () => {

@@ -39,24 +39,42 @@ export const MAX_BLOCK_TEXT_CHARS = 16 * 1024;
 /** Longest externally supplied reason kept on one line, in code points. */
 export const EXTERNAL_TEXT_MAX_CODE_POINTS = 200;
 
+const LINE_SPACE_CLASS = String.raw`\p{Cc}\p{Zl}\p{Zp}`;
+const HIDDEN_CLASS = String.raw`${LINE_SPACE_CLASS}\p{Cf}\p{Default_Ignorable_Code_Point}`;
+// `Mc` is left out: a spacing mark takes width and ink of its own.
+const MARK_CLASS = String.raw`\p{Mn}\p{Me}`;
+
 /**
  * The characters written out rather than drawn, taken from Unicode properties:
  * controls, format characters, line and paragraph separators, and every default
- * ignorable code point. They break a line, reorder what is drawn, or show
- * nothing, so removing them would make one value look like another.
+ * ignorable code point (group 1). They break a line, reorder what is drawn, or
+ * show nothing, so removing them would make one value look like another. A
+ * nonspacing or enclosing mark is matched too, and written out where it has no
+ * base (a defective combining sequence, Unicode D57), since it would draw onto
+ * whatever the page puts before it.
  */
-const WRITTEN_OUT_CHARS = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}\p{Default_Ignorable_Code_Point}]/gu;
+const WRITTEN_OUT_CHARS = new RegExp(`([${HIDDEN_CLASS}])|[${MARK_CLASS}]`, 'gu');
 
 /**
  * The characters written out in a value that points at a place: those of
  * {@link WRITTEN_OUT_CHARS}, every space but U+0020, and U+2800, which all look
  * like a plain space and would make one place look like another.
  */
-const PLACE_WRITTEN_OUT_CHARS =
-  /(?! )[\p{Cc}\p{Cf}\p{Zl}\p{Zp}\p{Default_Ignorable_Code_Point}\p{Zs}\u2800]/gu;
+const PLACE_WRITTEN_OUT_CHARS = new RegExp(
+  String.raw`(?! )([${HIDDEN_CLASS}\p{Zs}\u2800])|[${MARK_CLASS}]`,
+  'gu'
+);
 
-/** The characters one line shows as a space each. */
-const LINE_SPACES = /[\p{Cc}\p{Zl}\p{Zp}]/gu;
+/**
+ * {@link WRITTEN_OUT_CHARS} for one line, with the characters it shows as a
+ * space each (controls and separators) as group 1 and the rest as group 2.
+ */
+const LINE_CHARS = new RegExp(`([${LINE_SPACE_CLASS}])|([${HIDDEN_CLASS}])|[${MARK_CLASS}]`, 'gu');
+
+const NONSPACING_OR_ENCLOSING_MARK = new RegExp(`^[${MARK_CLASS}]$`, 'u');
+const ANY_MARK = /^\p{M}$/u;
+// The base characters of Unicode D51.
+const BASE_CHAR = /^[\p{L}\p{N}\p{P}\p{S}\p{Zs}]$/u;
 
 /** The form {@link writtenOut} gives a character. */
 const WRITTEN_OUT_FORM = /\\u\{[0-9A-F]{4,6}\}/g;
@@ -192,9 +210,41 @@ function shapesNothing(): boolean {
   return false;
 }
 
+type KeepsChar = (char: string, offset: number, text: string) => boolean;
+
+/**
+ * The one test of whether a character matched in `text` is written out: a
+ * listed (hidden) one that `keeps` does not keep, or a nonspacing or enclosing
+ * mark with no base. Marks look back past every mark, drawn or written out,
+ * since the combining sequence is made by the characters themselves. Matches
+ * must come in order of offset: each run of marks is then walked back once.
+ */
+function writtenOutTest(
+  text: string,
+  keeps: KeepsChar
+): (char: string, listed: boolean, offset: number) => boolean {
+  let knownEnd = -1;
+  let knownHasBase = false;
+  const hasBase = (char: string, offset: number): boolean => {
+    let at = offset;
+    let before = codePointBefore(text, at);
+    while (at !== knownEnd && ANY_MARK.test(before)) {
+      at -= before.length;
+      before = codePointBefore(text, at);
+    }
+    knownHasBase = at === knownEnd ? knownHasBase : BASE_CHAR.test(before);
+    knownEnd = offset + char.length;
+    return knownHasBase;
+  };
+  return (char, listed, offset) =>
+    (listed && !keeps(char, offset, text)) ||
+    ((!listed || NONSPACING_OR_ENCLOSING_MARK.test(char)) && !hasBase(char, offset));
+}
+
 /**
  * Caps `value` at `maxChars` code points, then writes out every character of
- * `writtenOutChars` outside `keptControls`, and outside what `drawn` keeps.
+ * `writtenOutChars` (group 1 the hidden ones, the rest marks) that
+ * {@link writtenOutTest} picks, keeping `keptControls` and what `drawn` keeps.
  * Capping first keeps all of what the daemon accepted and never cuts an escape
  * in half. Private, so no caller can pick which characters stay unseen.
  */
@@ -202,29 +252,40 @@ function formatMultilineText(
   value: string,
   maxChars: number,
   keptControls: ReadonlySet<string>,
-  drawn: (char: string, offset: number, text: string) => boolean = shapesNothing,
+  drawn: KeepsChar = shapesNothing,
   writtenOutChars: RegExp = WRITTEN_OUT_CHARS
 ): string {
-  return capCodePoints(value, maxChars).replace(
+  const capped = capCodePoints(value, maxChars);
+  const writesOut = writtenOutTest(
+    capped,
+    (char, offset, text) => keptControls.has(char) || drawn(char, offset, text)
+  );
+  return capped.replace(
     writtenOutChars,
-    (char: string, offset: number, text: string) =>
-      keptControls.has(char) || drawn(char, offset, text) ? char : writtenOut(char)
+    (char: string, listed: string | undefined, offset: number) =>
+      writesOut(char, listed !== undefined, offset) ? writtenOut(char) : char
   );
 }
 
 /**
  * One line to read: each control or separator becomes one space, every other
- * written-out character but an emoji shape is written out, and only then is
- * the line capped at `maxChars` code points, so a line that grows by writing
- * out still fits its place. A cut moves before a written-out character or a
- * code point it would split, and is marked with `…` after the cap.
+ * written-out character but an emoji shape, and every mark with no base, is
+ * written out, judged on `value` as given. Only then is the line capped at
+ * `maxChars` code points, so a line that grows by writing out still fits its
+ * place. A cut moves before a written-out character or a code point it would
+ * split, and is marked with `…` after the cap.
  */
 function prepareLine(value: string, maxChars: number): DisplayLine {
-  const written = value
-    .replace(LINE_SPACES, ' ')
-    .replace(WRITTEN_OUT_CHARS, (char: string, offset: number, text: string) =>
-      shapesEmoji(char, offset, text) ? char : writtenOut(char)
-    );
+  const writesOut = writtenOutTest(value, shapesEmoji);
+  const written = value.replace(
+    LINE_CHARS,
+    (char: string, lineSpace: string | undefined, listed: string | undefined, offset: number) => {
+      if (lineSpace !== undefined) {
+        return ' ';
+      }
+      return writesOut(char, listed !== undefined, offset) ? writtenOut(char) : char;
+    }
+  );
   const codePoints = Array.from(written);
   if (codePoints.length <= maxChars) {
     return written as DisplayLine;
@@ -236,8 +297,9 @@ function prepareLine(value: string, maxChars: number): DisplayLine {
 /**
  * Prepares one line of a label or of prose for display: each control or
  * separator becomes one space, every invisible character but an emoji shape is
- * written out (`\u{200C}`), and the result is capped at
- * {@link MAX_DISPLAY_FIELD_CHARS} code points after writing out. Never use it
+ * written out (`\u{200C}`), and so is a combining mark with no base before it
+ * (at the start, or after a control or an invisible character). The result is
+ * capped at {@link MAX_DISPLAY_FIELD_CHARS} code points after writing out. Never use it
  * for a value that points at a place (a path, a room name taken from a path):
  * use {@link formatPathForDisplay}.
  * @param value the text to display
@@ -368,9 +430,10 @@ export function formatCommandLine(argv: readonly string[]): DisplayLine {
 
 /**
  * Reduces a failure's reason to one display line: runs of line breaks,
- * control characters and whitespace are folded into single spaces, the ends
- * are trimmed, the rest is written out as {@link sanitizeForDisplay} writes
- * it, and the result is capped at {@link EXTERNAL_TEXT_MAX_CODE_POINTS} code
+ * control characters and the characters JavaScript's `\s` matches (the `Zs`
+ * spaces and U+FEFF) are folded into single spaces, the ends are trimmed, the
+ * rest is written out as {@link sanitizeForDisplay} writes it, and the result
+ * is capped at {@link EXTERNAL_TEXT_MAX_CODE_POINTS} code
  * points after writing out, so that one message cannot take over the notice
  * area. It changes how a name looks, so names go through
  * {@link sanitizeForDisplay}.
