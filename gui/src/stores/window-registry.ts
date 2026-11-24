@@ -26,7 +26,7 @@ import {
   type TaskReportMark,
 } from '../ipc/session-boundary';
 import type { WindowEventHandlers, WindowInfo } from '../ipc/session-client';
-import type { WindowMark } from '../session/approval-target';
+import type { WindowMark } from '../session/approval-types';
 
 /** Screen position of a window pane. */
 type Position = { x: number; y: number };

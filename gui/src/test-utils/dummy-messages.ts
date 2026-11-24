@@ -192,8 +192,7 @@ export const dummyMessages = {
     restoreLoadFailed: 'DUMMY_restoreLoadFailed',
     daemonWindowsUnavailable: 'DUMMY_daemonWindowsUnavailable',
     // Unseen-and-expired approval requests.
-    approvalExpiredUnseen: (count, latest) =>
-      `DUMMY_approvalExpiredUnseen(${count},${latest.requester},${latest.tool},${latest.target})`,
+    approvalExpiredUnseen: (count) => `DUMMY_approvalExpiredUnseen(${count})`,
     // A failed decide_approval invocation, and a
     // register_approver rejection.
     approvalDecisionFailed: 'DUMMY_approvalDecisionFailed',

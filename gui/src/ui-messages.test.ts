@@ -243,14 +243,6 @@ describe('describeDetectionWarning: Japanese summary, folding and capping', () =
  * here would leave every consumer unable to read these strings at all.
  */
 /**
- * `banners.approvalExpiredUnseen` renders the "N unseen expired approval
- * requests" notice (count + a one-item summary of the
- * latest). It is re-exported directly from `banners` (unlike
- * `describeThemeIssues`, it has no dedicated `describe*` wrapper -- there is
- * nothing render.ts-side to test in render.test.ts, which this task does not
- * touch).
- */
-/**
  * The fixed line an operation shows when its request was not sent because
  * the connected daemon speaks another wire revision, picked by
  * `commandFailureLine` (command-failure-model.ts); this only checks the facade

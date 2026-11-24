@@ -2,47 +2,11 @@
  * Who asked an approval request and what it would act on, as the approval
  * dialog draws it and the "expired unseen" notice names it.
  */
-import { formatPathForDisplay, type DisplayLine } from '../display/untrusted-text';
+import { formatPathForDisplay } from '../display/untrusted-text';
 import type { UiText } from '../display/ui-text';
 import type { ApprovalRequest, ApprovalRequester } from '../ipc/session-boundary';
 import { describeStatus, dialogs, settings } from '../ui-messages';
-
-/**
- * The mark the daemon draws from a window's ID (mirrors the Rust `WindowMark`).
- * Bit `row * 3 + column` of `cells` fills that cell of the left three columns of
- * five rows, which the right two columns mirror; `hue` is one of 12 steps.
- */
-export interface WindowMark {
-  cells: number;
-  hue: number;
-}
-
-/** An approval heading as runs and the sentence they join into. */
-export type ApprovalHeadline = ReturnType<typeof dialogs.approvalHeadlineOther>;
-
-/** One side of a request, as one card of the dialog draws it. */
-export interface ApprovalParty {
-  /** A window, a client that is no window, or what a request names in place of a window. */
-  kind: 'window' | 'external' | 'untargeted';
-  label: UiText | DisplayLine;
-  /** The launch profile a window was opened from; `null` for one opened from a command. */
-  profile: DisplayLine | null;
-  /** A window's status when the request was submitted, or that it has since closed. */
-  status: UiText | null;
-  windowId: DisplayLine | null;
-  mark: WindowMark | null;
-}
-
-/** Everything the approval dialog draws a request from. */
-export interface ApprovalFacts {
-  headline: ApprovalHeadline;
-  /** The gated tool's name, prepared for display. */
-  tool: DisplayLine;
-  from: ApprovalParty;
-  to: ApprovalParty;
-  /** Heads what the request would send or run; `null` for a tool that carries nothing. */
-  bodyHeading: UiText | null;
-}
+import type { ApprovalFacts, ApprovalParty, HeadlineParts } from './approval-types';
 
 type KnownApprovalTool = keyof typeof settings.approvalToolInfo;
 
@@ -101,7 +65,7 @@ export function approvalFactsOf(request: ApprovalRequest, isRequesterOpen: boole
   };
 }
 
-function headlineOf(request: ApprovalRequest, tool: KnownApprovalTool | null): ApprovalHeadline {
+function headlineOf(request: ApprovalRequest, tool: KnownApprovalTool | null): HeadlineParts {
   const from = request.requester.kind === 'window' ? request.requester.name : null;
   const target = request.target;
   if (tool === null) {

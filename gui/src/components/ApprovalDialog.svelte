@@ -5,6 +5,7 @@
   import { isWithinGuard } from '../session/approval-queue';
   import { approvalFactsOf } from '../session/approval-target';
   import { buttons, dialogs } from '../ui-messages';
+  import ApprovalHeadline from './ApprovalHeadline.svelte';
   import ApprovalParty from './ApprovalParty.svelte';
   import Icon from './Icon.svelte';
   import ModalDialog from './ModalDialog.svelte';
@@ -82,15 +83,8 @@
       </span>
       <div class="approval-head__text">
         <span class="approval-head__eyebrow">{eyebrow}</span>
-        <!-- Names are set apart by their own element rather than quotes, which a name may hold;
-             a name can still mimic the words, so the cards' marks are what tell windows apart. -->
         <h2 class="dialog-title approval-head__headline" id={headlineId}>
-          {#if headline.fromName !== null}<strong class="approval-name">{headline.fromName}</strong
-            >{:else if headline.fromWords !== null}{headline.fromWords}{/if}{headline.verb}{#if headline.tool !== null}<code
-              class="approval-tool-name">{headline.tool}</code
-            >{/if}{headline.toolLink}{#if headline.toName !== null}<strong class="approval-name"
-              >{headline.toName}</strong
-            >{:else if headline.toWords !== null}{headline.toWords}{/if}
+          <ApprovalHeadline {headline} />
         </h2>
       </div>
     </div>
@@ -188,14 +182,6 @@
     overflow-wrap: anywhere;
   }
 
-  /* A name stands apart from the words by weight and ground, neither of which its characters can draw. */
-  .approval-name {
-    padding: 0 var(--space-1);
-    border-radius: var(--radius-xs);
-    background-color: var(--bg-selected);
-    font-weight: var(--weight-semibold);
-  }
-
   .approval-tool-name {
     color: var(--fg-muted);
     font-family: var(--font-mono);
@@ -272,10 +258,6 @@
   @media (forced-colors: active) {
     .approval-failure {
       border-left-color: CanvasText;
-    }
-
-    .approval-name {
-      border: var(--line-width) solid CanvasText;
     }
   }
 </style>

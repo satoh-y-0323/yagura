@@ -8,9 +8,13 @@
    * The name comes first in the markup so it is read first; the grid moves the
    * mark to the left. Nothing in the card takes focus, so the two orders never
    * meet a keyboard.
+   *
+   * The compact form is a chip of the mark and the name, for a list row. Its
+   * heading, profile, status and ID are hidden from the eye but still read, so
+   * a screen reader hears the same card in either form.
    */
   import type { UiText } from '../display/ui-text';
-  import type { ApprovalParty } from '../session/approval-target';
+  import type { ApprovalParty } from '../session/approval-types';
   import Icon from './Icon.svelte';
   import WindowMark from './WindowMark.svelte';
 
@@ -19,6 +23,8 @@
   export let heading: UiText;
   /** The card's id, for the decision buttons to be described by. */
   export let id: string;
+  /** `compact` is the chip a notice row draws; `card` is the dialog's card. */
+  export let size: 'card' | 'compact' = 'card';
 
   $: headingId = `${id}-heading`;
 </script>
@@ -26,6 +32,7 @@
 <section
   class="approval-party"
   class:approval-party--untargeted={party.kind === 'untargeted'}
+  class:approval-party--compact={size === 'compact'}
   {id}
   aria-labelledby={headingId}
 >
@@ -48,11 +55,16 @@
     {/if}
     {#if party.mark !== null && party.windowId !== null}
       <span class="approval-party__mark">
-        <WindowMark mark={party.mark} windowId={party.windowId} size="card" showsId={false} />
+        <WindowMark
+          mark={party.mark}
+          windowId={party.windowId}
+          size={size === 'compact' ? 'header' : 'card'}
+          showsId={false}
+        />
       </span>
     {:else if party.kind === 'external'}
       <span class="approval-party__mark approval-party__mark--none">
-        <Icon name="plug" size="md" />
+        <Icon name="plug" size={size === 'compact' ? 'sm' : 'md'} />
       </span>
     {/if}
   </div>
@@ -161,6 +173,52 @@
     color: var(--fg-faint);
     font-family: var(--font-mono);
     font-size: var(--text-2xs);
+  }
+
+  .approval-party--compact {
+    position: relative;
+    display: inline-flex;
+    flex-direction: row;
+    align-items: center;
+    padding: var(--space-0_5) var(--space-2) var(--space-0_5) var(--space-1);
+    border-radius: var(--radius-full);
+    background-color: transparent;
+  }
+
+  .approval-party--compact.approval-party--untargeted {
+    padding-left: var(--space-2);
+  }
+
+  .approval-party--compact .approval-party__body {
+    display: inline-flex;
+    gap: var(--space-1_5);
+  }
+
+  .approval-party--compact .approval-party__name {
+    font-size: var(--text-xs);
+    font-weight: var(--weight-regular);
+  }
+
+  .approval-party--compact .approval-party__mark {
+    order: -1;
+    align-self: center;
+  }
+
+  .approval-party--compact .approval-party__mark--none {
+    width: auto;
+    height: auto;
+  }
+
+  /* Clipped to nothing rather than removed, so it is still read out. */
+  .approval-party--compact .approval-party__heading,
+  .approval-party--compact .approval-party__profile,
+  .approval-party--compact .approval-party__facts {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
   }
 
   @media (forced-colors: active) {

@@ -1,5 +1,5 @@
 import { banners, describeReopenNotice, describeThemeIssues } from '../ui-messages';
-import type { WithdrawReason } from '../session/approval-types';
+import type { ApprovalFacts, WithdrawReason } from '../session/approval-types';
 import type { DisplayLine } from '../display/untrusted-text';
 import type { UiText } from '../display/ui-text';
 import type {
@@ -61,16 +61,6 @@ export interface NoticeFacts {
   exitCode?: number | null;
 }
 
-/** A one-line summary of the approval request a notice reports. */
-export interface ApprovalExpiredSummary {
-  /** Who asked, as it would have been shown in the dialog. */
-  requester: UiText | DisplayLine;
-  /** The operation that was asked for, prepared for display. */
-  tool: DisplayLine;
-  /** The window it would have acted on. */
-  target: UiText | DisplayLine;
-}
-
 /** A status change of daemon recovery, with the generation that orders it. */
 export type DaemonRecoveryUpdate = {
   /** The status recovery has moved to. */
@@ -122,6 +112,8 @@ export interface NoticeDraft extends Pick<NoticeClass, 'blocking' | 'tone' | 'di
   title: NoticeText;
   detail: NoticeText | null;
   action: NoticeAction | null;
+  /** The request an expired-approval notice reports, drawn as in the approval dialog; absent for every other notice. */
+  approvalFacts?: ApprovalFacts;
 }
 
 /** The last session's windows on offer to reopen. */
@@ -157,7 +149,7 @@ export type NoticeSourceState = {
    * while none have. More than one can pile up between visits to the notice
    * area, so this counts them and keeps the most recent for the summary.
    */
-  approvalExpiredUnseen: { count: number; latest: ApprovalExpiredSummary } | null;
+  approvalExpiredUnseen: { count: number; latest: ApprovalFacts } | null;
   /** Whether this connection's `register_approver` attempt was refused. */
   approverRegistrationRefused: boolean;
   /** How far daemon recovery has got. */
@@ -390,18 +382,14 @@ export function buildNotices(state: NoticeSourceState): NoticeDraft[] {
     );
   }
   if (state.approvalExpiredUnseen !== null) {
-    drafts.push(
-      draftOf(
+    drafts.push({
+      ...draftOf(
         'approval-expired-unseen',
         {},
-        sentenceText(
-          banners.approvalExpiredUnseen(
-            state.approvalExpiredUnseen.count,
-            state.approvalExpiredUnseen.latest
-          )
-        )
-      )
-    );
+        sentenceText(banners.approvalExpiredUnseen(state.approvalExpiredUnseen.count))
+      ),
+      approvalFacts: state.approvalExpiredUnseen.latest,
+    });
   }
   const [firstNative] = state.profilesNeedingNativeProgram;
   if (firstNative !== undefined && !state.isProfileUnavailableDismissed) {
@@ -551,19 +539,19 @@ export function applyClientConfigFailure(
  * @param state the current notice-relevant application state
  * @param wasShown whether the request had been displayed before it was withdrawn
  * @param reason why the request was withdrawn
- * @param summary the withdrawn request, summarized for display
+ * @param facts the withdrawn request, as the approval dialog would have drawn it
  */
 export function recordApprovalExpiredUnseen(
   state: NoticeSourceState,
   wasShown: boolean,
   reason: WithdrawReason,
-  summary: ApprovalExpiredSummary
+  facts: ApprovalFacts
 ): NoticeSourceState {
   if (wasShown || reason !== 'timeout') {
     return state;
   }
   const count = (state.approvalExpiredUnseen?.count ?? 0) + 1;
-  return { ...state, approvalExpiredUnseen: { count, latest: summary } };
+  return { ...state, approvalExpiredUnseen: { count, latest: facts } };
 }
 
 /**

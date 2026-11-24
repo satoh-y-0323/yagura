@@ -13,7 +13,6 @@ import {
   profilesNeedingNativeProgram,
 } from './notice-model';
 import type {
-  ApprovalExpiredSummary,
   NoticeAction,
   NoticeClass,
   NoticeDraft,
@@ -23,6 +22,8 @@ import type {
 } from './notice-model';
 import { banners, describeReopenNotice, describeThemeIssues } from '../ui-messages';
 import { sanitizeForDisplay } from '../display/untrusted-text';
+import { approvalFactsOf } from '../session/approval-target';
+import type { ApprovalFacts } from '../session/approval-types';
 
 const DAEMON_SPAWN_NOTICE = sanitizeForDisplay(
   'spawn-probe: started without the strongest detachment mode'
@@ -57,16 +58,37 @@ function baseState(overrides: Partial<NoticeSourceState> = {}): NoticeSourceStat
   };
 }
 
-function summary(overrides: Partial<ApprovalExpiredSummary> = {}): ApprovalExpiredSummary {
-  return {
-    requester: sanitizeForDisplay('builder window'),
-    tool: sanitizeForDisplay('close_window'),
-    target: sanitizeForDisplay('target window'),
-    ...overrides,
-  };
+/** The facts the dialog draws a request from, for one window asking to close another. */
+function expiredFacts(requester: string, target = 'target window'): ApprovalFacts {
+  return approvalFactsOf(
+    {
+      request_id: `expired-${requester}`,
+      tool: 'close_window',
+      displayTool: sanitizeForDisplay('close_window'),
+      requester: {
+        kind: 'window',
+        window_id: 'w-req',
+        displayWindowId: sanitizeForDisplay('w-req'),
+        name: sanitizeForDisplay(requester),
+        profile: null,
+        status: 'running',
+        mark: { cells: 0b010_101_011_100_110, hue: 3 },
+      },
+      target: {
+        window_id: 'w-target',
+        displayWindowId: sanitizeForDisplay('w-target'),
+        name: sanitizeForDisplay(target),
+        profile: null,
+        status: 'waiting_input',
+        mark: { cells: 0b101_010_100_011_001, hue: 9 },
+      },
+      text: null,
+    },
+    true
+  );
 }
 
-const LATEST = summary();
+const LATEST = expiredFacts('builder window');
 const LAST_SESSION = { count: 3, savedAtEpochS: 1_795_223_700 };
 
 /** The sentence that states the fact: the detail under a blocking title, else the title itself. */
@@ -177,7 +199,10 @@ const NOTICES: { label: string; on: Partial<NoticeSourceState>; notice: ShownNot
     on: { approvalExpiredUnseen: { count: 2, latest: LATEST } },
     notice: {
       key: 'approval-expired-unseen',
-      sentence: banners.approvalExpiredUnseen(2, LATEST),
+      // Read when compared, so a resource that cannot build it fails this row alone.
+      get sentence() {
+        return banners.approvalExpiredUnseen(2);
+      },
       action: null,
     },
   },
@@ -366,6 +391,16 @@ describe('buildNotices', () => {
     }
   );
 
+  // The title names no window, so the notice carries the facts that name them beside their marks.
+  it('carries the facts of the latest expired approval request on its notice', () => {
+    const [draft] = buildNotices(
+      baseState({ approvalExpiredUnseen: { count: 3, latest: LATEST } })
+    );
+
+    expect(draft?.key).toBe('approval-expired-unseen');
+    expect(Object.values(draft ?? {})).toContainEqual(LATEST);
+  });
+
   it.each([['retrying'], ['exhausted']] as const)(
     'orders the blocking notices by cause, with recovery %s',
     (daemonRecovery) => {
@@ -495,8 +530,8 @@ describe('dismissNotice', () => {
 });
 
 describe('recordApprovalExpiredUnseen', () => {
-  it('starts the count at 1 with the given summary as latest, from a null state (reason: timeout), and leaves every other field untouched', () => {
-    const latest = summary();
+  it('starts the count at 1 with the given facts as latest, from a null state (reason: timeout), and leaves every other field untouched', () => {
+    const latest = expiredFacts('builder window');
     const state = baseState({
       daemonSpawnNotice: DAEMON_SPAWN_NOTICE,
       boundaryNotice: sanitizeForDisplay('probe: boundary notice'),
@@ -506,8 +541,8 @@ describe('recordApprovalExpiredUnseen', () => {
   });
 
   it('increments count and overwrites latest on a second unseen expiry (reason: timeout)', () => {
-    const first = summary({ requester: sanitizeForDisplay('window one') });
-    const second = summary({ requester: sanitizeForDisplay('window two') });
+    const first = expiredFacts('window one');
+    const second = expiredFacts('window two');
     let state = baseState();
     state = recordApprovalExpiredUnseen(state, false, 'timeout', first);
     state = recordApprovalExpiredUnseen(state, false, 'timeout', second);
@@ -516,13 +551,8 @@ describe('recordApprovalExpiredUnseen', () => {
   });
 
   it('does not change state when the request had already been shown', () => {
-    const state = baseState({ approvalExpiredUnseen: { count: 1, latest: summary() } });
-    const next = recordApprovalExpiredUnseen(
-      state,
-      true,
-      'timeout',
-      summary({ requester: sanitizeForDisplay('other window') })
-    );
+    const state = baseState({ approvalExpiredUnseen: { count: 1, latest: LATEST } });
+    const next = recordApprovalExpiredUnseen(state, true, 'timeout', expiredFacts('other window'));
     expect(next.approvalExpiredUnseen).toEqual(state.approvalExpiredUnseen);
   });
 
@@ -531,18 +561,18 @@ describe('recordApprovalExpiredUnseen', () => {
   it.each([['resolved'], ['requester_disconnected'], ['unknown']] as const)(
     'does not count an unseen withdrawal whose reason is "%s"',
     (reason) => {
-      const next = recordApprovalExpiredUnseen(baseState(), false, reason, summary());
+      const next = recordApprovalExpiredUnseen(baseState(), false, reason, LATEST);
       expect(next.approvalExpiredUnseen).toBeNull();
     }
   );
 
   it('does not change state for a non-timeout reason even when a count is already pending', () => {
-    const state = baseState({ approvalExpiredUnseen: { count: 1, latest: summary() } });
+    const state = baseState({ approvalExpiredUnseen: { count: 1, latest: LATEST } });
     const next = recordApprovalExpiredUnseen(
       state,
       false,
       'resolved',
-      summary({ requester: sanitizeForDisplay('other window') })
+      expiredFacts('other window')
     );
     expect(next.approvalExpiredUnseen).toEqual(state.approvalExpiredUnseen);
   });
@@ -552,7 +582,7 @@ describe('dismissApprovalExpiredUnseen', () => {
   it('clears the count and leaves every other notice-relevant field untouched', () => {
     const state = baseState({
       boundaryNotice: sanitizeForDisplay('probe: boundary notice'),
-      approvalExpiredUnseen: { count: 5, latest: summary() },
+      approvalExpiredUnseen: { count: 5, latest: LATEST },
     });
     const next = dismissApprovalExpiredUnseen(state);
     expect(next.approvalExpiredUnseen).toBeNull();

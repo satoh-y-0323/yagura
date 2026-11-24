@@ -6,7 +6,7 @@
    * The shape carries the difference; the hue only helps.
    */
   import type { DisplayLine } from '../display/untrusted-text';
-  import type { WindowMark } from '../session/approval-target';
+  import type { WindowMark } from '../session/approval-types';
   import { workArea } from '../ui-messages';
   import { tooltip } from './tooltip';
 

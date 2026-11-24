@@ -1,6 +1,7 @@
 import type { NoticeCategory } from '../notices/notice-model';
 import type { DisplayLine } from '../display/untrusted-text';
 import type { UiText } from '../display/ui-text';
+import type { HeadlineParts as RawHeadlineParts } from '../session/approval-types';
 
 /**
  * The consequence shared by every message that tells the user to restart the
@@ -137,23 +138,8 @@ const APPROVAL_TOOL_INFO = {
 /** What an approval heading names a window by: its name, or words that stand in for one. */
 export type HeadlineParty = { name: DisplayLine } | { words: UiText };
 
-/**
- * An approval heading in the order it reads, so a view can set each name apart
- * from the words, and the sentence those make. Of each `*Name` and `*Words` pair
- * at most one is set.
- */
-export interface HeadlineParts {
-  fromName: DisplayLine | null;
-  fromWords: string | null;
-  verb: string;
-  /** A tool this build does not know, named rather than guessed at. */
-  tool: DisplayLine | null;
-  /** The words between the tool and what it would act on. */
-  toolLink: string;
-  toName: DisplayLine | null;
-  toWords: string | null;
-  sentence: string;
-}
+/** The heading as this locale builds it, before its words are marked as UI text. */
+type HeadlineParts = RawHeadlineParts<string>;
 
 /** Builds a heading from who asks, what it would do and to what, the sentence made where the parts are. */
 function headline(
@@ -546,14 +532,8 @@ export const messagesEn = {
       'Windows cannot be opened: the console host bundled with yagura (conpty.dll, OpenConsole.exe) is missing or damaged. Reinstall yagura.',
 
     /** Plural form policy lives with the resource, not the machinery. */
-    approvalExpiredUnseen: (
-      count: number,
-      latest: { requester: UiText | DisplayLine; tool: DisplayLine; target: UiText | DisplayLine }
-    ): string => {
-      const subject =
-        count === 1 ? '1 approval request expired' : `${count} approval requests expired`;
-      return `${subject} before you could answer. Most recent: ${latest.tool} on ${latest.target}, asked for by ${latest.requester}.`;
-    },
+    approvalExpiredUnseen: (count: number): string =>
+      `${count === 1 ? '1 approval request expired' : `${count} approval requests expired`} before you could answer.`,
 
     approvalDecisionFailed: 'Could not send your decision to the daemon. Please try again.',
     approverRegistrationRefused: `Approvals are unavailable: restart the daemon (yagura-daemon --shutdown). ${RESTART_CLOSES_ALL_WINDOWS}`,

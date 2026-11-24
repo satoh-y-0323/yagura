@@ -2046,13 +2046,12 @@
   function withdrawApproval(requestId: string, reason: WithdrawReason): void {
     const request = approvals.items.find((entry) => entry.request_id === requestId);
     if (request !== undefined) {
-      // The notice names the request from the same facts the dialog draws it from.
-      const facts = approvalFactsOf(request, isRequesterWindowOpen(request, $registry.windows));
+      // The notice reports the request from the same facts the dialog draws it from.
       noticeState = recordApprovalExpiredUnseen(
         noticeState,
         approvalQueue.wasShown(approvals, requestId),
         reason,
-        { requester: facts.from.label, tool: facts.tool, target: facts.to.label }
+        approvalFactsOf(request, isRequesterWindowOpen(request, $registry.windows))
       );
     }
     approvals = approvalQueue.withdraw(approvals, requestId);

@@ -5,6 +5,8 @@ import { sanitizeForDisplay, type DisplayLine } from '../display/untrusted-text'
 import type { WindowStatus } from '../ipc/session-boundary';
 import { dummyMessages } from '../test-utils/dummy-messages';
 import type { TitleParts } from '../ui-messages';
+import { approvalFactsOf } from '../session/approval-target';
+import type { ApprovalFacts } from '../session/approval-types';
 import { appendEvent, failureEvent } from './event-log';
 import type { EventLog, NewEvent } from './event-log';
 import {
@@ -15,8 +17,14 @@ import {
 } from './needs-you-toasts';
 import { emptyNoticeMemory, emptyLaneState, dismissLaneNotice, noticeFeed } from './notice-feed';
 import type { LaneState, NoticeFeedInput, NoticeMemory } from './notice-feed';
-import type { NoticeAction, NoticeCategory, NoticeDraft, StateNoticeKey } from './notice-model';
-import { NOTICE_CATEGORIES } from './notice-model';
+import type {
+  NoticeAction,
+  NoticeCategory,
+  NoticeDraft,
+  NoticeSourceState,
+  StateNoticeKey,
+} from './notice-model';
+import { buildNotices, NOTICE_CATEGORIES } from './notice-model';
 import {
   readPreferences,
   withPreference,
@@ -134,6 +142,65 @@ function blocking(key: StateNoticeKey, tone: NoticeDraft['tone'], title: string)
     detail: sanitizeForDisplay(`${title}-detail`),
     action: null,
   };
+}
+
+/** The facts the dialog draws a request from, for one window asking to close another. */
+function expiredFacts(requester: string, target: string): ApprovalFacts {
+  return approvalFactsOf(
+    {
+      request_id: `expired-${requester}-${target}`,
+      tool: 'close_window',
+      displayTool: sanitizeForDisplay('close_window'),
+      requester: {
+        kind: 'window',
+        window_id: 'w-req',
+        displayWindowId: sanitizeForDisplay('w-req'),
+        name: sanitizeForDisplay(requester),
+        profile: null,
+        status: 'running',
+        mark: { cells: 0b010_101_011_100_110, hue: 3 },
+      },
+      target: {
+        window_id: 'w-target',
+        displayWindowId: sanitizeForDisplay('w-target'),
+        name: sanitizeForDisplay(target),
+        profile: null,
+        status: 'waiting_input',
+        mark: { cells: 0b101_010_100_011_001, hue: 9 },
+      },
+      text: null,
+    },
+    true
+  );
+}
+
+/** The notices the model builds while one unseen expired request is all there is to report. */
+function expiredDrafts(facts: ApprovalFacts): NoticeDraft[] {
+  const quiet: NoticeSourceState = {
+    daemonSpawnNotice: null,
+    detectionWarning: null,
+    keymapNotice: null,
+    boundaryNotice: null,
+    hasThemeLoadFailure: false,
+    isThemeLoadFailureDismissed: false,
+    themeIssueCount: 0,
+    isThemeIssuesDismissed: false,
+    approvalExpiredUnseen: null,
+    approverRegistrationRefused: false,
+    daemonRecovery: 'idle',
+    daemonRecoveryRev: 0,
+    clientConfigFailure: null,
+    isDaemonIncompatible: false,
+    daemonCompatibilityRev: 0,
+    startupEnvFailure: null,
+    profilesNeedingNativeProgram: [],
+    isProfileUnavailableDismissed: false,
+    daemonHealthNotices: [],
+    lastSession: null,
+    isReopenOfferDismissed: false,
+    hasOpenWindows: false,
+  };
+  return buildNotices({ ...quiet, approvalExpiredUnseen: { count: 1, latest: facts } });
 }
 
 function exitOf(
@@ -645,15 +712,13 @@ describe('notice feed: the settings rows', () => {
   it('shows and reads blocking notices and expired approval requests whatever the table says', () => {
     const s = shell();
     s.prefs = allOff();
-    s.drafts = [
-      blocking('daemon-health', 'error', 'block-1'),
-      setup('approval-expired-unseen', 'expired-1'),
-    ];
+    const expired = expiredDrafts(expiredFacts('alpha', 'bravo'));
+    s.drafts = [blocking('daemon-health', 'error', 'block-1'), ...expired];
     const out = run(s);
     expect(out.strip.map((notice) => notice.title)).toEqual(['block-1']);
     expect(out.announce.assertive).toContain('block-1');
-    expect(titles(out)).toEqual(['expired-1']);
-    expect(out.announce.polite).toContain('expired-1');
+    expect(titles(out)).toEqual(expired.map((draft) => draft.title));
+    expect(out.announce.polite).toContain(expired[0]?.title);
   });
 
   it('keeps the window calls of a switched-off row off the lane and unread', () => {
@@ -735,6 +800,24 @@ describe('notice feed: numbers and the unseen count', () => {
     expect(seqs).toContain(first.strip[0]?.seq);
     // The strip row shows the title, so the second fact is read by its title once more.
     expect(second.announce.assertive).toContain('health');
+  });
+
+  // The title says only how many expired, so the facts are what tell a new request from the last.
+  it('numbers an expired-approval notice anew when, at the same count, its request names other windows, and reads it out', () => {
+    const s = shell();
+    s.drafts = expiredDrafts(expiredFacts('alpha', 'bravo'));
+    const [before] = run(s).center;
+
+    const later = expiredFacts('charlie', 'delta');
+    s.drafts = expiredDrafts(later);
+    const second = run(s);
+    const [after] = second.center;
+
+    expect(second.center).toHaveLength(1);
+    expect(after?.title).toBe(before?.title);
+    expect(after?.seq).toBeGreaterThan(before?.seq ?? Number.POSITIVE_INFINITY);
+    expect(Object.values(after ?? {})).toContainEqual(later);
+    expect(second.announce.polite).toContain(after?.title);
   });
 
   it('numbers events and state notices from one counter, in the order they came', () => {

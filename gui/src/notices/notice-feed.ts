@@ -26,6 +26,7 @@ import {
 } from './notice-model';
 import type { UiText } from '../display/ui-text';
 import { sanitizeForDisplay, type DisplayLine } from '../display/untrusted-text';
+import type { ApprovalFacts } from '../session/approval-types';
 import type { NotificationPreferences } from './notification-preferences';
 
 type Tone = NoticeClass['tone'];
@@ -37,6 +38,8 @@ interface NoticeBody extends Pick<NoticeClass, 'blocking' | 'tone' | 'dismissibl
   title: NoticeText;
   detail: NoticeText | null;
   action: NoticeAction | null;
+  /** The request an expired-approval notice reports; `null` for every other notice. */
+  approvalFacts: ApprovalFacts | null;
   /** When an event was recorded, `HH:mm`; `null` for a state notice. */
   at: UiText | null;
 }
@@ -198,7 +201,8 @@ interface Entry {
 }
 
 function identity(draft: NoticeDraft): string {
-  return JSON.stringify([draft.key, draft.title, draft.detail]);
+  // The facts are part of it: two requests that expire alike in count are not the same notice.
+  return JSON.stringify([draft.key, draft.title, draft.detail, draft.approvalFacts ?? null]);
 }
 
 function numberNotices(
@@ -218,6 +222,7 @@ function numberNotices(
     const seq = memory.stateSeqs.get(id) ?? nextSeq++;
     stateSeqs.set(id, seq);
     const { key, blocking, tone, dismissible, title, detail, action } = draft;
+    const approvalFacts = draft.approvalFacts ?? null;
     entries.push({
       notice: {
         source: 'state',
@@ -229,6 +234,7 @@ function numberNotices(
         title,
         detail,
         action,
+        approvalFacts,
         at: null,
       },
       category: classifyNotice(key, {}).category,
@@ -249,6 +255,7 @@ function numberNotices(
         title: event.text,
         detail: null,
         action: null,
+        approvalFacts: null,
         at: event.at,
       },
       category,

@@ -14,7 +14,9 @@
 
   import type { Notice } from '../notices/notice-feed';
   import type { NoticeAction } from '../notices/notice-model';
-  import { banners, buttons, hints } from '../ui-messages';
+  import { banners, buttons, dialogs, hints } from '../ui-messages';
+  import ApprovalHeadline from './ApprovalHeadline.svelte';
+  import ApprovalParty from './ApprovalParty.svelte';
   import { dismissOnOutside, type OutsideDismissReason } from './dismiss-on-outside';
   import Icon from './Icon.svelte';
   import IconButton from './IconButton.svelte';
@@ -231,6 +233,29 @@
               {#if notice.detail !== null}
                 <p class="notice-center__detail">{notice.detail}</p>
               {/if}
+              {#if notice.approvalFacts !== null}
+                {@const facts = notice.approvalFacts}
+                <p class="notice-center__detail notice-center__headline">
+                  <ApprovalHeadline headline={facts.headline} />
+                </p>
+                <div class="notice-center__parties">
+                  <ApprovalParty
+                    size="compact"
+                    party={facts.from}
+                    heading={dialogs.approvalFrom}
+                    id="notice-{notice.seq}-from"
+                  />
+                  <span class="notice-center__arrow" aria-hidden="true">
+                    <Icon name="chevron-right" size="sm" />
+                  </span>
+                  <ApprovalParty
+                    size="compact"
+                    party={facts.to}
+                    heading={dialogs.approvalTo}
+                    id="notice-{notice.seq}-to"
+                  />
+                </div>
+              {/if}
               {#if notice.at !== null}
                 <time class="notice-center__at" datetime={notice.at}>{notice.at}</time>
               {/if}
@@ -413,6 +438,26 @@
     font-size: var(--text-xs);
     line-height: var(--leading-xs);
     overflow-wrap: anywhere;
+  }
+
+  .notice-center__headline {
+    margin-top: var(--space-1);
+    color: var(--fg-default);
+    font-size: var(--text-sm);
+    line-height: var(--leading-sm);
+  }
+
+  .notice-center__parties {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-1_5);
+    align-items: center;
+    margin-top: var(--space-1);
+  }
+
+  .notice-center__arrow {
+    display: inline-flex;
+    color: var(--fg-faint);
   }
 
   .notice-center__at {

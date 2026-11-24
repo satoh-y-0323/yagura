@@ -20,8 +20,7 @@ import {
 } from '../display/untrusted-text';
 import { formatMention } from './mention-syntax';
 import { parseLayoutJson, type LayoutV1 } from '../session/restore-model';
-import type { ApprovalRequesterKind, WithdrawReason } from '../session/approval-types';
-import type { WindowMark } from '../session/approval-target';
+import type { ApprovalRequesterKind, WindowMark, WithdrawReason } from '../session/approval-types';
 import type {
   ClientConfigFailure,
   DaemonRecoveryStatus,
