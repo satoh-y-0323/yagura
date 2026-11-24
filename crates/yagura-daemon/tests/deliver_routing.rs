@@ -812,6 +812,68 @@ async fn a_post_waiting_for_a_session_is_pushed_by_command_once_the_session_is_f
 }
 
 // =========================================================================================
+// a door names only a window whose tree it runs in
+// =========================================================================================
+
+/// A door run in window A's tree, handed window B's id and token, does not change B's
+/// record; B's own door does. `--report-session` reads its answer before it ends, and the
+/// daemon records a session before it answers, so the logged report is the sync point.
+#[tokio::test]
+async fn a_door_in_one_windows_tree_cannot_report_a_session_for_another_window() {
+    let scene = Scene::start("session-other-tree", Opts::default()).await;
+    let own_logs = scene.profile("hc-own-b", &["--session", "s-own-b"], None);
+    let mut user = scene.user().await;
+    let b = scene.open_profile(&mut user, "hc-own-b").await;
+    scene.type_line(&b, "TURN").await;
+    own_logs
+        .until("B's session to be reported", |logs| {
+            logs.count_events("session") > 0
+        })
+        .await;
+    assert_eq!(
+        scene.entry(&b).session_id().as_deref(),
+        Some("s-own-b"),
+        "control: a window's own door records its session"
+    );
+
+    let credentials = scene.root.join("b-credentials.json");
+    std::fs::write(
+        &credentials,
+        serde_json::json!({ "window_id": b, "token": VALID_TOKEN }).to_string(),
+    )
+    .expect("write B's credentials for A's door");
+    let credentials_arg = credentials.display().to_string();
+    // `launch` mode holds only when a used setting names `{credentials_file}`; `hook_child`
+    // ignores the flag that carries it, so its doors read only B's file.
+    let from_a_logs = scene.profile_with(
+        "hc-from-a",
+        "0",
+        &["--credentials", &credentials_arg, "--session", "s-from-a"],
+        None,
+        "\n[credentials]\nmode = \"launch\"\n\n[hooks]\n\
+         args = [\"--unread-credentials\", \"{credentials_file}\"]\n",
+    );
+    let a = scene.open_profile(&mut user, "hc-from-a").await;
+    scene.type_line(&a, "TURN").await;
+    from_a_logs
+        .until("A's door to report", |logs| {
+            logs.count_events("session") > 0
+        })
+        .await;
+
+    assert_eq!(
+        scene.entry(&b).session_id().as_deref(),
+        Some("s-own-b"),
+        "a door outside B's tree must not change B's session, even with B's token"
+    );
+    assert_eq!(
+        scene.entry(&a).session_id(),
+        None,
+        "a door that names another window records nothing for its own"
+    );
+}
+
+// =========================================================================================
 // opening a window types nothing; the start-up door carries the intro
 // =========================================================================================
 

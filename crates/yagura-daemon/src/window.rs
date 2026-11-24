@@ -934,6 +934,9 @@ pub struct WindowEntry {
     /// Whether a request refused for an overlay not made was logged as a
     /// warning for this window.
     overlay_noted: AtomicBool,
+    /// Whether a request refused for coming from outside the window's tree
+    /// was logged as a warning for this window.
+    lineage_noted: AtomicBool,
     /// The window's row in the window table, removed before the window's
     /// holder is told to end ([`WindowEntry::remove_row_then`]).
     row: WindowRow,
@@ -1001,6 +1004,12 @@ impl WindowEntry {
     /// overlay not made is the first, and so a warning.
     pub(crate) fn first_overlay_note(&self) -> bool {
         !self.overlay_noted.swap(true, Ordering::SeqCst)
+    }
+
+    /// `true` the first time it is asked: whether a note about a request
+    /// refused by this window's tree is the first, and so a warning.
+    pub(crate) fn first_lineage_note(&self) -> bool {
+        !self.lineage_noted.swap(true, Ordering::SeqCst)
     }
 
     /// The `[launch_overlay]` table the window's overlay is built by, when
@@ -2928,6 +2937,7 @@ impl WindowRegistry {
             peers: Arc::downgrade(&self.entries),
             overlay: Mutex::new(provenance_overlay),
             overlay_noted: AtomicBool::new(false),
+            lineage_noted: AtomicBool::new(false),
             row,
             #[cfg(feature = "fault-injection")]
             faults: self.config().faults.clone(),

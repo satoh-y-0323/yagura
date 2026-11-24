@@ -169,6 +169,9 @@ struct Pending {
     /// The child the holder's `Welcome` named running; `None` before the
     /// `Welcome`, when it named none, or when the child had already exited.
     child_pid: Option<u32>,
+    /// The running child with the start the holder read before it could be
+    /// reaped; `None` whenever the `Welcome` did not name both.
+    anchor: Option<(u32, ProcessStart)>,
 }
 
 impl Pending {
@@ -184,6 +187,7 @@ impl Pending {
             settles: HashMap::new(),
             confirmed: (cols, rows),
             child_pid: None,
+            anchor: None,
         }
     }
 
@@ -359,6 +363,11 @@ impl Link {
         lock_recover(&self.pending).child_pid
     }
 
+    /// The child the holder's `Welcome` named running, with its start.
+    pub(super) fn child_anchor(&self) -> Option<(u32, ProcessStart)> {
+        lock_recover(&self.pending).anchor.clone()
+    }
+
     /// Writes `data` to the child, after every earlier write, and returns
     /// once the holder answered.
     fn write(&self, data: &[u8]) -> std::io::Result<()> {
@@ -427,9 +436,10 @@ impl Link {
         }
     }
 
-    fn welcomed(&self, cols: u16, rows: u16, child_pid: Option<u32>) {
+    fn welcomed(&self, cols: u16, rows: u16, welcomed: &Welcomed) {
         let mut pending = lock_recover(&self.pending);
-        pending.child_pid = child_pid;
+        pending.child_pid = welcomed.running_child();
+        pending.anchor = welcomed.anchor();
         pending.confirmed = (cols, rows);
         pending.connected = true;
     }
@@ -796,7 +806,7 @@ fn run_take_back(
                 // Before the record gives the token back, so a request the
                 // token admits finds the link let in and the child named.
                 let (cols, rows) = welcomed.size;
-                link.welcomed(cols, rows, welcomed.running_child());
+                link.welcomed(cols, rows, &welcomed);
                 on_welcome(&welcomed.record);
                 let mut reader = Reader {
                     window_id: &window_id,
@@ -1226,9 +1236,18 @@ fn serve(
             }
         };
         let (cols, rows) = welcomed.size;
-        link.welcomed(cols, rows, welcomed.running_child());
+        link.welcomed(cols, rows, &welcomed);
         let opening = match welcomed.child_pid {
-            Some(_) => Some(Opening { opened }),
+            Some(_) => {
+                if welcomed.running_child().is_some() && welcomed.anchor().is_none() {
+                    tracing::warn!(
+                        window_id = holder.window_id,
+                        "the window's holder did not name its child's start; hooks and MCP \
+                         bridges of this window are refused until it is opened again"
+                    );
+                }
+                Some(Opening { opened })
+            }
             None => {
                 tracing::warn!(
                     window_id = holder.window_id,
@@ -1310,10 +1329,6 @@ struct Welcomed {
     child_pid: Option<u32>,
     /// The child's start as the holder's side read it before the child could
     /// be reaped; with `child_pid`, what names the window's child.
-    #[expect(
-        dead_code,
-        reason = "read once peers are checked against the window's tree"
-    )]
     child_start: Option<String>,
     exited: bool,
     size: (u16, u16),
@@ -1430,6 +1445,14 @@ impl Welcomed {
     /// The child the `Welcome` named, unless it had already exited by then.
     fn running_child(&self) -> Option<u32> {
         self.child_pid.filter(|_| !self.exited)
+    }
+
+    /// The running child and its start, when the `Welcome` named both; a
+    /// start that does not read as one is none.
+    fn anchor(&self) -> Option<(u32, ProcessStart)> {
+        let pid = self.running_child()?;
+        let start = self.child_start.as_deref()?.parse::<ProcessStart>().ok()?;
+        Some((pid, start))
     }
 }
 

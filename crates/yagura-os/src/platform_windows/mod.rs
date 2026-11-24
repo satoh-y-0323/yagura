@@ -287,10 +287,6 @@ impl PeerAuth for WindowsIpc {
         client_process_id(conn)
     }
 
-    fn peer_executable(&self, conn: &Self::Connection) -> Option<PathBuf> {
-        process_image_path(client_process_id(conn)?)
-    }
-
     fn capture_peer(&self, conn: &Self::Connection) -> Option<CapturedPeer> {
         let pid = client_process_id(conn)?;
         let start = crate::process_start(pid).ok().flatten()?;

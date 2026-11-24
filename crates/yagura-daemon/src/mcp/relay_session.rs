@@ -41,7 +41,6 @@ use yagura_protocol::{
 
 use super::server::YaguraMcpServer;
 use super::{DaemonTransport, RequesterIdentity, TransportError};
-use crate::control::RequestOrigin;
 use crate::ipc::report::{ReportReceipt, TakenReports};
 use crate::ipc::{Caller, IpcServer, VerifiedPeer};
 
@@ -276,10 +275,9 @@ pub(crate) async fn serve<S>(
         }
         _ => Identity::none(),
     };
-    let bucket = match &identity.origin {
-        RequestOrigin::Window(window_id) => Bucket::Window(window_id.clone()),
-        RequestOrigin::External | RequestOrigin::Approver => Bucket::Windowless,
-    };
+    let bucket = caller.window().map_or(Bucket::Windowless, |window_id| {
+        Bucket::Window(window_id.to_owned())
+    });
     let Some(_slot) = server.relay_sessions().take(bucket, max_windowless) else {
         send(
             &mut writer,
@@ -294,12 +292,12 @@ pub(crate) async fn serve<S>(
 
     let (closed_tx, closed_rx) = watch::channel(false);
     let receipts = Arc::new(Receipts::default());
+    let requester = identity.requester(&caller);
     let transport = SessionTransport {
         server,
         caller,
         verified,
-        origin: identity.origin,
-        requester: identity.requester,
+        requester,
         permits: Semaphore::new(REQUESTS_AT_ONCE),
         closed: closed_rx,
         receipts: Arc::clone(&receipts),
@@ -323,20 +321,36 @@ pub(crate) async fn serve<S>(
     drop(identity.claim);
 }
 
-/// The window a session identified as, and the connection that holds the
-/// window's claim for as long as the session lasts.
+/// How a session's claim of a window ended: why it was refused, and the
+/// connection that holds the window's claim for as long as the session lasts.
+/// The window it identified as is its caller's record ([`Caller::window`]).
 struct Identity {
-    origin: RequestOrigin,
-    requester: RequesterIdentity,
+    refusal: Option<String>,
     claim: Option<DuplexStream>,
 }
 
 impl Identity {
     fn none() -> Self {
         Self {
-            origin: RequestOrigin::External,
-            requester: RequesterIdentity::External,
+            refusal: None,
             claim: None,
+        }
+    }
+
+    fn refused(refusal: String) -> Self {
+        Self {
+            refusal: Some(refusal),
+            claim: None,
+        }
+    }
+
+    /// Who the session's tools say asks: the window `caller` identified as,
+    /// else the refusal of its claim, else no one.
+    fn requester(&self, caller: &Caller) -> RequesterIdentity {
+        match (caller.window(), &self.refusal) {
+            (Some(window_id), _) => RequesterIdentity::Window(window_id.to_owned()),
+            (None, Some(refusal)) => RequesterIdentity::Refused(refusal.clone()),
+            (None, None) => RequesterIdentity::External,
         }
     }
 }
@@ -353,8 +367,7 @@ async fn identify(
     token: String,
     declaration: Option<Declaration>,
 ) -> Identity {
-    let mut connection =
-        server.open_internal_connection(caller, verified, RequestOrigin::External, None);
+    let mut connection = server.open_internal_connection(caller, verified, None);
     let reply = exchange(
         &mut connection,
         &ClientMessage::Identify {
@@ -365,30 +378,22 @@ async fn identify(
     )
     .await;
     match reply {
-        Ok(DaemonMessage::Identified { window_id }) => Identity {
-            origin: RequestOrigin::Window(window_id.clone()),
-            requester: RequesterIdentity::Window(window_id),
+        Ok(DaemonMessage::Identified { .. }) => Identity {
+            refusal: None,
             claim: Some(connection),
         },
-        Ok(DaemonMessage::Error { code, message, .. }) => Identity {
-            requester: RequesterIdentity::Refused(format!(
-                "the daemon refused this window identity ({code}): {message}"
-            )),
-            ..Identity::none()
-        },
-        Ok(other) => Identity {
-            requester: RequesterIdentity::Refused(format!(
-                "the window identity could not be settled: unexpected reply {}",
-                super::tools::message_kind(&other)
-            )),
-            ..Identity::none()
-        },
-        Err(TransportError::Unavailable(reason) | TransportError::Protocol(reason)) => Identity {
-            requester: RequesterIdentity::Refused(format!(
+        Ok(DaemonMessage::Error { code, message, .. }) => Identity::refused(format!(
+            "the daemon refused this window identity ({code}): {message}"
+        )),
+        Ok(other) => Identity::refused(format!(
+            "the window identity could not be settled: unexpected reply {}",
+            super::tools::message_kind(&other)
+        )),
+        Err(TransportError::Unavailable(reason) | TransportError::Protocol(reason)) => {
+            Identity::refused(format!(
                 "the window identity could not be settled: {reason}"
-            )),
-            ..Identity::none()
-        },
+            ))
+        }
     }
 }
 
@@ -426,13 +431,12 @@ async fn exchange(
 
 /// The transport of one session's tools: each round trip runs on a new
 /// connection of the session's own, as the session's one caller and acting
-/// as the window the session identified as, at most [`REQUESTS_AT_ONCE`] at
+/// as the window the caller identified as, at most [`REQUESTS_AT_ONCE`] at
 /// a time.
 pub(crate) struct SessionTransport {
     server: Arc<IpcServer>,
     caller: Caller,
     verified: VerifiedPeer,
-    origin: RequestOrigin,
     requester: RequesterIdentity,
     permits: Semaphore,
     /// Turns `true` when the relay connection ends.
@@ -471,12 +475,9 @@ impl DaemonTransport for SessionTransport {
             }
             None => (None, None),
         };
-        let mut connection = self.server.open_internal_connection(
-            &self.caller,
-            &self.verified,
-            self.origin.clone(),
-            receipt,
-        );
+        let mut connection =
+            self.server
+                .open_internal_connection(&self.caller, &self.verified, receipt);
         let answer = tokio::select! {
             biased;
             () = &mut ended => Err(session_ended()),

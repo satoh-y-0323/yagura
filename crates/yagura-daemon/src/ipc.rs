@@ -13,7 +13,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::time::Duration;
 
 use thiserror::Error;
@@ -21,7 +21,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, DuplexStream
 use tokio::sync::{Notify, Semaphore, broadcast, mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
-use yagura_os::{IpcTransport, OsError, PeerAuth, PlatformIpc};
+use yagura_os::{IpcTransport, OsError, PeerAuth, PlatformIpc, ProcessStart};
 
 use yagura_protocol::{
     ApprovalRequester, ApprovalRequesterKind, ClientMessage, ConnectionErrorCode, DaemonMessage,
@@ -99,10 +99,23 @@ type Connection = <PlatformIpc as PeerAuth>::Connection;
 /// A bound endpoint owning its name, named through the OS boundary.
 type Listener = <PlatformIpc as IpcTransport>::Listener;
 
-/// Proof that a connection came through [`IpcServer::verify_peer`]: only
+/// Proof that a connection came through [`IpcServer::verify_peer`], with the
+/// process at its other end as captured once it was accepted: only
 /// [`IpcServer::handle_connection`] makes one, and a relay session needs it to
-/// open a connection of its own into the connection body.
-pub(crate) struct VerifiedPeer(());
+/// open a connection of its own into the connection body, which so speaks
+/// for the same process.
+pub(crate) struct VerifiedPeer {
+    /// `None` when the operating system could not name the process for
+    /// certain.
+    process: Option<PeerProcess>,
+}
+
+/// A connection's peer process, named for good by its id and start.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PeerProcess {
+    pid: u32,
+    start: ProcessStart,
+}
 
 /// The buffer of one internal connection, each way: it only paces the bytes
 /// of a frame, which is never bounded by it.
@@ -224,6 +237,9 @@ struct ConnectionState {
     /// connection was accepted. `None` when it could not be determined,
     /// which `register_approver` treats as a mismatch (fail-closed).
     peer_executable: Option<PathBuf>,
+    /// The peer process its [`VerifiedPeer`] carries: a request in a
+    /// window's name is judged against the window's tree from it.
+    peer: Option<PeerProcess>,
     /// Whether this connection's first refused `register_approver` has
     /// already been logged, so a client retrying in a loop cannot flood the
     /// log with its own failures.
@@ -257,6 +273,10 @@ pub(crate) struct Caller {
     /// slot outlives the connection: the detached task holding it still has
     /// to give it back once it has closed the window it opened.
     open_handoffs: Arc<AtomicUsize>,
+    /// The window this caller identified as, written once when an `identify`
+    /// of its own is accepted: the one record every connection of the
+    /// caller acts on.
+    window: Arc<OnceLock<String>>,
 }
 
 impl Caller {
@@ -264,29 +284,55 @@ impl Caller {
         Self {
             id,
             open_handoffs: Arc::new(AtomicUsize::new(0)),
+            window: Arc::new(OnceLock::new()),
         }
+    }
+
+    /// The window this caller identified as.
+    pub(crate) fn window(&self) -> Option<&str> {
+        self.window.get().map(String::as_str)
+    }
+
+    /// Who a connection of this caller acts as: the window it identified
+    /// as, or no one proven.
+    fn origin(&self) -> RequestOrigin {
+        self.window().map_or(RequestOrigin::External, |window_id| {
+            RequestOrigin::Window(window_id.to_owned())
+        })
+    }
+
+    /// Records that this caller identified as `window_id`; `false` when it
+    /// already identified as another window.
+    fn settle_window(&self, window_id: &str) -> bool {
+        self.window.get_or_init(|| window_id.to_owned()) == window_id
     }
 }
 
 impl ConnectionState {
     /// The state of a direct IPC connection, which is a caller of its own.
-    fn new(conn_id: u64, peer_executable: Option<PathBuf>) -> Self {
-        Self::of_caller(conn_id, Caller::new(conn_id), peer_executable)
+    fn new(conn_id: u64, peer: &VerifiedPeer, peer_executable: Option<PathBuf>) -> Self {
+        Self::of_caller(conn_id, Caller::new(conn_id), peer, peer_executable)
     }
 
-    fn of_caller(conn_id: u64, caller: Caller, peer_executable: Option<PathBuf>) -> Self {
+    fn of_caller(
+        conn_id: u64,
+        caller: Caller,
+        peer: &VerifiedPeer,
+        peer_executable: Option<PathBuf>,
+    ) -> Self {
         Self {
             conn_id,
+            origin: caller.origin(),
             caller,
             attachment: None,
             frames_failed: Arc::new(Notify::new()),
             status_rx: None,
             kick_rx: None,
             waiters: Vec::new(),
-            origin: RequestOrigin::External,
             mcp_claim: None,
             identify_failures: 0,
             peer_executable,
+            peer: peer.process.clone(),
             approver_refusal_logged: false,
             closed: ConnectionClosed::new(),
             held_read: inbox::HeldSlot::default(),
@@ -294,20 +340,19 @@ impl ConnectionState {
         }
     }
 
-    /// The state of a relay session's own connection, acting as `origin` for
-    /// the session's `caller`: the identity the session settled, with no
-    /// window claim of its own and no peer executable, so it never becomes an
-    /// approver.
+    /// The state of a relay session's own connection for the session's
+    /// `caller`, acting as the window the caller identified as, with no window
+    /// claim of its own and no peer executable, so it never becomes an
+    /// approver. Its peer is the relay connection's.
     fn internal(
         conn_id: u64,
         caller: Caller,
-        origin: RequestOrigin,
+        peer: &VerifiedPeer,
         report_receipt: Option<report::ReportReceipt>,
     ) -> Self {
         Self {
-            origin,
             report_receipt,
-            ..Self::of_caller(conn_id, caller, None)
+            ..Self::of_caller(conn_id, caller, peer, None)
         }
     }
 
@@ -1063,6 +1108,9 @@ pub struct IpcServer {
     /// Admits the profile reads of `run_hook`, each on a blocking thread, sized
     /// like `role_and_profile_reads`.
     hook_profile_reads: Semaphore,
+    /// Judges whether a request in a window's name comes from the window's
+    /// tree.
+    lineage: credentialed::LineageGate,
     /// Every window's inbox of reports from the windows it opened or owns
     /// tasks for. Memory only, and always enabled.
     reports: Arc<report::ReportInboxes>,
@@ -1121,6 +1169,7 @@ impl IpcServer {
         let role_and_profile_reads = Semaphore::new(config.max_windows);
         let window_text_reads = Semaphore::new(config.max_windows);
         let hook_profile_reads = Semaphore::new(config.max_windows);
+        let lineage = credentialed::LineageGate::new(config.max_windows);
         let model_choices_listing = Arc::new(Semaphore::new(config.model_choices_max_concurrent));
         let mcp_registration_listing = Arc::new(Semaphore::new(1));
         let mcp_registration_row_reads = Arc::new(Semaphore::new(
@@ -1159,6 +1208,7 @@ impl IpcServer {
             mcp_registration_changes,
             mcp_registration_writes,
             hook_profile_reads,
+            lineage,
             reports,
             health_checks: Semaphore::new(1),
             palette_store: store_gate::StoreGate::disabled(),
@@ -1350,15 +1400,18 @@ impl IpcServer {
             tracing::warn!("rejecting ipc connection: peer verification failed");
             return;
         }
-        let verified = VerifiedPeer(());
-
-        // Captured before the stream is handed on, and canonicalized here so no
-        // later frame has to: one local filesystem lookup per accepted
-        // connection, on the task that already ran `verify_peer`'s synchronous
-        // OS calls, is too short to be worth a `spawn_blocking` hop.
-        let peer_executable = PlatformIpc::default()
-            .peer_executable(&connection)
-            .and_then(|path| path.canonicalize().ok());
+        // Captured once, before the stream is handed on, and canonicalized here
+        // so no later frame has to: a few reads that do not wait, on the task
+        // that already ran `verify_peer`'s synchronous OS calls, are too short
+        // to be worth a `spawn_blocking` hop.
+        let captured = PlatformIpc::default().capture_peer(&connection);
+        let verified = VerifiedPeer {
+            process: captured.as_ref().map(|peer| PeerProcess {
+                pid: peer.pid,
+                start: peer.start.clone(),
+            }),
+        };
+        let peer_executable = captured.and_then(|peer| peer.executable.canonicalize().ok());
 
         let mut connection = connection;
         let mut read_buf: Vec<u8> = Vec::new();
@@ -1384,6 +1437,7 @@ impl IpcServer {
 
         let state = ConnectionState::new(
             self.next_conn_id.fetch_add(1, Ordering::Relaxed),
+            &verified,
             peer_executable,
         );
         self.serve_connection(connection, state, read_buf).await;
@@ -1395,24 +1449,23 @@ impl IpcServer {
         Caller::new(self.next_conn_id.fetch_add(1, Ordering::Relaxed))
     }
 
-    /// Opens a connection of a relay session's own into the connection body,
-    /// acting as `origin` for the session's `caller`, and returns its client
-    /// end. Dropping that end is the connection's end, as a client closing its
-    /// IPC connection is. A `report_receipt` is where its `wait_for_report`
-    /// hands what it takes. `_verified` is the proof that the relay connection
-    /// it serves passed [`IpcServer::verify_peer`].
+    /// Opens a connection of a relay session's own into the connection body
+    /// for the session's `caller`, acting as the window the caller identified
+    /// as, and returns its client end. Dropping that end is the connection's
+    /// end, as a client closing its IPC connection is. A `report_receipt` is
+    /// where its `wait_for_report` hands what it takes. `verified` is the
+    /// relay connection's, whose peer the connection speaks for.
     pub(crate) fn open_internal_connection(
         self: &Arc<Self>,
         caller: &Caller,
-        _verified: &VerifiedPeer,
-        origin: RequestOrigin,
+        verified: &VerifiedPeer,
         report_receipt: Option<report::ReportReceipt>,
     ) -> DuplexStream {
         let (client, body) = tokio::io::duplex(INTERNAL_CONNECTION_BUFFER);
         let state = ConnectionState::internal(
             self.next_conn_id.fetch_add(1, Ordering::Relaxed),
             caller.clone(),
-            origin,
+            verified,
             report_receipt,
         );
         let server = Arc::clone(self);
@@ -1675,8 +1728,15 @@ impl IpcServer {
                 window_id,
                 token,
             }) => {
-                self.handle_status_event(outbound, &token, &source, status, window_id.as_deref())
-                    .await;
+                self.handle_status_event(
+                    outbound,
+                    state.peer.as_ref(),
+                    &token,
+                    &source,
+                    status,
+                    window_id.as_deref(),
+                )
+                .await;
                 FrameOutcome::Continue
             }
             Ok(ClientMessage::OpenWindow {
@@ -1978,6 +2038,7 @@ impl IpcServer {
             }) => {
                 self.handle_build_launch_overlay(
                     outbound,
+                    state.peer.as_ref(),
                     (&window_id, &token),
                     crate::launch_overlay::OverlayFacts { env, files },
                 )
@@ -2001,6 +2062,7 @@ impl IpcServer {
                     .authenticate_window(
                         outbound,
                         HookDoor::new("deliver"),
+                        state.peer.as_ref(),
                         &token,
                         Some(&window_id),
                     )
@@ -2024,6 +2086,7 @@ impl IpcServer {
                     .authenticate_window(
                         outbound,
                         HookDoor::new("report_session"),
+                        state.peer.as_ref(),
                         &token,
                         Some(&window_id),
                     )
@@ -2047,6 +2110,7 @@ impl IpcServer {
                     profile_id: &profile,
                     name: &name,
                     input,
+                    peer: state.peer.as_ref(),
                 };
                 self.handle_run_hook(outbound, request, hook::HookRead::Older)
                     .await;
@@ -3874,16 +3938,18 @@ impl IpcServer {
     /// it presents.
     ///
     /// Checked in the same order as `status_event`: token shape -> window
-    /// resolution -> that window's own token, then what `declaration` states
-    /// against the window ([`WindowEntry::named_profile`]). A naming mistake
-    /// (`window_not_found`) and a declaration the window does not take
+    /// resolution -> that window's own token -> the window's tree, then what
+    /// `declaration` states against the window ([`WindowEntry::named_profile`]).
+    /// A naming mistake (`window_not_found`), a peer outside the window's tree
+    /// (`lineage_refused`) and a declaration the window does not take
     /// (`profile_mismatch`) are kept apart from a credential failure, so only
     /// the latter counts toward [`IDENTIFY_FAILURE_LIMIT`] and every refusal
     /// leaves the origin untouched.
     ///
     /// The one place a claim's declaration is judged: a relay carries its
-    /// own into here unread. A window whose launch overlay has not been made
-    /// is no credential failure either, so it is not counted.
+    /// own into here unread, on a connection whose peer is the relay's. A
+    /// window whose launch overlay has not been made is no credential failure
+    /// either, so it is not counted.
     async fn handle_identify(
         &self,
         outbound: &Outbound,
@@ -3913,13 +3979,20 @@ impl IpcServer {
             outbound.reply(&window_not_found_msg());
             return FrameOutcome::Continue;
         };
-        if let Some(own) = entry.named_profile()
+        let window = match self.lineage.judge(entry, state.peer.as_ref()).await {
+            Ok(window) => window,
+            Err(refused) => {
+                outbound.reply(&refused.message());
+                return FrameOutcome::Continue;
+            }
+        };
+        if let Some(own) = window.named_profile()
             && declaration.is_none_or(|declared| declared.profile != own)
         {
             // A nested CLI's bridge, or one of a registration older than the
             // declaration, claims every time it connects.
             tracing::debug!(
-                window_id = %entry.window_id(),
+                window_id = %window.window_id(),
                 "refusing an identify that does not declare the window's profile"
             );
             outbound.reply(&error_msg(
@@ -3928,7 +4001,7 @@ impl IpcServer {
             ));
             return FrameOutcome::Continue;
         }
-        let entry = match Credentialed::verified(entry).past_overlay() {
+        let entry = match window.past_overlay() {
             Ok(entry) => entry,
             Err(pending) => {
                 outbound.reply(&pending.message());
@@ -3941,8 +4014,8 @@ impl IpcServer {
             // conflict: a client that reconnects its own claim must not have
             // to track whether it already made it.
             RequestOrigin::Window(claimed) if claimed == entry.window_id() => {}
-            RequestOrigin::External => {
-                state.origin = RequestOrigin::Window(entry.window_id().to_string());
+            RequestOrigin::External if state.caller.settle_window(entry.window_id()) => {
+                state.origin = state.caller.origin();
                 state.mcp_claim = Some(entry.claim_mcp_connection());
             }
             _ => {
@@ -4172,6 +4245,7 @@ impl IpcServer {
     async fn handle_status_event(
         &self,
         outbound: &Outbound,
+        peer: Option<&PeerProcess>,
         token: &str,
         source: &str,
         status: WindowStatus,
@@ -4179,11 +4253,11 @@ impl IpcServer {
     ) {
         let door = HookDoor {
             name: "status_event",
-            overlay_pending: OverlayPendingAnswer::Error,
+            refused: RefusalAnswer::Error,
             registers_wait: false,
         };
         let Some(entry) = self
-            .authenticate_window(outbound, door, token, window_id)
+            .authenticate_window(outbound, door, peer, token, window_id)
             .await
         else {
             return;
@@ -4237,7 +4311,8 @@ impl IpcServer {
     /// leaves first.
     ///
     /// The one place a door is admitted, last: only a request whose
-    /// credentials hold is judged ([`Credentialed::past_overlay`]).
+    /// credentials hold and whose `peer` is in the window's tree is judged
+    /// ([`Credentialed::past_overlay`]).
     ///
     /// A door admitted is the window's CLI answering an ask to wait again
     /// ([`crate::inbox::Inbox::ask_due`]), so an ask that stood is taken back
@@ -4248,29 +4323,22 @@ impl IpcServer {
         &self,
         outbound: &Outbound,
         door: HookDoor,
+        peer: Option<&PeerProcess>,
         token: &str,
         window_id: Option<&str>,
     ) -> Option<Arc<WindowEntry>> {
-        let HookDoor {
-            name,
-            overlay_pending,
-            registers_wait,
-        } = door;
         let window = self
-            .verify_credentials(outbound, name, token, window_id)
+            .verify_credentials(outbound, door, peer, token, window_id)
             .await?;
         match window.past_overlay() {
             Ok(entry) => {
-                if !registers_wait && entry.inbox().clear_ask() {
+                if !door.registers_wait && entry.inbox().clear_ask() {
                     entry.wake_notice_agent();
                 }
                 Some(entry)
             }
             Err(pending) => {
-                outbound.reply(&match overlay_pending {
-                    OverlayPendingAnswer::Silence => crate::inbox::silence(),
-                    OverlayPendingAnswer::Error => pending.message(),
-                });
+                outbound.reply(&door.refused.answer(pending.message()));
                 None
             }
         }
@@ -4279,15 +4347,21 @@ impl IpcServer {
     /// Resolves the window a request (`door` names it) presents the
     /// credentials of, answering the refusal itself when they do not hold:
     /// the token's shape first, then the window, then that window's own
-    /// token. See [`IpcServer::authenticate_window`] for when the window is
-    /// resolved.
+    /// token, then whether `peer` is in the window's tree. See
+    /// [`IpcServer::authenticate_window`] for when the window is resolved.
     async fn verify_credentials(
         &self,
         outbound: &Outbound,
-        door: &'static str,
+        door: HookDoor,
+        peer: Option<&PeerProcess>,
         token: &str,
         window_id: Option<&str>,
     ) -> Option<Credentialed> {
+        let HookDoor {
+            name: door,
+            refused,
+            ..
+        } = door;
         let auth_failed = || {
             error_msg(
                 "auth_failed",
@@ -4325,7 +4399,13 @@ impl IpcServer {
             outbound.reply(&window_not_found_msg());
             return None;
         };
-        Some(Credentialed::verified(current))
+        match self.lineage.judge(current, peer).await {
+            Ok(window) => Some(window),
+            Err(lineage) => {
+                outbound.reply(&refused.answer(lineage.message()));
+                None
+            }
+        }
     }
 
     /// Answers `build_launch_overlay`: builds the launch overlay of the window
@@ -4336,11 +4416,17 @@ impl IpcServer {
     async fn handle_build_launch_overlay(
         &self,
         outbound: &Outbound,
+        peer: Option<&PeerProcess>,
         (window_id, token): (&str, &str),
         facts: crate::launch_overlay::OverlayFacts,
     ) {
+        let door = HookDoor {
+            name: "build_launch_overlay",
+            refused: RefusalAnswer::Error,
+            registers_wait: false,
+        };
         let Some(window) = self
-            .verify_credentials(outbound, "build_launch_overlay", token, Some(window_id))
+            .verify_credentials(outbound, door, peer, token, Some(window_id))
             .await
         else {
             return;
@@ -4724,8 +4810,7 @@ async fn verify_once_settled(
     token: &str,
     outbound: &Outbound,
 ) -> Option<bool> {
-    // A settled token is checked at once: a peer that sends one request and
-    // closes without reading (`--emit-status`) is still heard.
+    // A settled token is checked at once, with nothing to wait for.
     if !entry.token_pending() {
         return Some(entry.verify_status_token(token));
     }
@@ -4897,9 +4982,10 @@ fn approver_allowed(state: &ConnectionState, config: &DaemonConfig) -> bool {
 pub(super) struct HookDoor {
     /// The door, as its refusals name it.
     pub(super) name: &'static str,
-    /// How a request refused because the window's launch overlay has not
-    /// been made is answered.
-    pub(super) overlay_pending: OverlayPendingAnswer,
+    /// How a request refused although its credentials hold is answered: one
+    /// from outside the window's tree, or one in the name of a window whose
+    /// launch overlay has not been made.
+    pub(super) refused: RefusalAnswer,
     /// Whether the door registers a wait once admitted.
     pub(super) registers_wait: bool,
 }
@@ -4909,7 +4995,7 @@ impl HookDoor {
     pub(super) fn new(name: &'static str) -> Self {
         Self {
             name,
-            overlay_pending: OverlayPendingAnswer::Silence,
+            refused: RefusalAnswer::Silence,
             registers_wait: false,
         }
     }
@@ -4923,35 +5009,182 @@ impl HookDoor {
     }
 }
 
-/// How a door answers a request refused because the window's launch overlay
-/// has not been made.
+/// How a door answers a request refused although its credentials hold.
 #[derive(Clone, Copy)]
-pub(super) enum OverlayPendingAnswer {
+pub(super) enum RefusalAnswer {
     /// As a door with nothing to do: it prints nothing and succeeds.
     Silence,
-    /// With [`OverlayPending::message`].
+    /// With the refusal's error.
     Error,
 }
 
-/// A window whose credentials a request presented and the daemon verified.
-/// What they serve is decided here alone: a request reaches the window only
-/// once they speak for it ([`Credentialed::past_overlay`]), except the
-/// overlay door's, the one request that makes them do so
-/// ([`Credentialed::for_overlay_door`]).
+impl RefusalAnswer {
+    /// The answer to a request refused with `error`.
+    fn answer(self, error: DaemonMessage) -> DaemonMessage {
+        match self {
+            Self::Silence => crate::inbox::silence(),
+            Self::Error => error,
+        }
+    }
+}
+
+/// A window whose credentials a request presented and the daemon verified,
+/// from a process in the window's tree. What they serve is decided here
+/// alone: a request reaches the window only once they speak for it
+/// ([`Credentialed::past_overlay`]), except the overlay door's, the one
+/// request that makes them do so ([`Credentialed::for_overlay_door`]).
 mod credentialed {
     use std::sync::Arc;
+    use std::time::Instant;
 
-    use super::OverlayPending;
+    use tokio::sync::Semaphore;
+    use yagura_os::ProcessStart;
+    use yagura_os::window_lineage::{LineageVerdict, Refusal, judge_peer};
+
+    use super::{OverlayPending, PeerProcess, error_msg};
     use crate::launch_overlay::LaunchOverlaySpec;
     use crate::window::WindowEntry;
     use crate::window_table::RowUnwritten;
+    use yagura_protocol::DaemonMessage;
+
+    /// The log line of a request refused for not coming from its window's
+    /// tree.
+    const LINEAGE_REFUSED: &str = "refusing a request in a window's name from outside \
+        the window's own process tree; a window's hooks and MCP bridge run under its CLI";
+
+    /// Judges whether a request in a window's name comes from the window's
+    /// tree: the only maker of a [`Credentialed`].
+    pub(super) struct LineageGate {
+        /// Admits the judgments, each on a blocking thread; sized like the
+        /// daemon's windows.
+        reads: Semaphore,
+        /// This daemon's process id.
+        daemon_pid: u32,
+        /// This daemon's start; `None` when it could not be read, and then no
+        /// peer is taken for the daemon itself.
+        daemon_start: Option<ProcessStart>,
+    }
+
+    impl LineageGate {
+        pub(super) fn new(max_windows: usize) -> Self {
+            let daemon_pid = std::process::id();
+            Self {
+                reads: Semaphore::new(max_windows),
+                daemon_pid,
+                daemon_start: yagura_os::process_start(daemon_pid).ok().flatten(),
+            }
+        }
+
+        /// Whether `peer` is this daemon: the one process a window's tree
+        /// takes in that is not in it. Its ancestors are not.
+        fn is_daemon(&self, peer: &PeerProcess) -> bool {
+            peer.pid == self.daemon_pid && self.daemon_start.as_ref() == Some(&peer.start)
+        }
+
+        /// `entry`, whose own token the request presented, once `peer`, the
+        /// process the request came from as captured when its connection was
+        /// accepted, is judged a member of the window's tree: the window's
+        /// child the holder named with its start, a process it started, or
+        /// (Unix) one in its session. Whatever cannot be judged is refused.
+        ///
+        /// # Errors
+        ///
+        /// Returns [`LineageRefused`] when the peer is not known, the window
+        /// has no child named with its start, the judgment could not run, or
+        /// the peer is not a member.
+        pub(super) async fn judge(
+            &self,
+            entry: Arc<WindowEntry>,
+            peer: Option<&PeerProcess>,
+        ) -> Result<Credentialed, LineageRefused> {
+            let Some(peer) = peer else {
+                return Err(refuse(&entry, "the requester's process could not be named"));
+            };
+            if self.is_daemon(peer) {
+                return Ok(Credentialed(entry));
+            }
+            let Some((anchor_pid, anchor_start)) = entry.session().child_anchor() else {
+                return Err(refuse(
+                    &entry,
+                    "the window's holder named no running child with its start",
+                ));
+            };
+            let Ok(_permit) = self.reads.acquire().await else {
+                return Err(refuse(&entry, "the judgment could not be admitted"));
+            };
+            let (pid, start) = (peer.pid, peer.start.clone());
+            let daemon_pid = self.daemon_pid;
+            let begun = Instant::now();
+            let verdict = tokio::task::spawn_blocking(move || {
+                judge_peer((pid, &start), (anchor_pid, &anchor_start), daemon_pid)
+            })
+            .await;
+            tracing::debug!(
+                window_id = entry.window_id(),
+                elapsed_us = u64::try_from(begun.elapsed().as_micros()).unwrap_or(u64::MAX),
+                "judged whether a request comes from the window's tree"
+            );
+            match verdict {
+                Ok(LineageVerdict::Member) => Ok(Credentialed(entry)),
+                Ok(LineageVerdict::NotMember(refusal)) => {
+                    Err(refuse(&entry, refusal_reason(refusal)))
+                }
+                Err(_) => Err(refuse(&entry, "the judgment did not finish")),
+            }
+        }
+    }
+
+    /// Logs a refusal of a request in `entry`'s name for `reason`: the first
+    /// for the window as a warning, every later one at debug.
+    fn refuse(entry: &WindowEntry, reason: &str) -> LineageRefused {
+        let window_id = entry.window_id();
+        if entry.first_lineage_note() {
+            tracing::warn!(window_id, reason, "{LINEAGE_REFUSED}");
+        } else {
+            tracing::debug!(window_id, reason, "{LINEAGE_REFUSED}");
+        }
+        LineageRefused
+    }
+
+    fn refusal_reason(refusal: Refusal) -> &'static str {
+        match refusal {
+            Refusal::ReachedDaemon => "the requester's lineage reached the daemon first",
+            Refusal::NoParent => "the requester's lineage ended before the window's child",
+            Refusal::TooDeep => "the window's child is too many steps above the requester",
+            Refusal::PeerChanged => "the requester is not the process that connected",
+            Refusal::AnchorEnded => "the window's child has ended",
+            Refusal::Unreadable => "the requester's lineage could not be read",
+            Refusal::Inverted => "the requester's lineage has a creator younger than its child",
+        }
+    }
+
+    /// A request refused although it holds its window's credentials, for not
+    /// coming from the window's tree.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub(super) struct LineageRefused;
+
+    impl LineageRefused {
+        /// The error a refused request is answered with. Not a credential
+        /// failure: the requester holds the window's credentials.
+        pub(super) fn message(self) -> DaemonMessage {
+            error_msg(
+                "lineage_refused",
+                "the request does not come from the window's own process tree",
+            )
+        }
+    }
 
     pub(super) struct Credentialed(Arc<WindowEntry>);
 
     impl Credentialed {
-        /// `entry`, whose own token the request presented.
-        pub(super) fn verified(entry: Arc<WindowEntry>) -> Self {
-            Self(entry)
+        pub(super) fn window_id(&self) -> &str {
+            self.0.window_id()
+        }
+
+        /// The profile the window was opened from, when a claim must
+        /// declare it.
+        pub(super) fn named_profile(&self) -> Option<&str> {
+            self.0.named_profile()
         }
 
         /// The window, unless its profile declares a launch overlay that was
@@ -7024,13 +7257,24 @@ mod tests {
     /// that has not answered by then is waiting on something other than time.
     const UNTIL_IDLE: Duration = Duration::from_secs(3600);
 
+    /// A peer captured as this process, as a connection from it would be.
+    fn this_process() -> VerifiedPeer {
+        let pid = std::process::id();
+        let start = yagura_os::process_start(pid)
+            .expect("this process's start is read")
+            .expect("this process runs");
+        VerifiedPeer {
+            process: Some(PeerProcess { pid, start }),
+        }
+    }
+
     #[tokio::test(start_paused = true)]
     async fn identify_waits_for_an_open_in_progress_before_answering() {
         let registry = Arc::new(WindowRegistry::new(DaemonConfig::default()));
         let server = IpcServer::new(Arc::clone(&registry), "unused", DaemonConfig::default());
         let (tx, mut rx) = mpsc::channel(8);
         let outbound = Outbound::new(tx);
-        let mut state = ConnectionState::new(0, None);
+        let mut state = ConnectionState::new(0, &this_process(), None);
         let opening = registry.begin_opening("w-pending", "pending");
 
         let identify = server.handle_identify(&outbound, &mut state, "w-pending", TOKEN, None);
@@ -7062,8 +7306,10 @@ mod tests {
         let outbound = Outbound::new(tx);
         let opening = registry.begin_opening("w-pending", "pending");
 
+        let peer = this_process();
         let event = server.handle_status_event(
             &outbound,
+            peer.process.as_ref(),
             TOKEN,
             "hook-child",
             WindowStatus::WaitingApproval,
@@ -7121,7 +7367,7 @@ mod tests {
 
         let (tx, mut rx) = mpsc::channel(8);
         let outbound = Outbound::new(tx);
-        let state = ConnectionState::new(0, None);
+        let state = ConnectionState::new(0, &this_process(), None);
         server
             .handle_get_window_status(&outbound, &state, &opened.window_id)
             .await;

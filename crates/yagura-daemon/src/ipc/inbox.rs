@@ -241,6 +241,7 @@ impl IpcServer {
                 profile_id: &profile,
                 name: &name,
                 input,
+                peer: state.peer.as_ref(),
             };
             self.handle_run_hook(outbound, request, HookRead::Door(&state.held_read))
                 .await;
@@ -250,6 +251,7 @@ impl IpcServer {
             .authenticate_window(
                 outbound,
                 super::HookDoor::new("door_read").registering_wait(matches!(door, Door::Wait)),
+                state.peer.as_ref(),
                 token,
                 Some(window_id),
             )

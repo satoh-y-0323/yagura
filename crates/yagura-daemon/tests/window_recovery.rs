@@ -633,7 +633,9 @@ fn launch_record(window_id: &str, token: &str) -> String {
 /// A request carrying a window's token that arrives while the window is still being
 /// taken back is checked once the take-back ends: it passes with the token the holder
 /// hands back, and is refused when the take-back fails. A window taken back without a
-/// row serves it as the window its launch record's values build, with what it keeps.
+/// row serves it as the window its launch record's values build, with what it keeps. A
+/// window whose holder welcomes the daemon without its child's start has no anchor for its
+/// tree, so a claim even from the child it names is refused.
 #[tokio::test]
 async fn a_door_request_during_a_take_back_is_checked_once_the_take_back_ends() {
     const KEPT_MARK: &str = "ROWLESS-KEPT-PARCEL";
@@ -647,9 +649,11 @@ async fn a_door_request_during_a_take_back_is_checked_once_the_take_back_ends() 
     let welcomed = first.open_profile_window(&sandbox, "script").await;
     let refused = first.open_profile_window(&sandbox, "script").await;
     let rowless = first.open_profile_window(&sandbox, "script").await;
+    let unstarted = first.open_profile_window(&sandbox, "script").await;
     let welcomed_record = record_of(&sandbox, &welcomed);
     let refused_record = record_of(&sandbox, &refused);
     let rowless_record = record_of(&sandbox, &rowless);
+    let unstarted_record = record_of(&sandbox, &unstarted);
     first.kill_keeping_windows();
     // The row goes, and a parcel is kept for the window without it, which only the
     // window built from its launch record's values loads.
@@ -693,6 +697,15 @@ async fn a_door_request_during_a_take_back_is_checked_once_the_take_back_ends() 
         fakes.join("rowless.log"),
     )
     .await;
+    let unstarted_launch = fakes.join("unstarted.record");
+    std::fs::write(&unstarted_launch, launch_record(&unstarted, TOKEN)).unwrap();
+    let mut unstarted_fake = replace_holder_with(
+        &sandbox,
+        &unstarted_record,
+        &["gate", utf8(&unstarted_launch)],
+        fakes.join("unstarted.log"),
+    )
+    .await;
 
     // The windows that are welcomed ask from a process of their own tree: the child their
     // holder names. The refused one asks as it is, since its token is never settled.
@@ -700,12 +713,15 @@ async fn a_door_request_during_a_take_back_is_checked_once_the_take_back_ends() 
     let mut welcomed_client = ClientProcess::spawn(&sandbox, &welcomed_log);
     let mut rowless_log = ClientLog::new(&sandbox, "rowless");
     let mut rowless_client = ClientProcess::spawn(&sandbox, &rowless_log);
+    let mut unstarted_log = ClientLog::new(&sandbox, "unstarted");
+    let mut unstarted_client = ClientProcess::spawn(&sandbox, &unstarted_log);
 
     let mut next = sandbox.start().await;
     for (window_id, fake) in [
         (&welcomed, &welcomed_fake),
         (&refused, &refused_fake),
         (&rowless, &rowless_fake),
+        (&unstarted, &unstarted_fake),
     ] {
         listed(&mut next, &sandbox, window_id).await;
         fake.wait_logged("the next daemon's Hello", hello_logged)
@@ -719,13 +735,20 @@ async fn a_door_request_during_a_take_back_is_checked_once_the_take_back_ends() 
     let rowless_take =
         rowless_log.exchange("door", &deliver_take(&rowless, TOKEN), ClientRead::One);
     rowless_client.command(&rowless_take);
-    for window_id in [&welcomed, &refused, &rowless] {
+    let unstarted_identify = unstarted_log.exchange(
+        "identify",
+        &identify_message(&unstarted, None),
+        ClientRead::One,
+    );
+    unstarted_client.command(&unstarted_identify);
+    for window_id in [&welcomed, &refused, &rowless, &unstarted] {
         until_held(&sandbox, window_id).await;
     }
 
     welcomed_fake.answer(&welcome_naming(welcomed_client.id()));
     refused_fake.answer("reject");
     rowless_fake.answer(&welcome_naming(rowless_client.id()));
+    unstarted_fake.answer(&format!("welcome {}", unstarted_client.id()));
     match welcomed_log.message(&welcomed_take).await {
         DaemonMessage::Delivery { .. } => {}
         other => panic!(
@@ -748,6 +771,27 @@ async fn a_door_request_during_a_take_back_is_checked_once_the_take_back_ends() 
         other => panic!(
             "a request to a window taken back without a row must pass, got {other:?}; \
              daemon log:\n{}",
+            sandbox.daemon_log()
+        ),
+    }
+    // Control: the welcomed window's child, named with its start, claims its window.
+    let welcomed_identify = welcomed_log.exchange(
+        "identify",
+        &identify_message(&welcomed, None),
+        ClientRead::One,
+    );
+    welcomed_client.command(&welcomed_identify);
+    expect_identified(welcomed_log.message(&welcomed_identify).await, &welcomed);
+    match unstarted_log.message(&unstarted_identify).await {
+        DaemonMessage::Error { code, .. } => assert_eq!(
+            code,
+            "lineage_refused",
+            "a claim of a window welcomed without its child's start; daemon log:\n{}",
+            sandbox.daemon_log()
+        ),
+        other => panic!(
+            "a window welcomed without its child's start has no anchor, so a claim from the \
+             child it names must be refused, got {other:?}; daemon log:\n{}",
             sandbox.daemon_log()
         ),
     }

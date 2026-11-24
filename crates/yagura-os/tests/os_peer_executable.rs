@@ -5,8 +5,7 @@
 
 //! Integration test: what the daemon captures of the process at the other end
 //! of an accepted connection (its id, start and executable) and the startup
-//! check that the capture is available. `PeerAuth::peer_executable`, the
-//! older executable-path probe, is measured here too.
+//! check that the capture is available.
 //!
 //! cfg-free by design: `PlatformIpc` resolves to the platform under
 //! compilation, so this file exercises whichever implementation that is
@@ -27,68 +26,6 @@ use yagura_test_support::process::{install_exe, libtest_name, own_canonical_exe}
 /// Endpoint-name prefix for this file, kept distinct from the daemon's own so
 /// an endpoint created here can never be mistaken for a resident daemon's.
 const ENDPOINT_PREFIX: &str = "yagura-test-peer-executable";
-
-#[tokio::test]
-async fn peer_executable_resolves_to_the_connecting_process_canonicalized() {
-    let ipc = PlatformIpc::default();
-    let security = ipc
-        .endpoint_security()
-        .expect("endpoint_security should succeed");
-    let endpoint = unique_endpoint_name(ENDPOINT_PREFIX, "canonicalized");
-    let mut listener = ipc
-        .bind(&endpoint, security)
-        .await
-        .expect("bind should succeed");
-
-    let (accepted, connected) = tokio::join!(ipc.accept(&mut listener), ipc.connect(&endpoint));
-    let accepted = accepted.expect("accept should succeed");
-    let _connected = connected.expect("connect should succeed");
-
-    let raw = ipc
-        .peer_executable(&accepted)
-        .expect("peer_executable should resolve for a same-process connecting peer");
-    let actual = raw
-        .canonicalize()
-        .unwrap_or_else(|err| panic!("canonicalize peer_executable path {raw:?}: {err}"));
-    let expected = own_canonical_exe();
-
-    // Raw equality does not hold on Windows: `canonicalize` prefixes `\\?\`
-    // while `QueryFullProcessImageNameW` does not, so both sides are
-    // canonicalized before comparison.
-    assert_eq!(
-        actual, expected,
-        "peer_executable must resolve to this test binary's own executable path"
-    );
-}
-
-#[tokio::test]
-async fn peer_executable_raw_value_is_an_existing_absolute_path() {
-    let ipc = PlatformIpc::default();
-    let security = ipc
-        .endpoint_security()
-        .expect("endpoint_security should succeed");
-    let endpoint = unique_endpoint_name(ENDPOINT_PREFIX, "raw-absolute");
-    let mut listener = ipc
-        .bind(&endpoint, security)
-        .await
-        .expect("bind should succeed");
-
-    let (accepted, connected) = tokio::join!(ipc.accept(&mut listener), ipc.connect(&endpoint));
-    let accepted = accepted.expect("accept should succeed");
-    let _connected = connected.expect("connect should succeed");
-
-    let raw = ipc
-        .peer_executable(&accepted)
-        .expect("peer_executable should resolve for a same-process connecting peer");
-    assert!(
-        raw.is_absolute(),
-        "peer_executable's raw (pre-canonicalize) value must be an absolute path, got {raw:?}"
-    );
-    assert!(
-        raw.exists(),
-        "peer_executable's raw (pre-canonicalize) value must name an existing file, got {raw:?}"
-    );
-}
 
 // What is captured of the peer. Names under `yagura_os::peer_capture` and the
 // `capture_peer` method are spelled inside each test, where they are used.

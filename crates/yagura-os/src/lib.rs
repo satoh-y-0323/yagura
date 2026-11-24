@@ -118,23 +118,15 @@ pub trait PeerAuth: Send + Sync + 'static {
     /// `conn` when it connected, or `None` when it cannot be determined.
     fn peer_process_id(&self, conn: &Self::Connection) -> Option<u32>;
 
-    /// Returns the path of the executable image backing the peer of `conn`,
-    /// or `None` when it cannot be determined.
-    ///
-    /// The path is reported as the platform gives it and is *not*
-    /// canonicalized here: the caller compares it against a configured path
-    /// and owns the normalization of both sides, so that normalization
-    /// happens once per value rather than once per comparison.
-    fn peer_executable(&self, conn: &Self::Connection) -> Option<PathBuf>;
-
     /// Captures the process at the other end of `conn` as it is now: its id,
     /// its start and its executable. Returns `None` when the operating system
     /// cannot name that process for certain -- it has ended, its id may name
     /// another process, or it holds no end of the connection -- so a caller
     /// treats an uncaptured peer as unknown.
     ///
-    /// The executable path is reported as the platform gives it, as for
-    /// [`PeerAuth::peer_executable`].
+    /// The executable path is reported as the platform gives it and is *not*
+    /// canonicalized here: the caller compares it against a configured path
+    /// and owns the normalization of both sides.
     fn capture_peer(&self, conn: &Self::Connection) -> Option<peer_capture::CapturedPeer>;
 
     /// Reports whether the *existing* endpoint named `endpoint` grants access

@@ -463,10 +463,6 @@ impl PeerAuth for UnixIpc {
         peer_pid(conn)
     }
 
-    fn peer_executable(&self, conn: &Self::Connection) -> Option<PathBuf> {
-        peer_executable_path(conn)
-    }
-
     fn capture_peer(&self, conn: &Self::Connection) -> Option<CapturedPeer> {
         capture_connection_peer(conn)
     }
@@ -1030,11 +1026,6 @@ fn peer_pid(conn: &UnixStream) -> Option<u32> {
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 fn peer_pid(_conn: &UnixStream) -> Option<u32> {
     None
-}
-
-/// Reads the peer's executable through [`peer_pid`].
-fn peer_executable_path(conn: &UnixStream) -> Option<PathBuf> {
-    executable_path(peer_pid(conn)?)
 }
 
 /// The executable the process `pid` runs; `None` when it cannot be read.

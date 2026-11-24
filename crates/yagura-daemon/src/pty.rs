@@ -879,6 +879,14 @@ impl PtySession {
         self.link.child_pid().unwrap_or(0)
     }
 
+    /// The child the holder's `Welcome` named running, with the start the
+    /// holder read for it: what a window's tree is judged from. `None` when
+    /// the `Welcome` did not name both, or the child had exited by then; it
+    /// is not cleared when the child exits later.
+    pub(crate) fn child_anchor(&self) -> Option<(u32, yagura_os::ProcessStart)> {
+        self.link.child_anchor()
+    }
+
     /// Get the exit status of the child process.
     /// Returns `None` if running, `Some(exit)` if exited; the status is
     /// retained indefinitely.

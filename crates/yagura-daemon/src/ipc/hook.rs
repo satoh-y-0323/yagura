@@ -23,7 +23,7 @@ use crate::profile_interrupt::{AiMeans, HookStops, ProfileInterrupt, TurnRole};
 use crate::window::WindowEntry;
 
 use super::inbox::{HeldSlot, StopEnd, answer_read, answer_read_ending};
-use super::{HookDoor, IpcServer, Outbound, error_msg};
+use super::{HookDoor, IpcServer, Outbound, PeerProcess, error_msg};
 
 /// What a profile says about one event: the event, how its CLI marks a
 /// subagent's hook, and how it wants the text a hook prints.
@@ -83,6 +83,8 @@ pub(super) struct HookRequest<'a> {
     pub(super) profile_id: &'a str,
     pub(super) name: &'a str,
     pub(super) input: Option<Vec<HookInputValue>>,
+    /// The process the request came from, as its connection captured it.
+    pub(super) peer: Option<&'a PeerProcess>,
 }
 
 impl IpcServer {
@@ -101,9 +103,16 @@ impl IpcServer {
             profile_id,
             name,
             input,
+            peer,
         } = request;
         let Some(entry) = self
-            .authenticate_window(outbound, HookDoor::new("run_hook"), token, Some(window_id))
+            .authenticate_window(
+                outbound,
+                HookDoor::new("run_hook"),
+                peer,
+                token,
+                Some(window_id),
+            )
             .await
         else {
             return;
