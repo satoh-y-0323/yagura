@@ -17,7 +17,7 @@ use yagura_protocol::{
 };
 
 use crate::config::DaemonConfig;
-use crate::control::RequestOrigin;
+use crate::control;
 use crate::model_choices::{self, ChoicesFailure};
 use crate::profile::{self, ModelChoicesError, ModelChoicesPlan, OutputFormat};
 use crate::profile_aliases;
@@ -60,8 +60,8 @@ pub(super) async fn handle_list_model_choices(
     profile: String,
     request_id: u64,
 ) {
-    if !matches!(state.origin, RequestOrigin::Approver) {
-        outbound.reply(&approver_only_msg());
+    if let Err(refusal) = control::require_approver(&state.origin) {
+        outbound.reply(&approver_only_msg(refusal));
         return;
     }
     if !profile::has_profile_source(config) {

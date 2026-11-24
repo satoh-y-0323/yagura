@@ -22,7 +22,7 @@ use yagura_protocol::{
 };
 
 use crate::config::{DaemonConfig, REPORT_EXE_NAME};
-use crate::control::RequestOrigin;
+use crate::control;
 use crate::host_paths::{FileTools, HostPaths};
 use crate::json_entry;
 use crate::mcp_registration;
@@ -77,8 +77,8 @@ pub(super) async fn handle_list_mcp_registrations(
     state: &ConnectionState,
     request_id: u64,
 ) {
-    if !matches!(state.origin, RequestOrigin::Approver) {
-        outbound.reply(&approver_only_msg());
+    if let Err(refusal) = control::require_approver(&state.origin) {
+        outbound.reply(&approver_only_msg(refusal));
         return;
     }
     if !profile::has_profile_source(config) {
@@ -1640,8 +1640,8 @@ pub(super) async fn handle_run_mcp_registration(
         action,
         request_id,
     } = request;
-    if !matches!(state.origin, RequestOrigin::Approver) {
-        outbound.reply(&approver_only_msg());
+    if let Err(refusal) = control::require_approver(&state.origin) {
+        outbound.reply(&approver_only_msg(refusal));
         return;
     }
     let Some(source) = resolve_row_source(config, role_and_profile_reads, &profile).await else {

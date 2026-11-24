@@ -408,14 +408,23 @@ async fn a_window_is_always_refused_for_assignment_overrides_even_for_a_missing_
         effort: None,
     };
     let reply = set_task_assignment(&mut owner, &plan.plan_id, "t1", assignment.clone()).await;
-    expect_error(reply, "auth_failed");
+    assert_eq!(
+        expect_error(reply, "auth_failed"),
+        common::APPROVER_ONLY_MESSAGE
+    );
     let reply = clear_task_assignment(&mut owner, &plan.plan_id, "t1").await;
-    expect_error(reply, "auth_failed");
+    assert_eq!(
+        expect_error(reply, "auth_failed"),
+        common::APPROVER_ONLY_MESSAGE
+    );
 
     // Even a plan id nobody ever created is refused the same way: origin is
     // decided before the plan is ever looked up.
     let reply = set_task_assignment(&mut owner, "no-such-plan", "t1", assignment).await;
-    expect_error(reply, "auth_failed");
+    assert_eq!(
+        expect_error(reply, "auth_failed"),
+        common::APPROVER_ONLY_MESSAGE
+    );
 }
 
 #[tokio::test]
@@ -643,7 +652,10 @@ async fn nominating_checks_the_targets_registration_and_liveness() {
     let mut requester = h.connect().await;
     open_and_identify(&h, &mut requester).await;
     let reply = set_plan_owner(&mut requester, &plan.plan_id, &closed_window).await;
-    expect_error(reply, "auth_failed");
+    assert_eq!(
+        expect_error(reply, "auth_failed"),
+        common::APPROVER_ONLY_MESSAGE
+    );
 }
 
 // --- role table: list/save scope and validation --------------------------

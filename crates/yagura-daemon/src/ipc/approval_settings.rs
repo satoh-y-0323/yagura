@@ -14,7 +14,8 @@ use std::sync::Arc;
 use yagura_protocol::{ApprovalSettingsInfo, DaemonMessage, PlaybookState, ToolAutoApprove};
 
 use crate::config::DaemonConfig;
-use crate::control::{DestructiveTool, RequestOrigin};
+use crate::control;
+use crate::control::DestructiveTool;
 use crate::live_policy::{LivePolicy, LiveSource, PolicyCell, PolicyWriteGuard};
 use crate::playbook_rewrite::{self, PlaybookRewriteError, PlaybookWrite};
 
@@ -28,8 +29,8 @@ pub(super) fn handle_get_approval_settings(
     outbound: &Arc<Outbound>,
     state: &ConnectionState,
 ) {
-    if !matches!(state.origin, RequestOrigin::Approver) {
-        outbound.reply(&approver_only_msg());
+    if let Err(refusal) = control::require_approver(&state.origin) {
+        outbound.reply(&approver_only_msg(refusal));
         return;
     }
     outbound.reply(&DaemonMessage::ApprovalSettings {
@@ -47,8 +48,8 @@ pub(super) async fn handle_set_auto_approve(
     tool: String,
     auto_approve: bool,
 ) {
-    if !matches!(state.origin, RequestOrigin::Approver) {
-        outbound.reply(&approver_only_msg());
+    if let Err(refusal) = control::require_approver(&state.origin) {
+        outbound.reply(&approver_only_msg(refusal));
         return;
     }
     let Some(tool) = DestructiveTool::ALL
@@ -75,8 +76,8 @@ pub(super) async fn handle_set_plan_approval_required(
     state: &ConnectionState,
     required: bool,
 ) {
-    if !matches!(state.origin, RequestOrigin::Approver) {
-        outbound.reply(&approver_only_msg());
+    if let Err(refusal) = control::require_approver(&state.origin) {
+        outbound.reply(&approver_only_msg(refusal));
         return;
     }
     let change = Change::PlanApprovalRequired { required };

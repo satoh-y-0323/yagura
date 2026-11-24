@@ -134,6 +134,30 @@ pub enum RequestOrigin {
     Approver,
 }
 
+/// The words every approver-only refusal carries, on the wire and in a
+/// permit error's [`std::fmt::Display`] alike.
+pub(crate) const APPROVER_ONLY_TEXT: &str = "only the approver may make this request";
+
+/// The refusal [`require_approver`] gives. Each permit error type turns it
+/// into its own `ApproverOnly` variant through `From`, so `?` carries it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NotApprover;
+
+/// Refuses every origin but the approver. The one place that decides an
+/// approver-only request, for every IPC handler and permit, so the decision
+/// cannot drift between them.
+///
+/// # Errors
+///
+/// [`NotApprover`] for any origin other than an approver.
+pub fn require_approver(origin: &RequestOrigin) -> Result<(), NotApprover> {
+    if matches!(origin, RequestOrigin::Approver) {
+        Ok(())
+    } else {
+        Err(NotApprover)
+    }
+}
+
 /// The gate's outcome once no [`DenyReason`] applies outright.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GateVerdict {

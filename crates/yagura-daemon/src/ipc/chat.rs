@@ -1698,8 +1698,8 @@ pub(super) async fn handle_list_chat_rooms(
     outbound: &Arc<Outbound>,
     state: &super::ConnectionState,
 ) {
-    if !matches!(state.origin, RequestOrigin::Approver) {
-        outbound.reply(&super::approver_only_msg());
+    if let Err(refusal) = control::require_approver(&state.origin) {
+        outbound.reply(&super::approver_only_msg(refusal));
         return;
     }
 
@@ -1833,8 +1833,8 @@ async fn handle_room_removal(
     room_id: String,
     removal: RoomRemoval,
 ) {
-    if !matches!(state.origin, RequestOrigin::Approver) {
-        outbound.reply(&super::approver_only_msg());
+    if let Err(refusal) = control::require_approver(&state.origin) {
+        outbound.reply(&super::approver_only_msg(refusal));
         return;
     }
     if removal == RoomRemoval::DeleteRoom && room_id == MAIN_ROOM_ID {

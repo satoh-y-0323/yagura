@@ -7,7 +7,7 @@
 //! cwd resolved to), never from an argument, so a window cannot reach another
 //! repository's tickets by naming it.
 
-use crate::control::RequestOrigin;
+use crate::control::{self, APPROVER_ONLY_TEXT, NotApprover, RequestOrigin};
 use crate::window::{WindowLiveness, WindowRegistry};
 use crate::workspace::WorkspaceKey;
 
@@ -19,7 +19,7 @@ pub enum TicketPermitError {
     #[error("the caller is not authorized for this operation")]
     AuthFailed,
     /// The request is the approver's alone and the connection is not.
-    #[error("only the approver may make this request")]
+    #[error("{}", APPROVER_ONLY_TEXT)]
     ApproverOnly,
     /// The window cannot take a request: its child has exited, or it was never
     /// registered.
@@ -31,6 +31,12 @@ pub enum TicketPermitError {
     /// An approver read without naming a workspace.
     #[error("a workspace must be named")]
     WorkspaceRequired,
+}
+
+impl From<NotApprover> for TicketPermitError {
+    fn from(_: NotApprover) -> Self {
+        TicketPermitError::ApproverOnly
+    }
 }
 
 /// A workspace as the `ticket_workspace` table keys it.
@@ -168,9 +174,6 @@ pub fn issue_read(
 pub fn issue_list_workspaces(
     origin: &RequestOrigin,
 ) -> Result<WorkspaceListPermit, TicketPermitError> {
-    if matches!(origin, RequestOrigin::Approver) {
-        Ok(WorkspaceListPermit { _private: () })
-    } else {
-        Err(TicketPermitError::ApproverOnly)
-    }
+    control::require_approver(origin)?;
+    Ok(WorkspaceListPermit { _private: () })
 }

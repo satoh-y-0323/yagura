@@ -713,6 +713,10 @@ const BRAND_FORGING_RED: readonly CaseLine[] = [
   'declare const ownKey: unique symbol;',
   'const widened: (x: never) => void = noop;',
   'const lineSink = (line: DisplayLine): void => { void line; };',
+  'const lineCtor = class { constructor(line: DisplayLine) { void line; } };',
+  'const sinkList: readonly ((line: DisplayLine) => void)[] = [lineSink];',
+  'const sinkPair = [lineSink, lineSink] as const;',
+  'const sinkSet: ReadonlySet<(line: DisplayLine) => void> = new Set([lineSink]);',
   '',
   { code: "export const asserted = 'x' as DisplayLine;", reports: 'assertion' },
   { code: "export const orNull = 'x' as DisplayLine | null;", reports: 'assertion' },
@@ -774,6 +778,24 @@ const BRAND_FORGING_RED: readonly CaseLine[] = [
   { code: "Reflect.apply(lineSink, undefined, ['raw']);", reports: 'reflectiveCall' },
   { code: "Function.prototype.call.call(lineSink, null, 'raw');", reports: 'reflectiveCall' },
   { code: 'lineSink.call(null, made);', reports: 'reflectiveCall' },
+  { code: "Reflect.construct(lineCtor, ['raw']);", reports: 'reflectiveCall' },
+  { code: "Function.prototype.call(lineSink, 'raw');", reports: 'reflectiveCall' },
+  { code: "Function.prototype.apply(lineSink, ['raw']);", reports: 'reflectiveCall' },
+  { code: "Function.prototype.bind(lineSink, 'raw');", reports: 'reflectiveCall' },
+  { code: 'lineSink.apply(null, [made]);', reports: 'reflectiveCall' },
+  { code: 'lineSink.bind(null, made);', reports: 'reflectiveCall' },
+  { code: 'lineCtor.call({}, made);', reports: 'reflectiveCall' },
+  { code: 'lineCtor.apply({}, [made]);', reports: 'reflectiveCall' },
+  { code: 'lineCtor.bind({}, made);', reports: 'reflectiveCall' },
+  { code: '(lineSink?.call)(null, made);', reports: 'reflectiveCall' },
+  { code: 'Function.prototype.call(null, sinkList);', reports: 'reflectiveCall' },
+  { code: 'Function.prototype.call(null, sinkPair);', reports: 'reflectiveCall' },
+  { code: 'Function.prototype.call(null, ...sinkList);', reports: 'reflectiveCall' },
+  // A spread hands each function it yields, whatever iterable holds them.
+  { code: 'Function.prototype.call(null, ...sinkSet);', reports: 'reflectiveCall' },
+  // A timer takes its callback as a bare `Function` and hands it the arguments after the delay.
+  { code: "setTimeout(lineSink, 0, 'raw');", reports: 'reflectiveCall' },
+  { code: "setInterval(lineSink, 0, 'raw');", reports: 'reflectiveCall' },
   {
     code: 'export function mapped<T>(v: unknown) { return v as { [K in keyof T]: DisplayLine }; }',
     reports: 'assertion',
@@ -796,6 +818,8 @@ const BRAND_FORGING_RED: readonly CaseLine[] = [
     reports: 'predicate',
   },
   { code: "Object.assign(lineHolder, { name: 'x' });", reports: 'reflectiveWrite' },
+  // The result takes every source's members, the later over the earlier.
+  { code: "Object.assign({}, lineHolder, { name: 'x' });", reports: 'reflectiveWrite' },
   { code: 'export declare const declared: DisplayLine;', reports: 'declaration' },
   { code: 'export const typed = make<DisplayLine>();', reports: 'typeArgument' },
   { code: 'export const held: DisplayLine[] = [made];', reports: 'writable' },
@@ -865,6 +889,17 @@ const BRAND_RED_IN_UI_TEXT_MAKER: readonly CaseLine[] = [
   { code: 'export function same<T>(v: T): T { return v as T; }', reports: 'assertion' },
 ];
 
+/** A file named like a maker but not at the maker's path from `gui/`. */
+const MAKER_NAMED_TS = `${SOURCE_PREFIX}/lint-cases/src/i18n/messages.ts`;
+
+/** Linted at MAKER_NAMED_TS: only the maker's own path makes a file the maker. */
+const BRAND_RED_AT_MAKER_NAMED_PATH: readonly CaseLine[] = [
+  "import type { UiText } from '../../../display/ui-text';",
+  '',
+  'export {};',
+  { code: "export const claimed = 'x' as UiText;", reports: 'assertion' },
+];
+
 const METHOD_SIGNATURE_STYLE_RULE = '@typescript-eslint/method-signature-style';
 
 /** A method signature is checked both ways, so a parameter's brand would not be held to it. */
@@ -920,7 +955,7 @@ describe('the display guards report what they guard', () => {
   // The project service keeps the content it was last handed for a path, so each path a case
   // was linted as is linted again as on disk before any other source is.
   afterAll(async () => {
-    for (const path of [GUARD_CASE_TS, GUARD_CASE_SVELTE, MESSAGES_TS]) {
+    for (const path of [GUARD_CASE_TS, GUARD_CASE_SVELTE, MESSAGES_TS, MAKER_NAMED_TS]) {
       await eslint.lintText(diskSource(path), { filePath: path });
     }
   }, RESOLVE_TIMEOUT_MS);
@@ -970,6 +1005,7 @@ describe('the display guards report what they guard', () => {
       const makerGreen = await lintCase(eslint, MESSAGES_TS, BRAND_GREEN_IN_UI_TEXT_MAKER);
       const makerRed = await lintCase(eslint, MESSAGES_TS, BRAND_RED_IN_UI_TEXT_MAKER);
       const methods = await lintCase(eslint, GUARD_CASE_TS, METHOD_SIGNATURE_RED);
+      const makerNamed = await lintCase(eslint, MAKER_NAMED_TS, BRAND_RED_AT_MAKER_NAMED_PATH);
 
       expect
         .soft([
@@ -979,11 +1015,15 @@ describe('the display guards report what they guard', () => {
           ...unparsed(makerGreen),
           ...unparsed(makerRed),
           ...unparsed(methods),
+          ...unparsed(makerNamed),
         ])
         .toEqual([]);
       expect
         .soft(reportsOf(BRAND_FORGING_RULE, BRAND_RED_IN_UI_TEXT_MAKER, makerRed))
         .toEqual(expectedReports(BRAND_RED_IN_UI_TEXT_MAKER));
+      expect
+        .soft(reportsOf(BRAND_FORGING_RULE, BRAND_RED_AT_MAKER_NAMED_PATH, makerNamed))
+        .toEqual(expectedReports(BRAND_RED_AT_MAKER_NAMED_PATH));
       expect
         .soft(guardReportsOf(METHOD_SIGNATURE_RED, methods, new Set([METHOD_SIGNATURE_STYLE_RULE])))
         .toEqual(expectedReports(METHOD_SIGNATURE_RED));

@@ -21,7 +21,7 @@
 
 use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard};
 
-use crate::control::RequestOrigin;
+use crate::control::{NotApprover, RequestOrigin, require_approver};
 use crate::plan_store::{PlanReview, PlanStore};
 use crate::pty::lock_recover;
 use crate::ticket_permit::WorkspaceRef;
@@ -50,18 +50,9 @@ pub enum ChangeKind {
     MarkPlanSeen,
 }
 
-/// Refuses every origin but the approver. The one place that decides who
-/// may make an approver-only request, so the refusal and its wording cannot
-/// drift between a handler and a permit.
-///
-/// # Errors
-///
-/// [`PermitError::ApproverOnly`] for any origin other than an approver.
-pub fn require_approver(origin: &RequestOrigin) -> Result<(), PermitError> {
-    if matches!(origin, RequestOrigin::Approver) {
-        Ok(())
-    } else {
-        Err(PermitError::ApproverOnly)
+impl From<NotApprover> for PermitError {
+    fn from(_: NotApprover) -> Self {
+        PermitError::ApproverOnly
     }
 }
 
@@ -91,7 +82,7 @@ pub enum PermitError {
     AuthFailed,
     /// The request is the approver's alone and the connection is not the
     /// approver, whether or not the plan it names exists.
-    #[error("only the approver may make this request")]
+    #[error("{}", crate::control::APPROVER_ONLY_TEXT)]
     ApproverOnly,
     /// No plan with the given id exists, or the calling window has no
     /// relation to it -- the same answer either way, so the two cases stay

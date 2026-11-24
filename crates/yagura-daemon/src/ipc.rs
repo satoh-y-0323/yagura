@@ -3344,8 +3344,8 @@ impl IpcServer {
     ) {
         // Only the GUI renames, and a child that renames another window could
         // swap names with a window the user trusts.
-        if !matches!(state.origin, RequestOrigin::Approver) {
-            outbound.reply(&approver_only_msg());
+        if let Err(refusal) = control::require_approver(&state.origin) {
+            outbound.reply(&approver_only_msg(refusal));
             return;
         }
         let Some(entry) = self.registry.get(window_id) else {
@@ -4805,9 +4805,11 @@ pub(crate) fn now_ms() -> u64 {
 }
 
 /// The refusal of a request only the approver may make, shared so every such
-/// request is refused in the same words.
-fn approver_only_msg() -> DaemonMessage {
-    error_msg("auth_failed", "only the approver may make this request")
+/// request is refused in the same words. It takes the refusal
+/// [`control::require_approver`] gave, so a handler cannot refuse without
+/// that one decision.
+fn approver_only_msg(_: control::NotApprover) -> DaemonMessage {
+    error_msg("auth_failed", control::APPROVER_ONLY_TEXT)
 }
 
 fn error_msg(code: &str, message: &str) -> DaemonMessage {

@@ -536,13 +536,19 @@ async fn the_owners_own_window_cannot_approve_or_mark_its_plan_seen() {
     open_plain_owner(&h, &mut owner).await;
     let plan = create_plan(&mut owner, "plan", vec![task("t1", "first")]).await;
 
-    expect_error(
-        approve_plan(&mut owner, &plan.plan_id, plan.version).await,
-        "auth_failed",
+    assert_eq!(
+        expect_error(
+            approve_plan(&mut owner, &plan.plan_id, plan.version).await,
+            "auth_failed",
+        ),
+        common::APPROVER_ONLY_MESSAGE
     );
-    expect_error(
-        mark_plan_seen(&mut owner, &plan.plan_id, plan.version).await,
-        "auth_failed",
+    assert_eq!(
+        expect_error(
+            mark_plan_seen(&mut owner, &plan.plan_id, plan.version).await,
+            "auth_failed",
+        ),
+        common::APPROVER_ONLY_MESSAGE
     );
     assert_eq!(
         get_plan(&mut owner, &plan.plan_id).await.review,

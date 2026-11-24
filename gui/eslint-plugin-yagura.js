@@ -8,7 +8,13 @@
  * member a mapped type copies from it is the brand too, while a type that merely
  * shares a brand's name is not one.
  */
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import ts from 'typescript';
+
+// The gui root, where this file sits. A brand's `declaredIn` and `maker` are paths from it,
+// matched whole: a file elsewhere whose path merely ends the same is not the maker.
+const GUI_ROOT = path.dirname(fileURLToPath(import.meta.url));
 
 /** How deep a type is walked before it is taken to hold every brand. */
 const MAX_DEPTH = 12;
@@ -17,13 +23,12 @@ const OPAQUE_FLAGS = ts.TypeFlags.Any | ts.TypeFlags.Unknown;
 // Template literal and string mapping types are strings that no brand key can sit on.
 const STRING_SHAPED_FLAGS = ts.TypeFlags.TemplateLiteral | ts.TypeFlags.StringMapping;
 
-function slashed(path) {
-  return path.replace(/\\/g, '/');
+function slashed(fileName) {
+  return fileName.replace(/\\/g, '/');
 }
 
 function isFile(fileName, relativePath) {
-  const path = slashed(fileName);
-  return path === relativePath || path.endsWith(`/${relativePath}`);
+  return slashed(path.relative(GUI_ROOT, fileName)) === relativePath;
 }
 
 /**
@@ -508,6 +513,10 @@ const PARAMETER_ERASING_CALLS = [
   ...['Function', 'CallableFunction', 'NewableFunction'].flatMap((container) =>
     ['call', 'apply', 'bind'].map((member) => [container, member])
   ),
+  // A timer takes its callback as a `TimerHandler` and hands it the arguments after the delay.
+  ...['globalThis', 'WindowOrWorkerGlobalScope'].flatMap((container) =>
+    ['setTimeout', 'setInterval'].map((member) => [container, member])
+  ),
 ];
 
 /**
@@ -518,7 +527,7 @@ const PARAMETER_ERASING_CALLS = [
  * maker, the foreign brands its source and target hold must be the same set; its own brand
  * is not counted. The walk has no sign and never asks whether the source is assignable to
  * the target, so the looseness of that rule is no way around this one. A reflective write
- * into a value holding a foreign brand, and a function holding one handed to a call that
+ * with an argument holding a foreign brand, and a function holding one handed to a call that
  * erases its parameter types, are refused too.
  *
  * Ways this rule cannot close, each with the case that sends it back to be closed:
@@ -526,8 +535,17 @@ const PARAMETER_ERASING_CALLS = [
  *   needs no assertion. Back when a branded type with only optional members appears.
  * - A writable array is covariant, so it can be written through a wider name. Back when a
  *   function hands a writable container of a brand to a writable container type without it.
- * - A class method's parameters stay bivariant (`method-signature-style` rewrites only
- *   interfaces and type literals). Back when a class method takes a foreign brand.
+ * - A writable member is covariant too: a value with a branded member, seen as a type whose
+ *   member is wider (`{ a: string }`, `Record<string, string>`, `object`), takes plain text
+ *   into it. Back when a value with a writable branded member is handed or annotated as a
+ *   type whose member holds no brand.
+ * - A method is bivariant in its parameters wherever it is declared as one: a class method,
+ *   or an object literal's method shorthand (`method-signature-style` rewrites only
+ *   interfaces and type literals). Back when a function taking a foreign brand is put where
+ *   a type declares such a method.
+ * - A function of its own returning an intersection of its type arguments
+ *   (`merge<A, B>(a: A, b: B): A & B`) types a member as both sides, while at run time the
+ *   later wins. Back when such a function is handed a value holding a brand.
  * - A script `.ts` with no import or export, or `declare global`, can add members to a
  *   library type. Back when either appears.
  * - A member under a key declared without a value is skipped while typed `never`; giving the
@@ -582,8 +600,12 @@ const noBrandForging = {
     const isMaker = foreign.length < brands.length;
     const tsNode = (node) => services.esTreeNodeToTSNodeMap.get(node);
 
+    function foreignOnly(found) {
+      return [...found].filter((brand) => foreign.includes(brand));
+    }
+
     function foreignBrandsIn(type, options) {
-      return [...reader.brandsIn(type, options)].filter((brand) => foreign.includes(brand));
+      return foreignOnly(reader.brandsIn(type, options));
     }
 
     function report(node, messageId, held) {
@@ -668,17 +690,22 @@ const noBrandForging = {
       return type.getCallSignatures().length > 0 || type.getConstructSignatures().length > 0;
     }
 
+    function typeOfArgument(argument) {
+      return checker.getTypeAtLocation(
+        tsNode(argument.type === 'SpreadElement' ? argument.argument : argument)
+      );
+    }
+
     // What a call that erases parameter types is handed as a function: the receiver of
     // `f.call(…)` and every argument, each only if it can be called (so not `Reflect` itself).
-    function handedFunctionsOf(node) {
+    // A spread is taken whole, whatever iterable it is: what it yields is not inferred.
+    function handedTypesOf(node) {
       const callee = node.callee.type === 'ChainExpression' ? node.callee.expression : node.callee;
       const handed = [
         ...(callee.type === 'MemberExpression' ? [callee.object] : []),
-        ...node.arguments.map((argument) =>
-          argument.type === 'SpreadElement' ? argument.argument : argument
-        ),
+        ...node.arguments.filter((argument) => argument.type !== 'SpreadElement'),
       ];
-      return handed
+      const callable = handed
         .map((handedNode) => checker.getTypeAtLocation(tsNode(handedNode)))
         .filter((type) => {
           const inner =
@@ -687,6 +714,14 @@ const noBrandForging = {
               : [type];
           return inner.some(isCallable);
         });
+      const spread = node.arguments
+        .filter((argument) => argument.type === 'SpreadElement')
+        .map(typeOfArgument);
+      return [...callable, ...spread];
+    }
+
+    function heldByAny(types) {
+      return [...new Set(types.flatMap((type) => foreignBrandsIn(type)))];
     }
 
     function checkReflectiveCall(node, resolved) {
@@ -695,16 +730,13 @@ const noBrandForging = {
         return;
       }
       if (isMemberOf(declaration, REFLECTIVE_WRITES)) {
-        const [written] = node.arguments;
-        const held =
-          written === undefined || written.type === 'SpreadElement'
-            ? []
-            : foreignBrandsIn(checker.getTypeAtLocation(tsNode(written)));
+        // Every argument: `Object.assign` types its result as all of them, the later winning.
+        const held = heldByAny(node.arguments.map(typeOfArgument));
         if (held.length > 0) {
           report(node, 'reflectiveWrite', held);
         }
       } else if (isMemberOf(declaration, PARAMETER_ERASING_CALLS)) {
-        const held = [...new Set(handedFunctionsOf(node).flatMap((type) => foreignBrandsIn(type)))];
+        const held = heldByAny(handedTypesOf(node));
         if (held.length > 0) {
           report(node, 'reflectiveCall', held);
         }
@@ -753,10 +785,6 @@ const noBrandForging = {
           report(explicit[index] ?? node.callee ?? node.tag, 'typeArgument', held);
         }
       });
-    }
-
-    function foreignOnly(found) {
-      return [...found].filter((brand) => foreign.includes(brand));
     }
 
     // A type parameter is counted only at a member: a path that stops at a member never
@@ -1602,11 +1630,22 @@ const REFLECTIVE_WRITES = [
 const SVELTE_RAW_HTML = 'createRawSnippet';
 const SVELTE_DECLARATIONS = /\/node_modules\/svelte\//;
 
-/** The name of the interface or namespace `declaration` is a member of. */
+/**
+ * The name of the interface or namespace `declaration` is a member of, or `globalThis` for
+ * one a declaration script puts on the global.
+ */
 function containerName(declaration) {
   const parent = declaration.parent;
   if (parent !== undefined && ts.isInterfaceDeclaration(parent)) {
     return parent.name.text;
+  }
+  if (
+    parent !== undefined &&
+    ts.isSourceFile(parent) &&
+    parent.isDeclarationFile &&
+    !ts.isExternalModule(parent)
+  ) {
+    return 'globalThis';
   }
   const module = parent !== undefined && ts.isModuleBlock(parent) ? parent.parent : undefined;
   return module !== undefined && ts.isIdentifier(module.name) ? module.name.text : undefined;

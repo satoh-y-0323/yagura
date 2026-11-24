@@ -2298,8 +2298,9 @@ export function readOptionalString(
 
 /**
  * Reads an optional string and prepares it for display, `null` when the record
- * carries none. Every boundary that draws such a field goes through here, so the
- * read and the maker are never split apart.
+ * carries none. A field kept only in its prepared form is read through here, so
+ * the read and the maker are never split apart; a field that also keeps its raw
+ * text is read as a string and prepared beside it.
  *
  * @throws {BoundaryError} when the field is present with any other type.
  */

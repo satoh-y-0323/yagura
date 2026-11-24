@@ -259,8 +259,13 @@ describe('approvalFactsOf: the heading', () => {
     const onWindow = request({ tool: 'future_tool', target: TARGET });
     const onNothing = request({ tool: 'future_tool' });
 
-    expect(approvalFactsOf(onWindow, true).headline.sentence).toContain(onWindow.displayTool);
-    expect(approvalFactsOf(onNothing, true).headline.sentence).toContain(onNothing.displayTool);
+    // Whether ` on ` links the tool to a target is decided by the English resource, so it is spelled out.
+    expect(approvalFactsOf(onWindow, true).headline.sentence).toBe(
+      'builder wants to use future_tool on reviewer'
+    );
+    expect(approvalFactsOf(onNothing, true).headline.sentence).toBe(
+      'builder wants to use future_tool'
+    );
     expect(approvalFactsOf(onNothing, true).headline.to).toBeNull();
   });
 
