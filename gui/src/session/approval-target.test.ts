@@ -99,6 +99,12 @@ describe('describeUntargeted', () => {
       true,
       false,
     ]);
+    // A room's name stays a chip where a window's name would stand plain.
+    expect(partyRuns(describeUntargeted(named), 'plain').map((run) => run.chip)).toEqual([
+      false,
+      true,
+      false,
+    ]);
   });
 
   it('names a new window for a request to open one', () => {
@@ -109,6 +115,7 @@ describe('describeUntargeted', () => {
       words: dialogs.approvalTargetNewWindow,
     });
     expect(partyRuns(describeUntargeted(opening)).map((run) => run.chip)).toEqual([false]);
+    expect(partyRuns(describeUntargeted(opening), 'plain').map((run) => run.chip)).toEqual([false]);
   });
 
   it('names a new window for a handoff that opens one from a profile', () => {
