@@ -170,6 +170,8 @@ and versioning follows [Semantic Versioning](https://semver.org/).
 
 - `url` is updated to 2.5.9 (with `form_urlencoded` 1.2.3) for [GHSA-hrj5-67jp-wqp9](https://github.com/servo/rust-url/security/advisories/GHSA-hrj5-67jp-wqp9). The advisory is in `Url::origin()`, which none of the crates the GUI builds with call, so yagura was not exposed. `url` is built only into the GUI.
 
+- `cookie` is updated to 0.18.3 for [RUSTSEC-2026-0594](https://rustsec.org/advisories/RUSTSEC-2026-0594). The advisory is in private (encrypted) cookies sealed after a `fork()`; Tauri builds `cookie` without its `private` feature, so yagura was not exposed. `cookie` is built only into the GUI.
+
 ### Upgrade notes
 
 - **A `keymap.toml` that gives another operation one of the new default keys leaves the new operation without a key.** `Ctrl+Shift+O`, `Ctrl+Shift+P` and `Ctrl+Shift+T` (macOS `Cmd+P`, `Shift+Cmd+P` and `Shift+Cmd+T`) are default keys of Go to window, Commands and Board, and a line in the file takes a chord before a default does. If a line you wrote already uses one (for example `toggle-plans = "Ctrl+Shift+p"`, the Board's earlier default), the operation whose default it is has no key until you set one in Settings > Keyboard.
