@@ -16,6 +16,7 @@
 //! see the door's end as a direct connection shows it drops the connection at the first
 //! step; one that goes on using the connection keeps it.
 
+use std::future::Future;
 use std::io::Write;
 use std::process::{Command, Output, Stdio};
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -139,9 +140,8 @@ pub(crate) async fn write_json_frame<S: AsyncWrite + Unpin>(
 /// Claims `instance`'s endpoint; the returned future accepts the one door that connects.
 pub(crate) async fn claim_endpoint(
     instance: &str,
-) -> impl std::future::Future<Output = <yagura_os::PlatformIpc as yagura_os::PeerAuth>::Connection>
-+ Send
-+ 'static {
+) -> impl Future<Output = <yagura_os::PlatformIpc as yagura_os::PeerAuth>::Connection> + Send + 'static
+{
     use yagura_os::{IpcTransport, PeerAuth, PlatformIpc};
 
     let ipc = PlatformIpc::default();
@@ -345,11 +345,32 @@ pub(crate) async fn relay_door_connection(
     input: Vec<u8>,
     printed: Printed,
 ) -> ConnectionEnded {
+    relay_door_with(
+        h,
+        instance,
+        Some((window_id, VALID_TOKEN)),
+        args,
+        input,
+        printed,
+    )
+    .await
+}
+
+/// [`relay_door_connection`] for a door that may carry no credentials in its environment,
+/// as a door naming its window through `--credentials` does.
+pub(crate) async fn relay_door_with(
+    h: &Harness,
+    instance: &str,
+    window: Option<(&str, &str)>,
+    args: &[&str],
+    input: Vec<u8>,
+    printed: Printed,
+) -> ConnectionEnded {
     let bases = TempDir::new("yagura-door", "relay");
     let accept = claim_endpoint(instance).await;
     tokio::pin!(accept);
     let mut upstream = h.connect().await;
-    let command = door_command(args, instance, &bases, Some((window_id, VALID_TOKEN)));
+    let command = door_command(args, instance, &bases, window);
     let mut process = tokio::task::spawn_blocking(move || {
         let ended = run_with_input(command, input);
         drop(bases);
@@ -411,4 +432,88 @@ pub(crate) async fn run_door_as(
         .await
         .finish_dropping_upstream()
         .await
+}
+
+/// [`run_door`] for a door with no credentials in its environment.
+pub(crate) async fn run_door_without_credentials(
+    h: &Harness,
+    args: &[&str],
+    input: Vec<u8>,
+) -> (Output, std::io::Result<()>) {
+    relay_door_with(h, &unique_instance(), None, args, input, Printed::Forward)
+        .await
+        .finish_dropping_upstream()
+        .await
+}
+
+/// A relay running in the background for a door the test spawned itself.
+pub(crate) struct SpawnedRelay {
+    task: JoinHandle<Vec<serde_json::Value>>,
+}
+
+impl SpawnedRelay {
+    /// Waits for the relay to end, which it does once the door's connection ends or the
+    /// door's process ended without connecting; the connection to the daemon has been
+    /// dropped by then. Returns every frame the door sent.
+    pub(crate) async fn ended(self) -> Vec<serde_json::Value> {
+        self.task.await.expect("the relay task ends")
+    }
+}
+
+/// Relays the connection of the door process `door_pid`, which the test spawned with
+/// `YAGURA_INSTANCE` set to the instance `accept` was claimed for, to `h`'s daemon, in the
+/// background. A door's process ending decides that it will not connect only after the
+/// accept had its chance first, so a door that connected and then ended is still carried.
+/// The connection to the daemon is dropped when the door's connection ends.
+pub(crate) async fn relay_spawned_door<A>(
+    h: &Harness,
+    accept: A,
+    door_pid: u32,
+    printed: Printed,
+) -> SpawnedRelay
+where
+    A: Future<Output = <yagura_os::PlatformIpc as yagura_os::PeerAuth>::Connection>
+        + Send
+        + 'static,
+{
+    let mut upstream = h.connect().await;
+    let task = tokio::spawn(async move {
+        let mut sent = Vec::new();
+        let ended = door_ended(door_pid);
+        tokio::pin!(accept, ended);
+        let connected = tokio::select! {
+            biased;
+            conn = &mut accept => Some(conn),
+            () = &mut ended => std::future::poll_fn(|cx| {
+                std::task::Poll::Ready(match Future::poll(accept.as_mut(), cx) {
+                    std::task::Poll::Ready(conn) => Some(conn),
+                    std::task::Poll::Pending => None,
+                })
+            })
+            .await,
+        };
+        if let Some(mut conn) = connected {
+            carry(&mut conn, &mut upstream, printed, &mut sent).await;
+        }
+        drop(upstream);
+        sent
+    });
+    SpawnedRelay { task }
+}
+
+/// Resolves once the process `pid` has exited, without reaping it: the test's own `Child`
+/// still kills, polls and waits.
+async fn door_ended(pid: u32) {
+    tokio::task::spawn_blocking(move || {
+        let Some(start) = yagura_os::process_start(pid).expect("the door's start reads") else {
+            return;
+        };
+        if let Some(handle) =
+            yagura_os::ProcessHandle::open(pid, &start).expect("the door's process opens")
+        {
+            handle.wait().expect("the door's end is awaited");
+        }
+    })
+    .await
+    .expect("join");
 }

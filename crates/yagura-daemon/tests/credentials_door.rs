@@ -14,42 +14,26 @@
 //! points the data, state and config base directories into a temporary directory.
 
 use crate::common;
-use crate::common::bins;
+use crate::common::door_relay::run_door_without_credentials;
 
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output, Stdio};
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::process::Output;
 
 use yagura_daemon::inbox::Parcel;
-use yagura_test_support::paths::TempDir;
 
 use common::{Harness, VALID_TOKEN, approver_base_config, detection_config, unique_temp_dir};
 
-const WINDOW_ID_VAR: &str = "YAGURA_WINDOW_ID";
-const STATUS_TOKEN_VAR: &str = "YAGURA_STATUS_TOKEN";
-
-static COUNTER: AtomicU32 = AtomicU32::new(0);
-
 struct Setup {
     h: Harness,
-    instance: String,
-    bases: TempDir,
     files: PathBuf,
 }
 
 impl Setup {
     async fn start() -> Self {
-        let instance = format!(
-            "crd{:x}{}",
-            std::process::id(),
-            COUNTER.fetch_add(1, Ordering::Relaxed)
-        );
         let config = detection_config(&unique_temp_dir("credentials-door"), approver_base_config());
-        let h = Harness::start_on_instance(&instance, config).await;
+        let h = Harness::start("credentials-door", config).await;
         Self {
             h,
-            instance,
-            bases: TempDir::new("yagura-credentials", "bases"),
             files: unique_temp_dir("credentials-door-files"),
         }
     }
@@ -73,32 +57,17 @@ impl Setup {
         path
     }
 
-    /// Runs `--credentials <path> --deliver-take` with neither window variable inherited.
+    /// Runs `--credentials <path> --deliver-take` with neither window variable inherited,
+    /// through a relay to this test's daemon.
     async fn take_with(&self, credentials: &Path) -> Output {
-        let mut command = Command::new(bins::daemon_exe());
-        command
-            .arg("--credentials")
-            .arg(credentials)
-            .arg("--deliver-take")
-            .env("YAGURA_INSTANCE", &self.instance)
-            .env_remove("YAGURA_STORE_DB")
-            .env_remove(WINDOW_ID_VAR)
-            .env_remove(STATUS_TOKEN_VAR)
-            .stdin(Stdio::null());
-        if cfg!(windows) {
-            command
-                .env("LOCALAPPDATA", self.bases.make_dir("local"))
-                .env("APPDATA", self.bases.make_dir("roaming"));
-        } else {
-            command
-                .env("XDG_DATA_HOME", self.bases.make_dir("data"))
-                .env("XDG_STATE_HOME", self.bases.make_dir("state"))
-                .env("XDG_CONFIG_HOME", self.bases.make_dir("config"))
-                .env("HOME", self.bases.make_dir("home"));
-        }
-        tokio::task::spawn_blocking(move || command.output().expect("spawn the door"))
-            .await
-            .expect("join")
+        let credentials = credentials.to_str().expect("a UTF-8 path");
+        let (output, _) = run_door_without_credentials(
+            &self.h,
+            &["--credentials", credentials, "--deliver-take"],
+            Vec::new(),
+        )
+        .await;
+        output
     }
 }
 

@@ -15,10 +15,15 @@
 
 use crate::common;
 use crate::common::bins;
+use crate::common::door_relay::{
+    Printed, SpawnedRelay, claim_endpoint, relay_spawned_door, unique_instance,
+};
 
+use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
@@ -38,6 +43,7 @@ struct Setup {
     h: Harness,
     instance: String,
     bases: TempDir,
+    relays: Mutex<HashMap<u32, SpawnedRelay>>,
 }
 
 impl Setup {
@@ -54,6 +60,7 @@ impl Setup {
             h,
             instance,
             bases: TempDir::new("yagura-deliver", "bases"),
+            relays: Mutex::new(HashMap::new()),
         }
     }
 
@@ -68,17 +75,48 @@ impl Setup {
         door_command(&self.instance, &self.bases, args, window_id, token)
     }
 
-    fn spawn(&self, args: &[&str], window_id: &str, token: &str) -> Child {
-        self.command(args, Some(window_id), Some(token))
+    async fn spawn(&self, args: &[&str], window_id: &str, token: &str) -> Child {
+        let mut command = self.command(args, Some(window_id), Some(token));
+        command
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
+            .stderr(Stdio::piped());
+        self.spawn_command(command).await
+    }
+
+    /// Spawns the door `command` so that its connection reaches this daemon through a relay
+    /// of the test's own, under an instance of the relay's.
+    async fn spawn_command(&self, mut command: Command) -> Child {
+        let instance = unique_instance();
+        let accept = claim_endpoint(&instance).await;
+        let child = command
+            .env("YAGURA_INSTANCE", &instance)
             .spawn()
-            .expect("spawn the yagura-daemon binary")
+            .expect("spawn the yagura-daemon binary");
+        let relay = relay_spawned_door(&self.h, accept, child.id(), Printed::Forward).await;
+        self.relays.lock().unwrap().insert(child.id(), relay);
+        child
     }
 
     async fn run(&self, args: &[&str], window_id: &str, token: &str) -> Output {
-        finish(self.spawn(args, window_id, token)).await
+        let child = self.spawn(args, window_id, token).await;
+        self.finish(child).await
+    }
+
+    /// Waits for the door's process and then for its relay, so that what the door sent has
+    /// reached the daemon and the daemon has seen its connection end.
+    async fn finish(&self, child: Child) -> Output {
+        let pid = child.id();
+        let output = tokio::task::spawn_blocking(move || {
+            child.wait_with_output().expect("wait for the child")
+        })
+        .await
+        .expect("join");
+        let relay = self.relays.lock().unwrap().remove(&pid);
+        if let Some(relay) = relay {
+            relay.ended().await;
+        }
+        output
     }
 
     fn entry(&self, window_id: &str) -> std::sync::Arc<yagura_daemon::WindowEntry> {
@@ -139,12 +177,6 @@ fn door_command(
         command.env(STATUS_TOKEN_VAR, token);
     }
     command
-}
-
-async fn finish(child: Child) -> Output {
-    tokio::task::spawn_blocking(move || child.wait_with_output().expect("wait for the child"))
-        .await
-        .expect("join")
 }
 
 fn out(output: &Output) -> String {
@@ -252,14 +284,14 @@ async fn a_wrong_token_prints_no_parcel_and_is_never_the_wake_exit_code() {
 async fn wait_ends_with_the_declared_stream_and_exit_code_when_a_parcel_arrives() {
     let setup = Setup::start(|_| {}).await;
     let id = setup.window().await;
-    let child = setup.spawn(&["--deliver-wait"], &id, VALID_TOKEN);
+    let child = setup.spawn(&["--deliver-wait"], &id, VALID_TOKEN).await;
     setup
         .until("the wait to be registered", || {
             setup.entry(&id).inbox().has_waiter()
         })
         .await;
     setup.deposit(&id, "a", "PARCEL-ALPHA");
-    let output = finish(child).await;
+    let output = setup.finish(child).await;
     assert_eq!(output.status.code(), Some(2));
     assert!(err(&output).contains("PARCEL-ALPHA"), "{}", err(&output));
     assert!(
@@ -272,19 +304,19 @@ async fn wait_ends_with_the_declared_stream_and_exit_code_when_a_parcel_arrives(
 async fn a_second_wait_ends_the_first_silently_with_zero() {
     let setup = Setup::start(|_| {}).await;
     let id = setup.window().await;
-    let first = setup.spawn(&["--deliver-wait"], &id, VALID_TOKEN);
+    let first = setup.spawn(&["--deliver-wait"], &id, VALID_TOKEN).await;
     setup
         .until("the first wait", || setup.entry(&id).inbox().has_waiter())
         .await;
-    let second = setup.spawn(&["--deliver-wait"], &id, VALID_TOKEN);
+    let second = setup.spawn(&["--deliver-wait"], &id, VALID_TOKEN).await;
 
-    let first = finish(first).await;
+    let first = setup.finish(first).await;
     assert_eq!(first.status.code(), Some(0));
     assert!(first.stdout.is_empty() && first.stderr.is_empty());
     assert!(setup.entry(&id).inbox().has_waiter(), "the second stays");
 
     setup.deposit(&id, "a", "PARCEL-ALPHA");
-    let second = finish(second).await;
+    let second = setup.finish(second).await;
     assert_eq!(second.status.code(), Some(2));
     assert!(err(&second).contains("PARCEL-ALPHA"));
 }
@@ -293,14 +325,14 @@ async fn a_second_wait_ends_the_first_silently_with_zero() {
 async fn a_wait_killed_by_the_cli_is_dropped_by_the_daemon() {
     let setup = Setup::start(|_| {}).await;
     let id = setup.window().await;
-    let mut child = setup.spawn(&["--deliver-wait"], &id, VALID_TOKEN);
+    let mut child = setup.spawn(&["--deliver-wait"], &id, VALID_TOKEN).await;
     setup
         .until("the wait to be registered", || {
             setup.entry(&id).inbox().has_waiter()
         })
         .await;
     child.kill().expect("kill the wait");
-    let _ = finish(child).await;
+    let _ = setup.finish(child).await;
     setup
         .until("the killed wait to be dropped", || {
             !setup.entry(&id).inbox().has_waiter()
@@ -325,7 +357,7 @@ async fn a_wait_in_an_unknown_window_prints_nothing_while_the_window_cannot_be_p
         )
         .await;
     setup.deposit(&id, "a", "PARCEL-ALPHA");
-    let mut child = setup.spawn(&["--deliver-wait"], &id, VALID_TOKEN);
+    let mut child = setup.spawn(&["--deliver-wait"], &id, VALID_TOKEN).await;
     setup
         .until("the wait to be registered", || {
             setup.entry(&id).inbox().has_waiter()
@@ -334,7 +366,7 @@ async fn a_wait_in_an_unknown_window_prints_nothing_while_the_window_cannot_be_p
     assert_eq!(setup.entry(&id).inbox().pending_count(), 1);
     assert!(child.try_wait().unwrap().is_none(), "still waiting");
     child.kill().expect("kill the wait");
-    let output = finish(child).await;
+    let output = setup.finish(child).await;
     assert!(!out(&output).contains("PARCEL-ALPHA"));
     assert!(!err(&output).contains("PARCEL-ALPHA"));
 }
@@ -356,14 +388,13 @@ async fn a_take_door_that_cannot_print_puts_the_parcel_back_untold() {
     // A stdout whose reading end is already gone: the door's write fails.
     let (reader, writer) = std::io::pipe().expect("create a pipe");
     drop(reader);
-    let child = setup
-        .command(&["--deliver-take"], Some(&id), Some(VALID_TOKEN))
+    let mut command = setup.command(&["--deliver-take"], Some(&id), Some(VALID_TOKEN));
+    command
         .stdin(Stdio::null())
         .stdout(writer)
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("spawn the yagura-daemon binary");
-    let _ = finish(child).await;
+        .stderr(Stdio::piped());
+    let child = setup.spawn_command(command).await;
+    let _ = setup.finish(child).await;
 
     let deadline = tokio::time::Instant::now() + yagura_test_support::HANG_GUARD;
     loop {
@@ -405,19 +436,18 @@ async fn a_take_door_goes_on_once_its_input_has_ended_without_waiting_for_eof() 
     let setup = Setup::start(|_| {}).await;
     let id = setup.window().await;
     setup.deposit(&id, "a", "PARCEL-ALPHA");
-    let mut child = setup
-        .command(&["--deliver-take"], Some(&id), Some(VALID_TOKEN))
+    let mut command = setup.command(&["--deliver-take"], Some(&id), Some(VALID_TOKEN));
+    command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("spawn the yagura-daemon binary");
+        .stderr(Stdio::piped());
+    let mut child = setup.spawn_command(command).await;
     let mut stdin = child.stdin.take().expect("stdin");
     stdin
         .write_all(br#"{"session_id":"s-1"}"#)
         .and_then(|()| stdin.flush())
         .expect("write the hook input");
-    let output = tokio::time::timeout(yagura_test_support::HANG_GUARD, finish(child))
+    let output = tokio::time::timeout(yagura_test_support::HANG_GUARD, setup.finish(child))
         .await
         .expect("the door must end while its stdin is still open");
     drop(stdin);
@@ -430,16 +460,15 @@ async fn a_take_door_goes_on_once_its_input_has_ended_without_waiting_for_eof() 
 /// Runs `--report-session pointer` with `stdin` written from a thread of its own, so a
 /// child that stopped reading shows up as a failed write.
 async fn report(setup: &Setup, id: &str, pointer: &str, stdin: Vec<u8>) -> Output {
-    let mut child = setup
-        .command(&["--report-session", pointer], Some(id), Some(VALID_TOKEN))
+    let mut command = setup.command(&["--report-session", pointer], Some(id), Some(VALID_TOKEN));
+    command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("spawn");
+        .stderr(Stdio::piped());
+    let mut child = setup.spawn_command(command).await;
     let mut pipe = child.stdin.take().expect("stdin");
     let writer = std::thread::spawn(move || pipe.write_all(&stdin).and_then(|()| pipe.flush()));
-    let output = finish(child).await;
+    let output = setup.finish(child).await;
     writer
         .join()
         .expect("writer thread")
@@ -718,7 +747,7 @@ async fn the_profiles_wake_stream_and_exit_code_end_a_wait() {
     )
     .await;
     let id = setup.profile_window().await;
-    let child = setup.spawn(&["--deliver-wait"], &id, VALID_TOKEN);
+    let child = setup.spawn(&["--deliver-wait"], &id, VALID_TOKEN).await;
     setup
         .until("the wait to be registered", || {
             setup.entry(&id).inbox().has_waiter()
@@ -727,7 +756,7 @@ async fn the_profiles_wake_stream_and_exit_code_end_a_wait() {
 
     setup.deposit(&id, "a", "PARCEL-ALPHA");
 
-    let output = finish(child).await;
+    let output = setup.finish(child).await;
     assert_eq!(output.status.code(), Some(3), "{}", err(&output));
     assert!(out(&output).contains("PARCEL-ALPHA"), "{}", out(&output));
     assert!(
