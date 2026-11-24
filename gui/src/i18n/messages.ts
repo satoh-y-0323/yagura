@@ -65,7 +65,18 @@ export function headlineParts(
 }
 
 function partyText(party: HeadlineParty): UiText | DisplayLine {
-  return 'name' in party ? party.name : party.words;
+  switch (party.kind) {
+    case 'name':
+      return party.name;
+    case 'words':
+      return party.words;
+    case 'room':
+      return party.parts.sentence;
+    default: {
+      const unknown: never = party;
+      return unknown;
+    }
+  }
 }
 
 /** True when a parameter of type `P` accepts text that was not prepared for display. */

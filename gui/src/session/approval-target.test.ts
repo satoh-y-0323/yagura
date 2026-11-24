@@ -7,12 +7,9 @@
 import { describe, it, expect } from 'vitest';
 
 import { approvalFactsOf, describeUntargeted } from './approval-target';
-import {
-  formatApprovalBody,
-  formatPathForDisplay,
-  sanitizeForDisplay,
-} from '../display/untrusted-text';
+import { formatApprovalBody, sanitizeForDisplay } from '../display/untrusted-text';
 import type { ApprovalRequest, WindowStatus } from '../ipc/session-boundary';
+import type { HeadlineParty } from './approval-types';
 import { describeStatus, dialogs } from '../ui-messages';
 
 const REQUESTER_MARK = { cells: 0b010_101_011_100_110, hue: 3 };
@@ -53,6 +50,18 @@ function external(kind: 'external' | 'unknown'): ApprovalRequest['requester'] {
   return { kind, window_id: null, name: null };
 }
 
+/** The text a party reads as in a sentence. */
+function textOf(party: HeadlineParty): string {
+  switch (party.kind) {
+    case 'name':
+      return party.name;
+    case 'words':
+      return party.words;
+    case 'room':
+      return party.parts.sentence;
+  }
+}
+
 /** A handoff that opens its window from a profile, so it carries no target. */
 const HANDOFF_TO_NEW_WINDOW = request({
   tool: 'send_handoff',
@@ -60,24 +69,38 @@ const HANDOFF_TO_NEW_WINDOW = request({
 });
 
 describe('describeUntargeted', () => {
-  it('names the room a request carries', () => {
+  it('names the room a request carries by its name, set apart from the words around it', () => {
     const named = request({ room: { room_id: 'main', name: 'Main' } });
 
-    expect(describeUntargeted(named)).toBe(
-      dialogs.describeApprovalRoom(formatPathForDisplay('Main'))
-    );
-    // A room's name is the last name of a path, so a reordering control is written out.
+    expect(describeUntargeted(named)).toEqual({
+      kind: 'room',
+      parts: {
+        before: dialogs.approvalRoomWords.before,
+        name: 'Main',
+        after: dialogs.approvalRoomWords.after,
+        sentence: 'the chat room Main',
+      },
+    });
+    // A room's name is the last name of a path, so a reordering control and a no-break space are written out.
     const reordered = request({ room: { room_id: 'r', name: 'ya\u202Egura' } });
-    expect(describeUntargeted(reordered)).toBe(
-      dialogs.describeApprovalRoom(formatPathForDisplay(reordered.room?.name ?? ''))
-    );
-    expect(describeUntargeted(reordered)).toContain('ya\\u{202E}gura');
+    expect(describeUntargeted(reordered)).toMatchObject({
+      kind: 'room',
+      parts: { name: 'ya\\u{202E}gura' },
+    });
+    const spaced = request({ room: { room_id: 's', name: 'Ma\u00A0in' } });
+    expect(describeUntargeted(spaced)).toMatchObject({
+      kind: 'room',
+      parts: { name: 'Ma\\u{00A0}in' },
+    });
   });
 
   it('names a new window for a request to open one', () => {
     const opening = request({ tool: 'open_window' });
 
-    expect(describeUntargeted(opening)).toBe(dialogs.approvalTargetNewWindow);
+    expect(describeUntargeted(opening)).toEqual({
+      kind: 'words',
+      words: dialogs.approvalTargetNewWindow,
+    });
   });
 
   it('names a new window for a handoff that opens one from a profile', () => {
@@ -86,13 +109,19 @@ describe('describeUntargeted', () => {
       text: formatApprovalBody('profile: claude-code\n\nenvelope'),
     });
 
-    expect(describeUntargeted(opening)).toBe(dialogs.approvalTargetNewWindow);
+    expect(describeUntargeted(opening)).toEqual({
+      kind: 'words',
+      words: dialogs.approvalTargetNewWindow,
+    });
   });
 
   it.each(['send_chat', 'broadcast_chat'])(
     'falls back to the chat room as a whole for a %s request that names no room',
     (tool) => {
-      expect(describeUntargeted(request({ tool }))).toBe(dialogs.approvalTargetRoom);
+      expect(describeUntargeted(request({ tool }))).toEqual({
+        kind: 'words',
+        words: dialogs.approvalTargetRoom,
+      });
     }
   );
 });
@@ -105,7 +134,7 @@ describe('approvalFactsOf: who asks', () => {
 
     expect(from).toEqual({
       kind: 'window',
-      label: WINDOW_REQUESTER.name,
+      label: { kind: 'name', name: WINDOW_REQUESTER.name },
       profile: WINDOW_REQUESTER.profile,
       status: describeStatus(WINDOW_REQUESTER.status),
       window: { id: WINDOW_REQUESTER.displayWindowId, mark: REQUESTER_MARK },
@@ -130,7 +159,7 @@ describe('approvalFactsOf: who asks', () => {
     const { from } = approvalFactsOf(toWindow, false);
 
     expect(from.kind).toBe('window');
-    expect(from.label).toBe(WINDOW_REQUESTER.name);
+    expect(from.label).toEqual({ kind: 'name', name: WINDOW_REQUESTER.name });
     expect(from).toMatchObject({
       window: { id: WINDOW_REQUESTER.displayWindowId, mark: REQUESTER_MARK },
     });
@@ -156,7 +185,7 @@ describe('approvalFactsOf: who asks', () => {
 
       expect(from).toEqual({
         kind: 'external',
-        label: dialogs.approvalRequesterExternal,
+        label: { kind: 'words', words: dialogs.approvalRequesterExternal },
         profile: null,
         status: null,
       });
@@ -170,7 +199,7 @@ describe('approvalFactsOf: what it acts on', () => {
 
     expect(to).toEqual({
       kind: 'window',
-      label: TARGET.name,
+      label: { kind: 'name', name: TARGET.name },
       profile: TARGET.profile,
       status: describeStatus(TARGET.status),
       window: { id: TARGET.displayWindowId, mark: TARGET_MARK },
@@ -214,6 +243,11 @@ describe('approvalFactsOf: the heading', () => {
     const sentences = HEADED_FORMS.map(([, form]) => approvalFactsOf(form, true).headline.sentence);
 
     expect(new Set(sentences).size).toBe(HEADED_FORMS.length);
+    // A room's name stands as a name in the sentence, with no quotes around it.
+    const toRoom = request({ tool: 'broadcast_chat', room: MAIN_ROOM });
+    expect(approvalFactsOf(toRoom, true).headline.sentence).toBe(
+      'builder wants to post to everyone in the chat room Main'
+    );
   });
 
   it.each(HEADED_FORMS)(
@@ -223,10 +257,11 @@ describe('approvalFactsOf: the heading', () => {
       const { sentence } = facts.headline;
 
       // The requester window's name goes in the part drawn as a name, never in one drawn as words.
-      expect(facts.headline.from).toEqual({ name: facts.from.label });
+      expect(facts.headline.from).toEqual({ kind: 'name', name: WINDOW_REQUESTER.name });
+      expect(facts.headline.from).toEqual(facts.from.label);
       expect(sentence.startsWith(WINDOW_REQUESTER.name)).toBe(true);
       expect(sentence).not.toMatch(/\.$/);
-      for (const name of [WINDOW_REQUESTER.name, TARGET.name]) {
+      for (const name of [WINDOW_REQUESTER.name, TARGET.name, MAIN_ROOM.name]) {
         expect(sentence).not.toContain(`“${name}”`);
         expect(sentence).not.toContain(`"${name}"`);
       }
@@ -239,7 +274,8 @@ describe('approvalFactsOf: the heading', () => {
       const facts = approvalFactsOf(form, true);
       const { sentence } = facts.headline;
 
-      expect(facts.headline.to).toEqual({ name: facts.to.label });
+      expect(facts.headline.to).toEqual(facts.to.label);
+      expect(facts.headline.to).toEqual({ kind: 'name', name: TARGET.name });
       expect(sentence.indexOf(TARGET.name, WINDOW_REQUESTER.name.length)).toBeGreaterThan(0);
     }
   );
@@ -249,9 +285,11 @@ describe('approvalFactsOf: the heading', () => {
     (_label, form) => {
       const facts = approvalFactsOf(form, true);
 
-      // What stands in for a window that does not exist yet is words, not a name.
-      expect(facts.headline.to).toEqual({ words: facts.to.label });
-      expect(facts.headline.sentence).toContain(describeUntargeted(form));
+      // The heading and the card name the addressee by the same value: a room by its name, a
+      // window that does not exist yet by words.
+      expect(facts.headline.to).toEqual(facts.to.label);
+      expect(facts.headline.to?.kind).toBe(form.room === undefined ? 'words' : 'room');
+      expect(facts.headline.sentence).toContain(textOf(describeUntargeted(form)));
     }
   );
 
@@ -285,8 +323,8 @@ describe('approvalFactsOf: the heading', () => {
       expect(opening).not.toBe(WINDOW_REQUESTER.name);
       expect(fromUnknown).toBe(fromExternal);
       // A client that is no window has no name to show, so the heading opens with words.
-      expect(clientFacts.headline.from).toEqual({ words: opening });
-      expect(unknownFacts.headline.from).toEqual({ words: opening });
+      expect(clientFacts.headline.from).toEqual({ kind: 'words', words: opening });
+      expect(unknownFacts.headline.from).toEqual({ kind: 'words', words: opening });
     }
   );
 });

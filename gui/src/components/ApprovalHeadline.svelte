@@ -6,36 +6,19 @@
    * only, so the dialog and the notice list share it inside their own heading.
    */
   import type { HeadlineParts } from '../session/approval-types';
+  import ApprovalPartyName from './ApprovalPartyName.svelte';
 
   export let headline: HeadlineParts;
 </script>
 
-{#if 'name' in headline.from}<strong class="approval-name">{headline.from.name}</strong
-  >{:else if 'words' in headline.from}{headline.from
-    .words}{/if}{headline.verb}{#if headline.tool !== null}<code class="approval-tool-name"
-    >{headline.tool}</code
-  >{/if}{headline.toolLink}{#if headline.to !== null && 'name' in headline.to}<strong
-    class="approval-name">{headline.to.name}</strong
-  >{:else if headline.to !== null && 'words' in headline.to}{headline.to.words}{/if}
+<ApprovalPartyName party={headline.from} />{headline.verb}{#if headline.tool !== null}<code
+    class="approval-tool-name">{headline.tool}</code
+  >{/if}{headline.toolLink}{#if headline.to !== null}<ApprovalPartyName party={headline.to} />{/if}
 
 <style>
-  /* A name stands apart from the words by weight and ground, neither of which its characters can draw. */
-  .approval-name {
-    padding: 0 var(--space-1);
-    border-radius: var(--radius-xs);
-    background-color: var(--bg-selected);
-    font-weight: var(--weight-semibold);
-  }
-
   .approval-tool-name {
     color: var(--fg-muted);
     font-family: var(--font-mono);
     font-size: var(--text-xs);
-  }
-
-  @media (forced-colors: active) {
-    .approval-name {
-      border: var(--line-width) solid CanvasText;
-    }
   }
 </style>

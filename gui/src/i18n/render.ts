@@ -83,6 +83,15 @@ export function describeGoToCallingWindowParts(messages: Messages, name: Display
 }
 
 /**
+ * The chat room an approval request names, split around the room's name.
+ *
+ * @param name the room's name, prepared for display
+ */
+export function describeApprovalRoomParts(messages: Messages, name: DisplayLine): TitleParts {
+  return titleParts(messages.dialogs.approvalRoomWords, name);
+}
+
+/**
  * Describes a window that calls the user, as its lane card says it.
  *
  * @param name the window's display name
@@ -129,7 +138,9 @@ export function describeApprovalHeadline(
   displayTool: DisplayLine
 ): HeadlineParts {
   const fromParty: HeadlineParty =
-    from === null ? { words: messages.dialogs.approvalHeadlineExternal } : { name: from };
+    from === null
+      ? { kind: 'words', words: messages.dialogs.approvalHeadlineExternal }
+      : { kind: 'name', name: from };
   return tool === null
     ? headlineParts(
         messages.dialogs.approvalHeadlineOtherWords(to !== null),

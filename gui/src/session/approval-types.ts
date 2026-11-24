@@ -2,11 +2,14 @@
  * Wire-adjacent literal types shared by the approval boundary
  * (`ipc/session-boundary.ts`) and the notice model (`notices/notice-model.ts`).
  *
- * Deliberately depends on neither `ipc/` nor `ui-messages`: both of those
- * modules import from here, and a dependency the other way would cycle.
+ * Deliberately loads neither `ipc/` nor `ui-messages` at runtime: both of
+ * those modules import from here, and a dependency the other way would cycle.
+ * The one import from `ui-messages` is type-only, as is its import from here,
+ * so it is erased and neither loads the other.
  */
 import type { UiText } from '../display/ui-text';
 import type { DisplayLine } from '../display/untrusted-text';
+import type { TitleParts } from '../ui-messages';
 
 /**
  * Why a pending approval request ended without a decision from the approver
@@ -36,8 +39,15 @@ export interface WindowMark {
   hue: number;
 }
 
-/** What an approval heading names a party by: a window's name, or words that stand in for one. */
-export type HeadlineParty = { name: DisplayLine } | { words: UiText };
+/**
+ * What an approval heading and a card name a party by: a window's name, words
+ * that stand in for a party, or a room's name with the words around it. Readers
+ * branch on `kind` exhaustively, so a new kind cannot be dropped unnoticed.
+ */
+export type HeadlineParty =
+  | { kind: 'name'; name: DisplayLine }
+  | { kind: 'words'; words: UiText }
+  | { kind: 'room'; parts: TitleParts };
 
 /**
  * An approval heading in the order it reads, so a view can set each name apart
@@ -57,7 +67,8 @@ export interface HeadlineParts {
 
 /** What every side of a request is drawn with, whatever it is. */
 interface ApprovalPartyCommon {
-  label: UiText | DisplayLine;
+  /** The same value the heading names this party by. */
+  label: HeadlineParty;
   /** The launch profile a window was opened from; `null` for one opened from a command. */
   profile: DisplayLine | null;
   /** A window's status when the request was submitted, or that it has since closed. */

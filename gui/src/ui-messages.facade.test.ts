@@ -97,13 +97,19 @@ const CASES: ReadonlyArray<[string, () => unknown, () => unknown]> = [
   ],
   [
     'describeApprovalHeadline',
-    () => facade.describeApprovalHeadline('send_message', null, { name: IMPLEMENTER }, REVIEWER),
+    () =>
+      facade.describeApprovalHeadline(
+        'send_message',
+        null,
+        { kind: 'name', name: IMPLEMENTER },
+        REVIEWER
+      ),
     () =>
       render.describeApprovalHeadline(
         messages,
         'send_message',
         null,
-        { name: IMPLEMENTER },
+        { kind: 'name', name: IMPLEMENTER },
         REVIEWER
       ),
   ],

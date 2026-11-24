@@ -7,6 +7,7 @@ import {
   describeActionBlock as renderDescribeActionBlock,
   describeAnnouncement as renderDescribeAnnouncement,
   describeApprovalHeadline as renderDescribeApprovalHeadline,
+  describeApprovalRoomParts as renderDescribeApprovalRoomParts,
   describeAttentionBadge as renderDescribeAttentionBadge,
   describeChatPostedAt as renderDescribeChatPostedAt,
   describeDeliveryState as renderDescribeDeliveryState,
@@ -162,6 +163,14 @@ export function describeGoToWindow(name: DisplayLine): UiText {
  */
 export function describeGoToCallingWindowParts(name: DisplayLine): TitleParts {
   return renderDescribeGoToCallingWindowParts(messages, name);
+}
+
+/**
+ * The chat room an approval request names, split around the room's name.
+ * @param name the room's name, prepared for display
+ */
+export function describeApprovalRoomParts(name: DisplayLine): TitleParts {
+  return renderDescribeApprovalRoomParts(messages, name);
 }
 
 /**

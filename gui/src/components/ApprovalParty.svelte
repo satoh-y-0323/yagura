@@ -18,6 +18,7 @@
    */
   import type { UiText } from '../display/ui-text';
   import type { ApprovalParty } from '../session/approval-types';
+  import ApprovalPartyName from './ApprovalPartyName.svelte';
   import Icon from './Icon.svelte';
   import WindowMark from './WindowMark.svelte';
 
@@ -76,7 +77,9 @@
         {/if}
       </span>
     {/if}
-    <span class="approval-party__name" id={nameId}>{party.label}</span>
+    <span class="approval-party__name" id={nameId}
+      ><ApprovalPartyName party={party.label} windowName="plain" /></span
+    >
   </div>
 </svelte:element>
 

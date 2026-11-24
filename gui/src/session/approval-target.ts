@@ -3,10 +3,15 @@
  * dialog draws it and the "expired unseen" notice names it.
  */
 import { formatPathForDisplay } from '../display/untrusted-text';
-import type { UiText } from '../display/ui-text';
 import type { ApprovalRequest, ApprovalRequester } from '../ipc/session-boundary';
-import { describeApprovalHeadline, describeStatus, dialogs, settings } from '../ui-messages';
-import type { ApprovalFacts, ApprovalParty, HeadlineParts } from './approval-types';
+import {
+  describeApprovalHeadline,
+  describeApprovalRoomParts,
+  describeStatus,
+  dialogs,
+  settings,
+} from '../ui-messages';
+import type { ApprovalFacts, ApprovalParty, HeadlineParts, HeadlineParty } from './approval-types';
 
 type KnownApprovalTool = keyof typeof settings.approvalToolInfo;
 
@@ -33,17 +38,24 @@ function knownTool(tool: string): KnownApprovalTool | null {
 /**
  * Names the addressee of a request that carries no target window: the room it
  * names, the chat room as a whole for a chat request that predates the `room`
- * field, or otherwise a window that is about to be opened.
+ * field, or otherwise a window that is about to be opened. The heading and the
+ * card both name it by this value.
  */
-export function describeUntargeted(request: ApprovalRequest): UiText {
+export function describeUntargeted(request: ApprovalRequest): HeadlineParty {
   if (request.room !== undefined) {
-    return dialogs.describeApprovalRoom(formatPathForDisplay(request.room.name));
+    return {
+      kind: 'room',
+      parts: describeApprovalRoomParts(formatPathForDisplay(request.room.name)),
+    };
   }
   // Every other untargeted request (open_window, a handoff that opens a
   // window from a profile) is approved before its window exists.
-  return CHAT_TOOLS.has(request.tool)
-    ? dialogs.approvalTargetRoom
-    : dialogs.approvalTargetNewWindow;
+  return {
+    kind: 'words',
+    words: CHAT_TOOLS.has(request.tool)
+      ? dialogs.approvalTargetRoom
+      : dialogs.approvalTargetNewWindow,
+  };
 }
 
 /**
@@ -72,11 +84,12 @@ function headlineOf(request: ApprovalRequest, tool: KnownApprovalTool | null): H
     return describeApprovalHeadline(
       null,
       from,
-      target === undefined ? null : { name: target.name },
+      target === undefined ? null : { kind: 'name', name: target.name },
       request.displayTool
     );
   }
-  const to = target === undefined ? { words: describeUntargeted(request) } : { name: target.name };
+  const to: HeadlineParty =
+    target === undefined ? describeUntargeted(request) : { kind: 'name', name: target.name };
   return describeApprovalHeadline(tool, from, to, request.displayTool);
 }
 
@@ -84,14 +97,14 @@ function requesterParty(requester: ApprovalRequester, isRequesterOpen: boolean):
   if (requester.kind !== 'window') {
     return {
       kind: 'external',
-      label: dialogs.approvalRequesterExternal,
+      label: { kind: 'words', words: dialogs.approvalRequesterExternal },
       profile: null,
       status: null,
     };
   }
   return {
     kind: 'window',
-    label: requester.name,
+    label: { kind: 'name', name: requester.name },
     profile: requester.profile,
     status: isRequesterOpen ? describeStatus(requester.status) : dialogs.approvalRequesterClosed,
     window: { id: requester.displayWindowId, mark: requester.mark },
@@ -110,7 +123,7 @@ function targetParty(request: ApprovalRequest): ApprovalParty {
   }
   return {
     kind: 'window',
-    label: target.name,
+    label: { kind: 'name', name: target.name },
     profile: target.profile,
     status: describeStatus(target.status),
     window: { id: target.displayWindowId, mark: target.mark },

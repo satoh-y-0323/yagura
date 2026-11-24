@@ -56,8 +56,8 @@ export const dummyMessages = {
     approvalTargetRoom: 'DUMMY_approvalTargetRoom',
     // Shown in place of a target window's name when the request is to open one.
     approvalTargetNewWindow: 'DUMMY_approvalTargetNewWindow',
-    // Names the chat room a post would go to, when the request carries one.
-    describeApprovalRoom: (name) => `DUMMY_describeApprovalRoom(${name})`,
+    // The words around the chat room a post would go to, when the request carries one.
+    approvalRoomWords: { before: 'DUMMY_approvalRoom(', after: ')' },
     approvalHeadlineWords: {
       open_window: { verb: 'DUMMY_approvalHeadline_open_window(', toolLink: ',' },
       send_chat: { verb: 'DUMMY_approvalHeadline_send_chat(', toolLink: ',' },

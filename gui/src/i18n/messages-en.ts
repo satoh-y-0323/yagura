@@ -342,8 +342,11 @@ export const messagesEn = {
     /** Stands in for a target window when the request is to open one that does not exist yet. */
     approvalTargetNewWindow: 'a new window',
 
-    /** Names the chat room a request is addressed to, when it names one. */
-    describeApprovalRoom: (name: DisplayLine): string => `the chat room “${name}”`,
+    /**
+     * The words around the chat room a request names. The name is drawn apart
+     * from them rather than quoted, as a room's name may hold quotes.
+     */
+    approvalRoomWords: { before: 'the chat room ', after: '' } satisfies TitleWords,
 
     /** The approval dialog's heading words, keyed like `settings.approvalToolInfo`. */
     approvalHeadlineWords: APPROVAL_HEADLINE_WORDS,
