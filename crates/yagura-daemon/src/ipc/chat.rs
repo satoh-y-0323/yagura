@@ -1699,10 +1699,7 @@ pub(super) async fn handle_list_chat_rooms(
     state: &super::ConnectionState,
 ) {
     if !matches!(state.origin, RequestOrigin::Approver) {
-        outbound.reply(&error_msg(
-            "auth_failed",
-            "this connection may not list chat rooms",
-        ));
+        outbound.reply(&super::approver_only_msg());
         return;
     }
 
@@ -1837,10 +1834,7 @@ async fn handle_room_removal(
     removal: RoomRemoval,
 ) {
     if !matches!(state.origin, RequestOrigin::Approver) {
-        outbound.reply(&error_msg(
-            "auth_failed",
-            "this connection may not remove chat history or rooms",
-        ));
+        outbound.reply(&super::approver_only_msg());
         return;
     }
     if removal == RoomRemoval::DeleteRoom && room_id == MAIN_ROOM_ID {

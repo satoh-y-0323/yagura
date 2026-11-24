@@ -50,6 +50,21 @@ pub enum ChangeKind {
     MarkPlanSeen,
 }
 
+/// Refuses every origin but the approver. The one place that decides who
+/// may make an approver-only request, so the refusal and its wording cannot
+/// drift between a handler and a permit.
+///
+/// # Errors
+///
+/// [`PermitError::ApproverOnly`] for any origin other than an approver.
+pub fn require_approver(origin: &RequestOrigin) -> Result<(), PermitError> {
+    if matches!(origin, RequestOrigin::Approver) {
+        Ok(())
+    } else {
+        Err(PermitError::ApproverOnly)
+    }
+}
+
 impl ChangeKind {
     /// Whether this kind may only ever be authorized for an approver: a
     /// window can never hold this licence, regardless of its relation to the
@@ -74,6 +89,10 @@ pub enum PermitError {
     /// The connection never identified as a window or an approver.
     #[error("the caller is not authorized for this operation")]
     AuthFailed,
+    /// The request is the approver's alone and the connection is not the
+    /// approver, whether or not the plan it names exists.
+    #[error("only the approver may make this request")]
+    ApproverOnly,
     /// No plan with the given id exists, or the calling window has no
     /// relation to it -- the same answer either way, so the two cases stay
     /// indistinguishable to the caller.
@@ -432,8 +451,10 @@ fn issue_create_with(
 ///
 /// # Errors
 ///
-/// [`PermitError::AuthFailed`] for an unidentified connection, or a window
-/// requesting an approver-only kind. [`PermitError::PlanNotFound`] when the
+/// [`PermitError::ApproverOnly`] for any origin other than an approver
+/// requesting an approver-only kind, checked before the plan is looked at.
+/// [`PermitError::AuthFailed`] for an unidentified connection.
+/// [`PermitError::PlanNotFound`] when the
 /// plan does not exist or the window has no relation to it.
 /// [`PermitError::NotPlanOwner`] when the window is related to the plan but
 /// not currently its alive owner, or when an approver requests a
@@ -448,6 +469,9 @@ pub fn issue_change(
     registry: &WindowRegistry,
 ) -> Result<ChangePermit, PermitError> {
     let PlanGuard { plan_id, guard } = guard;
+    if kind.is_approver_only() {
+        require_approver(origin)?;
+    }
     match origin {
         RequestOrigin::External => Err(PermitError::AuthFailed),
         RequestOrigin::Approver => {
@@ -463,9 +487,6 @@ pub fn issue_change(
             }
         }
         RequestOrigin::Window(window_id) => {
-            if kind.is_approver_only() {
-                return Err(PermitError::AuthFailed);
-            }
             match relation_for(store, registry, &plan_id, window_id) {
                 Relation::Owner {
                     alive: true,
@@ -522,7 +543,7 @@ pub fn issue_read(
 ///
 /// # Errors
 ///
-/// [`PermitError::AuthFailed`] for any origin other than an approver.
+/// [`PermitError::ApproverOnly`] for any origin other than an approver.
 /// [`PermitError::InvalidState`] when `new_owner_window` was opened but
 /// cannot currently take a request. [`PermitError::WindowNotFound`] when
 /// `new_owner_window` names an id this registry never opened.
@@ -532,9 +553,7 @@ pub fn issue_nominate(
     new_owner_window: &str,
     registry: &WindowRegistry,
 ) -> Result<NominatePermit, PermitError> {
-    if !matches!(origin, RequestOrigin::Approver) {
-        return Err(PermitError::AuthFailed);
-    }
+    require_approver(origin)?;
     let PlanGuard { plan_id, guard } = guard;
     match registry.liveness(new_owner_window) {
         WindowLiveness::Alive(_) => Ok(NominatePermit {

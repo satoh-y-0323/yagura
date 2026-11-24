@@ -2707,7 +2707,10 @@ async fn list_chat_rooms_from_a_window_connection_is_refused() {
 
     send(&mut client, &ClientMessage::ListChatRooms).await;
     let result = read_reply(&mut client).await;
-    expect_error(result, "auth_failed");
+    assert_eq!(
+        expect_error(result, "auth_failed"),
+        common::APPROVER_ONLY_MESSAGE
+    );
 }
 
 #[tokio::test]
@@ -2718,7 +2721,10 @@ async fn list_chat_rooms_from_an_external_connection_is_refused() {
 
     send(&mut client, &ClientMessage::ListChatRooms).await;
     let result = read_reply(&mut client).await;
-    expect_error(result, "auth_failed");
+    assert_eq!(
+        expect_error(result, "auth_failed"),
+        common::APPROVER_ONLY_MESSAGE
+    );
 }
 
 #[tokio::test]
@@ -3178,10 +3184,16 @@ async fn only_an_approver_may_clear_or_delete_a_chat_room() {
     for request in [clear_request(&room_id), delete_request(&room_id)] {
         send(&mut window_conn, &request).await;
         let from_window = read_reply(&mut window_conn).await;
-        expect_error(from_window, "auth_failed");
+        assert_eq!(
+            expect_error(from_window, "auth_failed"),
+            common::APPROVER_ONLY_MESSAGE
+        );
         send(&mut external, &request).await;
         let from_external = read_reply(&mut external).await;
-        expect_error(from_external, "auth_failed");
+        assert_eq!(
+            expect_error(from_external, "auth_failed"),
+            common::APPROVER_ONLY_MESSAGE
+        );
     }
     let mut approver = h.connect().await;
     register_approver(&mut approver).await;

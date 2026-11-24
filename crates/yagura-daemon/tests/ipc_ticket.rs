@@ -360,6 +360,16 @@ async fn external_is_refused_and_an_approver_reads_every_workspace_but_never_wri
         }
     }
 
+    // Listing workspaces is approver-only: a non-approver gets the shared words.
+    for (who, conn) in [("external", &mut external), ("window", &mut a)] {
+        let reply = request(conn, ClientMessage::ListTicketWorkspaces).await;
+        assert_eq!(
+            common::expect_error(reply, "auth_failed"),
+            common::APPROVER_ONLY_MESSAGE,
+            "{who} ListTicketWorkspaces"
+        );
+    }
+
     let mut appr = approver(&h).await;
     let workspaces =
         expect_workspaces(approver_request(&mut appr, ClientMessage::ListTicketWorkspaces).await);

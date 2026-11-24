@@ -1611,6 +1611,10 @@ async fn read_message_until(
     }
 }
 
+/// The refusal text of every request only the approver may make, spelled out
+/// here rather than derived from the daemon so a drift in the daemon shows.
+pub const APPROVER_ONLY_MESSAGE: &str = "only the approver may make this request";
+
 pub fn expect_error(msg: DaemonMessage, expected_code: &str) -> String {
     match msg {
         DaemonMessage::Error { code, message, .. } => {

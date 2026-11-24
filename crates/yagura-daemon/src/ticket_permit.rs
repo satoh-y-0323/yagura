@@ -18,6 +18,9 @@ pub enum TicketPermitError {
     /// The connection is not allowed this operation at all.
     #[error("the caller is not authorized for this operation")]
     AuthFailed,
+    /// The request is the approver's alone and the connection is not.
+    #[error("only the approver may make this request")]
+    ApproverOnly,
     /// The window cannot take a request: its child has exited, or it was never
     /// registered.
     #[error("the window is not in a state that allows this operation")]
@@ -161,13 +164,13 @@ pub fn issue_read(
 ///
 /// # Errors
 ///
-/// [`TicketPermitError::AuthFailed`] for any other origin.
+/// [`TicketPermitError::ApproverOnly`] for any other origin.
 pub fn issue_list_workspaces(
     origin: &RequestOrigin,
 ) -> Result<WorkspaceListPermit, TicketPermitError> {
     if matches!(origin, RequestOrigin::Approver) {
         Ok(WorkspaceListPermit { _private: () })
     } else {
-        Err(TicketPermitError::AuthFailed)
+        Err(TicketPermitError::ApproverOnly)
     }
 }

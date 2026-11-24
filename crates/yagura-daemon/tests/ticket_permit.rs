@@ -156,7 +156,7 @@ async fn an_external_connection_gets_no_ticket_permit_at_all() {
     ));
     assert!(matches!(
         ticket_permit::issue_list_workspaces(&RequestOrigin::External),
-        Err(TicketPermitError::AuthFailed)
+        Err(TicketPermitError::ApproverOnly)
     ));
 }
 
@@ -236,7 +236,7 @@ async fn a_window_reads_only_its_own_workspace_and_cannot_name_another() {
     assert!(
         matches!(
             ticket_permit::issue_list_workspaces(&RequestOrigin::Window(window)),
-            Err(TicketPermitError::AuthFailed)
+            Err(TicketPermitError::ApproverOnly)
         ),
         "listing every workspace is the approver's alone"
     );

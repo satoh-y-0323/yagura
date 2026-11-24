@@ -830,8 +830,8 @@ pub(super) async fn handle_set_task_assignment(
         outbound.reply(&unsupported_msg());
         return;
     }
-    if !matches!(state.origin, RequestOrigin::Approver) {
-        outbound.reply(&approver_only_msg());
+    if let Err(err) = plan_permit::require_approver(&state.origin) {
+        outbound.reply(&permit_error_msg(err));
         return;
     }
 
@@ -908,8 +908,8 @@ pub(super) async fn handle_clear_task_assignment(
         outbound.reply(&unsupported_msg());
         return;
     }
-    if !matches!(state.origin, RequestOrigin::Approver) {
-        outbound.reply(&approver_only_msg());
+    if let Err(err) = plan_permit::require_approver(&state.origin) {
+        outbound.reply(&permit_error_msg(err));
         return;
     }
 
@@ -974,8 +974,8 @@ pub(super) async fn handle_set_plan_owner(
         outbound.reply(&unsupported_msg());
         return;
     }
-    if !matches!(state.origin, RequestOrigin::Approver) {
-        outbound.reply(&approver_only_msg());
+    if let Err(err) = plan_permit::require_approver(&state.origin) {
+        outbound.reply(&permit_error_msg(err));
         return;
     }
 
@@ -1058,8 +1058,8 @@ pub(super) async fn handle_approve_plan(
         outbound.reply(&unsupported_msg());
         return;
     }
-    if !matches!(state.origin, RequestOrigin::Approver) {
-        outbound.reply(&approver_only_msg());
+    if let Err(err) = plan_permit::require_approver(&state.origin) {
+        outbound.reply(&permit_error_msg(err));
         return;
     }
 
@@ -1216,8 +1216,8 @@ pub(super) async fn handle_mark_plan_seen(
         outbound.reply(&unsupported_msg());
         return;
     }
-    if !matches!(state.origin, RequestOrigin::Approver) {
-        outbound.reply(&approver_only_msg());
+    if let Err(err) = plan_permit::require_approver(&state.origin) {
+        outbound.reply(&permit_error_msg(err));
         return;
     }
 
@@ -1615,6 +1615,7 @@ pub(super) fn map_access_error(err: StoreAccessError) -> DaemonMessage {
 pub(super) fn permit_error_msg(err: PermitError) -> DaemonMessage {
     match err {
         PermitError::AuthFailed => auth_failed_msg(),
+        PermitError::ApproverOnly => approver_only_msg(),
         PermitError::PlanNotFound => plan_not_found_msg(),
         PermitError::NotPlanOwner => not_plan_owner_msg(),
         PermitError::InvalidState => invalid_state_msg(),

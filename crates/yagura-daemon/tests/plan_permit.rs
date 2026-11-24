@@ -504,8 +504,8 @@ async fn approver_only_operations_reject_every_window_origin_even_for_a_nonexist
             &registry,
         );
         assert!(
-            matches!(result, Err(PermitError::AuthFailed)),
-            "{kind:?} from a window must be auth_failed even for a plan_id that does not exist, \
+            matches!(result, Err(PermitError::ApproverOnly)),
+            "{kind:?} from a window must be approver-only even for a plan_id that does not exist, \
              so existence is never revealed by which error comes back, got {result:?}"
         );
     }
@@ -518,8 +518,8 @@ async fn approver_only_operations_reject_every_window_origin_even_for_a_nonexist
         &registry,
     );
     assert!(
-        matches!(nominate_result, Err(PermitError::AuthFailed)),
-        "nominating an owner from a window must be auth_failed the same way, got \
+        matches!(nominate_result, Err(PermitError::ApproverOnly)),
+        "nominating an owner from a window must be approver-only the same way, got \
          {nominate_result:?}"
     );
 }

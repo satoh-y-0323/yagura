@@ -321,7 +321,7 @@ async fn approving_and_marking_seen_are_licensed_only_for_the_approver() {
             .await;
             assert_eq!(
                 from_owner,
-                Err(PermitError::AuthFailed),
+                Err(PermitError::ApproverOnly),
                 "a window, even the plan's alive owner, must never hold {kind:?}"
             );
 
@@ -334,7 +334,7 @@ async fn approving_and_marking_seen_are_licensed_only_for_the_approver() {
                 plan_id,
             )
             .await;
-            assert_eq!(from_external, Err(PermitError::AuthFailed));
+            assert_eq!(from_external, Err(PermitError::ApproverOnly));
 
             let from_approver = change(
                 &table,
