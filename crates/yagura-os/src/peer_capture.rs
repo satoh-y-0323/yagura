@@ -3,8 +3,9 @@
 //! when the operating system cannot name that process for certain.
 //!
 //! The capture itself is [`PeerAuth::capture_peer`](crate::PeerAuth::capture_peer).
-//! This module holds what it returns, the order macOS reads a peer in (kept
-//! free of the operating system so it compiles and is measured everywhere),
+//! This module holds what it returns, the orders macOS and Linux read a peer
+//! in (kept free of the operating system so they compile and are measured
+//! everywhere),
 //! and the startup check that the capture is available at all.
 
 use std::io;
@@ -85,6 +86,64 @@ pub fn capture_in_order<R: OrderReads + ?Sized>(reads: &mut R) -> Option<Capture
         start,
         executable,
     })
+}
+
+/// The reads [`capture_in_pidfd_order`] makes, in the order it makes them.
+///
+/// On Linux the reads are the accepted socket's `SO_PEERPIDFD` and
+/// `SO_PEERCRED` and the process the credentials name; the implementation
+/// keeps the pidfd it took so the last read can poll it. The trait lets the
+/// order be run against a script instead.
+pub trait PidfdReads {
+    /// Takes the pidfd of the process that connected; `false` when the
+    /// connection yields none.
+    fn peer_pidfd(&mut self) -> bool;
+
+    /// The id the kernel recorded for the connection's peer; `None` when it
+    /// cannot be read.
+    fn peer_pid(&mut self) -> Option<u32>;
+
+    /// The start of the process `pid`; `None` when it cannot be read.
+    fn start_of(&mut self, pid: u32) -> Option<ProcessStart>;
+
+    /// The executable the process `pid` runs; `None` when it cannot be read.
+    fn executable_of(&mut self, pid: u32) -> Option<PathBuf>;
+
+    /// Whether the process the taken pidfd refers to has exited, from one
+    /// look that does not wait.
+    ///
+    /// # Errors
+    ///
+    /// Returns the `errno` of a pidfd that cannot be polled, or of one never
+    /// taken.
+    fn pidfd_has_exited(&mut self) -> Result<bool, i32>;
+}
+
+/// Captures a peer through `reads`: the pidfd is taken first, then the
+/// peer's id, its start and its executable, and the peer is captured only
+/// when the pidfd says it still runs after all of them. Any read that fails,
+/// and a peer that ended or whose liveness cannot be checked, captures
+/// nothing.
+///
+/// The pidfd names the process that connected whatever its id names later,
+/// so the reads by id are that process's only if it had not exited when the
+/// last of them was made.
+#[must_use]
+pub fn capture_in_pidfd_order<R: PidfdReads + ?Sized>(reads: &mut R) -> Option<CapturedPeer> {
+    if !reads.peer_pidfd() {
+        return None;
+    }
+    let pid = reads.peer_pid().filter(|&pid| pid != 0)?;
+    let start = reads.start_of(pid)?;
+    let executable = reads.executable_of(pid)?;
+    match reads.pidfd_has_exited() {
+        Ok(false) => Some(CapturedPeer {
+            pid,
+            start,
+            executable,
+        }),
+        Ok(true) | Err(_) => None,
+    }
 }
 
 /// Checks that this system can capture a connection's peer, which the daemon

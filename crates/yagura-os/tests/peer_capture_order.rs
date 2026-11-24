@@ -1,7 +1,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-//! The order in which macOS reads a connection's peer, with the operating
-//! system's reads replaced by a script. The peer is captured only when the
+//! The order in which macOS and Linux read a connection's peer, with the
+//! operating system's reads replaced by a script. The peer is captured only when the
 //! token read, the peer's start and the other end of the socket in its
 //! descriptors all agree, and the token and start read again afterwards are
 //! the same: a process that ended and had its id reused, or that holds no end
@@ -106,6 +106,7 @@ fn a_peer_holding_another_end_than_this_connections_is_not_captured() {
 fn a_connection_whose_own_socket_names_no_other_end_is_not_captured() {
     let mut script = Script::agreeing();
     script.own_pcb = None;
+    script.held = Some((PEER, 0));
     assert!(capture(&mut script).is_none());
 }
 
@@ -155,4 +156,130 @@ fn a_token_that_cannot_be_read_again_captures_no_peer() {
     let mut script = Script::agreeing();
     script.tokens = VecDeque::from([Ok((PEER, 7)), Err(ENOTCONN)]);
     assert!(capture(&mut script).is_none());
+}
+
+/// The Linux reads, in the order they are asked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Read {
+    Pidfd,
+    Pid,
+    Start,
+    Executable,
+    HasExited,
+}
+
+struct LinuxScript {
+    pidfd: bool,
+    pid: Option<u32>,
+    start: Option<ProcessStart>,
+    executable: Option<PathBuf>,
+    has_exited: Result<bool, i32>,
+    asked: Vec<Read>,
+}
+
+impl LinuxScript {
+    fn alive() -> Self {
+        Self {
+            pidfd: true,
+            pid: Some(PEER),
+            start: Some(start("boot:100")),
+            executable: Some(PathBuf::from("/opt/peer")),
+            has_exited: Ok(false),
+            asked: Vec::new(),
+        }
+    }
+}
+
+impl yagura_os::peer_capture::PidfdReads for LinuxScript {
+    fn peer_pidfd(&mut self) -> bool {
+        self.asked.push(Read::Pidfd);
+        self.pidfd
+    }
+
+    fn peer_pid(&mut self) -> Option<u32> {
+        self.asked.push(Read::Pid);
+        self.pid
+    }
+
+    fn start_of(&mut self, pid: u32) -> Option<ProcessStart> {
+        assert_eq!(Some(pid), self.pid, "start is read for the pid just read");
+        self.asked.push(Read::Start);
+        self.start.clone()
+    }
+
+    fn executable_of(&mut self, pid: u32) -> Option<PathBuf> {
+        assert_eq!(
+            Some(pid),
+            self.pid,
+            "executable is read for the pid just read"
+        );
+        self.asked.push(Read::Executable);
+        self.executable.clone()
+    }
+
+    fn pidfd_has_exited(&mut self) -> Result<bool, i32> {
+        self.asked.push(Read::HasExited);
+        self.has_exited
+    }
+}
+
+fn capture_pidfd(script: &mut LinuxScript) -> Option<yagura_os::peer_capture::CapturedPeer> {
+    yagura_os::peer_capture::capture_in_pidfd_order(script)
+}
+
+#[test]
+fn a_pidfd_peer_running_after_every_read_is_captured_pidfd_first_check_last() {
+    let mut script = LinuxScript::alive();
+    let captured = capture_pidfd(&mut script).expect("every read agrees and the peer runs");
+    assert_eq!(captured.pid, PEER);
+    assert_eq!(captured.start, start("boot:100"));
+    assert_eq!(captured.executable, PathBuf::from("/opt/peer"));
+    assert_eq!(script.asked.first(), Some(&Read::Pidfd));
+    assert_eq!(script.asked.last(), Some(&Read::HasExited));
+    for read in [Read::Pid, Read::Start, Read::Executable] {
+        assert_eq!(
+            script.asked.iter().filter(|r| **r == read).count(),
+            1,
+            "{read:?}"
+        );
+    }
+}
+
+#[test]
+fn a_pidfd_peer_that_ended_after_the_other_reads_is_not_captured() {
+    let mut script = LinuxScript::alive();
+    script.has_exited = Ok(true);
+    assert!(capture_pidfd(&mut script).is_none());
+    assert_eq!(script.asked.last(), Some(&Read::HasExited));
+}
+
+#[test]
+fn a_pidfd_peer_whose_liveness_cannot_be_checked_is_not_captured() {
+    for errno in [EINVAL, ENOTCONN] {
+        let mut script = LinuxScript::alive();
+        script.has_exited = Err(errno);
+        assert!(capture_pidfd(&mut script).is_none(), "errno {errno}");
+    }
+}
+
+#[test]
+fn a_connection_that_yields_no_pidfd_reads_nothing_else_and_captures_no_peer() {
+    let mut script = LinuxScript::alive();
+    script.pidfd = false;
+    assert!(capture_pidfd(&mut script).is_none());
+    assert_eq!(script.asked, vec![Read::Pidfd]);
+}
+
+#[test]
+fn a_pidfd_peer_with_a_read_that_fails_is_not_captured() {
+    let breakers: [fn(&mut LinuxScript); 3] = [
+        |s| s.pid = None,
+        |s| s.start = None,
+        |s| s.executable = None,
+    ];
+    for (index, break_read) in breakers.into_iter().enumerate() {
+        let mut script = LinuxScript::alive();
+        break_read(&mut script);
+        assert!(capture_pidfd(&mut script).is_none(), "breaker {index}");
+    }
 }

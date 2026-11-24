@@ -1101,22 +1101,42 @@ fn peer_pidfd(fd: std::os::fd::RawFd) -> io::Result<std::os::fd::OwnedFd> {
     Ok(unsafe { std::os::fd::OwnedFd::from_raw_fd(pidfd) })
 }
 
-/// The pidfd names the process that connected, whatever its id names later,
-/// so the id, start and executable read through `SO_PEERCRED` are that
-/// process's only if the pidfd says it still runs after them.
 #[cfg(target_os = "linux")]
 fn capture_connection_peer(conn: &UnixStream) -> Option<CapturedPeer> {
-    let pidfd = peer_pidfd(conn.as_raw_fd()).ok()?;
-    let pid = peer_pid(conn)?;
-    let start = crate::process_start(pid).ok().flatten()?;
-    let executable = executable_path(pid)?;
-    match crate::process_identity::pidfd_has_exited(&pidfd) {
-        Ok(false) => Some(CapturedPeer {
-            pid,
-            start,
-            executable,
-        }),
-        Ok(true) | Err(_) => None,
+    crate::peer_capture::capture_in_pidfd_order(&mut PidfdSocketReads { conn, pidfd: None })
+}
+
+/// The reads `peer_capture::capture_in_pidfd_order` makes, as Linux answers
+/// them; `pidfd` is the one taken by the first read.
+#[cfg(target_os = "linux")]
+struct PidfdSocketReads<'a> {
+    conn: &'a UnixStream,
+    pidfd: Option<std::os::fd::OwnedFd>,
+}
+
+#[cfg(target_os = "linux")]
+impl crate::peer_capture::PidfdReads for PidfdSocketReads<'_> {
+    fn peer_pidfd(&mut self) -> bool {
+        self.pidfd = peer_pidfd(self.conn.as_raw_fd()).ok();
+        self.pidfd.is_some()
+    }
+
+    fn peer_pid(&mut self) -> Option<u32> {
+        peer_pid(self.conn)
+    }
+
+    fn start_of(&mut self, pid: u32) -> Option<crate::ProcessStart> {
+        crate::process_start(pid).ok().flatten()
+    }
+
+    fn executable_of(&mut self, pid: u32) -> Option<PathBuf> {
+        executable_path(pid)
+    }
+
+    fn pidfd_has_exited(&mut self) -> Result<bool, i32> {
+        let pidfd = self.pidfd.as_ref().ok_or(libc::EBADF)?;
+        crate::process_identity::pidfd_has_exited(pidfd)
+            .map_err(|error| error.raw_os_error().unwrap_or(libc::EINVAL))
     }
 }
 
