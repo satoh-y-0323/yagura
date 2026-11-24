@@ -13,16 +13,17 @@
 //! Each case runs real daemon processes one after the other in one sandbox instance.
 
 use crate::common;
-use crate::common::bins::holder_child_path;
+use crate::common::bins::window_client_command;
+use crate::relay_session::WindowRelay;
 
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output, Stdio};
 use std::time::Duration;
 
-use common::real_daemon::{RunningDaemon, Sandbox, daemon_bin};
+use common::real_daemon::{
+    ClientCommand, ClientLog, ClientRead, RunningDaemon, Sandbox, daemon_bin,
+};
 use common::store_fixtures::{inbox_parcel_keys, seed_parcels_an_older_daemon_kept, store_holds};
-use common::{VALID_TOKEN, identify, read_response, report_status, send};
-use tokio::io::AsyncWriteExt;
+use common::{VALID_TOKEN, read_response, send};
 use yagura_daemon::fault_point::{self, FaultPoint};
 use yagura_daemon::store;
 use yagura_os::{PeerAuth, PlatformIpc};
@@ -38,12 +39,16 @@ const PROFILE: &str = "deliver";
 /// The fixed marker a report notice opens with.
 const REPORT_NOTICE_MARK: &str = "[yagura report]";
 
-fn write_delivering_profile(sandbox: &Sandbox) {
-    let child = holder_child_path()
-        .to_str()
-        .expect("holder_child path must be UTF-8")
-        .to_owned();
-    sandbox.write_probe_profile(PROFILE, &[&child, "hex"], "\n[delivery]\nwake = \"wait\"\n");
+/// The results file every window of a case writes to: a window here is a `window_client`
+/// that speaks to the daemon with the window's own credentials, from inside its tree.
+fn new_log(sandbox: &Sandbox) -> ClientLog {
+    ClientLog::new(sandbox, "parcels")
+}
+
+fn write_delivering_profile(sandbox: &Sandbox, log: &ClientLog) {
+    let client = window_client_command(log.path());
+    let client: Vec<&str> = client.iter().map(String::as_str).collect();
+    sandbox.write_probe_profile(PROFILE, &client, "\n[delivery]\nwake = \"wait\"\n");
 }
 
 /// Starts a daemon whose windows all get [`VALID_TOKEN`] and whose playbook lets a
@@ -80,20 +85,21 @@ const CHAT_PROFILE: &str = "deliver-chat";
 
 /// Writes [`CHAT_PROFILE`] and its detection definition; returns the definitions'
 /// directory, which every daemon of the sandbox is started with.
-fn write_chat_profile(sandbox: &Sandbox) -> PathBuf {
+fn write_chat_profile(sandbox: &Sandbox, log: &ClientLog) -> PathBuf {
     let detections = sandbox.tree.make_dir("persist-detections");
     common::write_control_definition(&detections);
-    let child = holder_child_path()
-        .to_str()
-        .expect("holder_child path must be UTF-8")
-        .to_owned();
+    let argv: Vec<String> = window_client_command(log.path())
+        .iter()
+        .map(|element| format!("'{element}'"))
+        .collect();
     common::write_profile(
         &sandbox.profiles_dir,
         CHAT_PROFILE,
         &format!(
             "schema = 1\ndisplay_name = \"{CHAT_PROFILE}\"\ndetection = \"{}\"\n\n[command]\n\
-             default = ['{child}', 'hex']\n\n[delivery]\nwake = \"wait\"\n",
-            common::CONTROL_DETECTION_NAME
+             default = [{}]\n\n[delivery]\nwake = \"wait\"\n",
+            common::CONTROL_DETECTION_NAME,
+            argv.join(", ")
         ),
     );
     detections
@@ -226,10 +232,62 @@ async fn listed(daemon: &mut RunningDaemon, sandbox: &Sandbox, window_id: &str) 
         })
 }
 
-/// Gives the window a status a handoff may land on.
-async fn make_ready(daemon: &mut RunningDaemon, window_id: &str) {
-    report_status(&mut daemon.client, window_id, WindowStatus::WaitingApproval).await;
+/// Gives the window a status a handoff may land on: its own client reports it, and the
+/// pong after it says the daemon has taken the report.
+async fn make_ready(daemon: &mut RunningDaemon, log: &mut ClientLog, window_id: &str) {
+    let conn = log.new_conn();
+    let report = log.exchange(
+        &conn,
+        &ClientMessage::StatusEvent {
+            source: "test-report".to_string(),
+            status: WindowStatus::WaitingApproval,
+            window_id: Some(window_id.to_string()),
+            token: VALID_TOKEN.to_string(),
+        },
+        ClientRead::Pong,
+    );
+    daemon.type_command(window_id, &report).await;
+    let refused = log.messages(&report).await;
+    assert!(
+        refused.is_empty(),
+        "the window's own status report must be taken: {refused:?}"
+    );
     common::wait_until_status(&mut daemon.client, window_id, WindowStatus::WaitingApproval).await;
+}
+
+/// An `identify` of `window_id` with [`VALID_TOKEN`].
+fn identify_message(window_id: &str) -> ClientMessage {
+    ClientMessage::Identify {
+        window_id: window_id.to_owned(),
+        token: VALID_TOKEN.to_owned(),
+        declaration: None,
+    }
+}
+
+/// Identifies `window_id` from its own client on a connection of its own, which it returns.
+async fn identified(daemon: &mut RunningDaemon, log: &mut ClientLog, window_id: &str) -> String {
+    let conn = log.new_conn();
+    let identify = log.exchange(&conn, &identify_message(window_id), ClientRead::One);
+    daemon.type_command(window_id, &identify).await;
+    match log.message(&identify).await {
+        DaemonMessage::Identified { window_id: acked } => assert_eq!(acked, window_id),
+        other => panic!("expected identified, got {other:?}"),
+    }
+    conn
+}
+
+/// Sends `message` from the client of `window_id` on its connection `conn` and returns the
+/// one response.
+async fn ask(
+    daemon: &mut RunningDaemon,
+    log: &mut ClientLog,
+    window_id: &str,
+    conn: &str,
+    message: &ClientMessage,
+) -> DaemonMessage {
+    let command = log.exchange(conn, message, ClientRead::One);
+    daemon.type_command(window_id, &command).await;
+    log.message(&command).await
 }
 
 /// Sends a handoff carrying `note` to `window_id` on a connection of its own and returns
@@ -288,26 +346,50 @@ fn printed() -> ClientMessage {
         .unwrap_or_else(|err| panic!("the wire must know deliver_printed: {err}"))
 }
 
-/// Takes through the window's door as a hook does: on a connection of its own, printing
-/// what it was answered with and saying so before it ends.
-async fn take(_daemon: &mut RunningDaemon, sandbox: &Sandbox, window_id: &str) -> String {
-    let mut door = connect(sandbox).await;
-    send(&mut door, &door_read_take(window_id)).await;
-    match read_response(&mut door).await {
-        DaemonMessage::Delivery { output, .. } => {
-            send(&mut door, &printed()).await;
-            output
-        }
+/// Takes through the window's door as a hook does: from the window's own client, on a
+/// connection of its own, printing what it was answered with and saying so before it ends.
+async fn take(
+    daemon: &mut RunningDaemon,
+    sandbox: &Sandbox,
+    log: &mut ClientLog,
+    window_id: &str,
+) -> String {
+    let conn = log.new_conn();
+    let read = log.exchange(&conn, &door_read_take(window_id), ClientRead::Delivery);
+    daemon.type_command(window_id, &read).await;
+    let output = match log.message(&read).await {
+        DaemonMessage::Delivery { output, .. } => output,
         other => panic!(
             "expected a delivery from the door of {window_id}, got {other:?}; daemon log:\n{}",
             sandbox.daemon_log()
         ),
-    }
+    };
+    end_door(daemon, log, window_id, &conn).await;
+    output
 }
 
-async fn wait_for_report(client: &mut Connection) -> Vec<yagura_protocol::ReceivedReport> {
-    send(client, &ClientMessage::WaitForReport { timeout_sec: 0 }).await;
-    match read_response(client).await {
+/// Ends the door `conn` of `window_id`'s client, as the door's process ending would.
+async fn end_door(daemon: &mut RunningDaemon, log: &mut ClientLog, window_id: &str, conn: &str) {
+    let close = log.close(conn);
+    daemon.type_command(window_id, &close).await;
+    log.result(&close).await;
+}
+
+async fn wait_for_report(
+    daemon: &mut RunningDaemon,
+    log: &mut ClientLog,
+    window_id: &str,
+    conn: &str,
+) -> Vec<yagura_protocol::ReceivedReport> {
+    match ask(
+        daemon,
+        log,
+        window_id,
+        conn,
+        &ClientMessage::WaitForReport { timeout_sec: 0 },
+    )
+    .await
+    {
         DaemonMessage::Reports { reports, .. } => reports,
         other => panic!("expected reports, got {other:?}"),
     }
@@ -385,11 +467,12 @@ async fn until_kept(sandbox: &Sandbox, needles: &[&str]) {
 async fn a_handoff_waiting_in_an_inbox_is_withdrawn_when_the_daemon_is_killed() {
     const HANDOFF_MARK: &str = "PERSIST-HANDOFF-9K4";
     let sandbox = Sandbox::new("persist-handoff");
-    write_delivering_profile(&sandbox);
+    let mut log = new_log(&sandbox);
+    write_delivering_profile(&sandbox, &log);
 
     let mut first = start_first_with(&sandbox, Some(FaultPoint::HandoffDeposited)).await;
     let window_id = first.open_profile_window(&sandbox, PROFILE).await;
-    make_ready(&mut first, &window_id).await;
+    make_ready(&mut first, &mut log, &window_id).await;
     let _requester = post_handoff(&sandbox, &window_id, HANDOFF_MARK).await;
     let ended = first.wait_for_fault_end().await;
     assert!(
@@ -399,7 +482,7 @@ async fn a_handoff_waiting_in_an_inbox_is_withdrawn_when_the_daemon_is_killed() 
 
     let mut next = sandbox.start().await;
     listed(&mut next, &sandbox, &window_id).await;
-    let taken = take(&mut next, &sandbox, &window_id).await;
+    let taken = take(&mut next, &sandbox, &mut log, &window_id).await;
     assert_eq!(
         count(&taken, HANDOFF_MARK),
         0,
@@ -419,13 +502,16 @@ async fn a_handoff_waiting_in_an_inbox_is_withdrawn_when_the_daemon_is_killed() 
 async fn report_to_opener(
     sandbox: &Sandbox,
     first: &mut RunningDaemon,
+    log: &mut ClientLog,
     summary: &str,
 ) -> (String, String) {
     let parent = first.open_profile_window(sandbox, PROFILE).await;
-    let mut as_parent = connect(sandbox).await;
-    identify(&mut as_parent, &parent).await;
-    send(
-        &mut as_parent,
+    let as_parent = identified(first, log, &parent).await;
+    let child = match ask(
+        first,
+        log,
+        &parent,
+        &as_parent,
         &ClientMessage::OpenWindowFromProfile {
             profile: PROFILE.to_owned(),
             cwd: None,
@@ -435,37 +521,31 @@ async fn report_to_opener(
             on_name_taken: Default::default(),
         },
     )
-    .await;
-    let child = match read_response(&mut as_parent).await {
+    .await
+    {
         DaemonMessage::WindowOpened { window_id, .. } => window_id,
         other => panic!("expected window_opened, got {other:?}"),
     };
-    let mut as_child = connect(sandbox).await;
-    identify(&mut as_child, &child).await;
-    send(
-        &mut as_child,
+    let as_child = identified(first, log, &child).await;
+    match ask(
+        first,
+        log,
+        &child,
+        &as_child,
         &ClientMessage::SendReport {
             outcome: ReportOutcome::Succeeded,
             summary: summary.to_owned(),
             path: None,
         },
     )
-    .await;
-    match read_response(&mut as_child).await {
+    .await
+    {
         DaemonMessage::ReportSent { delivered_to, .. } => {
             assert_eq!(delivered_to.as_deref(), Some(parent.as_str()));
         }
         other => panic!("expected report_sent, got {other:?}"),
     }
     (parent, child)
-}
-
-/// The sandbox daemon's endpoint, which a relay connects to.
-fn endpoint(sandbox: &Sandbox) -> String {
-    let user = PlatformIpc::default()
-        .current_user_id()
-        .expect("the current user id must resolve");
-    yagura_os::default_endpoint(&user, &sandbox.namespace())
 }
 
 /// A report the parent's relay took with `wait_for_report` but never said it received
@@ -476,12 +556,13 @@ async fn a_report_taken_through_a_relay_without_a_receipt_is_taken_again_after_t
  {
     const REPORT_MARK: &str = "PERSIST-RECEIPT-6H3";
     let sandbox = Sandbox::new("persist-receipt");
-    write_delivering_profile(&sandbox);
+    let mut log = new_log(&sandbox);
+    write_delivering_profile(&sandbox, &log);
 
     let mut first = start_first(&sandbox).await;
-    let (parent, child) = report_to_opener(&sandbox, &mut first, REPORT_MARK).await;
-    let mut relay = crate::relay_session::window_session(&endpoint(&sandbox), &parent).await;
-    let took = crate::relay_session::take_reports(&mut relay, 1, 0).await;
+    let (parent, child) = report_to_opener(&sandbox, &mut first, &mut log, REPORT_MARK).await;
+    let mut relay = WindowRelay::open(&mut first, &mut log, &parent).await;
+    let took = relay.take_reports(&mut first, &mut log, 1, 0).await;
     let keys = crate::relay_session::report_keys(&took.reports);
     assert_eq!(
         keys.iter()
@@ -491,12 +572,11 @@ async fn a_report_taken_through_a_relay_without_a_receipt_is_taken_again_after_t
         "the parent's relay takes the report from the first daemon"
     );
     first.kill_keeping_windows();
-    drop(relay);
 
     let mut next = sandbox.start().await;
     listed(&mut next, &sandbox, &parent).await;
-    let mut relay = crate::relay_session::window_session(&endpoint(&sandbox), &parent).await;
-    let again = crate::relay_session::take_reports(&mut relay, 1, 0).await;
+    let mut relay = WindowRelay::open(&mut next, &mut log, &parent).await;
+    let again = relay.take_reports(&mut next, &mut log, 1, 0).await;
     assert_eq!(
         crate::relay_session::report_keys(&again.reports),
         keys,
@@ -516,10 +596,11 @@ async fn a_handoff_envelope_and_a_report_notice_an_older_daemon_kept_are_dropped
     const STALE_NOTICE_MARK: &str = "PERSIST-STALE-NOTICE-4J1";
     const REPORT_MARK: &str = "PERSIST-REPORT-6B5";
     let sandbox = Sandbox::new("persist-older-parcels");
-    write_delivering_profile(&sandbox);
+    let mut log = new_log(&sandbox);
+    write_delivering_profile(&sandbox, &log);
 
     let mut first = start_first(&sandbox).await;
-    let (parent, child) = report_to_opener(&sandbox, &mut first, REPORT_MARK).await;
+    let (parent, child) = report_to_opener(&sandbox, &mut first, &mut log, REPORT_MARK).await;
     first.kill_keeping_windows();
     seed_parcels_an_older_daemon_kept(
         &store_db(&sandbox),
@@ -530,7 +611,7 @@ async fn a_handoff_envelope_and_a_report_notice_an_older_daemon_kept_are_dropped
 
     let mut next = sandbox.start().await;
     listed(&mut next, &sandbox, &parent).await;
-    let taken = take(&mut next, &sandbox, &parent).await;
+    let taken = take(&mut next, &sandbox, &mut log, &parent).await;
     assert_eq!(
         (
             count(&taken, STALE_HANDOFF_MARK),
@@ -542,7 +623,7 @@ async fn a_handoff_envelope_and_a_report_notice_an_older_daemon_kept_are_dropped
          from the report: {taken:?}; daemon log:\n{}",
         sandbox.daemon_log()
     );
-    let again = take(&mut next, &sandbox, &parent).await;
+    let again = take(&mut next, &sandbox, &mut log, &parent).await;
     assert_eq!(
         count(&again, REPORT_NOTICE_MARK),
         0,
@@ -555,15 +636,14 @@ async fn a_handoff_envelope_and_a_report_notice_an_older_daemon_kept_are_dropped
         "no envelope or notice may stay in the store: {kept:?}"
     );
 
-    let mut as_parent = connect(&sandbox).await;
-    identify(&mut as_parent, &parent).await;
-    let reports = wait_for_report(&mut as_parent).await;
+    let as_parent = identified(&mut next, &mut log, &parent).await;
+    let reports = wait_for_report(&mut next, &mut log, &parent, &as_parent).await;
     let summaries: Vec<(&str, &str)> = reports
         .iter()
         .map(|report| (report.from_window_id.as_str(), report.summary.as_str()))
         .collect();
     assert_eq!(summaries, [(child.as_str(), REPORT_MARK)]);
-    let reports = wait_for_report(&mut as_parent).await;
+    let reports = wait_for_report(&mut next, &mut log, &parent, &as_parent).await;
     assert!(
         reports.is_empty(),
         "a report already read must not be read again: {reports:?}"
@@ -578,13 +658,14 @@ async fn a_lost_windows_kept_parcel_stays_with_its_row_and_a_closed_windows_does
     const LOST_MARK: &str = "PERSIST-LOST-5T1";
     const CLOSED_MARK: &str = "PERSIST-CLOSED-8M6";
     let sandbox = Sandbox::new("persist-lost");
-    let detections = write_chat_profile(&sandbox);
+    let mut log = new_log(&sandbox);
+    let detections = write_chat_profile(&sandbox, &log);
 
     let mut first = start_chatting(&sandbox, &detections).await;
     let lost = first.open_profile_window(&sandbox, CHAT_PROFILE).await;
     let closed = first.open_profile_window(&sandbox, CHAT_PROFILE).await;
-    make_ready(&mut first, &lost).await;
-    make_ready(&mut first, &closed).await;
+    make_ready(&mut first, &mut log, &lost).await;
+    make_ready(&mut first, &mut log, &closed).await;
     post_chat(&mut first.client, format!("@{lost} {LOST_MARK}")).await;
     post_chat(&mut first.client, format!("@{closed} {CLOSED_MARK}")).await;
     // The room keeps the body alone; only the envelope in the inbox carries it as JSON.
@@ -667,12 +748,13 @@ async fn a_lost_windows_kept_parcel_stays_with_its_row_and_a_closed_windows_does
 async fn a_chat_post_committed_as_the_daemon_ends_is_taken_once_by_the_next_daemon() {
     const CHAT_MARK: &str = "PERSIST-COMMITTED-7H3";
     let sandbox = Sandbox::new("persist-chat-committed");
-    let detections = write_chat_profile(&sandbox);
+    let mut log = new_log(&sandbox);
+    let detections = write_chat_profile(&sandbox, &log);
 
     let mut first =
         start_chatting_with(&sandbox, &detections, Some(FaultPoint::ChatPostCommitted)).await;
     let window_id = first.open_profile_window(&sandbox, CHAT_PROFILE).await;
-    make_ready(&mut first, &window_id).await;
+    make_ready(&mut first, &mut log, &window_id).await;
     send(
         &mut first.client,
         &ClientMessage::SendChat {
@@ -690,7 +772,7 @@ async fn a_chat_post_committed_as_the_daemon_ends_is_taken_once_by_the_next_daem
     let mut next = start_chatting(&sandbox, &detections).await;
     listed(&mut next, &sandbox, &window_id).await;
     let seq = chat_seq_of(&mut next.client, &sandbox, CHAT_MARK).await;
-    let taken = take(&mut next, &sandbox, &window_id).await;
+    let taken = take(&mut next, &sandbox, &mut log, &window_id).await;
     assert_eq!(
         count(&taken, CHAT_MARK),
         1,
@@ -709,7 +791,8 @@ async fn a_chat_post_committed_as_the_daemon_ends_is_taken_once_by_the_next_daem
 async fn a_parcel_ending_as_the_daemon_ends_leaves_its_chat_delivery_and_its_row_in_step() {
     const CHAT_MARK: &str = "PERSIST-ENDING-4R9";
     let sandbox = Sandbox::new("persist-chat-ending");
-    let detections = write_chat_profile(&sandbox);
+    let mut log = new_log(&sandbox);
+    let detections = write_chat_profile(&sandbox, &log);
 
     let mut first = start_chatting_with(
         &sandbox,
@@ -718,16 +801,17 @@ async fn a_parcel_ending_as_the_daemon_ends_leaves_its_chat_delivery_and_its_row
     )
     .await;
     let window_id = first.open_profile_window(&sandbox, CHAT_PROFILE).await;
-    make_ready(&mut first, &window_id).await;
+    make_ready(&mut first, &mut log, &window_id).await;
     let seq = post_chat(&mut first.client, format!("@{window_id} {CHAT_MARK}")).await;
-    // The door's printing ends the parcel; the daemon ends before it could settle.
-    let mut door = connect(&sandbox).await;
-    send(&mut door, &door_read_take(&window_id)).await;
-    match read_response(&mut door).await {
+    // The door's printing ends the parcel; the daemon ends before it could settle. The
+    // client says it printed once it has read the delivery.
+    let door = log.new_conn();
+    let read = log.exchange(&door, &door_read_take(&window_id), ClientRead::Delivery);
+    first.type_command(&window_id, &read).await;
+    match log.message(&read).await {
         DaemonMessage::Delivery { output, .. } => assert_eq!(count(&output, CHAT_MARK), 1),
         other => panic!("expected the door's delivery, got {other:?}"),
     }
-    send(&mut door, &printed()).await;
     let ended = first.wait_for_fault_end().await;
     assert!(
         !ended.success(),
@@ -749,7 +833,7 @@ async fn a_parcel_ending_as_the_daemon_ends_leaves_its_chat_delivery_and_its_row
         sandbox.daemon_log()
     );
     if kept {
-        let taken = take(&mut next, &sandbox, &window_id).await;
+        let taken = take(&mut next, &sandbox, &mut log, &window_id).await;
         assert_eq!(count(&taken, CHAT_MARK), 1, "taken: {taken:?}");
         until_chat_taken(&mut next.client, &sandbox, seq, &window_id).await;
     }
@@ -777,7 +861,8 @@ fn report_task(task_id: &str) -> yagura_protocol::PlanTaskSpec {
 async fn a_task_report_half_written_as_the_daemon_ends_shows_in_both_places_or_neither() {
     const REPORT_MARK: &str = "PERSIST-TASK-REPORT-8N2";
     let sandbox = Sandbox::new("persist-task-report");
-    write_delivering_profile(&sandbox);
+    let mut log = new_log(&sandbox);
+    write_delivering_profile(&sandbox, &log);
 
     // A plan that needs no approval, so its task window opens at once.
     let playbook = sandbox
@@ -801,45 +886,51 @@ async fn a_task_report_half_written_as_the_daemon_ends_shows_in_both_places_or_n
         ])
         .await;
     let parent = first.open_profile_window(&sandbox, PROFILE).await;
-    let mut as_parent = connect(&sandbox).await;
-    identify(&mut as_parent, &parent).await;
-    send(
-        &mut as_parent,
+    let as_parent = identified(&mut first, &mut log, &parent).await;
+    let plan_id = match ask(
+        &mut first,
+        &mut log,
+        &parent,
+        &as_parent,
         &ClientMessage::CreatePlan {
             title: "plan".to_owned(),
             tasks: vec![report_task("t1")],
             ticket: None,
         },
     )
-    .await;
-    let plan_id = match read_response(&mut as_parent).await {
+    .await
+    {
         DaemonMessage::PlanDetail { plan } => plan.plan_id,
         other => panic!("expected plan_detail, got {other:?}"),
     };
-    send(
-        &mut as_parent,
+    let task_window = match ask(
+        &mut first,
+        &mut log,
+        &parent,
+        &as_parent,
         &ClientMessage::OpenTaskWindow {
             plan_id: plan_id.clone(),
             task_id: "t1".to_owned(),
             name: None,
         },
     )
-    .await;
-    let task_window = match read_response(&mut as_parent).await {
+    .await
+    {
         DaemonMessage::TaskWindowOpened { window_id, .. } => window_id,
         other => panic!("expected task_window_opened, got {other:?}"),
     };
-    let mut as_task = connect(&sandbox).await;
-    identify(&mut as_task, &task_window).await;
-    send(
-        &mut as_task,
+    let as_task = identified(&mut first, &mut log, &task_window).await;
+    // The daemon ends while it settles the report, so nothing is read back.
+    let report = log.exchange(
+        &as_task,
         &ClientMessage::SendReport {
             outcome: ReportOutcome::Succeeded,
             summary: REPORT_MARK.to_owned(),
             path: None,
         },
-    )
-    .await;
+        ClientRead::Nothing,
+    );
+    first.type_command(&task_window, &report).await;
     let ended = first.wait_for_fault_end().await;
     assert!(
         !ended.success(),
@@ -853,16 +944,18 @@ async fn a_task_report_half_written_as_the_daemon_ends_shows_in_both_places_or_n
         ])
         .await;
     listed(&mut next, &sandbox, &parent).await;
-    let mut as_parent = connect(&sandbox).await;
-    identify(&mut as_parent, &parent).await;
-    send(
-        &mut as_parent,
+    let as_parent = identified(&mut next, &mut log, &parent).await;
+    let plan = match ask(
+        &mut next,
+        &mut log,
+        &parent,
+        &as_parent,
         &ClientMessage::GetPlan {
             plan_id: plan_id.clone(),
         },
     )
-    .await;
-    let plan = match read_response(&mut as_parent).await {
+    .await
+    {
         DaemonMessage::PlanDetail { plan } => plan,
         other => panic!("expected plan_detail, got {other:?}"),
     };
@@ -874,7 +967,7 @@ async fn a_task_report_half_written_as_the_daemon_ends_shows_in_both_places_or_n
         .map(|report| report.summary.clone())
         .into_iter()
         .collect();
-    let reports = wait_for_report(&mut as_parent).await;
+    let reports = wait_for_report(&mut next, &mut log, &parent, &as_parent).await;
     let to_parent: Vec<String> = reports
         .iter()
         .map(|report| report.summary.clone())
@@ -891,57 +984,44 @@ async fn a_task_report_half_written_as_the_daemon_ends_shows_in_both_places_or_n
 /// The door a CLI's turn-start hook runs to take what waits in its window's inbox.
 const TAKE_DOOR: &str = "--deliver-take";
 
-/// Runs the daemon executable as the hook door `door` of `window_id`, the way a CLI's
-/// hook runs it against the sandbox's instance, and returns how it ended.
-async fn run_door(sandbox: &Sandbox, window_id: &str, door: &str) -> Output {
-    run_door_with(sandbox, window_id, &[door]).await
+/// How a door the client of a window ran ended.
+struct DoorRun {
+    code: Option<i64>,
+    stdout: String,
+    stderr: String,
 }
 
-/// [`run_door`] for a door that takes arguments (`--hook <profile> <event>`).
-async fn run_door_with(sandbox: &Sandbox, window_id: &str, args: &[&str]) -> Output {
-    let mut command = Command::new(daemon_bin());
-    command
-        .args(args)
-        .env("YAGURA_INSTANCE", &sandbox.instance)
-        .env("YAGURA_WINDOW_ID", window_id)
-        .env("YAGURA_STATUS_TOKEN", VALID_TOKEN)
-        .env_remove("YAGURA_STORE_DB")
-        .env_remove(fault_point::POINT_ENV)
-        .env_remove(fault_point::SIGNAL_ENV)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    if cfg!(windows) {
-        command.env("LOCALAPPDATA", &sandbox.state_home);
-    } else {
-        command
-            .env("XDG_STATE_HOME", &sandbox.state_home)
-            .env("XDG_DATA_HOME", sandbox.tree.make_dir("data"))
-            .env("XDG_CONFIG_HOME", sandbox.tree.make_dir("config"))
-            .env("HOME", sandbox.tree.make_dir("home"));
+/// The command that has the client of the window run the daemon executable as the hook
+/// door `args` (`--deliver-take`, or `--hook <profile> <event>`), the way a CLI's hook runs
+/// it in the window's own environment, to its end.
+fn door_command(log: &mut ClientLog, args: &[&str]) -> ClientCommand {
+    let exe = daemon_bin();
+    let exe = exe.to_str().expect("the daemon path must be UTF-8");
+    let mut argv = vec![exe];
+    argv.extend_from_slice(args);
+    log.run(&argv, None)
+}
+
+/// What the door `command` the window's client ran printed and how it ended.
+async fn door_run(log: &mut ClientLog, command: &ClientCommand) -> DoorRun {
+    let result = log.result(command).await;
+    DoorRun {
+        code: result["code"].as_i64(),
+        stdout: result["stdout"].as_str().unwrap_or_default().to_owned(),
+        stderr: result["stderr"].as_str().unwrap_or_default().to_owned(),
     }
-    let child = command.spawn().expect("spawn the door");
-    let pid = child.id();
-    let ended = tokio::time::timeout(
-        HANG_GUARD,
-        tokio::task::spawn_blocking(move || child.wait_with_output()),
-    )
-    .await;
-    match ended {
-        Ok(joined) => joined
-            .expect("the door's waiter must join")
-            .expect("the door must be waitable"),
-        Err(_) => {
-            if let Some(handle) = yagura_os::process_start(pid)
-                .ok()
-                .flatten()
-                .and_then(|start| yagura_os::ProcessHandle::open(pid, &start).ok().flatten())
-            {
-                let _ = handle.kill();
-            }
-            panic!("the door {pid} did not end within {HANG_GUARD:?}");
-        }
-    }
+}
+
+/// Runs the door `args` from the client of `window_id` and returns how it ended.
+async fn run_door(
+    daemon: &mut RunningDaemon,
+    log: &mut ClientLog,
+    window_id: &str,
+    args: &[&str],
+) -> DoorRun {
+    let command = door_command(log, args);
+    daemon.type_command(window_id, &command).await;
+    door_run(log, &command).await
 }
 
 /// A door prints a chat post before it says so, and ends without waiting for an answer.
@@ -953,15 +1033,18 @@ async fn run_door_with(sandbox: &Sandbox, window_id: &str, args: &[&str]) -> Out
 async fn a_door_whose_daemon_ends_before_settling_has_printed_and_the_next_daemon_hands_it_again() {
     const CHAT_MARK: &str = "PERSIST-DOOR-5C8";
     let sandbox = Sandbox::new("persist-door");
-    let detections = write_chat_profile(&sandbox);
+    let mut log = new_log(&sandbox);
+    let detections = write_chat_profile(&sandbox, &log);
 
     let mut first =
         start_chatting_with(&sandbox, &detections, Some(FaultPoint::DoorBeforeSettle)).await;
     let window_id = first.open_profile_window(&sandbox, CHAT_PROFILE).await;
-    make_ready(&mut first, &window_id).await;
+    make_ready(&mut first, &mut log, &window_id).await;
     let seq = post_chat(&mut first.client, format!("@{window_id} {CHAT_MARK}")).await;
+    let door_command = door_command(&mut log, &[TAKE_DOOR]);
+    first.type_command(&window_id, &door_command).await;
     let (door, ended) = tokio::join!(
-        run_door(&sandbox, &window_id, TAKE_DOOR),
+        door_run(&mut log, &door_command),
         first.wait_for_fault_end()
     );
     assert!(
@@ -971,27 +1054,27 @@ async fn a_door_whose_daemon_ends_before_settling_has_printed_and_the_next_daemo
 
     let mut next = start_chatting(&sandbox, &detections).await;
     listed(&mut next, &sandbox, &window_id).await;
-    let again = run_door(&sandbox, &window_id, TAKE_DOOR).await;
-    let printed = String::from_utf8_lossy(&door.stdout);
-    let printed_again = String::from_utf8_lossy(&again.stdout);
+    let again = run_door(&mut next, &mut log, &window_id, &[TAKE_DOOR]).await;
+    let printed = door.stdout.as_str();
+    let printed_again = again.stdout.as_str();
     assert_eq!(
         (
-            count(&printed, CHAT_MARK),
-            door.status.code(),
-            count(&printed_again, CHAT_MARK),
-            again.status.success(),
+            count(printed, CHAT_MARK),
+            door.code,
+            count(printed_again, CHAT_MARK),
+            again.code == Some(0),
         ),
         (1, Some(0), 1, true),
         "(marks the first door printed, its exit code, marks the next daemon's door printed, \
          whether it succeeded); first door stdout {printed:?} stderr {:?}; next door stdout \
          {printed_again:?} stderr {:?}; daemon log:\n{}",
-        String::from_utf8_lossy(&door.stderr),
-        String::from_utf8_lossy(&again.stderr),
+        door.stderr,
+        again.stderr,
         sandbox.daemon_log()
     );
     assert_eq!(
-        chat_envelope_id(&printed, CHAT_MARK),
-        chat_envelope_id(&printed_again, CHAT_MARK),
+        chat_envelope_id(printed, CHAT_MARK),
+        chat_envelope_id(printed_again, CHAT_MARK),
         "the kept post is handed out again under the same id, so its reader can tell it is          the one it already has"
     );
     // The door ends without waiting for the take to settle, so the record follows it.
@@ -1000,10 +1083,10 @@ async fn a_door_whose_daemon_ends_before_settling_has_printed_and_the_next_daemo
 
     let mut last = start_chatting(&sandbox, &detections).await;
     listed(&mut last, &sandbox, &window_id).await;
-    let after = run_door(&sandbox, &window_id, TAKE_DOOR).await;
-    let printed_after = String::from_utf8_lossy(&after.stdout);
+    let after = run_door(&mut last, &mut log, &window_id, &[TAKE_DOOR]).await;
+    let printed_after = after.stdout.as_str();
     assert_eq!(
-        count(&printed_after, CHAT_MARK),
+        count(printed_after, CHAT_MARK),
         0,
         "a post a door printed under a daemon that settled the take must not come out again: \
          {printed_after:?}"
@@ -1016,27 +1099,25 @@ async fn a_door_whose_daemon_ends_before_settling_has_printed_and_the_next_daemo
 async fn a_take_whose_door_ends_before_printing_is_handed_out_again_by_the_same_daemon() {
     const CHAT_MARK: &str = "PERSIST-DOOR-GONE-2L6";
     let sandbox = Sandbox::new("persist-door-gone");
-    let detections = write_chat_profile(&sandbox);
+    let mut log = new_log(&sandbox);
+    let detections = write_chat_profile(&sandbox, &log);
 
     let mut daemon = start_chatting(&sandbox, &detections).await;
     let window_id = daemon.open_profile_window(&sandbox, CHAT_PROFILE).await;
-    make_ready(&mut daemon, &window_id).await;
+    make_ready(&mut daemon, &mut log, &window_id).await;
     post_chat(&mut daemon.client, format!("@{window_id} {CHAT_MARK}")).await;
 
-    let mut door = connect(&sandbox).await;
-    // Sent as the frame a door of revision 34 sends: it says it printed only once it has.
-    let body = serde_json::json!({
-        "type": "door_read",
-        "window_id": window_id,
-        "token": VALID_TOKEN,
-        "door": { "kind": "take" },
-    });
-    door.write_all(&yagura_protocol::frame_encode(
-        &serde_json::to_vec(&body).unwrap(),
-    ))
-    .await
-    .expect("write the door's take");
-    let handed = read_response(&mut door).await;
+    // The door's take, as a door of revision 34 sends it: it says it printed only once it
+    // has, so reading the delivery does not say it.
+    let door = log.new_conn();
+    let handed = ask(
+        &mut daemon,
+        &mut log,
+        &window_id,
+        &door,
+        &door_read_take(&window_id),
+    )
+    .await;
     let handed_marks = match &handed {
         DaemonMessage::Delivery { output, .. } => count(output, CHAT_MARK),
         _ => 0,
@@ -1048,11 +1129,11 @@ async fn a_take_whose_door_ends_before_printing_is_handed_out_again_by_the_same_
         sandbox.daemon_log()
     );
     // The door ends without printing.
-    drop(door);
+    end_door(&mut daemon, &mut log, &window_id, &door).await;
 
     let deadline = tokio::time::Instant::now() + HANG_GUARD;
     let taken = loop {
-        let taken = take(&mut daemon, &sandbox, &window_id).await;
+        let taken = take(&mut daemon, &sandbox, &mut log, &window_id).await;
         if count(&taken, CHAT_MARK) > 0 {
             break taken;
         }
@@ -1065,7 +1146,7 @@ async fn a_take_whose_door_ends_before_printing_is_handed_out_again_by_the_same_
         tokio::time::sleep(Duration::from_millis(50)).await;
     };
     assert_eq!(count(&taken, CHAT_MARK), 1, "taken: {taken:?}");
-    let again = take(&mut daemon, &sandbox, &window_id).await;
+    let again = take(&mut daemon, &sandbox, &mut log, &window_id).await;
     assert_eq!(
         count(&again, CHAT_MARK),
         0,
@@ -1085,7 +1166,8 @@ async fn a_hook_event_whose_daemon_ends_before_settling_has_printed_and_the_next
  {
     const CHAT_MARK: &str = "PERSIST-HOOK-DOOR-7Q4";
     let sandbox = Sandbox::new("persist-hook-door");
-    let detections = write_chat_profile(&sandbox);
+    let mut log = new_log(&sandbox);
+    let detections = write_chat_profile(&sandbox, &log);
     let profile_file = sandbox.profiles_dir.join(format!("{CHAT_PROFILE}.toml"));
     let mut source = std::fs::read_to_string(&profile_file).expect("read the chat profile");
     source.push_str(&format!(
@@ -1100,10 +1182,12 @@ async fn a_hook_event_whose_daemon_ends_before_settling_has_printed_and_the_next
     let mut first =
         start_chatting_with(&sandbox, &detections, Some(FaultPoint::DoorBeforeSettle)).await;
     let window_id = first.open_profile_window(&sandbox, CHAT_PROFILE).await;
-    make_ready(&mut first, &window_id).await;
+    make_ready(&mut first, &mut log, &window_id).await;
     let seq = post_chat(&mut first.client, format!("@{window_id} {CHAT_MARK}")).await;
+    let hook_command = door_command(&mut log, &hook);
+    first.type_command(&window_id, &hook_command).await;
     let (door, ended) = tokio::join!(
-        run_door_with(&sandbox, &window_id, &hook),
+        door_run(&mut log, &hook_command),
         first.wait_for_fault_end()
     );
     assert!(
@@ -1113,21 +1197,21 @@ async fn a_hook_event_whose_daemon_ends_before_settling_has_printed_and_the_next
 
     let mut next = start_chatting(&sandbox, &detections).await;
     listed(&mut next, &sandbox, &window_id).await;
-    let again = run_door_with(&sandbox, &window_id, &hook).await;
-    let printed = String::from_utf8_lossy(&door.stdout);
-    let printed_again = String::from_utf8_lossy(&again.stdout);
+    let again = run_door(&mut next, &mut log, &window_id, &hook).await;
+    let printed = door.stdout.as_str();
+    let printed_again = again.stdout.as_str();
     assert_eq!(
         (
-            count(&printed, CHAT_MARK),
-            door.status.success(),
-            count(&printed_again, CHAT_MARK),
-            again.status.success(),
+            count(printed, CHAT_MARK),
+            door.code == Some(0),
+            count(printed_again, CHAT_MARK),
+            again.code == Some(0),
         ),
         (1, true, 1, true),
         "(marks the first hook printed, whether it succeeded, marks the next daemon's hook          printed, whether it succeeded); first hook stdout {printed:?} stderr {:?}; next hook          stdout {printed_again:?} stderr {:?}; daemon log:
 {}",
-        String::from_utf8_lossy(&door.stderr),
-        String::from_utf8_lossy(&again.stderr),
+        door.stderr,
+        again.stderr,
         sandbox.daemon_log()
     );
     // The hook ends without waiting for the take to settle, so the record follows it.
@@ -1136,10 +1220,10 @@ async fn a_hook_event_whose_daemon_ends_before_settling_has_printed_and_the_next
 
     let mut last = start_chatting(&sandbox, &detections).await;
     listed(&mut last, &sandbox, &window_id).await;
-    let after = run_door_with(&sandbox, &window_id, &hook).await;
-    let printed_after = String::from_utf8_lossy(&after.stdout);
+    let after = run_door(&mut last, &mut log, &window_id, &hook).await;
+    let printed_after = after.stdout.as_str();
     assert_eq!(
-        count(&printed_after, CHAT_MARK),
+        count(printed_after, CHAT_MARK),
         0,
         "a post a hook printed under a daemon that settled the take must not come out again:          {printed_after:?}"
     );
@@ -1152,17 +1236,25 @@ async fn a_hook_event_whose_daemon_ends_before_settling_has_printed_and_the_next
 async fn a_post_a_door_holds_when_its_rooms_history_goes_is_printed_and_settles_without_its_row() {
     const CHAT_MARK: &str = "PERSIST-CLEARED-HELD-8K3";
     let sandbox = Sandbox::new("persist-cleared-held");
-    let detections = write_chat_profile(&sandbox);
+    let mut log = new_log(&sandbox);
+    let detections = write_chat_profile(&sandbox, &log);
 
     let mut daemon = start_chatting(&sandbox, &detections).await;
     let window_id = daemon.open_profile_window(&sandbox, CHAT_PROFILE).await;
-    make_ready(&mut daemon, &window_id).await;
+    make_ready(&mut daemon, &mut log, &window_id).await;
     post_chat(&mut daemon.client, format!("@{window_id} {CHAT_MARK}")).await;
     until_kept(&sandbox, &[&format!("{CHAT_MARK}\"")]).await;
 
-    let mut door = connect(&sandbox).await;
-    send(&mut door, &door_read_take(&window_id)).await;
-    match read_response(&mut door).await {
+    let door = log.new_conn();
+    match ask(
+        &mut daemon,
+        &mut log,
+        &window_id,
+        &door,
+        &door_read_take(&window_id),
+    )
+    .await
+    {
         DaemonMessage::Delivery { output, .. } => assert_eq!(
             count(&output, CHAT_MARK),
             1,
@@ -1178,8 +1270,10 @@ async fn a_post_a_door_holds_when_its_rooms_history_goes_is_printed_and_settles_
         .expect("clearing the room's history must succeed");
     drop(chat);
 
-    send(&mut door, &printed()).await;
-    drop(door);
+    let printed = log.exchange(&door, &printed(), ClientRead::Nothing);
+    daemon.type_command(&window_id, &printed).await;
+    log.result(&printed).await;
+    end_door(&mut daemon, &mut log, &window_id, &door).await;
 
     let db = store_db(&sandbox);
     let deadline = tokio::time::Instant::now() + HANG_GUARD;
@@ -1191,7 +1285,7 @@ async fn a_post_a_door_holds_when_its_rooms_history_goes_is_printed_and_settles_
         );
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    let again = take(&mut daemon, &sandbox, &window_id).await;
+    let again = take(&mut daemon, &sandbox, &mut log, &window_id).await;
     assert_eq!(
         count(&again, CHAT_MARK),
         0,

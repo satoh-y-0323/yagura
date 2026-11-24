@@ -547,10 +547,9 @@ pub enum ClientRead {
     One,
     Pong,
     Delivery,
-    // The common module is built whole into the one test binary, whether or not a test
-    // reads a raw frame.
-    #[allow(dead_code)]
     Frame,
+    /// Sends and reads nothing, for a frame the daemon does not answer.
+    Nothing,
 }
 
 impl ClientRead {
@@ -560,6 +559,7 @@ impl ClientRead {
             Self::Pong => "pong",
             Self::Delivery => "delivery",
             Self::Frame => "frame",
+            Self::Nothing => "none",
         }
     }
 }
@@ -629,8 +629,6 @@ impl ClientLog {
     }
 
     /// Sends the JSON `frame` as one frame on the connection `conn`, then reads.
-    // As for `ClientRead::Frame`.
-    #[allow(dead_code)]
     pub fn exchange_frame(&mut self, conn: &str, frame: &Value, read: ClientRead) -> ClientCommand {
         self.command(json!({
             "op": "exchange",
@@ -640,9 +638,12 @@ impl ClientLog {
         }))
     }
 
+    /// Drops the connection `conn`, as a door's process ending does.
+    pub fn close(&mut self, conn: &str) -> ClientCommand {
+        self.command(json!({ "op": "close", "conn": conn }))
+    }
+
     /// Reads on the connection `conn` without sending.
-    // As for `ClientRead::Frame`.
-    #[allow(dead_code)]
     pub fn read(&mut self, conn: &str, read: ClientRead) -> ClientCommand {
         self.command(json!({ "op": "exchange", "conn": conn, "read": read.name() }))
     }
@@ -674,8 +675,6 @@ impl ClientLog {
     }
 
     /// Runs `argv` to its end as a child of the client.
-    // As for `ClientRead::Frame`.
-    #[allow(dead_code)]
     pub fn run(&mut self, argv: &[&str], stdin: Option<&str>) -> ClientCommand {
         self.command(json!({ "op": "run", "argv": argv, "stdin": stdin }))
     }

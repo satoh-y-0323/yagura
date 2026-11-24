@@ -19,6 +19,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::hook_events_door::open_launched;
+use common::real_daemon::{ClientCommand, ClientLog, ClientRead, RunningDaemon};
 use common::relay::{
     RelayClient, cancelled_line, discover_line, hello, hello_declaring, initialize_line,
     initialized_line, roots_list_changed_line, stateless_meta, tool_call_line, tool_json,
@@ -26,11 +27,11 @@ use common::relay::{
 use common::{Harness, VALID_TOKEN, approver_base_config, policy};
 use yagura_daemon::DaemonConfig;
 use yagura_daemon::window::HooksRoute;
-use yagura_protocol::MAX_FRAME_BODY_LEN;
 use yagura_protocol::relay::{
     INVALID_REQUEST, RESOURCE_EXHAUSTED, RelayFrame, RelayRefusedKind, RelayResume,
     SUPPORTED_CONTRACTS, request_id,
 };
+use yagura_protocol::{ClientMessage, DaemonMessage, MAX_FRAME_BODY_LEN};
 use yagura_test_support::HANG_GUARD;
 use yagura_test_support::relay_stdio::{rpc_error_word, tool_call_error};
 
@@ -1112,23 +1113,156 @@ pub(crate) async fn take_reports(client: &mut RelayClient, id: u64, timeout_sec:
                 line,
                 seq: Some(answered),
                 receipt,
-            } if answered == seq => {
-                let answer: Value = serde_json::from_str(&line)
-                    .unwrap_or_else(|err| panic!("relay_out must carry JSON ({err}): {line}"));
-                let reports = tool_json(&answer)["reports"]
-                    .as_array()
-                    .unwrap_or_else(|| panic!("wait_for_report answers its reports, got {answer}"))
-                    .clone();
-                return Took {
-                    seq,
-                    reports,
-                    receipt,
-                };
-            }
+            } if answered == seq => return took_of(seq, &line, receipt),
             RelayFrame::Out { .. } => {}
             other => panic!("expected relay_out while waiting for seq {seq}, got {other:?}"),
         }
     }
+}
+
+/// What the `wait_for_report` answer `line` to the request `seq` carried.
+fn took_of(seq: u64, line: &str, receipt: Option<bool>) -> Took {
+    let answer: Value = serde_json::from_str(line)
+        .unwrap_or_else(|err| panic!("relay_out must carry JSON ({err}): {line}"));
+    let reports = tool_json(&answer)["reports"]
+        .as_array()
+        .unwrap_or_else(|| panic!("wait_for_report answers its reports, got {answer}"))
+        .clone();
+    Took {
+        seq,
+        reports,
+        receipt,
+    }
+}
+
+/// A relay session a window's own `window_client serve` holds with the daemon: the relay
+/// frames go in as commands typed into the window and come back as results, so the
+/// session names its window from inside the window's tree, as a window's relay does.
+pub(crate) struct WindowRelay {
+    window_id: String,
+    conn: String,
+    next_seq: u64,
+}
+
+impl WindowRelay {
+    /// Opens a session for `window_id` with `relay_hello` and `initialize`, as a CLI that
+    /// opens with it does.
+    pub(crate) async fn open(
+        daemon: &mut RunningDaemon,
+        log: &mut ClientLog,
+        window_id: &str,
+    ) -> Self {
+        let mut relay = Self {
+            window_id: window_id.to_owned(),
+            conn: log.new_conn(),
+            next_seq: 1,
+        };
+        let hello = serde_json::to_value(hello(Some((window_id, VALID_TOKEN)), None))
+            .expect("a relay frame encodes");
+        let command = log.exchange_frame(&relay.conn, &hello, ClientRead::Frame);
+        match relay.frame_of(daemon, log, &command).await {
+            RelayFrame::Welcome { contract, .. } => {
+                assert_eq!(contract, common::relay::CONTRACT, "the relay's contract");
+            }
+            other => panic!("expected relay_welcome, got {other:?}"),
+        }
+        let seq = relay.next_seq;
+        let first = relay.send(daemon, log, &initialize_line(0), seq).await;
+        relay.answer(daemon, log, seq, first).await;
+        let initialized = log.exchange_frame(
+            &relay.conn,
+            &relay_in(&initialized_line().to_string(), None),
+            ClientRead::Nothing,
+        );
+        daemon.type_command(&relay.window_id, &initialized).await;
+        log.result(&initialized).await;
+        relay
+    }
+
+    /// The frame the client read for `command` once it was typed into the window.
+    async fn frame_of(
+        &self,
+        daemon: &mut RunningDaemon,
+        log: &mut ClientLog,
+        command: &ClientCommand,
+    ) -> RelayFrame {
+        daemon.type_command(&self.window_id, command).await;
+        let result = log.result(command).await;
+        let frame = result
+            .get("frame")
+            .unwrap_or_else(|| panic!("the daemon ended the relay connection: {result}"));
+        serde_json::from_value(frame.clone())
+            .unwrap_or_else(|err| panic!("a relay frame ({err}): {frame}"))
+    }
+
+    /// Carries `line` as the request `seq` and returns the next frame the daemon sent.
+    async fn send(
+        &mut self,
+        daemon: &mut RunningDaemon,
+        log: &mut ClientLog,
+        line: &Value,
+        seq: u64,
+    ) -> RelayFrame {
+        self.next_seq = seq + 1;
+        let command = log.exchange_frame(
+            &self.conn,
+            &relay_in(&line.to_string(), Some(seq)),
+            ClientRead::Frame,
+        );
+        self.frame_of(daemon, log, &command).await
+    }
+
+    /// Reads from `frame` on until the `relay_out` answering `seq`, acknowledging nothing.
+    async fn answer(
+        &mut self,
+        daemon: &mut RunningDaemon,
+        log: &mut ClientLog,
+        seq: u64,
+        mut frame: RelayFrame,
+    ) -> (String, Option<bool>) {
+        loop {
+            match frame {
+                RelayFrame::Out {
+                    line,
+                    seq: Some(answered),
+                    receipt,
+                } if answered == seq => return (line, receipt),
+                RelayFrame::Out { .. } => {}
+                other => panic!("expected relay_out while waiting for seq {seq}, got {other:?}"),
+            }
+            let next = log.read(&self.conn, ClientRead::Frame);
+            frame = self.frame_of(daemon, log, &next).await;
+        }
+    }
+
+    /// [`take_reports`] over this session.
+    pub(crate) async fn take_reports(
+        &mut self,
+        daemon: &mut RunningDaemon,
+        log: &mut ClientLog,
+        id: u64,
+        timeout_sec: u64,
+    ) -> Took {
+        let seq = self.next_seq;
+        let line = tool_call_line(
+            id,
+            "wait_for_report",
+            json!({"timeout_sec": timeout_sec}),
+            false,
+        );
+        let first = self.send(daemon, log, &line, seq).await;
+        let (answer, receipt) = self.answer(daemon, log, seq, first).await;
+        took_of(seq, &answer, receipt)
+    }
+}
+
+/// A `relay_in` frame carrying `line` as JSON, for a command's `frame`.
+fn relay_in(line: &str, seq: Option<u64>) -> Value {
+    serde_json::to_value(RelayFrame::In {
+        line: line.to_owned(),
+        seq,
+    })
+    .expect("a relay frame encodes")
 }
 
 /// The `(from_window_id, summary, at_ms)` of each report.
@@ -1396,6 +1530,63 @@ async fn screen_of(client: &mut yagura_test_support::ipc::Connection, window_id:
     }
 }
 
+/// The argv of a window that draws what it is typed and starts what its input names as
+/// children of its own, which is where a window's own client runs from.
+fn drawing_window_command() -> Vec<String> {
+    let mut command = bins::echo_child_command();
+    command.push("--spawning".to_owned());
+    command
+}
+
+/// The commands that open a relay session of `window_id` through its own client and then
+/// make one `tools/call` each of `calls` (ids from 1), every one answered by one
+/// `relay_out`. They are run in order by a `window_client once`.
+fn session_commands(log: &mut ClientLog, window_id: &str, calls: &[Value]) -> Vec<ClientCommand> {
+    let conn = log.new_conn();
+    let hello = serde_json::to_value(hello(Some((window_id, VALID_TOKEN)), None))
+        .expect("a relay frame encodes");
+    let mut commands = vec![
+        log.exchange_frame(&conn, &hello, ClientRead::Frame),
+        log.exchange_frame(
+            &conn,
+            &relay_in(&initialize_line(0).to_string(), Some(1)),
+            ClientRead::Frame,
+        ),
+        log.exchange_frame(
+            &conn,
+            &relay_in(&initialized_line().to_string(), None),
+            ClientRead::Nothing,
+        ),
+    ];
+    for (index, call) in calls.iter().enumerate() {
+        commands.push(log.exchange_frame(
+            &conn,
+            &relay_in(&call.to_string(), Some(index as u64 + 2)),
+            ClientRead::Frame,
+        ));
+    }
+    commands
+}
+
+/// The `relay_out` line answering the request `seq` that `command` read.
+async fn answer_line(
+    log: &mut ClientLog,
+    command: &ClientCommand,
+    seq: u64,
+) -> (String, Option<bool>) {
+    let result = log.result(command).await;
+    let frame: RelayFrame = serde_json::from_value(result["frame"].clone())
+        .unwrap_or_else(|err| panic!("a relay frame ({err}): {result}"));
+    match frame {
+        RelayFrame::Out {
+            line,
+            seq: Some(answered),
+            receipt,
+        } if answered == seq => (line, receipt),
+        other => panic!("expected the relay_out answering seq {seq}, got {other:?}"),
+    }
+}
+
 #[tokio::test]
 async fn a_tool_calls_arguments_and_result_stay_out_of_a_debug_daemon_log() {
     // Carried by a report: its summary reaches the parent only as a tool result, so
@@ -1409,30 +1600,66 @@ async fn a_tool_calls_arguments_and_result_stay_out_of_a_debug_daemon_log() {
         ])
         .await;
     let endpoint = sandbox.endpoint().to_string();
+    let mut log = ClientLog::new(&sandbox, "relay-rmcp-log");
 
-    let parent = common::call_open_window(&mut daemon.client, bins::echo_child_command()).await;
-    let mut as_parent = yagura_test_support::ipc::connect_with_retry(&endpoint).await;
-    common::identify(&mut as_parent, &parent).await;
-    let child = common::call_open_window(&mut as_parent, bins::echo_child_command()).await;
+    let parent = common::call_open_window(&mut daemon.client, drawing_window_command()).await;
+    let parent_conn = log.new_conn();
+    let opening = [
+        log.exchange(
+            &parent_conn,
+            &ClientMessage::Identify {
+                window_id: parent.clone(),
+                token: VALID_TOKEN.to_owned(),
+                declaration: None,
+            },
+            ClientRead::One,
+        ),
+        log.exchange(
+            &parent_conn,
+            &ClientMessage::OpenWindow {
+                command: drawing_window_command(),
+                cwd: None,
+                name: None,
+                vendor: None,
+                detection: None,
+                on_name_taken: Default::default(),
+            },
+            ClientRead::One,
+        ),
+    ];
+    daemon.start_client_once(&parent, &log, &opening).await;
+    match log.message(&opening[0]).await {
+        DaemonMessage::Identified { window_id } => assert_eq!(window_id, parent),
+        other => panic!("expected identified, got {other:?}"),
+    }
+    let child = match log.message(&opening[1]).await {
+        DaemonMessage::WindowOpened { window_id, .. } => window_id,
+        other => panic!("expected window_opened, got {other:?}"),
+    };
 
-    let mut child_session = window_session(&endpoint, &child).await;
-    let sent = child_session
-        .request(&tool_call_line(
-            1,
-            "send_report",
-            json!({"outcome": "succeeded", "summary": NONCE}),
-            false,
-        ))
-        .await;
-    let answer = child_session.answer(sent).await;
+    let report = tool_call_line(
+        1,
+        "send_report",
+        json!({"outcome": "succeeded", "summary": NONCE}),
+        false,
+    );
+    let child_session = session_commands(&mut log, &child, &[report]);
+    daemon.start_client_once(&child, &log, &child_session).await;
+    let (answer, _) = answer_line(&mut log, &child_session[3], 2).await;
+    let answer: Value = serde_json::from_str(&answer).expect("relay_out must carry JSON");
     assert_eq!(
         tool_json(&answer)["delivered_to"].as_str(),
         Some(parent.as_str()),
         "the report must reach the parent"
     );
 
-    let mut parent_session = window_session(&endpoint, &parent).await;
-    let took = take_reports(&mut parent_session, 1, 0).await;
+    let wait = tool_call_line(1, "wait_for_report", json!({"timeout_sec": 0}), false);
+    let parent_session = session_commands(&mut log, &parent, &[wait]);
+    daemon
+        .start_client_once(&parent, &log, &parent_session)
+        .await;
+    let (line, receipt) = answer_line(&mut log, &parent_session[3], 2).await;
+    let took = took_of(2, &line, receipt);
     assert_eq!(
         report_keys(&took.reports)
             .iter()
@@ -1471,7 +1698,7 @@ async fn a_tool_calls_arguments_and_result_stay_out_of_a_debug_daemon_log() {
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
 
-    drop((child_session, parent_session, as_parent, typist));
+    drop(typist);
     let mut shutdown = sandbox.spawn_with_args(&["--shutdown"]);
     let ended = daemon.wait_for_fault_end().await;
     let _ = tokio::task::spawn_blocking(move || shutdown.wait()).await;
