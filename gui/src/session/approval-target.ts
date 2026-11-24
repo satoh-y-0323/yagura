@@ -5,7 +5,7 @@
 import { formatPathForDisplay } from '../display/untrusted-text';
 import type { UiText } from '../display/ui-text';
 import type { ApprovalRequest, ApprovalRequester } from '../ipc/session-boundary';
-import { describeStatus, dialogs, settings } from '../ui-messages';
+import { describeApprovalHeadline, describeStatus, dialogs, settings } from '../ui-messages';
 import type { ApprovalFacts, ApprovalParty, HeadlineParts } from './approval-types';
 
 type KnownApprovalTool = keyof typeof settings.approvalToolInfo;
@@ -69,14 +69,15 @@ function headlineOf(request: ApprovalRequest, tool: KnownApprovalTool | null): H
   const from = request.requester.kind === 'window' ? request.requester.name : null;
   const target = request.target;
   if (tool === null) {
-    return dialogs.approvalHeadlineOther(
+    return describeApprovalHeadline(
+      null,
       from,
-      request.displayTool,
-      target === undefined ? null : { name: target.name }
+      target === undefined ? null : { name: target.name },
+      request.displayTool
     );
   }
   const to = target === undefined ? { words: describeUntargeted(request) } : { name: target.name };
-  return dialogs.approvalHeadlines[tool](from, to);
+  return describeApprovalHeadline(tool, from, to, request.displayTool);
 }
 
 function requesterParty(requester: ApprovalRequester, isRequesterOpen: boolean): ApprovalParty {

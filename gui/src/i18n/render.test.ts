@@ -638,16 +638,16 @@ describe('describeExitedWindow', () => {
   it('names the window without an exit code until one is known, and with it after', () => {
     const reviewer = sanitizeForDisplay('reviewer');
     expect(describeExitedWindow(dummyMessages, reviewer, null)).toBe(
-      dummyMessages.workArea.windowExited(reviewer)
+      'DUMMY_workArea_windowExited(reviewer)'
     );
     expect(describeExitedWindow(dummyMessages, reviewer, 0)).toBe(
-      dummyMessages.workArea.windowExitedWithCode(reviewer, 0)
+      'DUMMY_workArea_windowExitedWithCode(reviewer,0)'
     );
 
     // The card draws the title from its parts, so the parts make up the English sentence.
     for (const [exitCode, sentence] of [
-      [null, english.workArea.windowExited(reviewer)],
-      [3, english.workArea.windowExitedWithCode(reviewer, 3)],
+      [null, '“reviewer” exited'],
+      [3, '“reviewer” exited (exit code 3)'],
     ] as const) {
       const parts = describeExitedWindowParts(english, reviewer, exitCode);
       expect(parts.name).toBe('reviewer');

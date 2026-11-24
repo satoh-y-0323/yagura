@@ -17,7 +17,13 @@
   import type { LaneItem } from '../notices/notice-feed';
   import type { UiText } from '../display/ui-text';
   import type { DisplayLine } from '../display/untrusted-text';
-  import { banners, buttons, hints, type TitleParts } from '../ui-messages';
+  import {
+    banners,
+    buttons,
+    describeGoToCallingWindowParts,
+    hints,
+    type TitleParts,
+  } from '../ui-messages';
   import Icon from './Icon.svelte';
   import IconButton from './IconButton.svelte';
   import StatusBadge from './StatusBadge.svelte';
@@ -57,7 +63,7 @@
 
   function cardAction(card: LaneItem): Line {
     if (card.kind === 'needs-you') {
-      return split(banners.goToCallingWindowParts(card.parts.name));
+      return split(describeGoToCallingWindowParts(card.parts.name));
     }
     return whole(
       card.action === null ? banners.showInNotifications : buttons[card.action.labelKey]

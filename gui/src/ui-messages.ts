@@ -6,6 +6,7 @@ import { resolveMessages } from './i18n/messages';
 import {
   describeActionBlock as renderDescribeActionBlock,
   describeAnnouncement as renderDescribeAnnouncement,
+  describeApprovalHeadline as renderDescribeApprovalHeadline,
   describeAttentionBadge as renderDescribeAttentionBadge,
   describeChatPostedAt as renderDescribeChatPostedAt,
   describeDeliveryState as renderDescribeDeliveryState,
@@ -14,6 +15,7 @@ import {
   describeEventTime as renderDescribeEventTime,
   describeExitedWindow as renderDescribeExitedWindow,
   describeExitedWindowParts as renderDescribeExitedWindowParts,
+  describeGoToCallingWindowParts as renderDescribeGoToCallingWindowParts,
   describeGoToWindow as renderDescribeGoToWindow,
   describeHaltReason as renderDescribeHaltReason,
   describeJoinedParts as renderDescribeJoinedParts,
@@ -49,7 +51,7 @@ import {
   type PickerWindowRowFacts,
   type WindowHeaderFacts,
 } from './i18n/render';
-import type { TitleParts } from './i18n/messages';
+import type { Messages, TitleParts } from './i18n/messages';
 import type { UiText } from './display/ui-text';
 import {
   EXTERNAL_TEXT_MAX_CODE_POINTS,
@@ -60,6 +62,7 @@ import type { PickerEmpty, PickerMode } from './command-picker/picker-model';
 import type { ChatDeliveryOutcome, DetectedStatusView, WindowStatus } from './ipc/session-boundary';
 import type { ActionBlockReason } from './keymap/action-availability';
 import type { ConfirmTarget } from './session/confirm-target';
+import type { HeadlineParts, HeadlineParty } from './session/approval-types';
 
 const messages = resolveMessages();
 
@@ -71,9 +74,6 @@ export type { Messages, MessagesSource } from './i18n/messages';
 
 /** A sentence split around the name it holds. */
 export type { TitleParts };
-
-/** The parts as a locale resource writes them, for a locale written outside `i18n/`. */
-export type { TitleParts as TitlePartsSource } from './i18n/messages-en';
 
 /** Status display strings. */
 export const statusLabels = messages.statusLabels;
@@ -157,6 +157,14 @@ export function describeGoToWindow(name: DisplayLine): UiText {
 }
 
 /**
+ * A lane card's go-to sentence for a calling window, split around its name.
+ * @param name the window's display name
+ */
+export function describeGoToCallingWindowParts(name: DisplayLine): TitleParts {
+  return renderDescribeGoToCallingWindowParts(messages, name);
+}
+
+/**
  * Describes a window that calls the user, as its lane card says it.
  * @param name the window's display name
  * @param status which call it is
@@ -178,6 +186,22 @@ export function describeWindowCallParts(
   status: Extract<WindowStatus, 'waiting_approval' | 'waiting_input'>
 ): TitleParts {
   return renderDescribeWindowCallParts(messages, name, status);
+}
+
+/**
+ * The approval dialog's heading: who asks, then what it would do to what.
+ * @param tool the gated tool, or `null` for one this build does not know
+ * @param from the requesting window's name, or `null` for a client that is no window
+ * @param to what the request would act on, or `null` when it names nothing
+ * @param displayTool the tool's name, prepared for display
+ */
+export function describeApprovalHeadline(
+  tool: keyof Messages['dialogs']['approvalHeadlineWords'] | null,
+  from: DisplayLine | null,
+  to: HeadlineParty | null,
+  displayTool: DisplayLine
+): HeadlineParts {
+  return renderDescribeApprovalHeadline(messages, tool, from, to, displayTool);
 }
 
 /**

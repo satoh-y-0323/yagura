@@ -8,7 +8,7 @@ declare const uiTextBrand: unique symbol;
 
 /**
  * Text the UI itself wrote, resolved from the locale resources. Only
- * `resolveMessages` (`i18n/messages.ts`) makes one.
+ * `i18n/messages.ts` makes one.
  */
 export type UiText = string & { readonly [uiTextBrand]: true };
 

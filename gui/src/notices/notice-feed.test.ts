@@ -33,9 +33,10 @@ import {
 
 // Every sentence the feed builds goes through the facade; binding the facade to
 // the dummy locale makes a sentence typed into the feed show up as a mismatch.
-vi.mock('../i18n/messages', async () => {
-  const dummy = await import('../test-utils/dummy-messages');
-  return { resolveMessages: () => dummy.dummyMessages };
+vi.mock('../i18n/messages', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../i18n/messages')>();
+  const { dummyMessages } = await import('../test-utils/dummy-messages');
+  return { ...actual, resolveMessages: () => dummyMessages };
 });
 
 type FeedOutput = ReturnType<typeof noticeFeed>;
@@ -221,10 +222,15 @@ function exitOf(
 
 /** The exited window's sentence split around its display name, as the work area builds it. */
 function exitPartsOf(windowId: string, exitCode: number): TitleParts {
-  return dummyMessages.workArea.windowExitedWithCodeParts(
-    NAMES.get(windowId) ?? sanitizeForDisplay(windowId),
-    exitCode
-  );
+  const name = NAMES.get(windowId) ?? sanitizeForDisplay(windowId);
+  const before = 'DUMMY_workArea_windowExitedWithCode(';
+  const after = `,${exitCode})`;
+  return {
+    before: before as UiText,
+    name,
+    after: after as UiText,
+    sentence: `${before}${name}${after}` as UiText,
+  };
 }
 
 function win(windowId: string, status: WindowStatus, needsYou = true): NeedsYouToastWindow {
@@ -311,9 +317,9 @@ const card = (sentence: string): string =>
     .slice('DUMMY_sentences('.length, -1);
 
 const windowNeedsApproval = (name: string): string =>
-  dummyMessages.banners.windowNeedsApproval(sanitizeForDisplay(name));
+  `DUMMY_windowNeedsApproval(${sanitizeForDisplay(name)})`;
 const windowNeedsInput = (name: string): string =>
-  dummyMessages.banners.windowNeedsInput(sanitizeForDisplay(name));
+  `DUMMY_windowNeedsInput(${sanitizeForDisplay(name)})`;
 const { waitingForYouMoreAnnouncement, notificationsMoreAnnouncement } = dummyMessages.banners;
 
 describe('notice feed: which notices come onto the lane', () => {

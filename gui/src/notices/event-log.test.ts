@@ -18,9 +18,10 @@ import type { EventLog, GoneWindow, NewEvent } from './event-log';
 
 // Binding the facade to the dummy locale proves the event's text and parts are
 // the card's sentence, not a copy of it.
-vi.mock('../i18n/messages', async () => {
-  const dummy = await import('../test-utils/dummy-messages');
-  return { resolveMessages: () => dummy.dummyMessages };
+vi.mock('../i18n/messages', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../i18n/messages')>();
+  const { dummyMessages } = await import('../test-utils/dummy-messages');
+  return { ...actual, resolveMessages: () => dummyMessages };
 });
 
 function dummyExitSentence(name: string, exitCode: number | null): string {

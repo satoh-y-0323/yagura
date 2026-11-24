@@ -1,7 +1,6 @@
 import type { NoticeCategory } from '../notices/notice-model';
 import type { DisplayLine } from '../display/untrusted-text';
 import type { UiText } from '../display/ui-text';
-import type { HeadlineParts as RawHeadlineParts, HeadlineParty } from '../session/approval-types';
 
 /**
  * The consequence shared by every message that tells the user to restart the
@@ -21,27 +20,18 @@ const PLAN_STILL_RUNS_WITHOUT_REVIEW = 'It still runs new plans without review.'
 /** What sets the parts of one line apart, held once so every such line is spelled alike. */
 const PART_SEPARATOR = ' · ';
 
-/** A sentence split around the name it holds, so a card can cut the name short and keep the rest. */
-export interface TitleParts {
+/** The words around a name, which the maker joins with the name. */
+export interface TitleWords {
   before: string;
-  name: DisplayLine;
   after: string;
-  /** The parts joined: the whole sentence, made where the parts are. */
-  sentence: string;
 }
 
-/** Makes a sentence's parts and the sentence they join into, from one set of words. */
-function titleParts(before: string, name: DisplayLine, after: string): TitleParts {
-  return { before, name, after, sentence: `${before}${name}${after}` };
+/** The words of an approval heading, which the maker joins with the names. */
+export interface HeadlineWords {
+  verb: string;
+  /** The words between a tool this build does not know and what it would act on. */
+  toolLink: string;
 }
-
-const windowNeedsApprovalParts = (name: DisplayLine): TitleParts =>
-  titleParts('“', name, '” needs approval');
-const windowNeedsInputParts = (name: DisplayLine): TitleParts =>
-  titleParts('“', name, '” needs input');
-const windowExitedParts = (name: DisplayLine): TitleParts => titleParts('“', name, '” exited');
-const windowExitedWithCodeParts = (name: DisplayLine, code: number): TitleParts =>
-  titleParts('“', name, `” exited (exit code ${code})`);
 
 /** `focusNextWindow` -> `focus-next-window`, at the type level. */
 type KebabCase<S extends string> = S extends `${infer Head}${infer Tail}`
@@ -60,7 +50,12 @@ function camelCase(id: string): string {
 
 /** Looks `id` up in a camelCase-keyed table. */
 function lookup<T>(table: Readonly<Record<string, T>>, id: string): T {
-  return table[camelCase(id)] as T;
+  const found = table[camelCase(id)];
+  // The id types keep a miss out of reach; one would be a table that lost a row, not a value to guess.
+  if (found === undefined) {
+    throw new Error(`no entry for ${id}`);
+  }
+  return found;
 }
 
 // 24-hour with two digits whatever the system's locale, as the restore timestamp is.
@@ -135,54 +130,16 @@ const APPROVAL_TOOL_INFO = {
   },
 };
 
-/** The heading as this locale builds it, before its words are marked as UI text. */
-type HeadlineParts = RawHeadlineParts<string>;
-
-/** Builds a heading from who asks, what it would do and to what, the sentence made where the parts are. */
-function headline(
-  from: DisplayLine | null,
-  verb: string,
-  to: HeadlineParty | null,
-  tool: DisplayLine | null = null,
-  toolLink = ''
-): HeadlineParts {
-  const parts = {
-    from: from === null ? { words: 'An external client' } : { name: from },
-    verb,
-    tool,
-    toolLink,
-    to,
-  };
-  return { ...parts, sentence: sentenceOf(parts) };
-}
-
-// The sentence is read back from the parts the dialog draws, so a test of the sentence also covers them.
-function sentenceOf(parts: Omit<HeadlineParts, 'sentence'>): string {
-  const { from, verb, tool, toolLink, to } = parts;
-  return `${partyText(from)}${verb}${tool ?? ''}${toolLink}${to === null ? '' : partyText(to)}`;
-}
-
-function partyText(party: HeadlineParty<string>): string {
-  return 'name' in party ? party.name : party.words;
-}
-
 /** One heading per gated tool: who asks, then what it would do to what. */
-const APPROVAL_HEADLINES = {
-  open_window: (from: DisplayLine | null, to: HeadlineParty): HeadlineParts =>
-    headline(from, ' wants to open ', to),
-  send_chat: (from: DisplayLine | null, to: HeadlineParty): HeadlineParts =>
-    headline(from, ' wants to post in ', to),
-  broadcast_chat: (from: DisplayLine | null, to: HeadlineParty): HeadlineParts =>
-    headline(from, ' wants to post to everyone in ', to),
-  send_message: (from: DisplayLine | null, to: HeadlineParty): HeadlineParts =>
-    headline(from, ' wants to send a message to ', to),
-  send_handoff: (from: DisplayLine | null, to: HeadlineParty): HeadlineParts =>
-    headline(from, ' wants to hand off work to ', to),
-  interrupt_window: (from: DisplayLine | null, to: HeadlineParty): HeadlineParts =>
-    headline(from, ' wants to interrupt ', to),
-  close_window: (from: DisplayLine | null, to: HeadlineParty): HeadlineParts =>
-    headline(from, ' wants to close ', to),
-} satisfies Record<keyof typeof APPROVAL_TOOL_INFO, unknown>;
+const APPROVAL_HEADLINE_WORDS = {
+  open_window: { verb: ' wants to open ', toolLink: '' },
+  send_chat: { verb: ' wants to post in ', toolLink: '' },
+  broadcast_chat: { verb: ' wants to post to everyone in ', toolLink: '' },
+  send_message: { verb: ' wants to send a message to ', toolLink: '' },
+  send_handoff: { verb: ' wants to hand off work to ', toolLink: '' },
+  interrupt_window: { verb: ' wants to interrupt ', toolLink: '' },
+  close_window: { verb: ' wants to close ', toolLink: '' },
+} satisfies Record<keyof typeof APPROVAL_TOOL_INFO, HeadlineWords>;
 
 /** One settings row per notice kind; a kind added to `NoticeCategory` fails to compile until it is named here. */
 const NOTIFICATION_ROWS: Readonly<Record<NoticeCategory, { name: string; description: string }>> = {
@@ -388,15 +345,17 @@ export const messagesEn = {
     /** Names the chat room a request is addressed to, when it names one. */
     describeApprovalRoom: (name: DisplayLine): string => `the chat room “${name}”`,
 
-    /** The approval dialog's heading, keyed like `settings.approvalToolInfo`. */
-    approvalHeadlines: APPROVAL_HEADLINES,
+    /** The approval dialog's heading words, keyed like `settings.approvalToolInfo`. */
+    approvalHeadlineWords: APPROVAL_HEADLINE_WORDS,
 
-    /** The heading of a tool this build does not know, which names the tool rather than guess what it does. */
-    approvalHeadlineOther: (
-      from: DisplayLine | null,
-      tool: DisplayLine,
-      to: HeadlineParty | null
-    ): HeadlineParts => headline(from, ' wants to use ', to, tool, to === null ? '' : ' on '),
+    /** The heading words of a tool this build does not know, which names the tool rather than guess what it does. */
+    approvalHeadlineOtherWords: (hasTarget: boolean): HeadlineWords => ({
+      verb: ' wants to use ',
+      toolLink: hasTarget ? ' on ' : '',
+    }),
+
+    /** Names a requester that is no window, where a heading would name the window. */
+    approvalHeadlineExternal: 'An external client',
 
     /** Heads what a request would send or run. */
     approvalBodyHeadings: {
@@ -593,12 +552,10 @@ export const messagesEn = {
     /** A card that later events of its kind were folded into: the latest event's sentence first. */
     noticeAndMore: (sentence: UiText | DisplayLine, count: number): string =>
       `${sentence} and ${count} more`,
-    windowNeedsApprovalParts,
-    windowNeedsInputParts,
-    windowNeedsApproval: (name: DisplayLine): string => windowNeedsApprovalParts(name).sentence,
-    windowNeedsInput: (name: DisplayLine): string => windowNeedsInputParts(name).sentence,
+    windowNeedsApprovalWords: { before: '“', after: '” needs approval' } satisfies TitleWords,
+    windowNeedsInputWords: { before: '“', after: '” needs input' } satisfies TitleWords,
     // A card's go-to sentence; the arrow beside it is drawn, not said.
-    goToCallingWindowParts: (name: DisplayLine): TitleParts => titleParts('Go to “', name, '”'),
+    goToCallingWindowWords: { before: 'Go to “', after: '”' } satisfies TitleWords,
     waitingForYouMore: (count: number): string => `+${count} waiting for you`,
     notificationsMore: (count: number): string => `+${count} more in Notifications`,
     // Read out, so the count is said as a number rather than the "+N" the chip shows.
@@ -1286,11 +1243,11 @@ export const messagesEn = {
       const saved = recordedTimeOrNull(savedAtEpochS);
       return saved === null ? base : `${base} (saved ${saved})`;
     },
-    windowExitedParts,
-    windowExitedWithCodeParts,
-    windowExited: (name: DisplayLine): string => windowExitedParts(name).sentence,
-    windowExitedWithCode: (name: DisplayLine, code: number): string =>
-      windowExitedWithCodeParts(name, code).sentence,
+    windowExitedWords: { before: '“', after: '” exited' } satisfies TitleWords,
+    windowExitedWithCodeWords: (code: number): TitleWords => ({
+      before: '“',
+      after: `” exited (exit code ${code})`,
+    }),
     exitedBody:
       "yagura didn't switch to another window, so nothing you type goes to a different CLI.",
     goToWindow: (name: DisplayLine): string => `Go to ${name}`,

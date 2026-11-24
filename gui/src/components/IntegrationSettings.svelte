@@ -43,6 +43,7 @@
       <div class="integration-settings__group-head">{group.heading}</div>
       <div class="integration-settings__list">
         {#each group.rows as row (row.profile)}
+          {@const result = results.get(row.profile)}
           <div class="integration-settings__row">
             <div class="integration-settings__name">
               <span>{row.name}</span>
@@ -110,10 +111,8 @@
             {#if row.refusal}
               <p class="integration-settings__refusal">{row.refusal}</p>
             {/if}
-            {#if results.has(row.profile)}
-              {@const outcome = resultLines(
-                results.get(row.profile) as McpRegistrationResultPayload
-              )}
+            {#if result !== undefined}
+              {@const outcome = resultLines(result)}
               <pre
                 class="integration-settings__result"
                 class:integration-settings__result--failure={outcome.isFailure}>{outcome.text}</pre>

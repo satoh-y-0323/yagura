@@ -91,6 +91,23 @@ const CASES: ReadonlyArray<[string, () => unknown, () => unknown]> = [
     () => render.describeExitedWindowParts(messages, REVIEWER, 1),
   ],
   [
+    'describeGoToCallingWindowParts',
+    () => facade.describeGoToCallingWindowParts(REVIEWER),
+    () => render.describeGoToCallingWindowParts(messages, REVIEWER),
+  ],
+  [
+    'describeApprovalHeadline',
+    () => facade.describeApprovalHeadline('send_message', null, { name: IMPLEMENTER }, REVIEWER),
+    () =>
+      render.describeApprovalHeadline(
+        messages,
+        'send_message',
+        null,
+        { name: IMPLEMENTER },
+        REVIEWER
+      ),
+  ],
+  [
     'describeNoticeAndMore',
     () => facade.describeNoticeAndMore(BUILDER_EXITED, 3),
     () => render.describeNoticeAndMore(messages, BUILDER_EXITED, 3),

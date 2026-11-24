@@ -1,4 +1,4 @@
-import type { Messages, TitleParts } from './messages';
+import { headlineParts, titleParts, type Messages, type TitleParts } from './messages';
 import type { UiText } from '../display/ui-text';
 import type { PickerEmpty, PickerMode } from '../command-picker/picker-model';
 import type {
@@ -16,6 +16,7 @@ import type { ActionBlockReason } from '../keymap/action-availability';
 // Type-only: the gate itself reaches this module through `ui-messages.ts`, so
 // a value import here would close that loop at runtime.
 import type { ConfirmTarget, InterruptBlockReason } from '../session/confirm-target';
+import type { HeadlineParts, HeadlineParty } from '../session/approval-types';
 
 /**
  * The entry `record` holds under `key` when that is an own key, else
@@ -42,9 +43,7 @@ export function describeExitedWindow(
   name: DisplayLine,
   exitCode: number | null
 ): UiText {
-  return exitCode === null
-    ? messages.workArea.windowExited(name)
-    : messages.workArea.windowExitedWithCode(name, exitCode);
+  return describeExitedWindowParts(messages, name, exitCode).sentence;
 }
 
 /**
@@ -57,9 +56,12 @@ export function describeExitedWindowParts(
   name: DisplayLine,
   exitCode: number | null
 ): TitleParts {
-  return exitCode === null
-    ? messages.workArea.windowExitedParts(name)
-    : messages.workArea.windowExitedWithCodeParts(name, exitCode);
+  return titleParts(
+    exitCode === null
+      ? messages.workArea.windowExitedWords
+      : messages.workArea.windowExitedWithCodeWords(exitCode),
+    name
+  );
 }
 
 /**
@@ -72,6 +74,15 @@ export function describeGoToWindow(messages: Messages, name: DisplayLine): UiTex
 }
 
 /**
+ * A lane card's go-to sentence for a calling window, split around its name.
+ *
+ * @param name the window's display name
+ */
+export function describeGoToCallingWindowParts(messages: Messages, name: DisplayLine): TitleParts {
+  return titleParts(messages.banners.goToCallingWindowWords, name);
+}
+
+/**
  * Describes a window that calls the user, as its lane card says it.
  *
  * @param name the window's display name
@@ -81,9 +92,7 @@ export function describeWindowCall(
   name: DisplayLine,
   status: Extract<WindowStatus, 'waiting_approval' | 'waiting_input'>
 ): UiText {
-  return status === 'waiting_approval'
-    ? messages.banners.windowNeedsApproval(name)
-    : messages.banners.windowNeedsInput(name);
+  return describeWindowCallParts(messages, name, status).sentence;
 }
 
 /**
@@ -96,9 +105,39 @@ export function describeWindowCallParts(
   name: DisplayLine,
   status: Extract<WindowStatus, 'waiting_approval' | 'waiting_input'>
 ): TitleParts {
-  return status === 'waiting_approval'
-    ? messages.banners.windowNeedsApprovalParts(name)
-    : messages.banners.windowNeedsInputParts(name);
+  return titleParts(
+    status === 'waiting_approval'
+      ? messages.banners.windowNeedsApprovalWords
+      : messages.banners.windowNeedsInputWords,
+    name
+  );
+}
+
+/**
+ * The approval dialog's heading: who asks, then what it would do to what.
+ *
+ * @param tool the gated tool, or `null` for one this build does not know
+ * @param from the requesting window's name, or `null` for a client that is no window
+ * @param to what the request would act on, or `null` when it names nothing
+ * @param displayTool the tool's name, prepared for display; named only for a tool this build does not know
+ */
+export function describeApprovalHeadline(
+  messages: Messages,
+  tool: keyof Messages['dialogs']['approvalHeadlineWords'] | null,
+  from: DisplayLine | null,
+  to: HeadlineParty | null,
+  displayTool: DisplayLine
+): HeadlineParts {
+  const fromParty: HeadlineParty =
+    from === null ? { words: messages.dialogs.approvalHeadlineExternal } : { name: from };
+  return tool === null
+    ? headlineParts(
+        messages.dialogs.approvalHeadlineOtherWords(to !== null),
+        fromParty,
+        to,
+        displayTool
+      )
+    : headlineParts(messages.dialogs.approvalHeadlineWords[tool], fromParty, to, null);
 }
 
 /**

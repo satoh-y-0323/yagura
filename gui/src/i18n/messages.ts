@@ -1,6 +1,7 @@
-import { messagesEn, type TitleParts as TitlePartsSource } from './messages-en';
+import { messagesEn, type HeadlineWords, type TitleWords } from './messages-en';
 import type { UiText, UiTextOf } from '../display/ui-text';
 import type { DisplayBlock, DisplayLine } from '../display/untrusted-text';
+import type { HeadlineParts, HeadlineParty } from '../session/approval-types';
 
 /**
  * The shape of a locale, derived from the English resource: a second
@@ -11,8 +12,14 @@ export type MessagesSource = typeof messagesEn;
 /** A resolved locale: the resource's shape with the text it yields typed as `UiText`. */
 export type Messages = UiTextOf<MessagesSource>;
 
-/** A sentence split around the name it holds, as a resolved locale yields it. */
-export type TitleParts = UiTextOf<TitlePartsSource>;
+/** A sentence split around the name it holds, so a card can cut the name short and keep the rest. */
+export interface TitleParts {
+  before: UiText;
+  name: DisplayLine;
+  after: UiText;
+  /** The parts joined: the whole sentence, made where the parts are. */
+  sentence: UiText;
+}
 
 /**
  * Locale selection is a policy, kept in this one place. English only for now;
@@ -21,6 +28,42 @@ export type TitleParts = UiTextOf<TitlePartsSource>;
 export function resolveMessages(): Messages {
   // The one place text becomes `UiText`: what the resource yields is the UI's own words.
   return messagesEn as Messages;
+}
+
+/**
+ * Joins a locale's words around a name into the parts a card draws and the sentence they make.
+ *
+ * @param words the words before and after the name, from a resolved locale
+ * @param name the name, prepared for display
+ */
+export function titleParts(words: UiTextOf<TitleWords>, name: DisplayLine): TitleParts {
+  const { before, after } = words;
+  return { before, name, after, sentence: `${before}${name}${after}` as UiText };
+}
+
+/**
+ * Builds an approval heading from a locale's words and the parties it names, in the order it reads.
+ *
+ * @param words the verb and the words after a tool, from a resolved locale
+ * @param from who asks
+ * @param to what it would act on; `null` when it names nothing
+ * @param tool a tool this build does not know, named rather than guessed at; else `null`
+ */
+export function headlineParts(
+  words: UiTextOf<HeadlineWords>,
+  from: HeadlineParty,
+  to: HeadlineParty | null,
+  tool: DisplayLine | null
+): HeadlineParts {
+  const { verb, toolLink } = words;
+  // The sentence is the parts joined; it does not tell a name from words.
+  const sentence =
+    `${partyText(from)}${verb}${tool ?? ''}${toolLink}${to === null ? '' : partyText(to)}` as UiText;
+  return { from, verb, tool, toolLink, to, sentence };
+}
+
+function partyText(party: HeadlineParty): UiText | DisplayLine {
+  return 'name' in party ? party.name : party.words;
 }
 
 /** True when a parameter of type `P` accepts text that was not prepared for display. */

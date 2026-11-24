@@ -36,27 +36,23 @@ export interface WindowMark {
   hue: number;
 }
 
-/**
- * What an approval heading names a party by: a window's name, or words that
- * stand in for one. `Text` is what the words are, as in {@link HeadlineParts}.
- */
-export type HeadlineParty<Text = UiText> = { name: DisplayLine } | { words: Text };
+/** What an approval heading names a party by: a window's name, or words that stand in for one. */
+export type HeadlineParty = { name: DisplayLine } | { words: UiText };
 
 /**
  * An approval heading in the order it reads, so a view can set each name apart
- * from the words, and the sentence those make. `Text` is what the words are: a
- * locale resource builds them as plain strings, and a view receives them as UI text.
+ * from the words, and the sentence those make.
  */
-export interface HeadlineParts<Text = UiText> {
-  from: HeadlineParty<Text>;
-  verb: Text;
+export interface HeadlineParts {
+  from: HeadlineParty;
+  verb: UiText;
   /** A tool this build does not know, named rather than guessed at. */
   tool: DisplayLine | null;
   /** The words between the tool and what it would act on. */
-  toolLink: Text;
+  toolLink: UiText;
   /** `null` for a tool this build does not know that names nothing to act on. */
-  to: HeadlineParty<Text> | null;
-  sentence: Text;
+  to: HeadlineParty | null;
+  sentence: UiText;
 }
 
 /** One side of a request, as one card of the dialog draws it. */

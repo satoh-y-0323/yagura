@@ -3,44 +3,9 @@
  * leaking past the locale is obvious in a failing assertion. It is a plain module,
  * not a test file, so importing it registers no tests in the importer.
  */
-import type { DisplayLine } from '../display/untrusted-text';
-import type { Messages, MessagesSource, TitlePartsSource as TitleParts } from '../ui-messages';
-import type { HeadlineParty as HeadlinePartyOf } from '../session/approval-types';
-
-/** Each dummy sentence with a name is its parts put together, as in the English locale. */
-function titleParts(before: string, name: DisplayLine, after: string): TitleParts {
-  return { before, name, after, sentence: `${before}${name}${after}` };
-}
-
-const windowNeedsApprovalParts = (name: DisplayLine): TitleParts =>
-  titleParts('DUMMY_windowNeedsApproval(', name, ')');
-const windowNeedsInputParts = (name: DisplayLine): TitleParts =>
-  titleParts('DUMMY_windowNeedsInput(', name, ')');
-const windowExitedParts = (name: DisplayLine): TitleParts =>
-  titleParts('DUMMY_workArea_windowExited(', name, ')');
-const windowExitedWithCodeParts = (name: DisplayLine, code: number): TitleParts =>
-  titleParts('DUMMY_workArea_windowExitedWithCode(', name, `,${code})`);
-
-type HeadlineParts = ReturnType<MessagesSource['dialogs']['approvalHeadlineOther']>;
-type HeadlineParty = Parameters<MessagesSource['dialogs']['approvalHeadlineOther']>[2];
-
-function partyText(party: HeadlinePartyOf<string>): string {
-  return 'name' in party ? party.name : party.words;
-}
-
-/** Each dummy heading is its parts put together, as in the English locale. */
-function dummyHeadline(
-  key: string,
-  from: DisplayLine | null,
-  to: HeadlineParty,
-  tool: DisplayLine | null = null
-): HeadlineParts {
-  const fromParty = from === null ? { words: 'DUMMY_external' } : { name: from };
-  const verb = `DUMMY_approvalHeadline_${key}(`;
-  const toolLink = ',';
-  const sentence = `${partyText(fromParty)}${verb}${tool ?? ''}${toolLink}${to === null ? '' : partyText(to)}`;
-  return { from: fromParty, verb, tool, toolLink, to, sentence };
-}
+// Type-only imports: a test that mocks `i18n/messages` loads this file from its mock factory,
+// so a value import that reaches that module would load it mid-mock.
+import type { Messages, MessagesSource } from '../ui-messages';
 
 // Checked against the resource's shape so a missing key stays a type error, then typed as the
 // resolved locale it stands in for.
@@ -93,16 +58,20 @@ export const dummyMessages = {
     approvalTargetNewWindow: 'DUMMY_approvalTargetNewWindow',
     // Names the chat room a post would go to, when the request carries one.
     describeApprovalRoom: (name) => `DUMMY_describeApprovalRoom(${name})`,
-    approvalHeadlines: {
-      open_window: (from, to) => dummyHeadline('open_window', from, to),
-      send_chat: (from, to) => dummyHeadline('send_chat', from, to),
-      broadcast_chat: (from, to) => dummyHeadline('broadcast_chat', from, to),
-      send_message: (from, to) => dummyHeadline('send_message', from, to),
-      send_handoff: (from, to) => dummyHeadline('send_handoff', from, to),
-      interrupt_window: (from, to) => dummyHeadline('interrupt_window', from, to),
-      close_window: (from, to) => dummyHeadline('close_window', from, to),
+    approvalHeadlineWords: {
+      open_window: { verb: 'DUMMY_approvalHeadline_open_window(', toolLink: ',' },
+      send_chat: { verb: 'DUMMY_approvalHeadline_send_chat(', toolLink: ',' },
+      broadcast_chat: { verb: 'DUMMY_approvalHeadline_broadcast_chat(', toolLink: ',' },
+      send_message: { verb: 'DUMMY_approvalHeadline_send_message(', toolLink: ',' },
+      send_handoff: { verb: 'DUMMY_approvalHeadline_send_handoff(', toolLink: ',' },
+      interrupt_window: { verb: 'DUMMY_approvalHeadline_interrupt_window(', toolLink: ',' },
+      close_window: { verb: 'DUMMY_approvalHeadline_close_window(', toolLink: ',' },
     },
-    approvalHeadlineOther: (from, tool, to) => dummyHeadline('other', from, to, tool),
+    approvalHeadlineOtherWords: (_hasTarget: boolean) => ({
+      verb: 'DUMMY_approvalHeadline_other(',
+      toolLink: ',',
+    }),
+    approvalHeadlineExternal: 'DUMMY_external',
     approvalBodyHeadings: {
       message: 'DUMMY_approvalBodyHeadings_message',
       handoff: 'DUMMY_approvalBodyHeadings_handoff',
@@ -225,11 +194,9 @@ export const dummyMessages = {
     restoreNotRestoredMore: (count: number) => `DUMMY_restoreNotRestoredMore(${count})`,
     actionsAvailable: 'DUMMY_actionsAvailable',
     noticeAndMore: (sentence, count) => `DUMMY_noticeAndMore(${sentence},${count})`,
-    windowNeedsApprovalParts,
-    windowNeedsInputParts,
-    windowNeedsApproval: (name) => windowNeedsApprovalParts(name).sentence,
-    windowNeedsInput: (name) => windowNeedsInputParts(name).sentence,
-    goToCallingWindowParts: (name) => titleParts('DUMMY_goToCallingWindow(', name, ')'),
+    windowNeedsApprovalWords: { before: 'DUMMY_windowNeedsApproval(', after: ')' },
+    windowNeedsInputWords: { before: 'DUMMY_windowNeedsInput(', after: ')' },
+    goToCallingWindowWords: { before: 'DUMMY_goToCallingWindow(', after: ')' },
     waitingForYouMore: (count: number) => `DUMMY_waitingForYouMore(${count})`,
     notificationsMore: (count: number) => `DUMMY_notificationsMore(${count})`,
     waitingForYouMoreAnnouncement: (count: number) =>
@@ -587,10 +554,11 @@ export const dummyMessages = {
     settings: 'DUMMY_workArea_settings',
     reopenFromLastSession: (count: number, savedAtEpochS: number | null) =>
       `DUMMY_workArea_reopenFromLastSession(${count},${String(savedAtEpochS)})`,
-    windowExitedParts,
-    windowExitedWithCodeParts,
-    windowExited: (name) => windowExitedParts(name).sentence,
-    windowExitedWithCode: (name, code) => windowExitedWithCodeParts(name, code).sentence,
+    windowExitedWords: { before: 'DUMMY_workArea_windowExited(', after: ')' },
+    windowExitedWithCodeWords: (code) => ({
+      before: 'DUMMY_workArea_windowExitedWithCode(',
+      after: `,${code})`,
+    }),
     exitedBody: 'DUMMY_workArea_exitedBody',
     goToWindow: (name) => `DUMMY_workArea_goToWindow(${name})`,
   },
