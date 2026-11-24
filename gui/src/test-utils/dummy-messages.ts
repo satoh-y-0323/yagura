@@ -5,6 +5,7 @@
  */
 import type { DisplayLine } from '../display/untrusted-text';
 import type { Messages, MessagesSource, TitlePartsSource as TitleParts } from '../ui-messages';
+import type { HeadlineParty as HeadlinePartyOf } from '../session/approval-types';
 
 /** Each dummy sentence with a name is its parts put together, as in the English locale. */
 function titleParts(before: string, name: DisplayLine, after: string): TitleParts {
@@ -23,6 +24,10 @@ const windowExitedWithCodeParts = (name: DisplayLine, code: number): TitleParts 
 type HeadlineParts = ReturnType<MessagesSource['dialogs']['approvalHeadlineOther']>;
 type HeadlineParty = Parameters<MessagesSource['dialogs']['approvalHeadlineOther']>[2];
 
+function partyText(party: HeadlinePartyOf<string>): string {
+  return 'name' in party ? party.name : party.words;
+}
+
 /** Each dummy heading is its parts put together, as in the English locale. */
 function dummyHeadline(
   key: string,
@@ -30,13 +35,11 @@ function dummyHeadline(
   to: HeadlineParty,
   tool: DisplayLine | null = null
 ): HeadlineParts {
-  const fromWords = from === null ? 'DUMMY_external' : null;
+  const fromParty = from === null ? { words: 'DUMMY_external' } : { name: from };
   const verb = `DUMMY_approvalHeadline_${key}(`;
-  const toName = to !== null && 'name' in to ? to.name : null;
-  const toWords = to !== null && 'words' in to ? to.words : null;
   const toolLink = ',';
-  const sentence = `${from ?? fromWords ?? ''}${verb}${tool ?? ''}${toolLink}${toName ?? toWords ?? ''}`;
-  return { fromName: from, fromWords, verb, tool, toolLink, toName, toWords, sentence };
+  const sentence = `${partyText(fromParty)}${verb}${tool ?? ''}${toolLink}${to === null ? '' : partyText(to)}`;
+  return { from: fromParty, verb, tool, toolLink, to, sentence };
 }
 
 // Checked against the resource's shape so a missing key stays a type error, then typed as the

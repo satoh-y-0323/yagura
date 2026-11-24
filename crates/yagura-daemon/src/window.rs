@@ -132,8 +132,8 @@ fn to_base36(mut value: u64, digits: usize) -> String {
 const WINDOW_ID_DIGITS: usize = 8;
 
 /// How many random ids one reservation round offers to
-/// [`first_free_window_id`]; each id is taken only by a holder's files or a
-/// window, so a round runs dry only on a broken random source.
+/// [`first_free_window_id`]. A round runs dry when every id is taken or, for
+/// an open, when every id's mark is not drawable or lies near a held window's.
 const WINDOW_ID_CANDIDATES: usize = 8;
 
 /// How many reservation rounds an open makes before it gives up, each ending
@@ -2771,8 +2771,13 @@ impl WindowRegistry {
     }
 
     /// Picks a window id that no window, holder's files or row of the window
-    /// table has, and reserves it by writing the window's `opening` row with
-    /// `values`. Called under `open_lock`, so two opens never pick one id.
+    /// table has, whose mark is drawable and differs in at least
+    /// [`WINDOW_MARK_MIN_DISTANCE`] cells from every held window's mark, and
+    /// reserves it by writing the window's `opening` row with `values`.
+    ///
+    /// Only when no round draws an id that keeps that distance does it fall
+    /// back to [`WINDOW_MARK_FALLBACK_DISTANCE`] (with a warning), so a window
+    /// still opens. Called under `open_lock`, so two opens never pick one id.
     async fn reserve_window_id(
         &self,
         values: &WindowValues,
@@ -5089,6 +5094,48 @@ mod tests {
                 Some(far.clone()),
                 "the mark rule holds whether or not a holder has been started ({dir:?})"
             );
+        }
+    }
+
+    /// With this many windows held, an id drawn at random has a mark within
+    /// two cells of some held one in about half the draws, so a reservation
+    /// that ignored the mark rule would hand one out almost every time.
+    const HELD_WINDOWS: usize = 200;
+    const RESERVED_WINDOWS: usize = 50;
+
+    #[tokio::test]
+    async fn every_reserved_window_id_keeps_its_mark_three_cells_from_every_held_window() {
+        let registry = WindowRegistry::new(DaemonConfig::default());
+        let mut held: Vec<String> = (0..HELD_WINDOWS)
+            .map(|_| random_window_id().expect("draw the id of a held window"))
+            .collect();
+        let mut opens: Vec<OpeningWindow<'_>> = held
+            .iter()
+            .map(|id| registry.begin_opening(id, id))
+            .collect();
+
+        for _ in 0..RESERVED_WINDOWS {
+            let (window_id, _row) = registry
+                .reserve_window_id(&unknown_values("reserved"))
+                .await
+                .expect("a reservation finds a window id");
+            let mark = window_mark(&window_id);
+            assert!(
+                mark.is_drawable(),
+                "{window_id}'s mark fills {} of its cells",
+                mark.cells.count_ones()
+            );
+            let near: Vec<&String> = held
+                .iter()
+                .filter(|other| !window_marks_apart(mark, window_mark(other), 3))
+                .collect();
+            assert!(
+                near.is_empty(),
+                "{window_id}'s mark is within two cells of the held windows {near:?}"
+            );
+            // The open that reserved the id holds it from here on.
+            opens.push(registry.begin_opening(&window_id, &window_id));
+            held.push(window_id);
         }
     }
 

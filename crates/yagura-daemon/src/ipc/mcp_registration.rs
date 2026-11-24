@@ -32,8 +32,8 @@ use crate::pty;
 use crate::toml_set;
 use crate::window::{CliInjection, InjectionKind};
 
-use super::plan::{auth_failed_msg, load_role_and_profile_state_blocking, unsupported_msg};
-use super::{ConnectionState, Outbound, error_msg};
+use super::plan::{load_role_and_profile_state_blocking, unsupported_msg};
+use super::{ConnectionState, Outbound, approver_only_msg, error_msg};
 
 /// One row's registration table, together with everything a later state read
 /// needs, kept apart from the wire row so a background read never re-parses
@@ -78,7 +78,7 @@ pub(super) async fn handle_list_mcp_registrations(
     request_id: u64,
 ) {
     if !matches!(state.origin, RequestOrigin::Approver) {
-        outbound.reply(&auth_failed_msg());
+        outbound.reply(&approver_only_msg());
         return;
     }
     if !profile::has_profile_source(config) {
@@ -1641,7 +1641,7 @@ pub(super) async fn handle_run_mcp_registration(
         request_id,
     } = request;
     if !matches!(state.origin, RequestOrigin::Approver) {
-        outbound.reply(&auth_failed_msg());
+        outbound.reply(&approver_only_msg());
         return;
     }
     let Some(source) = resolve_row_source(config, role_and_profile_reads, &profile).await else {

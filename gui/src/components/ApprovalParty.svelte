@@ -5,13 +5,14 @@
    * forge; a client that is no window shows an icon instead, and a window that
    * does not exist yet an empty card.
    *
-   * The name comes first in the markup so it is read first; the grid moves the
-   * mark to the left. Nothing in the card takes focus, so the two orders never
-   * meet a keyboard.
+   * The mark comes before the name in the markup and in the card's label, so
+   * what the daemon vouches for is read before the name, whose characters may
+   * mimic it. Nothing in the card takes focus, so no keyboard meets the order.
    *
    * The compact form is a chip of the mark and the name, for a list row. Its
    * heading, profile, status and ID are hidden from the eye but still read, so
-   * a screen reader hears the same card in either form.
+   * a screen reader hears the same card in either form. It is no landmark: a
+   * list of notices would otherwise hold two for every row.
    */
   import type { UiText } from '../display/ui-text';
   import type { ApprovalParty } from '../session/approval-types';
@@ -27,18 +28,38 @@
   export let size: 'card' | 'compact' = 'card';
 
   $: headingId = `${id}-heading`;
+  $: markId = `${id}-mark`;
+  $: nameId = `${id}-name`;
+  $: hasMark = party.mark !== null && party.windowId !== null;
+  $: labelledBy =
+    size === 'compact' ? undefined : [headingId, ...(hasMark ? [markId] : []), nameId].join(' ');
 </script>
 
-<section
+<svelte:element
+  this={size === 'compact' ? 'div' : 'section'}
   class="approval-party"
   class:approval-party--untargeted={party.kind === 'untargeted'}
   class:approval-party--compact={size === 'compact'}
   {id}
-  aria-labelledby={headingId}
+  aria-labelledby={labelledBy}
 >
   <span class="approval-party__heading" id={headingId}>{heading}</span>
   <div class="approval-party__body">
-    <span class="approval-party__name">{party.label}</span>
+    {#if party.mark !== null && party.windowId !== null}
+      <span class="approval-party__mark" id={markId}>
+        <WindowMark
+          mark={party.mark}
+          windowId={party.windowId}
+          size={size === 'compact' ? 'header' : 'card'}
+          showsId={false}
+        />
+      </span>
+    {:else if party.kind === 'external'}
+      <span class="approval-party__mark approval-party__mark--none">
+        <Icon name="plug" size={size === 'compact' ? 'sm' : 'md'} />
+      </span>
+    {/if}
+    <span class="approval-party__name" id={nameId}>{party.label}</span>
     {#if party.profile !== null}
       <span class="approval-party__profile">{party.profile}</span>
     {/if}
@@ -53,22 +74,8 @@
         {/if}
       </span>
     {/if}
-    {#if party.mark !== null && party.windowId !== null}
-      <span class="approval-party__mark">
-        <WindowMark
-          mark={party.mark}
-          windowId={party.windowId}
-          size={size === 'compact' ? 'header' : 'card'}
-          showsId={false}
-        />
-      </span>
-    {:else if party.kind === 'external'}
-      <span class="approval-party__mark approval-party__mark--none">
-        <Icon name="plug" size={size === 'compact' ? 'sm' : 'md'} />
-      </span>
-    {/if}
   </div>
-</section>
+</svelte:element>
 
 <style>
   .approval-party {
@@ -200,7 +207,6 @@
   }
 
   .approval-party--compact .approval-party__mark {
-    order: -1;
     align-self: center;
   }
 

@@ -372,6 +372,7 @@ function createBrandReader(program, brands) {
   return {
     checker,
     brandsIn,
+    brandOfProperty,
     brandOfText,
     handedInBy,
     isLibraryType,
@@ -491,7 +492,9 @@ const noBrandForging = {
      * The foreign brands an assertion of `source` to `target` claims. Where the
      * two are plain objects they are set beside each other member by member and
      * through each signature's result, so a place where the source already holds
-     * the brand claims nothing; any other shape is judged as a whole.
+     * the brand claims nothing. A union source claims what its members claim, and a
+     * union target claims nothing when the source fits one of its members; any other
+     * shape is judged as a whole.
      */
     function claimedBrands(source, target, depth) {
       const held = foreignBrandsIn(target);
@@ -500,7 +503,26 @@ const noBrandForging = {
         return new Set();
       }
       const whole = new Set(held);
-      if (isAny || depth > MAX_DEPTH || !isPlainObject(source) || !isPlainObject(target)) {
+      if (isAny || depth > MAX_DEPTH) {
+        return whole;
+      }
+      // Each member of the source is a value the assertion may be handed, so each claims apart.
+      if (source.isUnion()) {
+        const claimed = new Set();
+        for (const member of source.types) {
+          claimedBrands(member, target, depth + 1).forEach((brand) => claimed.add(brand));
+        }
+        return claimed;
+      }
+      // Narrowing may later pick any member of the target, so only a member the source truly is
+      // lets the rest go unclaimed; holding no foreign brand does not make a member fit.
+      if (
+        target.isUnion() &&
+        target.types.some((member) => fitsBesideOwn(source, member, depth + 1))
+      ) {
+        return new Set();
+      }
+      if (!isPlainObject(source) || !isPlainObject(target)) {
         return whole;
       }
       if (
@@ -535,6 +557,70 @@ const noBrandForging = {
         add(claimedBrands(sourceCall.getReturnType(), targetCall.getReturnType(), depth + 1));
       }
       return claimed;
+    }
+
+    /** True when `text` is a brand this file makes: a string carrying only its own brands' keys. */
+    function isOwnBrandText(text) {
+      const brand = reader.brandOfText(text);
+      return (
+        brand !== undefined &&
+        !foreign.includes(brand) &&
+        text.types.every(
+          (part) =>
+            (part.flags & ts.TypeFlags.StringLike) !== 0 ||
+            checker.getPropertiesOfType(part).every((key) => {
+              const keyBrand = reader.brandOfProperty(key);
+              return keyBrand !== undefined && !foreign.includes(keyBrand);
+            })
+        )
+      );
+    }
+
+    /**
+     * True when `source` is assignable to `target` once the brands this file makes are set
+     * aside; foreign brands must already be held where `target` has them.
+     */
+    function fitsBesideOwn(source, target, depth) {
+      if ((source.flags & ts.TypeFlags.Any) !== 0) {
+        return foreignBrandsIn(target).length === 0;
+      }
+      if (checker.isTypeAssignableTo(source, target)) {
+        return true;
+      }
+      if (depth > MAX_DEPTH) {
+        return false;
+      }
+      if (source.isUnion()) {
+        return source.types.every((member) => fitsBesideOwn(member, target, depth + 1));
+      }
+      if (target.isUnion()) {
+        return target.types.some((member) => fitsBesideOwn(source, member, depth + 1));
+      }
+      if (isOwnBrandText(target)) {
+        return target.types
+          .filter((part) => (part.flags & ts.TypeFlags.StringLike) !== 0)
+          .every((part) => checker.isTypeAssignableTo(source, part));
+      }
+      if (
+        !isPlainObject(source) ||
+        !isPlainObject(target) ||
+        checker.getIndexInfosOfType(target).length > 0 ||
+        target.getConstructSignatures().length > 0 ||
+        target.getCallSignatures().length > 0
+      ) {
+        return false;
+      }
+      return checker.getPropertiesOfType(target).every((property) => {
+        const counterpart = checker.getPropertyOfType(source, property.name);
+        if (counterpart === undefined) {
+          return (property.flags & ts.SymbolFlags.Optional) !== 0;
+        }
+        return fitsBesideOwn(
+          checker.getTypeOfSymbol(counterpart),
+          checker.getTypeOfSymbol(property),
+          depth + 1
+        );
+      });
     }
 
     function checkReturnTypes(node) {

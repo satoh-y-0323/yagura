@@ -13,8 +13,8 @@ use crate::control::RequestOrigin;
 use crate::profile::{self, validate_profile_id};
 use crate::profile_rewrite::ProfileWriteError;
 
-use super::plan::{auth_failed_msg, internal_msg, unsupported_msg};
-use super::{ConnectionState, Outbound, error_msg};
+use super::plan::{internal_msg, unsupported_msg};
+use super::{ConnectionState, Outbound, approver_only_msg, error_msg};
 
 /// What a profile request needs from the daemon's configuration.
 #[derive(Debug, Clone, Copy)]
@@ -39,7 +39,7 @@ pub(super) async fn run_profile_job(
     job: impl FnOnce(DaemonConfig) -> DaemonMessage + Send + 'static,
 ) {
     if !matches!(state.origin, RequestOrigin::Approver) {
-        outbound.reply(&auth_failed_msg());
+        outbound.reply(&approver_only_msg());
         return;
     }
     let has_what_it_needs = match needs {

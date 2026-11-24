@@ -10,12 +10,13 @@
   export let headline: HeadlineParts;
 </script>
 
-{#if headline.fromName !== null}<strong class="approval-name">{headline.fromName}</strong
-  >{:else if headline.fromWords !== null}{headline.fromWords}{/if}{headline.verb}{#if headline.tool !== null}<code
-    class="approval-tool-name">{headline.tool}</code
-  >{/if}{headline.toolLink}{#if headline.toName !== null}<strong class="approval-name"
-    >{headline.toName}</strong
-  >{:else if headline.toWords !== null}{headline.toWords}{/if}
+{#if 'name' in headline.from}<strong class="approval-name">{headline.from.name}</strong
+  >{:else if 'words' in headline.from}{headline.from
+    .words}{/if}{headline.verb}{#if headline.tool !== null}<code class="approval-tool-name"
+    >{headline.tool}</code
+  >{/if}{headline.toolLink}{#if headline.to !== null && 'name' in headline.to}<strong
+    class="approval-name">{headline.to.name}</strong
+  >{:else if headline.to !== null && 'words' in headline.to}{headline.to.words}{/if}
 
 <style>
   /* A name stands apart from the words by weight and ground, neither of which its characters can draw. */

@@ -3327,13 +3327,14 @@ impl IpcServer {
         .await;
     }
 
-    /// Changes a window's display name.
+    /// Changes a window's display name. Only the approver may rename.
     ///
-    /// Decision order matches the other window-scoped handlers: existence
-    /// first, then the argument check. The `child_exited` gate `send_text`
-    /// applies does not appear here -- a label change never touches the child,
-    /// and gating it would leave an exited window stuck with a name nobody can
-    /// correct.
+    /// Decision order: the approver check, then existence, then the argument
+    /// check. The approver check comes first so a caller that is not the
+    /// approver learns nothing about the window. The `child_exited` gate
+    /// `send_text` applies does not appear here -- a label change never touches
+    /// the child, and gating it would leave an exited window stuck with a name
+    /// nobody can correct.
     async fn handle_rename_window(
         &self,
         outbound: &Outbound,
@@ -3342,13 +3343,9 @@ impl IpcServer {
         name: &str,
     ) {
         // Only the GUI renames, and a child that renames another window could
-        // swap names with a window the user trusts. Refused before the lookup,
-        // so a caller that is not the approver learns nothing about the window.
+        // swap names with a window the user trusts.
         if !matches!(state.origin, RequestOrigin::Approver) {
-            outbound.reply(&error_msg(
-                "auth_failed",
-                "only the approver may rename a window",
-            ));
+            outbound.reply(&approver_only_msg());
             return;
         }
         let Some(entry) = self.registry.get(window_id) else {
@@ -4805,6 +4802,12 @@ pub(crate) fn now_ms() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|elapsed| u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX))
         .unwrap_or(0)
+}
+
+/// The refusal of a request only the approver may make, shared so every such
+/// request is refused in the same words.
+fn approver_only_msg() -> DaemonMessage {
+    error_msg("auth_failed", "only the approver may make this request")
 }
 
 fn error_msg(code: &str, message: &str) -> DaemonMessage {

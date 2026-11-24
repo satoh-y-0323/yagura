@@ -1,7 +1,7 @@
 import type { NoticeCategory } from '../notices/notice-model';
 import type { DisplayLine } from '../display/untrusted-text';
 import type { UiText } from '../display/ui-text';
-import type { HeadlineParts as RawHeadlineParts } from '../session/approval-types';
+import type { HeadlineParts as RawHeadlineParts, HeadlineParty } from '../session/approval-types';
 
 /**
  * The consequence shared by every message that tells the user to restart the
@@ -135,9 +135,6 @@ const APPROVAL_TOOL_INFO = {
   },
 };
 
-/** What an approval heading names a window by: its name, or words that stand in for one. */
-export type HeadlineParty = { name: DisplayLine } | { words: UiText };
-
 /** The heading as this locale builds it, before its words are marked as UI text. */
 type HeadlineParts = RawHeadlineParts<string>;
 
@@ -149,17 +146,24 @@ function headline(
   tool: DisplayLine | null = null,
   toolLink = ''
 ): HeadlineParts {
-  const fromWords = from === null ? 'An external client' : null;
-  const toName = to !== null && 'name' in to ? to.name : null;
-  const toWords = to !== null && 'words' in to ? to.words : null;
-  const parts = { fromName: from, fromWords, verb, tool, toolLink, toName, toWords };
+  const parts = {
+    from: from === null ? { words: 'An external client' } : { name: from },
+    verb,
+    tool,
+    toolLink,
+    to,
+  };
   return { ...parts, sentence: sentenceOf(parts) };
 }
 
 // The sentence is read back from the parts the dialog draws, so a test of the sentence also covers them.
 function sentenceOf(parts: Omit<HeadlineParts, 'sentence'>): string {
-  const { fromName, fromWords, verb, tool, toolLink, toName, toWords } = parts;
-  return `${fromName ?? fromWords ?? ''}${verb}${tool ?? ''}${toolLink}${toName ?? toWords ?? ''}`;
+  const { from, verb, tool, toolLink, to } = parts;
+  return `${partyText(from)}${verb}${tool ?? ''}${toolLink}${to === null ? '' : partyText(to)}`;
+}
+
+function partyText(party: HeadlineParty<string>): string {
+  return 'name' in party ? party.name : party.words;
 }
 
 /** One heading per gated tool: who asks, then what it would do to what. */

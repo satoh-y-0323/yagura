@@ -40,7 +40,7 @@ use crate::window::task_report::ReportChange;
 use crate::window::{WindowLiveness, WindowRegistry};
 
 use super::store_gate::{StoreAccessError, StoreGate};
-use super::{Outbound, error_msg, window_not_found_msg};
+use super::{Outbound, approver_only_msg, error_msg, window_not_found_msg};
 
 /// [`super::chat::ChatRuntime`]'s counterpart for the plan ledger: the store
 /// gate and the per-plan lock table, together.
@@ -831,7 +831,7 @@ pub(super) async fn handle_set_task_assignment(
         return;
     }
     if !matches!(state.origin, RequestOrigin::Approver) {
-        outbound.reply(&auth_failed_msg());
+        outbound.reply(&approver_only_msg());
         return;
     }
 
@@ -909,7 +909,7 @@ pub(super) async fn handle_clear_task_assignment(
         return;
     }
     if !matches!(state.origin, RequestOrigin::Approver) {
-        outbound.reply(&auth_failed_msg());
+        outbound.reply(&approver_only_msg());
         return;
     }
 
@@ -975,7 +975,7 @@ pub(super) async fn handle_set_plan_owner(
         return;
     }
     if !matches!(state.origin, RequestOrigin::Approver) {
-        outbound.reply(&auth_failed_msg());
+        outbound.reply(&approver_only_msg());
         return;
     }
 
@@ -1059,7 +1059,7 @@ pub(super) async fn handle_approve_plan(
         return;
     }
     if !matches!(state.origin, RequestOrigin::Approver) {
-        outbound.reply(&auth_failed_msg());
+        outbound.reply(&approver_only_msg());
         return;
     }
 
@@ -1217,7 +1217,7 @@ pub(super) async fn handle_mark_plan_seen(
         return;
     }
     if !matches!(state.origin, RequestOrigin::Approver) {
-        outbound.reply(&auth_failed_msg());
+        outbound.reply(&approver_only_msg());
         return;
     }
 
@@ -1385,7 +1385,7 @@ pub(super) async fn handle_save_roles(
     default_role: Option<String>,
 ) {
     if !matches!(state.origin, RequestOrigin::Approver) {
-        outbound.reply(&auth_failed_msg());
+        outbound.reply(&approver_only_msg());
         return;
     }
     let Some(path) = config.roles_path.clone() else {

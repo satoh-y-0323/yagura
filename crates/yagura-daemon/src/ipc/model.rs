@@ -23,9 +23,9 @@ use crate::profile::{self, ModelChoicesError, ModelChoicesPlan, OutputFormat};
 use crate::profile_aliases;
 use crate::pty;
 
-use super::plan::{auth_failed_msg, unsupported_msg};
+use super::plan::unsupported_msg;
 use super::profile_job::{ProfileJobNeeds, profile_write_error_msg, run_profile_job};
-use super::{ConnectionState, Outbound, error_msg};
+use super::{ConnectionState, Outbound, approver_only_msg, error_msg};
 
 /// [`ModelChoicesError`] and [`ChoicesFailure`] both name "unknown launch
 /// profile", "this profile does not map the model option" and an
@@ -61,7 +61,7 @@ pub(super) async fn handle_list_model_choices(
     request_id: u64,
 ) {
     if !matches!(state.origin, RequestOrigin::Approver) {
-        outbound.reply(&auth_failed_msg());
+        outbound.reply(&approver_only_msg());
         return;
     }
     if !profile::has_profile_source(config) {

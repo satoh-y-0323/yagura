@@ -2098,7 +2098,12 @@ yagura draws a mark derived from the window ID in each window's header in the
 GUI and on the approval dialog, so a request can be matched to its window by
 something the window cannot choose. The mapping from an ID to its mark does not
 change between versions, and the daemon does not hand out an ID whose mark is
-close to the mark of a window it holds.
+close to the mark of a window it holds: the new mark differs from each of
+theirs in at least three of its cells. Only when it holds so many windows that
+no such ID is left does it hand out one whose mark merely differs, and it logs a
+warning when it does. A window's header leaves the mark out while the window is
+drawn narrow, and a window that is not on screen shows no header at all; to match
+a request to such a window, bring the window forward and compare the marks.
 
 A `window_id` can also stop resolving without a daemon restart: an unattached, already-`exited` window may be evicted from the registry once the daemon needs the slot back (to stay within its total-entry limit). Any tool call against an evicted `window_id`, including one already blocked inside `wait_for_status`, resolves as `window_not_found`.
 

@@ -18,8 +18,8 @@ use crate::control::{DestructiveTool, RequestOrigin};
 use crate::live_policy::{LivePolicy, LiveSource, PolicyCell, PolicyWriteGuard};
 use crate::playbook_rewrite::{self, PlaybookRewriteError, PlaybookWrite};
 
-use super::plan::{auth_failed_msg, unsupported_msg};
-use super::{ConnectionState, Outbound, error_msg};
+use super::plan::unsupported_msg;
+use super::{ConnectionState, Outbound, approver_only_msg, error_msg};
 
 /// Answers `get_approval_settings`, approver-only, with the daemon's current
 /// value.
@@ -29,7 +29,7 @@ pub(super) fn handle_get_approval_settings(
     state: &ConnectionState,
 ) {
     if !matches!(state.origin, RequestOrigin::Approver) {
-        outbound.reply(&auth_failed_msg());
+        outbound.reply(&approver_only_msg());
         return;
     }
     outbound.reply(&DaemonMessage::ApprovalSettings {
@@ -48,7 +48,7 @@ pub(super) async fn handle_set_auto_approve(
     auto_approve: bool,
 ) {
     if !matches!(state.origin, RequestOrigin::Approver) {
-        outbound.reply(&auth_failed_msg());
+        outbound.reply(&approver_only_msg());
         return;
     }
     let Some(tool) = DestructiveTool::ALL
@@ -76,7 +76,7 @@ pub(super) async fn handle_set_plan_approval_required(
     required: bool,
 ) {
     if !matches!(state.origin, RequestOrigin::Approver) {
-        outbound.reply(&auth_failed_msg());
+        outbound.reply(&approver_only_msg());
         return;
     }
     let change = Change::PlanApprovalRequired { required };

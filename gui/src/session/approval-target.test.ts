@@ -224,8 +224,11 @@ describe('approvalFactsOf: the heading', () => {
   it.each(HEADED_FORMS)(
     'starts the %s sentence with the requester, sets the names apart without quotes, and ends without a period',
     (_label, form) => {
-      const { sentence } = approvalFactsOf(form, true).headline;
+      const facts = approvalFactsOf(form, true);
+      const { sentence } = facts.headline;
 
+      // The requester window's name goes in the part drawn as a name, never in one drawn as words.
+      expect(facts.headline.from).toEqual({ name: facts.from.label });
       expect(sentence.startsWith(WINDOW_REQUESTER.name)).toBe(true);
       expect(sentence).not.toMatch(/\.$/);
       for (const name of [WINDOW_REQUESTER.name, TARGET.name]) {
@@ -238,8 +241,10 @@ describe('approvalFactsOf: the heading', () => {
   it.each(HEADED_FORMS.filter(([, form]) => form.target !== undefined))(
     'names the target window after the requester in the %s sentence',
     (_label, form) => {
-      const { sentence } = approvalFactsOf(form, true).headline;
+      const facts = approvalFactsOf(form, true);
+      const { sentence } = facts.headline;
 
+      expect(facts.headline.to).toEqual({ name: facts.to.label });
       expect(sentence.indexOf(TARGET.name, WINDOW_REQUESTER.name.length)).toBeGreaterThan(0);
     }
   );
@@ -247,7 +252,11 @@ describe('approvalFactsOf: the heading', () => {
   it.each(HEADED_FORMS.filter(([, form]) => form.target === undefined))(
     'names what the %s request is addressed to in its sentence',
     (_label, form) => {
-      expect(approvalFactsOf(form, true).headline.sentence).toContain(describeUntargeted(form));
+      const facts = approvalFactsOf(form, true);
+
+      // What stands in for a window that does not exist yet is words, not a name.
+      expect(facts.headline.to).toEqual({ words: facts.to.label });
+      expect(facts.headline.sentence).toContain(describeUntargeted(form));
     }
   );
 
@@ -257,6 +266,7 @@ describe('approvalFactsOf: the heading', () => {
 
     expect(approvalFactsOf(onWindow, true).headline.sentence).toContain(onWindow.displayTool);
     expect(approvalFactsOf(onNothing, true).headline.sentence).toContain(onNothing.displayTool);
+    expect(approvalFactsOf(onNothing, true).headline.to).toBeNull();
   });
 
   it.each(HEADED_FORMS)(
@@ -264,16 +274,19 @@ describe('approvalFactsOf: the heading', () => {
     (_label, form) => {
       const fromWindow = approvalFactsOf(form, true).headline.sentence;
       const rest = fromWindow.slice(WINDOW_REQUESTER.name.length);
-      const fromExternal = approvalFactsOf({ ...form, requester: external('external') }, true)
-        .headline.sentence;
-      const fromUnknown = approvalFactsOf({ ...form, requester: external('unknown') }, true)
-        .headline.sentence;
+      const clientFacts = approvalFactsOf({ ...form, requester: external('external') }, true);
+      const unknownFacts = approvalFactsOf({ ...form, requester: external('unknown') }, true);
+      const fromExternal = clientFacts.headline.sentence;
+      const fromUnknown = unknownFacts.headline.sentence;
 
       expect(fromExternal.endsWith(rest)).toBe(true);
       const opening = fromExternal.slice(0, fromExternal.length - rest.length);
       expect(opening).not.toBe('');
       expect(opening).not.toBe(WINDOW_REQUESTER.name);
       expect(fromUnknown).toBe(fromExternal);
+      // A client that is no window has no name to show, so the heading opens with words.
+      expect(clientFacts.headline.from).toEqual({ words: opening });
+      expect(unknownFacts.headline.from).toEqual({ words: opening });
     }
   );
 });

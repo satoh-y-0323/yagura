@@ -698,6 +698,24 @@ const BRAND_FORGING_RED: readonly CaseLine[] = [
   "const made = sanitizeForDisplay('x');",
   '',
   { code: "export const asserted = 'x' as DisplayLine;", reports: 'assertion' },
+  { code: "export const orNull = 'x' as DisplayLine | null;", reports: 'assertion' },
+  {
+    code: "export const noName = { words: 'x' } as { name: DisplayLine } | { words: DisplayLine };",
+    reports: 'assertion',
+  },
+  'export function oneSideClaims(v: { a: string } | { b: DisplayLine }): unknown {',
+  { code: '  return v as { a: DisplayLine } | { b: DisplayLine };', reports: 'assertion' },
+  '}',
+  // A member that holds no foreign brand is not one the value fits: narrowing picks the other.
+  'export function fitsNoMember(v: { x: string }): unknown {',
+  { code: '  return v as { x: DisplayLine } | { y: string };', reports: 'assertion' },
+  '}',
+  "export function otherKind(v: { kind: 'b'; x: string }): unknown {",
+  {
+    code: "  return v as { kind: 'a'; x: string } | { kind: 'b'; x: DisplayLine };",
+    reports: 'assertion',
+  },
+  '}',
   { code: "export const angled = <DisplayLine>'x';", reports: 'assertion' },
   {
     code: 'export function isLine(value: string): value is DisplayLine { return value.length > 0; }',
@@ -726,6 +744,55 @@ const BRAND_FORGING_GREEN: readonly CaseLine[] = [
   'export const plain = unknownValue as string;',
 ];
 
+const MESSAGES_TS = `${SOURCE_PREFIX}/i18n/messages.ts`;
+
+/**
+ * Linted as the maker of `UiText`, which may claim it: a union whose members each
+ * already hold the same `DisplayLine` claims none, member set beside member.
+ */
+const BRAND_UNION_GREEN_IN_UI_TEXT_MAKER: readonly CaseLine[] = [
+  "import type { UiText } from '../display/ui-text';",
+  "import type { DisplayLine } from '../display/untrusted-text';",
+  '',
+  'export function keepsName(v: { name: DisplayLine } | { words: string }): unknown {',
+  '  return v as { name: DisplayLine } | { words: UiText };',
+  '}',
+];
+
+/**
+ * Linted as the maker of `UiText`: its own brand may be set aside, but a member holding
+ * no foreign brand is not one the value fits, so the `DisplayLine` is still claimed.
+ */
+const BRAND_UNION_RED_IN_UI_TEXT_MAKER: readonly CaseLine[] = [
+  "import type { UiText } from '../display/ui-text';",
+  "import type { DisplayLine } from '../display/untrusted-text';",
+  '',
+  'export function fitsNoMember(v: { x: string }): unknown {',
+  { code: '  return v as { x: DisplayLine } | { y: UiText };', reports: 'assertion' },
+  '}',
+];
+
+const BAN_TS_COMMENT_RULE = '@typescript-eslint/ban-ts-comment';
+
+/** Every silenced type error, bare and with a reason given; a reason does not let one through. */
+const SILENCED_TYPE_ERROR_RED: readonly CaseLine[] = [
+  { code: '// @ts-nocheck', reports: BAN_TS_COMMENT_RULE },
+  { code: '// @ts-nocheck -- the types here are checked elsewhere', reports: BAN_TS_COMMENT_RULE },
+  'export {};',
+  'declare const raw: string;',
+  { code: '// @ts-expect-error', reports: BAN_TS_COMMENT_RULE },
+  'export const expected: number = raw;',
+  {
+    code: '// @ts-expect-error -- the value is a number at run time',
+    reports: BAN_TS_COMMENT_RULE,
+  },
+  'export const expectedWithReason: number = raw;',
+  { code: '// @ts-ignore', reports: BAN_TS_COMMENT_RULE },
+  'export const ignored: number = raw;',
+  { code: '// @ts-ignore -- the value is a number at run time', reports: BAN_TS_COMMENT_RULE },
+  'export const ignoredWithReason: number = raw;',
+];
+
 const HIDDEN_BY_HTML_COMMENT: readonly CaseLine[] = [
   '<script lang="ts">',
   '  export {};',
@@ -745,10 +812,10 @@ const HIDDEN_BY_CONFIG_COMMENT: readonly CaseLine[] = [
 ];
 
 describe('the display guards report what they guard', () => {
-  // The project service keeps the content it was last handed for a path, so the fixtures are
-  // linted again as on disk before any other source is.
+  // The project service keeps the content it was last handed for a path, so each path a case
+  // was linted as is linted again as on disk before any other source is.
   afterAll(async () => {
-    for (const path of [GUARD_CASE_TS, GUARD_CASE_SVELTE]) {
+    for (const path of [GUARD_CASE_TS, GUARD_CASE_SVELTE, MESSAGES_TS]) {
       await eslint.lintText(diskSource(path), { filePath: path });
     }
   }, RESOLVE_TIMEOUT_MS);
@@ -794,11 +861,32 @@ describe('the display guards report what they guard', () => {
     async () => {
       const red = await lintCase(eslint, GUARD_CASE_TS, BRAND_FORGING_RED);
       const green = await lintCase(eslint, GUARD_CASE_TS, BRAND_FORGING_GREEN);
+      const silenced = await lintCase(eslint, GUARD_CASE_TS, SILENCED_TYPE_ERROR_RED);
+      const union = await lintCase(eslint, MESSAGES_TS, BRAND_UNION_GREEN_IN_UI_TEXT_MAKER);
+      const unionRed = await lintCase(eslint, MESSAGES_TS, BRAND_UNION_RED_IN_UI_TEXT_MAKER);
 
-      expect.soft([...unparsed(red), ...unparsed(green)]).toEqual([]);
+      expect
+        .soft([
+          ...unparsed(red),
+          ...unparsed(green),
+          ...unparsed(silenced),
+          ...unparsed(union),
+          ...unparsed(unionRed),
+        ])
+        .toEqual([]);
+      expect
+        .soft(reportsOf(BRAND_FORGING_RULE, BRAND_UNION_RED_IN_UI_TEXT_MAKER, unionRed))
+        .toEqual(expectedReports(BRAND_UNION_RED_IN_UI_TEXT_MAKER));
       expect
         .soft(reportsOf(BRAND_FORGING_RULE, BRAND_FORGING_RED, red))
         .toEqual(expectedReports(BRAND_FORGING_RED));
+      // A silenced type error claims whatever brand it likes with no check, so it is refused too.
+      expect
+        .soft(guardReportsOf(SILENCED_TYPE_ERROR_RED, silenced, new Set([BAN_TS_COMMENT_RULE])))
+        .toEqual(expectedReports(SILENCED_TYPE_ERROR_RED));
+      expect
+        .soft(reportsOf(BRAND_FORGING_RULE, BRAND_UNION_GREEN_IN_UI_TEXT_MAKER, union))
+        .toEqual([]);
       expect(reportsOf(BRAND_FORGING_RULE, BRAND_FORGING_GREEN, green)).toEqual([]);
     },
     RESOLVE_TIMEOUT_MS
