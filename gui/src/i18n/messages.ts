@@ -3,7 +3,8 @@
 import { messagesEn, type HeadlineWords, type TitleWords } from './messages-en';
 import type { UiText, UiTextOf } from '../display/ui-text';
 import type { DisplayBlock, DisplayLine } from '../display/untrusted-text';
-import { partyRuns, type HeadlineParts, type HeadlineParty } from '../session/approval-types';
+import { partyRuns } from '../session/approval-party-runs';
+import type { HeadlineParts, HeadlineParty } from '../session/approval-types';
 
 /**
  * The shape of a locale, derived from the English resource: a second

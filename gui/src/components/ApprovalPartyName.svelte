@@ -5,7 +5,8 @@
    * The one place the name's chip is drawn, so a heading and a card set a name
    * apart alike. Draws runs only, so it sits inside the caller's own element.
    */
-  import { partyRuns, type HeadlineParty } from '../session/approval-types';
+  import { partyRuns } from '../session/approval-party-runs';
+  import type { HeadlineParty } from '../session/approval-types';
 
   export let party: HeadlineParty;
   /**
@@ -27,6 +28,7 @@
     border-radius: var(--radius-xs);
     background-color: var(--bg-selected);
     font-weight: var(--weight-semibold);
+    white-space: pre-wrap;
   }
 
   @media (forced-colors: active) {

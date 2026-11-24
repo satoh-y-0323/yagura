@@ -838,6 +838,9 @@ describe('formatCommandLine', () => {
     expect(formatCommandLine(['a\u00A0b'])).toBe('a\\u{00A0}b');
     expect(formatCommandLine(['a\u2800b'])).toBe('a\\u{2800}b');
     expect(formatCommandLine([''])).toBe('""');
+    expect(formatCommandLine([' x'])).toBe('\\u{0020}x');
+    expect(formatCommandLine(['a b '])).toBe('"a b\\u{0020}"');
+    expect(formatCommandLine([' '])).toBe('\\u{0020}');
   });
 
   it('joins the elements with one space', () => {
@@ -847,6 +850,11 @@ describe('formatCommandLine', () => {
   it('cuts at the limit counting the separators, closes the quote of a cut element, and drops the rest', () => {
     const shown = formatCommandLine(['ab', `c ${'d'.repeat(5000)}`, 'e']);
     expect(shown).toBe(`ab "c ${'d'.repeat(4091)}"…`);
+    // A cut that falls on a space is not the end of the value, so no trailing space is written out.
+    const cutAtSpace = formatCommandLine(['a'.repeat(4091), 'abc def']);
+    expect(cutAtSpace).not.toContain('\\u{0020}');
+    expect(cutAtSpace).toContain('abc');
+    expect(cutAtSpace.endsWith('\u2026')).toBe(true);
   });
 });
 

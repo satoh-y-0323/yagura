@@ -9,7 +9,8 @@ import { describe, it, expect } from 'vitest';
 import { approvalFactsOf, describeUntargeted } from './approval-target';
 import { formatApprovalBody, sanitizeForDisplay } from '../display/untrusted-text';
 import type { ApprovalRequest, WindowStatus } from '../ipc/session-boundary';
-import { partyRuns, type HeadlineParty } from './approval-types';
+import { partyRuns } from './approval-party-runs';
+import type { HeadlineParty } from './approval-types';
 import { describeStatus, dialogs } from '../ui-messages';
 
 const REQUESTER_MARK = { cells: 0b010_101_011_100_110, hue: 3 };
@@ -92,6 +93,12 @@ describe('describeUntargeted', () => {
       kind: 'room',
       parts: { name: '\\u{0020}Main\\u{0020}' },
     });
+    // Only the room's name is a chip; the words around it are not.
+    expect(partyRuns(describeUntargeted(named)).map((run) => run.chip)).toEqual([
+      false,
+      true,
+      false,
+    ]);
   });
 
   it('names a new window for a request to open one', () => {
@@ -101,6 +108,7 @@ describe('describeUntargeted', () => {
       kind: 'words',
       words: dialogs.approvalTargetNewWindow,
     });
+    expect(partyRuns(describeUntargeted(opening)).map((run) => run.chip)).toEqual([false]);
   });
 
   it('names a new window for a handoff that opens one from a profile', () => {
@@ -140,6 +148,10 @@ describe('approvalFactsOf: who asks', () => {
       window: { id: WINDOW_REQUESTER.displayWindowId, mark: REQUESTER_MARK },
     });
     expect(tool).toBe(toWindow.displayTool);
+    // A window's name is a chip where words surround it and plain where it stands alone.
+    expect(partyRuns(from.label).map((run) => run.chip)).toEqual([true]);
+    expect(partyRuns(from.label, 'chip').map((run) => run.chip)).toEqual([true]);
+    expect(partyRuns(from.label, 'plain').map((run) => run.chip)).toEqual([false]);
   });
 
   it('leaves the launch profile out for a window opened from a command', () => {

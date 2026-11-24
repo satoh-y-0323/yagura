@@ -1,12 +1,10 @@
 /**
  * Wire-adjacent literal types shared by the approval boundary
- * (`ipc/session-boundary.ts`) and the notice model (`notices/notice-model.ts`),
- * and how a party those types name is read.
+ * (`ipc/session-boundary.ts`) and the notice model (`notices/notice-model.ts`).
  *
- * Deliberately loads neither `ipc/` nor `ui-messages` at runtime: both of
- * those modules import from here, and a dependency the other way would cycle.
- * The one import from `ui-messages` is type-only, as is its import from here,
- * so it is erased and neither loads the other.
+ * Types only, so nothing here loads at runtime: both `ipc/` and `ui-messages`
+ * import from here, and its one import from `ui-messages` is type-only, so
+ * neither loads the other. How a party is read is in `approval-party-runs.ts`.
  */
 import type { UiText } from '../display/ui-text';
 import type { DisplayLine } from '../display/untrusted-text';
@@ -43,46 +41,12 @@ export interface WindowMark {
 /**
  * What an approval heading and a card name a party by: a window's name, words
  * that stand in for a party, or a room's name with the words around it. Read it
- * through {@link partyRuns}, the one place that branches on `kind`.
+ * through `partyRuns` (`approval-party-runs.ts`), the one place that branches on `kind`.
  */
 export type HeadlineParty =
   | { kind: 'name'; name: DisplayLine }
   | { kind: 'words'; words: UiText }
   | { kind: 'room'; parts: TitleParts };
-
-/** One run of a party's text; `chip` sets a name apart from the words around it. */
-export interface PartyRun {
-  text: UiText | DisplayLine;
-  chip: boolean;
-}
-
-/**
- * A party as the runs it reads in. A room's name is always a chip, as words
- * always surround it; a window's name is one when `windowName` is `chip`.
- * @param party the party to read
- * @param windowName `chip` where words surround a window's name, `plain` where it stands alone
- */
-export function partyRuns(
-  party: HeadlineParty,
-  windowName: 'chip' | 'plain' = 'chip'
-): readonly PartyRun[] {
-  switch (party.kind) {
-    case 'name':
-      return [{ text: party.name, chip: windowName === 'chip' }];
-    case 'words':
-      return [{ text: party.words, chip: false }];
-    case 'room':
-      return [
-        { text: party.parts.before, chip: false },
-        { text: party.parts.name, chip: true },
-        { text: party.parts.after, chip: false },
-      ];
-    default: {
-      const unknown: never = party;
-      return unknown;
-    }
-  }
-}
 
 /**
  * An approval heading in the order it reads, so a view can set each name apart

@@ -44,7 +44,7 @@ export const EXTERNAL_TEXT_MAX_CODE_POINTS = 200;
 const LINE_SPACE_CLASS = String.raw`\p{Cc}\p{Zl}\p{Zp}`;
 // U+FFFC only holds the place of an embedded object and has no ink of its own:
 // WebKit on macOS and on Linux draws nothing for it.
-const OBJECT_REPLACEMENT = '￼';
+const OBJECT_REPLACEMENT = '\uFFFC';
 const HIDDEN_CLASS = String.raw`${LINE_SPACE_CLASS}\p{Cf}\p{Default_Ignorable_Code_Point}${OBJECT_REPLACEMENT}`;
 // `Mc` is left out: a spacing mark takes width and ink of its own.
 const MARK_CLASS = String.raw`\p{Mn}\p{Me}`;
@@ -349,12 +349,12 @@ export function formatPathForDisplay(value: string): DisplayLine {
   return formatPlace(value, MAX_DISPLAY_FIELD_CHARS) as DisplayLine;
 }
 
-function formatPlace(value: string, maxChars: number): string {
+function formatPlace(value: string, maxChars: number, cutShort = false): string {
   return formatMultilineText(
     value,
     maxChars,
     NO_CONTROLS,
-    keepsInnerSpace(),
+    keepsInnerSpace(cutShort),
     PLACE_WRITTEN_OUT_CHARS
   );
 }
@@ -362,9 +362,11 @@ function formatPlace(value: string, maxChars: number): string {
 /**
  * Keeps each U+0020 of a place but those it starts or ends with: with no quotes
  * around the value, those show as nothing, so ` main` would look like `main`.
- * The ends are measured once for each text it is asked about.
+ * A value `cutShort` by its caller does not end where it is cut (the caller
+ * marks the cut), so its trailing U+0020 stays. The ends are measured once for
+ * each text it is asked about.
  */
-function keepsInnerSpace(): KeepsChar {
+function keepsInnerSpace(cutShort: boolean): KeepsChar {
   let measured: string | undefined;
   let start = 0;
   let end = 0;
@@ -376,7 +378,7 @@ function keepsInnerSpace(): KeepsChar {
         start += 1;
       }
       end = text.length;
-      while (end > start && text[end - 1] === ' ') {
+      while (!cutShort && end > start && text[end - 1] === ' ') {
         end -= 1;
       }
     }
@@ -430,8 +432,8 @@ export function formatOutputBlock(value: string): DisplayBlock {
   ) as DisplayBlock;
 }
 
-function formatArgument(argument: string): string {
-  const written = formatPlace(argument, Infinity).replace(/"/g, '\\u{0022}');
+function formatArgument(argument: string, cutShort: boolean): string {
+  const written = formatPlace(argument, Infinity, cutShort).replace(/"/g, '\\u{0022}');
   // A space drawn as a space would hide where the element ends; an empty one would vanish.
   return written === '' || /\s/u.test(written) ? `"${written}"` : written;
 }
@@ -461,13 +463,13 @@ export function formatCommandLine(argv: readonly string[]): DisplayLine {
     if (codePoints.length > budget) {
       const left = codePoints.slice(0, budget).join('');
       if (left !== '') {
-        shown.push(formatArgument(left));
+        shown.push(formatArgument(left, true));
       }
       cut = true;
       break;
     }
     budget -= codePoints.length;
-    shown.push(formatArgument(argument));
+    shown.push(formatArgument(argument, false));
   }
   return `${shown.join(' ')}${cut ? '…' : ''}` as DisplayLine;
 }
