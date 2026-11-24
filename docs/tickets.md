@@ -200,9 +200,11 @@ Board tab is shown.
 Text from tickets is drawn as plain text, with control characters and characters that could
 reorder or hide text made visible. A workspace's path, and the name taken from it, are shown with
 every control character (line breaks included), every character that could reorder them and every
-invisible character (U+FFFC included) made visible, written as `\u{202E}`, so two paths never look
-alike. A combining mark that follows a character written out this way is written out too, since it
-would otherwise attach to the closing brace of the escape.
+invisible character (U+FFFC included) made visible, written as `\u{202E}`, and so is a space the
+path or name starts or ends with. A combining mark that follows a character written out this way is
+written out too, since it would otherwise attach to the closing brace of the escape. This keeps two
+paths from looking alike, except where a combining mark that no installed font can draw covers the
+character after it (see [Approval Flow](mcp-setup.md#approval-flow)).
 
 ## Moving a repository
 
