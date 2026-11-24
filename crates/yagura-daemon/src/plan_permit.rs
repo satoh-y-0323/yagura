@@ -51,8 +51,8 @@ pub enum ChangeKind {
 }
 
 impl From<NotApprover> for PermitError {
-    fn from(_: NotApprover) -> Self {
-        PermitError::ApproverOnly
+    fn from(refusal: NotApprover) -> Self {
+        PermitError::ApproverOnly(refusal)
     }
 }
 
@@ -72,9 +72,9 @@ impl ChangeKind {
     }
 }
 
-/// Why an `issue_*` call in this module refused to grant a permit. Every
-/// variant carries no data, so a refusal can never echo a plan id, a window
-/// id or any other caller-supplied value back through [`std::fmt::Display`].
+/// Why an `issue_*` call in this module refused to grant a permit. No variant
+/// carries a caller-supplied value, so a refusal can never echo a plan id, a
+/// window id or any other such value back through [`std::fmt::Display`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum PermitError {
     /// The connection never identified as a window or an approver.
@@ -83,7 +83,7 @@ pub enum PermitError {
     /// The request is the approver's alone and the connection is not the
     /// approver, whether or not the plan it names exists.
     #[error("{}", crate::control::APPROVER_ONLY_TEXT)]
-    ApproverOnly,
+    ApproverOnly(NotApprover),
     /// No plan with the given id exists, or the calling window has no
     /// relation to it -- the same answer either way, so the two cases stay
     /// indistinguishable to the caller.

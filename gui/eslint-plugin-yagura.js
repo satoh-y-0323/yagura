@@ -8,13 +8,32 @@
  * member a mapped type copies from it is the brand too, while a type that merely
  * shares a brand's name is not one.
  */
+import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import ts from 'typescript';
 
+const realPaths = new Map();
+
+// A junction or symlink gives one file two paths, and this module, the linted file and the
+// program may each name it by a different one, so paths are compared resolved, once each.
+// A path not on disk resolves to itself.
+function realPath(fileName) {
+  let real = realPaths.get(fileName);
+  if (real === undefined) {
+    try {
+      real = fs.realpathSync.native(fileName);
+    } catch {
+      real = path.resolve(fileName);
+    }
+    realPaths.set(fileName, real);
+  }
+  return real;
+}
+
 // The gui root, where this file sits. A brand's `declaredIn` and `maker` are paths from it,
 // matched whole: a file elsewhere whose path merely ends the same is not the maker.
-const GUI_ROOT = path.dirname(fileURLToPath(import.meta.url));
+const GUI_ROOT = realPath(path.dirname(fileURLToPath(import.meta.url)));
 
 /** How deep a type is walked before it is taken to hold every brand. */
 const MAX_DEPTH = 12;
@@ -28,27 +47,29 @@ function slashed(fileName) {
 }
 
 function isFile(fileName, relativePath) {
-  return slashed(path.relative(GUI_ROOT, fileName)) === relativePath;
+  return slashed(path.relative(GUI_ROOT, realPath(fileName))) === relativePath;
 }
 
 /**
  * What a rule needs to know about brands in one program: which brands a type
- * holds, and the brand types themselves.
+ * holds, and the brand types themselves. A rule reads nothing else of it while
+ * `undeclared` is not empty.
  * @param {ts.Program} program
  * @param {{ type: string, key: string, declaredIn: string, maker: string, multiline?: boolean }[]} brands
  */
 function createBrandReader(program, brands) {
   const checker = program.getTypeChecker();
   const brandTypes = new Map();
+  for (const brand of brands) {
+    const file = program.getSourceFiles().find((f) => isFile(f.fileName, brand.declaredIn));
+    const alias = file?.statements.find(
+      (statement) => ts.isTypeAliasDeclaration(statement) && statement.name.text === brand.type
+    );
+    brandTypes.set(brand, alias === undefined ? null : checker.getTypeAtLocation(alias.name));
+  }
+  const undeclared = brands.filter((brand) => brandTypes.get(brand) === null);
 
   function brandType(brand) {
-    if (!brandTypes.has(brand)) {
-      const file = program.getSourceFiles().find((f) => isFile(f.fileName, brand.declaredIn));
-      const alias = file?.statements.find(
-        (statement) => ts.isTypeAliasDeclaration(statement) && statement.name.text === brand.type
-      );
-      brandTypes.set(brand, alias === undefined ? null : checker.getTypeAtLocation(alias.name));
-    }
     return brandTypes.get(brand);
   }
 
@@ -70,13 +91,9 @@ function createBrandReader(program, brands) {
     if (brandsByKeyName === undefined) {
       brandsByKeyName = new Map();
       for (const brand of brands) {
-        const branded = brandType(brand);
-        const key =
-          branded === null
-            ? undefined
-            : checker
-                .getPropertiesOfType(branded)
-                .find((p) => (p.declarations ?? []).some((d) => isKeyDeclaration(d, brand)));
+        const key = checker
+          .getPropertiesOfType(brandType(brand))
+          .find((p) => (p.declarations ?? []).some((d) => isKeyDeclaration(d, brand)));
         if (key !== undefined) {
           brandsByKeyName.set(key.escapedName, brand);
         }
@@ -163,12 +180,10 @@ function createBrandReader(program, brands) {
   function brandsAcceptedBy(type, found) {
     const constraint = checker.getBaseConstraintOfType(type);
     for (const brand of brands) {
-      const branded = brandType(brand);
       if (
         constraint === undefined ||
         (constraint.flags & OPAQUE_FLAGS) !== 0 ||
-        branded === null ||
-        checker.isTypeAssignableTo(branded, constraint)
+        checker.isTypeAssignableTo(brandType(brand), constraint)
       ) {
         found.add(brand);
       }
@@ -467,6 +482,7 @@ function createBrandReader(program, brands) {
 
   return {
     checker,
+    undeclared,
     brandsIn,
     brandOfProperty,
     brandOfText,
@@ -555,6 +571,27 @@ const PARAMETER_ERASING_CALLS = [
  *   passes. Back when a maker holds an assertion touching a foreign brand other than typing
  *   the message resource as `Messages`.
  */
+/**
+ * The listeners of a rule whose brand declarations are not all found: a brand it cannot see
+ * would let every value of it pass, so each file is refused until the config is right.
+ */
+function undeclaredBrandListeners(context, undeclared) {
+  return {
+    Program(node) {
+      for (const brand of undeclared) {
+        context.report({
+          node,
+          messageId: 'noBrandDeclaration',
+          data: { brand: brand.type, declaredIn: brand.declaredIn },
+        });
+      }
+    },
+  };
+}
+
+const NO_BRAND_DECLARATION =
+  'The brand {{brand}} is not declared as a type alias in {{declaredIn}}, so this rule cannot see it; fix the brand in the rule options.';
+
 const noBrandForging = {
   meta: {
     type: 'problem',
@@ -564,6 +601,7 @@ const noBrandForging = {
     schema: [BRAND_OPTIONS_SCHEMA],
     messages: {
       noTypes: 'yagura/no-brand-forging needs type information for this file.',
+      noBrandDeclaration: NO_BRAND_DECLARATION,
       assertion:
         "The source or target of this assertion holds {{brands}}; make and pass it only through the maker's functions ({{makers}}). Inside a maker, an assertion keeps the same foreign brands on both sides, adding none and dropping none.",
       predicate:
@@ -595,6 +633,9 @@ const noBrandForging = {
       };
     }
     const reader = createBrandReader(services.program, brands);
+    if (reader.undeclared.length > 0) {
+      return undeclaredBrandListeners(context, reader.undeclared);
+    }
     const { checker } = reader;
     const foreign = brands.filter((brand) => !isFile(context.filename, brand.maker));
     const isMaker = foreign.length < brands.length;
@@ -1381,6 +1422,7 @@ const displayText = {
     schema: [BRAND_OPTIONS_SCHEMA],
     messages: {
       noTypes: 'yagura/display-text needs type information for this file.',
+      noBrandDeclaration: NO_BRAND_DECLARATION,
       unprepared:
         'This shows {{type}}, which says nothing of how it was prepared; show the UI text from ui-messages or the prepared text from display/untrusted-text.',
       untyped:
@@ -1402,6 +1444,9 @@ const displayText = {
       };
     }
     const reader = createBrandReader(services.program, brands);
+    if (reader.undeclared.length > 0) {
+      return undeclaredBrandListeners(context, reader.undeclared);
+    }
     const { checker } = reader;
 
     function membersOf(type) {

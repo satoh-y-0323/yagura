@@ -1615,7 +1615,7 @@ pub(super) fn map_access_error(err: StoreAccessError) -> DaemonMessage {
 pub(super) fn permit_error_msg(err: PermitError) -> DaemonMessage {
     match err {
         PermitError::AuthFailed => auth_failed_msg(),
-        PermitError::ApproverOnly => approver_only_msg(control::NotApprover),
+        PermitError::ApproverOnly(refusal) => approver_only_msg(refusal),
         PermitError::PlanNotFound => plan_not_found_msg(),
         PermitError::NotPlanOwner => not_plan_owner_msg(),
         PermitError::InvalidState => invalid_state_msg(),

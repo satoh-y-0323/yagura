@@ -717,6 +717,7 @@ const BRAND_FORGING_RED: readonly CaseLine[] = [
   'const sinkList: readonly ((line: DisplayLine) => void)[] = [lineSink];',
   'const sinkPair = [lineSink, lineSink] as const;',
   'const sinkSet: ReadonlySet<(line: DisplayLine) => void> = new Set([lineSink]);',
+  'const sinkIterable = { keep: lineSink, *[Symbol.iterator](): Iterator<unknown> { yield this.keep; } };',
   '',
   { code: "export const asserted = 'x' as DisplayLine;", reports: 'assertion' },
   { code: "export const orNull = 'x' as DisplayLine | null;", reports: 'assertion' },
@@ -796,6 +797,10 @@ const BRAND_FORGING_RED: readonly CaseLine[] = [
   // A timer takes its callback as a bare `Function` and hands it the arguments after the delay.
   { code: "setTimeout(lineSink, 0, 'raw');", reports: 'reflectiveCall' },
   { code: "setInterval(lineSink, 0, 'raw');", reports: 'reflectiveCall' },
+  { code: "window.setTimeout(lineSink, 0, 'raw');", reports: 'reflectiveCall' },
+  { code: "self.setInterval(lineSink, 0, 'raw');", reports: 'reflectiveCall' },
+  // A spread is taken whole: what an iterable is typed to yield need not be what it yields.
+  { code: 'Function.prototype.call(null, ...sinkIterable);', reports: 'reflectiveCall' },
   {
     code: 'export function mapped<T>(v: unknown) { return v as { [K in keyof T]: DisplayLine }; }',
     reports: 'assertion',
@@ -899,6 +904,47 @@ const BRAND_RED_AT_MAKER_NAMED_PATH: readonly CaseLine[] = [
   'export {};',
   { code: "export const claimed = 'x' as UiText;", reports: 'assertion' },
 ];
+
+/** A claim the rule refuses once it finds where the brand is declared. */
+const BRAND_AT_DECLARATION: readonly CaseLine[] = [
+  "import type { DisplayLine } from '../display/untrusted-text';",
+  '',
+  'export {};',
+  { code: "export const claimed = 'x' as DisplayLine;", reports: 'assertion' },
+];
+
+/**
+ * The rule configured with one brand declared in `declaredIn`, linted over BRAND_AT_DECLARATION
+ * as the guard case: what the rule reports, or `threw` when the lint stops on the rule.
+ */
+async function brandRuleWithDeclaration(declaredIn: string): Promise<string[] | 'threw'> {
+  const linter = new ESLint({
+    cwd: guiRoot(),
+    overrideConfig: {
+      rules: {
+        [BRAND_FORGING_RULE]: [
+          'error',
+          {
+            brands: [
+              {
+                type: 'DisplayLine',
+                key: 'displayLineBrand',
+                declaredIn,
+                maker: 'src/display/untrusted-text.ts',
+              },
+            ],
+          },
+        ],
+      },
+    },
+  });
+  try {
+    const messages = await lintCase(linter, GUARD_CASE_TS, BRAND_AT_DECLARATION);
+    return reportsOf(BRAND_FORGING_RULE, BRAND_AT_DECLARATION, messages);
+  } catch {
+    return 'threw';
+  }
+}
 
 const METHOD_SIGNATURE_STYLE_RULE = '@typescript-eslint/method-signature-style';
 
@@ -1006,6 +1052,9 @@ describe('the display guards report what they guard', () => {
       const makerRed = await lintCase(eslint, MESSAGES_TS, BRAND_RED_IN_UI_TEXT_MAKER);
       const methods = await lintCase(eslint, GUARD_CASE_TS, METHOD_SIGNATURE_RED);
       const makerNamed = await lintCase(eslint, MAKER_NAMED_TS, BRAND_RED_AT_MAKER_NAMED_PATH);
+      const declared = await brandRuleWithDeclaration('src/display/untrusted-text.ts');
+      // A brand whose declaration is not found is a misconfigured rule, not a file free of brands.
+      const undeclared = await brandRuleWithDeclaration('src/display/no-such-declaration.ts');
 
       expect
         .soft([
@@ -1024,6 +1073,8 @@ describe('the display guards report what they guard', () => {
       expect
         .soft(reportsOf(BRAND_FORGING_RULE, BRAND_RED_AT_MAKER_NAMED_PATH, makerNamed))
         .toEqual(expectedReports(BRAND_RED_AT_MAKER_NAMED_PATH));
+      expect.soft(declared).toEqual(expectedReports(BRAND_AT_DECLARATION));
+      expect.soft(undeclared).not.toEqual([]);
       expect
         .soft(guardReportsOf(METHOD_SIGNATURE_RED, methods, new Set([METHOD_SIGNATURE_STYLE_RULE])))
         .toEqual(expectedReports(METHOD_SIGNATURE_RED));

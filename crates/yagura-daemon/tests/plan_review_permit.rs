@@ -319,10 +319,9 @@ async fn approving_and_marking_seen_are_licensed_only_for_the_approver() {
                 plan_id,
             )
             .await;
-            assert_eq!(
-                from_owner,
-                Err(PermitError::ApproverOnly),
-                "a window, even the plan's alive owner, must never hold {kind:?}"
+            assert!(
+                matches!(from_owner, Err(PermitError::ApproverOnly(_))),
+                "a window, even the plan's alive owner, must never hold {kind:?}, got {from_owner:?}"
             );
 
             let from_external = change(
@@ -334,7 +333,10 @@ async fn approving_and_marking_seen_are_licensed_only_for_the_approver() {
                 plan_id,
             )
             .await;
-            assert_eq!(from_external, Err(PermitError::ApproverOnly));
+            assert!(
+                matches!(from_external, Err(PermitError::ApproverOnly(_))),
+                "got {from_external:?}"
+            );
 
             let from_approver = change(
                 &table,

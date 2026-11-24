@@ -138,10 +138,13 @@ pub enum RequestOrigin {
 /// permit error's [`std::fmt::Display`] alike.
 pub(crate) const APPROVER_ONLY_TEXT: &str = "only the approver may make this request";
 
-/// The refusal [`require_approver`] gives. Each permit error type turns it
-/// into its own `ApproverOnly` variant through `From`, so `?` carries it.
+/// The refusal [`require_approver`] gives. Each permit error type carries it
+/// in its own `ApproverOnly` variant through `From`, so `?` carries it.
+///
+/// The private field keeps every other module from building one: holding a
+/// `NotApprover` proves [`require_approver`] refused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct NotApprover;
+pub struct NotApprover(());
 
 /// Refuses every origin but the approver. The one place that decides an
 /// approver-only request, for every IPC handler and permit, so the decision
@@ -154,7 +157,7 @@ pub fn require_approver(origin: &RequestOrigin) -> Result<(), NotApprover> {
     if matches!(origin, RequestOrigin::Approver) {
         Ok(())
     } else {
-        Err(NotApprover)
+        Err(NotApprover(()))
     }
 }
 

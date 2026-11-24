@@ -521,7 +521,7 @@ fn permit_error_msg(err: TicketPermitError) -> DaemonMessage {
             "auth_failed",
             "this connection is not authorized for this ticket operation",
         ),
-        TicketPermitError::ApproverOnly => super::approver_only_msg(crate::control::NotApprover),
+        TicketPermitError::ApproverOnly(refusal) => super::approver_only_msg(refusal),
         TicketPermitError::InvalidState => super::plan::invalid_state_msg(),
         TicketPermitError::WorkspaceNotAllowed => invalid_argument_msg(
             "workspace_id",

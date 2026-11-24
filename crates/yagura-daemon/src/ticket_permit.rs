@@ -11,8 +11,8 @@ use crate::control::{self, APPROVER_ONLY_TEXT, NotApprover, RequestOrigin};
 use crate::window::{WindowLiveness, WindowRegistry};
 use crate::workspace::WorkspaceKey;
 
-/// Why an `issue_*` call refused. No variant carries data, so a refusal never
-/// echoes a window id, a workspace id or a path.
+/// Why an `issue_*` call refused. No variant carries a caller-supplied value,
+/// so a refusal never echoes a window id, a workspace id or a path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum TicketPermitError {
     /// The connection is not allowed this operation at all.
@@ -20,7 +20,7 @@ pub enum TicketPermitError {
     AuthFailed,
     /// The request is the approver's alone and the connection is not.
     #[error("{}", APPROVER_ONLY_TEXT)]
-    ApproverOnly,
+    ApproverOnly(NotApprover),
     /// The window cannot take a request: its child has exited, or it was never
     /// registered.
     #[error("the window is not in a state that allows this operation")]
@@ -34,8 +34,8 @@ pub enum TicketPermitError {
 }
 
 impl From<NotApprover> for TicketPermitError {
-    fn from(_: NotApprover) -> Self {
-        TicketPermitError::ApproverOnly
+    fn from(refusal: NotApprover) -> Self {
+        TicketPermitError::ApproverOnly(refusal)
     }
 }
 
