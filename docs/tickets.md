@@ -200,7 +200,9 @@ Board tab is shown.
 Text from tickets is drawn as plain text, with control characters and characters that could
 reorder or hide text made visible. A workspace's path, and the name taken from it, are shown with
 every control character (line breaks included), every character that could reorder them and every
-invisible character made visible, written as `\u{202E}`, so two paths never look alike.
+invisible character (U+FFFC included) made visible, written as `\u{202E}`, so two paths never look
+alike. A combining mark that follows a character written out this way is written out too, since it
+would otherwise attach to the closing brace of the escape.
 
 ## Moving a repository
 
