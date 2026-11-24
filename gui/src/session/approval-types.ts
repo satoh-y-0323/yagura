@@ -55,18 +55,23 @@ export interface HeadlineParts {
   sentence: UiText;
 }
 
-/** One side of a request, as one card of the dialog draws it. */
-export interface ApprovalParty {
-  /** A window, a client that is no window, or what a request names in place of a window. */
-  kind: 'window' | 'external' | 'untargeted';
+/** What every side of a request is drawn with, whatever it is. */
+interface ApprovalPartyCommon {
   label: UiText | DisplayLine;
   /** The launch profile a window was opened from; `null` for one opened from a command. */
   profile: DisplayLine | null;
   /** A window's status when the request was submitted, or that it has since closed. */
   status: UiText | null;
-  windowId: DisplayLine | null;
-  mark: WindowMark | null;
 }
+
+/**
+ * One side of a request, as one card of the dialog draws it: a window, a client
+ * that is no window, or what a request names in place of a window. Only a window
+ * has an ID and a mark, and it has both.
+ */
+export type ApprovalParty =
+  | (ApprovalPartyCommon & { kind: 'window'; window: { id: DisplayLine; mark: WindowMark } })
+  | (ApprovalPartyCommon & { kind: 'external' | 'untargeted' });
 
 /** Everything the approval dialog, and the notice of an expired request, draw a request from. */
 export interface ApprovalFacts {

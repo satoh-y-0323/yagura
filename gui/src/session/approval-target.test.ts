@@ -108,8 +108,7 @@ describe('approvalFactsOf: who asks', () => {
       label: WINDOW_REQUESTER.name,
       profile: WINDOW_REQUESTER.profile,
       status: describeStatus(WINDOW_REQUESTER.status),
-      windowId: WINDOW_REQUESTER.displayWindowId,
-      mark: REQUESTER_MARK,
+      window: { id: WINDOW_REQUESTER.displayWindowId, mark: REQUESTER_MARK },
     });
     expect(tool).toBe(toWindow.displayTool);
   });
@@ -132,8 +131,9 @@ describe('approvalFactsOf: who asks', () => {
 
     expect(from.kind).toBe('window');
     expect(from.label).toBe(WINDOW_REQUESTER.name);
-    expect(from.windowId).toBe(WINDOW_REQUESTER.displayWindowId);
-    expect(from.mark).toEqual(REQUESTER_MARK);
+    expect(from).toMatchObject({
+      window: { id: WINDOW_REQUESTER.displayWindowId, mark: REQUESTER_MARK },
+    });
     expect(from.status).not.toBeNull();
     const liveStatuses: readonly WindowStatus[] = [
       'running',
@@ -159,8 +159,6 @@ describe('approvalFactsOf: who asks', () => {
         label: dialogs.approvalRequesterExternal,
         profile: null,
         status: null,
-        windowId: null,
-        mark: null,
       });
     }
   );
@@ -175,8 +173,7 @@ describe('approvalFactsOf: what it acts on', () => {
       label: TARGET.name,
       profile: TARGET.profile,
       status: describeStatus(TARGET.status),
-      windowId: TARGET.displayWindowId,
-      mark: TARGET_MARK,
+      window: { id: TARGET.displayWindowId, mark: TARGET_MARK },
     });
   });
 
@@ -193,8 +190,6 @@ describe('approvalFactsOf: what it acts on', () => {
       label: describeUntargeted(untargeted),
       profile: null,
       status: null,
-      windowId: null,
-      mark: null,
     });
   });
 });

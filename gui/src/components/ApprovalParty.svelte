@@ -5,9 +5,11 @@
    * forge; a client that is no window shows an icon instead, and a window that
    * does not exist yet an empty card.
    *
-   * The mark comes before the name in the markup and in the card's label, so
-   * what the daemon vouches for is read before the name, whose characters may
-   * mimic it. Nothing in the card takes focus, so no keyboard meets the order.
+   * What the daemon vouches for (the mark, the profile and the status) comes
+   * before the name in the markup, and the mark in the card's label, so it is
+   * read before the name, whose characters may mimic it. The grid places each
+   * part by row, so the eye sees another order. Nothing in the card takes
+   * focus, so no keyboard meets the order.
    *
    * The compact form is a chip of the mark and the name, for a list row. Its
    * heading, profile, status and ID are hidden from the eye but still read, so
@@ -30,9 +32,10 @@
   $: headingId = `${id}-heading`;
   $: markId = `${id}-mark`;
   $: nameId = `${id}-name`;
-  $: hasMark = party.mark !== null && party.windowId !== null;
   $: labelledBy =
-    size === 'compact' ? undefined : [headingId, ...(hasMark ? [markId] : []), nameId].join(' ');
+    size === 'compact'
+      ? undefined
+      : [headingId, ...(party.kind === 'window' ? [markId] : []), nameId].join(' ');
 </script>
 
 <svelte:element
@@ -45,11 +48,11 @@
 >
   <span class="approval-party__heading" id={headingId}>{heading}</span>
   <div class="approval-party__body">
-    {#if party.mark !== null && party.windowId !== null}
+    {#if party.kind === 'window'}
       <span class="approval-party__mark" id={markId}>
         <WindowMark
-          mark={party.mark}
-          windowId={party.windowId}
+          mark={party.window.mark}
+          windowId={party.window.id}
           size={size === 'compact' ? 'header' : 'card'}
           showsId={false}
         />
@@ -59,21 +62,21 @@
         <Icon name="plug" size={size === 'compact' ? 'sm' : 'md'} />
       </span>
     {/if}
-    <span class="approval-party__name" id={nameId}>{party.label}</span>
     {#if party.profile !== null}
       <span class="approval-party__profile">{party.profile}</span>
     {/if}
-    {#if party.status !== null || party.windowId !== null}
+    {#if party.status !== null || party.kind === 'window'}
       <span class="approval-party__facts">
         {#if party.status !== null}
           <span class="approval-party__status">{party.status}</span>
         {/if}
-        {#if party.windowId !== null}
+        {#if party.kind === 'window'}
           <!-- The mark's name already says the ID; this copy is for the eye. -->
-          <span class="approval-party__id" aria-hidden="true">{party.windowId}</span>
+          <span class="approval-party__id" aria-hidden="true">{party.window.id}</span>
         {/if}
       </span>
     {/if}
+    <span class="approval-party__name" id={nameId}>{party.label}</span>
   </div>
 </svelte:element>
 
@@ -137,6 +140,7 @@
   }
 
   .approval-party__name {
+    grid-row: 1;
     color: var(--fg-default);
     font-size: var(--text-md);
     font-weight: var(--weight-semibold);
@@ -150,6 +154,7 @@
   }
 
   .approval-party__profile {
+    grid-row: 2;
     color: var(--fg-muted);
     font-size: var(--text-xs);
     overflow-wrap: anywhere;
@@ -165,6 +170,7 @@
   /* The status and the ID run under both columns, as wide as the card. */
   .approval-party__body > .approval-party__facts {
     grid-column: 1 / -1;
+    grid-row: 3;
   }
 
   .approval-party__status {

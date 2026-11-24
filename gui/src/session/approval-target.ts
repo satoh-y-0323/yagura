@@ -87,8 +87,6 @@ function requesterParty(requester: ApprovalRequester, isRequesterOpen: boolean):
       label: dialogs.approvalRequesterExternal,
       profile: null,
       status: null,
-      windowId: null,
-      mark: null,
     };
   }
   return {
@@ -96,8 +94,7 @@ function requesterParty(requester: ApprovalRequester, isRequesterOpen: boolean):
     label: requester.name,
     profile: requester.profile,
     status: isRequesterOpen ? describeStatus(requester.status) : dialogs.approvalRequesterClosed,
-    windowId: requester.displayWindowId,
-    mark: requester.mark,
+    window: { id: requester.displayWindowId, mark: requester.mark },
   };
 }
 
@@ -109,8 +106,6 @@ function targetParty(request: ApprovalRequest): ApprovalParty {
       label: describeUntargeted(request),
       profile: null,
       status: null,
-      windowId: null,
-      mark: null,
     };
   }
   return {
@@ -118,7 +113,6 @@ function targetParty(request: ApprovalRequest): ApprovalParty {
     label: target.name,
     profile: target.profile,
     status: describeStatus(target.status),
-    windowId: target.displayWindowId,
-    mark: target.mark,
+    window: { id: target.displayWindowId, mark: target.mark },
   };
 }
