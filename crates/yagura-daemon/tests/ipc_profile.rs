@@ -1922,7 +1922,7 @@ async fn send_handoff_from_a_profile_with_an_oversized_envelope_is_invalid_argum
         .open(OpenWindowRequest {
             command: echo_child_command(),
             cwd: Some(RequestedCwd::from_caller(nested_cwd)),
-            name: None,
+            name: Some(max_name.clone()),
             vendor: None,
             detection: None,
             on_name_taken: Default::default(),
@@ -1932,18 +1932,6 @@ async fn send_handoff_from_a_profile_with_an_oversized_envelope_is_invalid_argum
         .window_id;
     let mut requester = h.connect().await;
     identify(&mut requester, &requester_window_id).await;
-    send(
-        &mut requester,
-        &ClientMessage::RenameWindow {
-            window_id: requester_window_id.clone(),
-            name: max_name.clone(),
-        },
-    )
-    .await;
-    match read_response(&mut requester).await {
-        DaemonMessage::WindowRenamed { .. } => {}
-        other => panic!("expected window_renamed, got {other:?}"),
-    }
 
     // Fixture precondition, checked with the same pure function the daemon
     // calls (`yagura_daemon::handoff`): this exact combination really is

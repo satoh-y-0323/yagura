@@ -239,6 +239,16 @@
 //! 64-bit integer makes the frame malformed. [`read_frame_label`] reads the key
 //! and the `type` of a frame apart from decoding its variant, so a frame that
 //! does not decode can still be answered by name.
+//!
+//! Revision 39 adds the window's mark ([`WindowMark`], derived from the window
+//! ID by [`window_mark`]): an optional `mark` in [`WindowInfo`], which the
+//! daemon always sends to the GUI; `mark`, `status` and `profile` in
+//! [`ApprovalRequester`] for a window; and `mark` and an optional `profile` in
+//! [`ApprovalTarget`]. `profile` is the launch profile the window was opened
+//! from, absent for a window opened from a raw argv. `rename_window` is
+//! answered only for the registered approver; any other connection gets
+//! `auth_failed`. A window name may no longer start or end with a blank
+//! character nor lack a visible one ([`validate_window_name`]).
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -263,7 +273,7 @@ pub use screen_copy::{
 /// anything a peer can observe on the wire. It is what a peer reports when
 /// asked which wire it speaks, and what the GUI compares against before it
 /// uses a daemon at all.
-pub const PROTOCOL_REVISION: u32 = 38;
+pub const PROTOCOL_REVISION: u32 = 39;
 
 /// The largest column count, and the largest row count, a window takes.
 ///
@@ -713,6 +723,38 @@ pub enum WindowNameError {
         /// The offending character.
         ch: char,
     },
+    /// The window name consists only of blank characters (whitespace and
+    /// U+2800) and the joiners U+200C and U+200D, so it renders as nothing.
+    #[error("window name has no visible character")]
+    NoVisibleChar,
+    /// The window name starts or ends with a blank character, so it renders
+    /// like the name without it.
+    ///
+    /// The character is reported as a code point, as in
+    /// [`WindowNameError::ForbiddenChar`].
+    #[error("window name must not start or end with a blank character (U+{:04X} at byte offset {at})", *ch as u32)]
+    SurroundingBlank {
+        /// Byte offset of the blank character within the name.
+        at: usize,
+        /// The blank character.
+        ch: char,
+    },
+}
+
+/// Whether `ch` renders as a space: Unicode White_Space, or a character the GUI
+/// draws as a space inside a name (U+2800 BRAILLE PATTERN BLANK).
+///
+/// The GUI's write-out rules own the second set; the fixture
+/// `tests/fixtures/blank-looking-chars.json` pins it on both sides.
+fn is_blank_looking(ch: char) -> bool {
+    ch.is_whitespace() || ch == '\u{2800}'
+}
+
+/// Whether `text` has a character that is neither blank-looking nor one of the
+/// glyph-shaping joiners U+200C and U+200D.
+fn has_visible_char(text: &str) -> bool {
+    text.chars()
+        .any(|ch| !is_blank_looking(ch) && !matches!(ch, '\u{200C}' | '\u{200D}'))
 }
 
 /// Characters that may not appear in a window display label, nor (apart from
@@ -753,9 +795,11 @@ fn is_forbidden_label_char(ch: char) -> bool {
 }
 
 /// Validates a window display name: non-empty, at most
-/// [`WINDOW_NAME_MAX_BYTES`] UTF-8 bytes, and free of the characters listed
+/// [`WINDOW_NAME_MAX_BYTES`] UTF-8 bytes, free of the characters listed
 /// in [`WindowNameError::ForbiddenChar`]'s documentation and of `"`, which
-/// would end a quoted `@"..."` mention early.
+/// would end a quoted `@"..."` mention early, with at least one visible
+/// character, and neither starting nor ending with a blank character
+/// (whitespace or U+2800), which would let it pass for the name without it.
 ///
 /// This is the single source of truth for the rule, shared by the daemon
 /// (which enforces it at every entry point that stores a name) and by
@@ -764,9 +808,37 @@ fn is_forbidden_label_char(ch: char) -> bool {
 /// # Errors
 ///
 /// Returns the first violation found, checked in the order empty ->
-/// too long -> forbidden character.
+/// too long -> forbidden character -> no visible character -> blank edge.
 pub fn validate_window_name(name: &str) -> Result<(), WindowNameError> {
-    validate_label(name, |ch| is_forbidden_label_char(ch) || ch == '"')
+    validate_label(name, |ch| is_forbidden_label_char(ch) || ch == '"')?;
+    if !has_visible_char(name) {
+        return Err(WindowNameError::NoVisibleChar);
+    }
+    let first = name.char_indices().next();
+    let last = name.char_indices().next_back();
+    match [first, last]
+        .into_iter()
+        .flatten()
+        .find(|&(_, ch)| is_blank_looking(ch))
+    {
+        Some((at, ch)) => Err(WindowNameError::SurroundingBlank { at, ch }),
+        None => Ok(()),
+    }
+}
+
+/// Settles a saved name for use as a new window name: strips the blank
+/// characters (whitespace and U+2800) around it and returns it when the rest
+/// passes [`validate_window_name`].
+///
+/// A name saved under an earlier, looser rule comes back through this before
+/// it names a window again, so every window holds a name the current rule
+/// accepts.
+#[must_use]
+pub fn settle_window_name(raw: &str) -> Option<String> {
+    let settled = raw.trim_matches(is_blank_looking);
+    validate_window_name(settled)
+        .ok()
+        .map(|()| settled.to_owned())
 }
 
 /// Validates a label that is displayed but never written as a window name:
@@ -1738,6 +1810,69 @@ pub enum ReportState {
     Unknown,
 }
 
+/// The mark the GUI draws for a window: a 5×5 left-right symmetric pattern and
+/// a hue, both derived from the window ID alone by [`window_mark`].
+///
+/// A child process cannot choose its window ID, and the name it can choose is
+/// never drawn where the mark is, so the mark tells windows apart where a name
+/// can pass for another window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct WindowMark {
+    /// The 15 free cells: bit `r * 3 + c` is the cell in row `r` (0 to 4) and
+    /// column `c` (0 to 2); columns 3 and 4 mirror columns 1 and 0. Always
+    /// below `1 << 15`.
+    pub cells: u16,
+    /// One of 12 hue steps (0 to 11). Colour only supplements the shape.
+    pub hue: u8,
+}
+
+/// The number of cells a [`WindowMark`] varies.
+const WINDOW_MARK_CELLS: u32 = 15;
+
+/// The number of hue steps a [`WindowMark`] takes.
+const WINDOW_MARK_HUES: u64 = 12;
+
+impl WindowMark {
+    /// Whether the mark fills 4 to 11 of its 15 cells: a nearly empty or nearly
+    /// full pattern reads like the markless icon or a solid block.
+    #[must_use]
+    pub fn is_drawable(&self) -> bool {
+        (4..=11).contains(&self.cells.count_ones())
+    }
+}
+
+/// The mark of the window `window_id`.
+///
+/// The derivation is part of the contract and never changes between versions,
+/// so a window taken back after a daemon update keeps its mark: FNV-1a 64 over
+/// the ID's UTF-8 bytes, mixed by the splitmix64 finalizer; `cells` is the low
+/// 15 bits, `hue` the bits from 16 up modulo 12.
+#[must_use]
+pub fn window_mark(window_id: &str) -> WindowMark {
+    // `std`'s `DefaultHasher` may change between Rust releases, so the hash is
+    // spelled out here.
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in window_id.bytes() {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    let mut mixed = hash;
+    mixed = (mixed ^ (mixed >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    mixed = (mixed ^ (mixed >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    mixed ^= mixed >> 31;
+    let cells = u16::try_from(mixed & ((1 << WINDOW_MARK_CELLS) - 1)).unwrap_or(0);
+    let hue = u8::try_from((mixed >> 16) % WINDOW_MARK_HUES).unwrap_or(0);
+    WindowMark { cells, hue }
+}
+
+/// Whether the shapes of `a` and `b` differ in at least `min_distance` cells.
+///
+/// The hue is not counted: two marks told apart by colour alone are not apart.
+#[must_use]
+pub fn window_marks_apart(a: WindowMark, b: WindowMark, min_distance: u32) -> bool {
+    (a.cells ^ b.cells).count_ones() >= min_distance
+}
+
 /// Window metadata shared across wire protocol responses (multi-window v2).
 ///
 /// The single source of truth for window information transmitted in responses
@@ -1825,6 +1960,11 @@ pub struct WindowInfo {
     /// stands". Omitted from the wire when `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub task_report: Option<TaskReportMark>,
+    /// The window's mark ([`window_mark`] of [`Self::window_id`]). The daemon
+    /// always sends it to the GUI and leaves it out of the MCP `list_windows`
+    /// answer. Omitted from the wire when `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mark: Option<WindowMark>,
 }
 
 /// One restore candidate: a window from the previous boot's configuration,
@@ -2185,6 +2325,19 @@ pub struct ApprovalRequester {
     /// [`ApprovalRequesterKind::Window`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    /// The requesting window's mark ([`window_mark`] of its id). `Some` only
+    /// for [`ApprovalRequesterKind::Window`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mark: Option<WindowMark>,
+    /// The requesting window's status when the request was submitted. `Some`
+    /// only for [`ApprovalRequesterKind::Window`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<WindowStatus>,
+    /// The launch profile the requesting window was opened from: a fact the
+    /// daemon decided, never what the window claims. `None` for a window
+    /// opened from a raw argv, and for any other kind.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
 }
 
 /// The window a pending [`ApprovalRequest`] would act on.
@@ -2196,6 +2349,13 @@ pub struct ApprovalTarget {
     pub name: String,
     /// The target window's status at the moment the request was submitted.
     pub status: WindowStatus,
+    /// The target window's mark ([`window_mark`] of [`Self::window_id`]).
+    pub mark: WindowMark,
+    /// The launch profile the target window was opened from. `None` for a
+    /// window opened from a raw argv, or one the daemon no longer held when
+    /// the request was submitted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
 }
 
 /// Why a pending [`ApprovalRequest`] ended without a decision from the
@@ -2798,7 +2958,9 @@ pub enum ClientMessage {
     },
     /// Change a window's display name. A label change only;
     /// it never touches the child process, so an exited window can still be
-    /// renamed.
+    /// renamed. Only the registered approver may rename: any other connection,
+    /// an identified window included, is refused as `auth_failed` before the
+    /// daemon says whether the window exists.
     RenameWindow {
         /// The window ID to rename.
         window_id: String,
@@ -5324,10 +5486,7 @@ pub enum ChatBodyError {
 /// ));
 /// ```
 pub fn validate_chat_body(value: &str) -> Result<(), ChatBodyError> {
-    if value
-        .chars()
-        .all(|ch| ch.is_whitespace() || matches!(ch, '\u{200C}' | '\u{200D}'))
-    {
+    if !has_visible_char(value) {
         return Err(ChatBodyError::Empty);
     }
     if value.len() > CHAT_BODY_MAX_BYTES {

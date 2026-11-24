@@ -3463,6 +3463,38 @@ async fn an_approvers_own_close_window_and_interrupt_window_bypass_the_gate_with
     }
 }
 
+/// [`expect_approval_requested`], also returning the request as it crossed the wire.
+async fn expect_approval_requested_on_the_wire(
+    client: &mut Connection,
+) -> (yagura_protocol::ApprovalRequest, serde_json::Value) {
+    let deadline = tokio::time::Instant::now() + HANG_GUARD;
+    loop {
+        let mut len_buf = [0u8; 4];
+        tokio::time::timeout_at(deadline, client.read_exact(&mut len_buf))
+            .await
+            .expect("timed out waiting for a frame length prefix")
+            .expect("connection closed while reading a frame length prefix");
+        let mut body = vec![0u8; u32::from_le_bytes(len_buf) as usize];
+        tokio::time::timeout_at(deadline, client.read_exact(&mut body))
+            .await
+            .expect("timed out waiting for a frame body")
+            .expect("connection closed while reading a frame body");
+        match yagura_protocol::decode_daemon_message(&body)
+            .expect("daemon must only ever emit well-formed frames")
+        {
+            DaemonMessage::Frame(_)
+            | DaemonMessage::StatusChanged { .. }
+            | DaemonMessage::ChatParticipantsChanged => continue,
+            DaemonMessage::ApprovalRequested { request } => {
+                let wire: serde_json::Value =
+                    serde_json::from_slice(&body).expect("a frame body is JSON");
+                return (request, wire["request"].clone());
+            }
+            other => panic!("expected approval_requested, got {other:?}"),
+        }
+    }
+}
+
 #[tokio::test]
 async fn send_text_from_an_identified_window_to_another_window_is_pending_with_full_text_and_window_identity()
  {
@@ -3506,7 +3538,7 @@ async fn send_text_from_an_identified_window_to_another_window_is_pending_with_f
     )
     .await;
 
-    let request = expect_approval_requested(&mut approver).await;
+    let (request, wire) = expect_approval_requested_on_the_wire(&mut approver).await;
     assert_eq!(request.tool, "send_message");
     assert_eq!(request.text.as_deref(), Some(body.as_str()));
     assert_eq!(request.requester.kind, ApprovalRequesterKind::Window);
@@ -3521,6 +3553,36 @@ async fn send_text_from_an_identified_window_to_another_window_is_pending_with_f
             .as_ref()
             .map(|target| target.window_id.as_str()),
         Some(window_b.as_str())
+    );
+
+    // The GUI draws the mark the daemon sends and never computes one, so this is the
+    // one place a request could show another window's mark.
+    let listed_mark = |window_id: &str| {
+        let info = h
+            .registry
+            .list()
+            .into_iter()
+            .find(|w| w.window_id == window_id)
+            .expect("the window must be listed");
+        serde_json::to_value(info).expect("a window record encodes")["mark"].clone()
+    };
+    let mark_a = listed_mark(&window_a);
+    let mark_b = listed_mark(&window_b);
+    assert!(
+        wire["requester"]["mark"].is_object(),
+        "the requester carries the mark the daemon drew for it: {wire}"
+    );
+    assert_eq!(
+        wire["requester"]["mark"], mark_a,
+        "the requester's mark is the requesting window's own, the one its header shows"
+    );
+    assert_eq!(
+        wire["target"]["mark"], mark_b,
+        "the target's mark is the target window's own, the one its header shows"
+    );
+    assert_ne!(
+        mark_a, mark_b,
+        "two windows the daemon holds never share a mark, so a swap shows"
     );
 
     decide(&mut approver, &request.request_id, true).await;

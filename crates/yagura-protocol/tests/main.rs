@@ -35,5 +35,6 @@ mod structured_input_protocol;
 mod ticket_protocol;
 mod unknown_reason;
 mod view_visibility_protocol;
+mod window_mark;
 mod window_name;
 mod wire_inventory;

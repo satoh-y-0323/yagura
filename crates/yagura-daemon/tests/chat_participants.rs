@@ -155,7 +155,7 @@ async fn rename(client: &mut Connection, window_id: &str, name: &str) {
         },
     )
     .await;
-    match read_response(client).await {
+    match approver_reply(client).await {
         DaemonMessage::WindowRenamed { name: stored, .. } => assert_eq!(stored, name),
         other => panic!("expected window_renamed, got {other:?}"),
     }
@@ -219,6 +219,7 @@ async fn renaming_a_participant_pushes_participants_changed_and_the_roster_read_
     let mut approver = h.connect().await;
     register_approver(&mut approver).await;
     let mut client = h.connect().await;
+    register_approver(&mut client).await;
 
     let window = open_participant(&h, None).await;
     roster_after_a_push(&mut approver, |r| has(r, &window), "the window").await;

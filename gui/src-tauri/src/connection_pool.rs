@@ -1736,6 +1736,7 @@ mod tests {
             status_reports_missing: None,
             queued_count: None,
             task_report: None,
+            mark: None,
         }
     }
 

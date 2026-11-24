@@ -11,7 +11,9 @@
 use std::marker::PhantomData;
 use std::time::Duration;
 
-use yagura_protocol::{APPROVAL_TEXT_MAX_BYTES, ApprovalTarget, DaemonMessage, DetectedStatus};
+use yagura_protocol::{
+    APPROVAL_TEXT_MAX_BYTES, ApprovalTarget, DaemonMessage, DetectedStatus, window_mark,
+};
 
 use crate::approval::{ApprovalDraft, SubmitError, Ticket};
 use crate::config::DaemonConfig;
@@ -23,7 +25,6 @@ use crate::window::WindowEntry;
 use super::{
     ApprovalEnd, GateContext, HandoffSlot, InterruptMeans, LeftWatch, PendingAction,
     approval_limits, await_approval, deny_msg, deny_no_approver, error_msg, requester_for,
-    window_info,
 };
 
 /// One gated tool, named as a type so that a permit can be tied to it.
@@ -170,19 +171,35 @@ fn gate_window<T: GatedTool>(
         ApprovalDraft {
             tool,
             requester: requester_for(context.registry, context.origin),
-            target: Some(ApprovalTarget {
-                window_id: entry.window_id().to_string(),
-                // The id identifies the window unambiguously, so it stands in
-                // for a name the registry no longer carries.
-                name: window_info(context.registry, entry.window_id())
-                    .map(|window| window.name)
-                    .unwrap_or_else(|| entry.window_id().to_string()),
-                status: detected.status(),
-            }),
+            target: Some(approval_target(context, entry, detected)),
             text: text.map(str::to_string),
             room: None,
         },
     )
+}
+
+/// The window a request acts on, as the approver is shown it.
+///
+/// The mark always comes from `entry`'s own id, held or not. A window the
+/// registry no longer holds is named by its id and shows no profile.
+fn approval_target(
+    context: &GateContext<'_>,
+    entry: &WindowEntry,
+    detected: DetectedStatus,
+) -> ApprovalTarget {
+    let window_id = entry.window_id();
+    let held = context.registry.get(window_id);
+    ApprovalTarget {
+        window_id: window_id.to_string(),
+        name: held
+            .as_ref()
+            .map_or_else(|| window_id.to_string(), |held| held.window_info().name),
+        status: detected.status(),
+        mark: window_mark(window_id),
+        profile: held
+            .as_ref()
+            .and_then(|held| held.launch_profile().map(str::to_string)),
+    }
 }
 
 /// Runs a handoff that opens a window from a profile past the approval gate,

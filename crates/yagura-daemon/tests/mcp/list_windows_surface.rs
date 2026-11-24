@@ -1,11 +1,13 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-//! The daemon reports `status_reports_missing`, `status_boot` and `task_report`
-//! on its window records for the GUI; the MCP surface is an external contract
-//! that must not grow with them, so `list_windows` leaves them out whatever
-//! their value.
+//! The daemon reports `status_reports_missing`, `status_boot`, `task_report` and
+//! `mark` on its window records for the GUI; the MCP surface is an external
+//! contract that must not grow with them, so `list_windows` leaves them out
+//! whatever their value.
 
 use std::sync::Mutex;
+
+use serde_json::json;
 
 use yagura_daemon::mcp::tools::list_windows;
 use yagura_daemon::mcp::{DaemonTransport, RequesterIdentity, TransportError};
@@ -30,35 +32,39 @@ impl DaemonTransport for OneReply {
     }
 }
 
+/// A window record as the daemon sends it, read through the wire form so that the
+/// GUI-only `mark` is set the way the daemon sets it on every window.
 fn window(window_id: &str, status_reports_missing: Option<bool>, state: ReportState) -> WindowInfo {
-    WindowInfo {
-        window_id: window_id.to_string(),
-        name: "cli".to_string(),
-        vendor: None,
-        cwd: "/work".to_string(),
-        status: WindowStatus::Running,
-        exit_code: None,
-        layout_json: None,
-        room: None,
-        unknown_reason: None,
-        detection_warning: None,
-        status_rev: Some(1),
-        status_boot: Some(StatusBoot { origin: 7, seq: 3 }),
-        mcp_connected: Some(true),
-        status_reports_missing,
-        queued_count: None,
-        task_report: Some(TaskReportMark { seq: 2, state }),
-    }
+    serde_json::from_value(json!({
+        "window_id": window_id,
+        "name": "cli",
+        "cwd": "/work",
+        "status": WindowStatus::Running,
+        "status_rev": 1,
+        "status_boot": StatusBoot { origin: 7, seq: 3 },
+        "mcp_connected": true,
+        "status_reports_missing": status_reports_missing,
+        "task_report": TaskReportMark { seq: 2, state },
+        "mark": { "cells": 12097, "hue": 6 },
+    }))
+    .expect("a window record decodes")
 }
 
 #[tokio::test]
 async fn list_windows_does_not_surface_status_reports_missing() {
+    let scripted = vec![
+        window("w1", Some(true), ReportState::Standing),
+        window("w2", Some(false), ReportState::Instruction),
+        window("w3", None, ReportState::NoReader),
+    ];
+    for record in &scripted {
+        assert!(
+            serde_json::to_value(record).expect("a window record encodes")["mark"].is_object(),
+            "fixture premise: the daemon's record carries the mark, got: {record:?}"
+        );
+    }
     let transport = OneReply(Mutex::new(Some(DaemonMessage::WindowList {
-        windows: vec![
-            window("w1", Some(true), ReportState::Standing),
-            window("w2", Some(false), ReportState::Instruction),
-            window("w3", None, ReportState::NoReader),
-        ],
+        windows: scripted,
     })));
 
     let result = list_windows(&transport)
@@ -75,6 +81,10 @@ async fn list_windows_does_not_surface_status_reports_missing() {
         assert!(
             entry.get("status_boot").is_none(),
             "the boot the GUI orders status by must not reach an agent, got: {entry}"
+        );
+        assert!(
+            entry.get("mark").is_none(),
+            "the mark is drawn by the GUI and must not reach an agent, got: {entry}"
         );
         assert!(
             entry.get("task_report").is_none(),

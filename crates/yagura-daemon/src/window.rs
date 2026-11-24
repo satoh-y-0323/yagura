@@ -22,8 +22,9 @@ use yagura_os::program;
 use yagura_protocol::{
     DaemonPush, DefaultPalettes, DetectedStatus, INSTANCE_ENV, MCP_BRIDGE_ENV, OnNameTaken,
     Palette, RoomRef, STATUS_TOKEN_ENV, StatusBoot, TaskReportMark, UnknownReason, WINDOW_ID_ENV,
-    WINDOW_NAME_MAX_BYTES, WindowInfo, WindowNameError, WindowStatus, WithdrawOutcome,
-    validate_window_name, validate_window_vendor,
+    WINDOW_NAME_MAX_BYTES, WindowInfo, WindowMark, WindowNameError, WindowStatus, WithdrawOutcome,
+    settle_window_name, validate_window_name, validate_window_vendor, window_mark,
+    window_marks_apart,
 };
 
 use crate::config::DaemonConfig;
@@ -178,11 +179,49 @@ fn drawn_window_id(
     let candidates = (0..WINDOW_ID_CANDIDATES)
         .map(|_| random_window_id())
         .collect::<Result<Vec<_>, _>>()?;
-    Ok(match holders_dir {
+    Ok(picked_window_id(candidates, holders_dir, in_use))
+}
+
+/// The first of `candidates` that no holder's files in `holders_dir` name and
+/// `in_use` does not claim.
+fn picked_window_id(
+    candidates: Vec<String>,
+    holders_dir: Option<&Path>,
+    in_use: impl Fn(&str) -> bool,
+) -> Option<String> {
+    match holders_dir {
         Some(dir) => first_free_window_id(candidates, dir, in_use),
         // No holder has been started yet, so none has files.
         None => candidates.into_iter().find(|id| !in_use(id)),
-    })
+    }
+}
+
+/// How many cells a new window's mark differs in, at least, from the mark of
+/// every window the registry holds.
+const WINDOW_MARK_MIN_DISTANCE: u32 = 3;
+
+/// The distance a reservation falls back to when no id keeps
+/// [`WINDOW_MARK_MIN_DISTANCE`]: only a registry holding several times the
+/// default window count runs out, and a window must still open. No two held
+/// windows share a mark even then.
+const WINDOW_MARK_FALLBACK_DISTANCE: u32 = 1;
+
+/// Whether an id is taken for a new window, given the ids the registry holds:
+/// held itself, or its mark is not drawable or lies within `min_distance`
+/// cells of a held window's mark. A child that reopens windows to draw again
+/// never gets a mark that passes for one it can see beside it.
+fn window_id_claim(held: HashSet<String>, min_distance: u32) -> impl Fn(&str) -> bool {
+    let held_marks: Vec<WindowMark> = held.iter().map(|id| window_mark(id)).collect();
+    move |id| {
+        if held.contains(id) {
+            return true;
+        }
+        let mark = window_mark(id);
+        !mark.is_drawable()
+            || held_marks
+                .iter()
+                .any(|&held_mark| !window_marks_apart(mark, held_mark, min_distance))
+    }
 }
 
 /// A fresh window id that no holder's files in `holders_dir` name and `in_use`
@@ -1636,6 +1675,7 @@ impl WindowEntry {
             status_reports_missing: Some(self.report_gap()),
             queued_count: Some(u64::try_from(self.inbox.pending_count()).unwrap_or(u64::MAX)),
             task_report,
+            mark: Some(window_mark(&self.window_id)),
         }
     }
 
@@ -2739,26 +2779,43 @@ impl WindowRegistry {
     ) -> Result<(String, OpeningRow), WindowOpenError> {
         let table = lock_recover(&self.window_table).clone();
         let holders_dir = self.holder_host.holders_dir();
-        for _ in 0..WINDOW_ID_ROUNDS {
-            let in_use: HashSet<String> = {
-                let entries = lock_recover(&self.entries);
-                let opening = lock_recover(&self.opening);
-                entries
-                    .iter()
-                    .map(|entry| entry.window_id.clone())
-                    .chain(opening.keys().cloned())
-                    .collect()
-            };
-            let picked = drawn_window_id(holders_dir.as_deref(), |id| in_use.contains(id))?;
-            let Some(window_id) = picked else {
-                continue;
-            };
-            // Named for each id tried: a name is never used for two starts.
-            let scopes = self.holder_host.scope_names(&window_id);
-            if let Reservation::Reserved(row) =
-                OpeningRow::reserve(table.as_ref(), &window_id, values, scopes).await
-            {
-                return Ok((window_id, row));
+        for min_distance in [WINDOW_MARK_MIN_DISTANCE, WINDOW_MARK_FALLBACK_DISTANCE] {
+            if min_distance == WINDOW_MARK_FALLBACK_DISTANCE {
+                tracing::warn!(
+                    min_distance = WINDOW_MARK_MIN_DISTANCE,
+                    "no window id keeps its mark apart from every held window's; handing out one \
+                     whose mark only differs"
+                );
+            }
+            let mut any_picked = false;
+            for _ in 0..WINDOW_ID_ROUNDS {
+                let held: HashSet<String> = {
+                    let entries = lock_recover(&self.entries);
+                    let opening = lock_recover(&self.opening);
+                    entries
+                        .iter()
+                        .map(|entry| entry.window_id.clone())
+                        .chain(opening.keys().cloned())
+                        .collect()
+                };
+                let picked =
+                    drawn_window_id(holders_dir.as_deref(), window_id_claim(held, min_distance))?;
+                let Some(window_id) = picked else {
+                    continue;
+                };
+                any_picked = true;
+                // Named for each id tried: a name is never used for two starts.
+                let scopes = self.holder_host.scope_names(&window_id);
+                if let Reservation::Reserved(row) =
+                    OpeningRow::reserve(table.as_ref(), &window_id, values, scopes).await
+                {
+                    return Ok((window_id, row));
+                }
+            }
+            // Only running out of marks falls back; ids the table already
+            // holds are not the mark rule's doing.
+            if any_picked {
+                break;
             }
         }
         Err(WindowOpenError::SpawnFailed(
@@ -3401,7 +3458,14 @@ impl WindowRegistry {
         let name = {
             let entries = lock_recover(&self.entries);
             let opening = lock_recover(&self.opening);
-            claim_name(&entries, &opening, &values.name, OnNameTaken::Number)?
+            // A name saved under an earlier, looser rule is settled, so every
+            // window holds a name the current rule accepts; the id always does.
+            let saved = settled_saved_name(
+                &values.name,
+                values.command.first().map(String::as_str),
+                window_id,
+            );
+            claim_name(&entries, &opening, &saved, OnNameTaken::Number)?
         };
         let entry = self.create_window_entry(
             window_id.to_owned(),
@@ -4285,6 +4349,19 @@ pub(crate) fn resolve_existing_dir(
     Ok(crate::strip_extended_length_prefix(&canonical))
 }
 
+/// The name a window saved as `saved` takes when it opens again: `saved`
+/// settled under the current rule ([`settle_window_name`]), else the default
+/// name of `command0` settled the same way, else `last_resort`.
+///
+/// `last_resort` must itself pass [`validate_window_name`]: it is used as is.
+pub(crate) fn settled_saved_name(saved: &str, command0: Option<&str>, last_resort: &str) -> String {
+    settle_window_name(saved)
+        .or_else(|| {
+            command0.and_then(|command0| settle_window_name(&default_name_from_command(command0)))
+        })
+        .unwrap_or_else(|| last_resort.to_owned())
+}
+
 /// Derives the default window name from `command[0]`'s file stem, or the
 /// whole value if it has none.
 fn default_name_from_command(command0: &str) -> String {
@@ -4951,6 +5028,68 @@ mod tests {
             None,
             "no id is handed out when every candidate is taken"
         );
+    }
+
+    /// The first generated id whose mark, set against `held`'s, satisfies `wanted`.
+    fn id_whose_mark(held: &str, wanted: impl Fn(WindowMark, u32) -> bool) -> String {
+        let held_mark = window_mark(held);
+        (0..1_000_000u32)
+            .map(|n| format!("w{n:08}"))
+            .find(|id| {
+                let mark = window_mark(id);
+                wanted(mark, (mark.cells ^ held_mark.cells).count_ones())
+            })
+            .expect("some generated id has a mark of the wanted kind")
+    }
+
+    #[test]
+    fn a_new_window_id_keeps_its_mark_drawable_and_apart_from_every_held_window() {
+        let held = "wheld0001";
+        assert!(window_mark(held).is_drawable(), "fixture premise: {held}");
+        let near = id_whose_mark(held, |mark, distance| mark.is_drawable() && distance == 2);
+        let undrawable = id_whose_mark(held, |mark, distance| !mark.is_drawable() && distance >= 3);
+        let far = id_whose_mark(held, |mark, distance| mark.is_drawable() && distance == 3);
+        let holding = || HashSet::from([held.to_owned()]);
+
+        let claim = window_id_claim(holding(), WINDOW_MARK_MIN_DISTANCE);
+        assert!(claim(held), "a held id is taken");
+        assert!(
+            claim(&near),
+            "{near}'s mark is within two cells of {held}'s"
+        );
+        assert!(
+            claim(&undrawable),
+            "{undrawable}'s mark fills too few or too many cells"
+        );
+        assert!(
+            !claim(&far),
+            "{far}'s mark is drawable and exactly three cells apart"
+        );
+
+        let fallback = window_id_claim(holding(), WINDOW_MARK_FALLBACK_DISTANCE);
+        assert!(fallback(held), "a held id stays taken on the fallback");
+        assert!(
+            !fallback(&near),
+            "on the fallback, a mark that differs at all is free"
+        );
+        assert!(
+            fallback(&undrawable),
+            "on the fallback, a mark must still be drawable"
+        );
+
+        let holders_dir =
+            yagura_test_support::paths::unique_temp_dir("yagura-test-window-id", "mark-rule");
+        for dir in [None, Some(holders_dir.as_path())] {
+            assert_eq!(
+                picked_window_id(
+                    vec![near.clone(), undrawable.clone(), far.clone()],
+                    dir,
+                    window_id_claim(holding(), WINDOW_MARK_MIN_DISTANCE),
+                ),
+                Some(far.clone()),
+                "the mark rule holds whether or not a holder has been started ({dir:?})"
+            );
+        }
     }
 
     #[tokio::test]

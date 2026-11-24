@@ -43,6 +43,7 @@ fn sample_window_info(status_rev: Option<u64>) -> WindowInfo {
         status_reports_missing: None,
         queued_count: None,
         task_report: None,
+        mark: None,
     }
 }
 

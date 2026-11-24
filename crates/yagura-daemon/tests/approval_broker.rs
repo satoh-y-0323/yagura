@@ -23,7 +23,7 @@ use yagura_daemon::approval::{
 use yagura_daemon::control::DestructiveTool;
 use yagura_protocol::{
     ApprovalRequest, ApprovalRequester, ApprovalRequesterKind, ApprovalTarget, DaemonPush, RoomRef,
-    WindowStatus,
+    WindowStatus, window_mark,
 };
 
 /// The boot nonce every request id in these tests is minted against.
@@ -109,11 +109,16 @@ fn draft() -> ApprovalDraft {
             kind: ApprovalRequesterKind::Window,
             window_id: Some("w1-abc".to_string()),
             name: Some("agent A".to_string()),
+            mark: Some(window_mark("w1-abc")),
+            status: Some(WindowStatus::Running),
+            profile: None,
         },
         target: Some(ApprovalTarget {
             window_id: "w2-abc".to_string(),
             name: "agent B".to_string(),
             status: WindowStatus::Idle,
+            mark: window_mark("w2-abc"),
+            profile: None,
         }),
         text: None,
         // close_window is not addressed to a chat room.
@@ -130,6 +135,9 @@ fn chat_draft() -> ApprovalDraft {
             kind: ApprovalRequesterKind::Window,
             window_id: Some("w1-abc".to_string()),
             name: Some("agent A".to_string()),
+            mark: Some(window_mark("w1-abc")),
+            status: Some(WindowStatus::Running),
+            profile: None,
         },
         target: None,
         text: Some("[yagura chat] {\"from\":\"w1-abc\"}".to_string()),

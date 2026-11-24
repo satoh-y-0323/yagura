@@ -103,7 +103,7 @@ use yagura_protocol::{
     ResolvedAssignment, RestoreCandidate, ReviewMark, RoleEntry, RoomRef, StatusBoot,
     TaskAssignment, TaskReport, TaskReportMark, TerminalSize, TicketConfigInfo, TicketFieldInfo,
     TicketInfo, TicketResultInfo, TicketStateInfo, TicketSummary, TicketWorkspaceInfo,
-    ToolAutoApprove, UnknownReason, ViewState, WheelInput, WindowInfo,
+    ToolAutoApprove, UnknownReason, ViewState, WheelInput, WindowInfo, WindowMark,
     WindowStatus as WireWindowStatus, WithdrawOutcome, WithdrawReason,
 };
 
@@ -336,7 +336,9 @@ wire_sample!(struct WindowInfo {
     status_reports_missing,
     queued_count,
     task_report,
+    mark,
 });
+wire_sample!(struct WindowMark { cells, hue });
 wire_sample!(struct TaskReportMark { seq, state });
 wire_sample!(struct RestoreCandidate {
     position,
@@ -384,8 +386,21 @@ wire_sample!(struct ApprovalRequest {
     room,
 });
 wire_sample!(struct RoomRef { room_id, name });
-wire_sample!(struct ApprovalRequester { kind, window_id, name });
-wire_sample!(struct ApprovalTarget { window_id, name, status });
+wire_sample!(struct ApprovalRequester {
+    kind,
+    window_id,
+    name,
+    mark,
+    status,
+    profile,
+});
+wire_sample!(struct ApprovalTarget {
+    window_id,
+    name,
+    status,
+    mark,
+    profile,
+});
 wire_sample!(struct ChatMessage {
     seq,
     at_ms,

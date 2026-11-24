@@ -10,12 +10,14 @@
 //! distinguish the reasons *before* sending, which is why the error type is
 //! an enum rather than a unit type.
 
+use std::path::Path;
+
 use serde_json::{Value, json};
 use yagura_protocol::{
-    HANDOFF_NOTE_MAX_BYTES, WINDOW_NAME_MAX_BYTES, WindowNameError, decode_client_message,
-    decode_daemon_message, encode_client_message, encode_daemon_message, validate_chat_body,
-    validate_handoff_text, validate_message_text, validate_task_instruction, validate_window_name,
-    validate_window_vendor,
+    ChatBodyError, HANDOFF_NOTE_MAX_BYTES, WINDOW_NAME_MAX_BYTES, WindowNameError,
+    decode_client_message, decode_daemon_message, encode_client_message, encode_daemon_message,
+    validate_chat_body, validate_display_label, validate_handoff_text, validate_message_text,
+    validate_task_instruction, validate_window_name, validate_window_vendor,
 };
 
 /// Invisible characters that carry no glyph-shaping role and are therefore
@@ -404,5 +406,111 @@ fn an_answer_from_a_daemon_that_predates_the_name_still_decodes_and_writes_no_na
             echoed.get("name").is_none(),
             "an absent name is left off the wire, not written as null: {echoed}"
         );
+    }
+}
+
+// --- a name must look like itself: no blank edges, at least one visible character ---
+
+/// The message `validate_window_name` gives a name with no visible character.
+const NO_VISIBLE_CHAR: &str = "window name has no visible character";
+
+/// The message `validate_window_name` gives a name that starts or ends with `ch`.
+fn surrounding_blank(ch: char, at: usize) -> String {
+    format!(
+        "window name must not start or end with a blank character (U+{:04X} at byte offset {at})",
+        ch as u32
+    )
+}
+
+/// The characters the GUI draws as a space inside a name while it writes them out
+/// inside a place: the TS side of the same contract computes this list from the
+/// GUI's own write-out functions, so the two sides read one definition.
+fn gui_blank_looking_chars() -> Vec<char> {
+    let path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/blank-looking-chars.json");
+    let source = std::fs::read_to_string(&path)
+        .unwrap_or_else(|err| panic!("{} must be readable: {err}", path.display()));
+    let entries: Vec<String> = serde_json::from_str(&source)
+        .unwrap_or_else(|err| panic!("{} must be an array of strings: {err}", path.display()));
+    entries
+        .iter()
+        .map(|entry| {
+            let mut chars = entry.chars();
+            match (chars.next(), chars.next()) {
+                (Some(ch), None) => ch,
+                _ => panic!(
+                    "every entry of {} is one character: {entry:?}",
+                    path.display()
+                ),
+            }
+        })
+        .collect()
+}
+
+fn message_of(result: Result<(), WindowNameError>) -> Option<String> {
+    result.err().map(|err| err.to_string())
+}
+
+#[test]
+fn every_blank_looking_character_is_refused_alone_or_at_an_edge_and_kept_inside_a_name() {
+    let fixture = gui_blank_looking_chars();
+    assert!(
+        fixture.contains(&'\u{2800}'),
+        "the GUI draws U+2800 as a space inside a name: {fixture:?}"
+    );
+    let mut blank_looking = fixture;
+    blank_looking.push(' ');
+
+    for ch in blank_looking {
+        let code = ch as u32;
+        assert_eq!(
+            message_of(validate_window_name(&ch.to_string())),
+            Some(NO_VISIBLE_CHAR.to_string()),
+            "a name of only U+{code:04X} shows nothing"
+        );
+        assert_eq!(
+            message_of(validate_window_name(&format!("{ch}reviewer"))),
+            Some(surrounding_blank(ch, 0)),
+            "U+{code:04X} before a name makes it look like the name without it"
+        );
+        assert_eq!(
+            message_of(validate_window_name(&format!("reviewer{ch}"))),
+            Some(surrounding_blank(ch, "reviewer".len())),
+            "U+{code:04X} after a name makes it look like the name without it"
+        );
+        assert_eq!(
+            validate_window_name(&format!("a{ch}b")),
+            Ok(()),
+            "U+{code:04X} between visible characters is part of the name"
+        );
+        assert_eq!(
+            validate_chat_body(&ch.to_string()),
+            Err(ChatBodyError::Empty),
+            "a chat message of only U+{code:04X} carries nothing to read"
+        );
+    }
+}
+
+#[test]
+fn a_name_of_blank_characters_and_joiners_only_has_no_visible_character() {
+    for name in [
+        " \u{200C} ",
+        "\u{200C}",
+        "\u{200D}",
+        "\u{2800}\u{200D}\u{3000}",
+    ] {
+        assert_eq!(
+            message_of(validate_window_name(name)),
+            Some(NO_VISIBLE_CHAR.to_string()),
+            "{name:?} shows nothing"
+        );
+    }
+}
+
+#[test]
+fn a_blank_edge_stays_accepted_in_labels_that_are_not_window_names() {
+    for label in [" x", "x ", "\u{2800}x", "x\u{3000}"] {
+        assert_eq!(validate_window_vendor(label), Ok(()), "vendor {label:?}");
+        assert_eq!(validate_display_label(label), Ok(()), "label {label:?}");
     }
 }

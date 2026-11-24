@@ -519,3 +519,46 @@ async fn a_corrupt_lost_row_costs_only_itself_and_each_read_warns_once_per_kind(
     }
     drop(daemon);
 }
+
+/// A saved name comes back as a candidate only in a form the window-name rule accepts,
+/// since the GUI sends it back as the name of the window it opens: blank edges are
+/// trimmed, a name with nothing visible left takes its command's file stem, and one
+/// whose file stem shows nothing either takes the fixed fallback.
+#[tokio::test]
+async fn a_saved_name_comes_back_trimmed_or_replaced_when_nothing_visible_is_left() {
+    let db = temp_store_db("ipc-restore-settled-names");
+    create_schema(&db.path);
+    {
+        let conn = rusqlite::Connection::open(&db.path).expect("a seed connection must open");
+        let rows = [
+            (" lost ", "[\"cmd.exe\"]"),
+            ("\u{3000}", "[\"stemname.exe\"]"),
+            ("\u{2800}", "[\"\u{3000}.exe\"]"),
+        ];
+        for (index, (name, command_json)) in rows.into_iter().enumerate() {
+            insert_window_table_row(
+                &conn,
+                &seeded_id(index),
+                name,
+                "lost",
+                Value::Text(command_json.to_owned()),
+                Value::Null,
+            );
+        }
+    }
+
+    let harness = Harness::start(
+        "ipc-restore-settled-names",
+        config_with_store(db.path.clone()),
+    )
+    .await;
+    let mut client = harness.connect().await;
+    let read = candidates(&mut client).await;
+    assert_eq!(
+        names(&read),
+        vec!["lost", "stemname", "window"],
+        "every candidate's name must already satisfy validate_window_name"
+    );
+
+    drop(harness);
+}

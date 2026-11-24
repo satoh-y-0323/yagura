@@ -30,8 +30,9 @@ use yagura_protocol::{
     OnNameTaken, PROTOCOL_REVISION, PointerButton, PointerInput, PointerKind, ProfileInfo,
     RestoreCandidate, TerminalSize, WindowInfo, WindowStatus, check_input_bounds,
     decode_correlated_client_message, encode_correlated_daemon_message, encode_daemon_message,
-    frame_decode, frame_encode, is_valid_source, read_frame_label, validate_handoff_target,
-    validate_handoff_text, validate_launch_option_value, validate_message_text,
+    frame_decode, frame_encode, is_valid_source, read_frame_label, settle_window_name,
+    validate_handoff_target, validate_handoff_text, validate_launch_option_value,
+    validate_message_text, window_mark,
 };
 
 mod approval_settings;
@@ -82,7 +83,7 @@ use crate::window::{
     CliInjection, HooksRoute, InputOrigin, LaunchIdentity, McpConnectionClaim, NameRefusal,
     OpenWindowRequest, OpenedWindow, RejectedArgument, RequestedCwd, TaskOrigin, WakeCommand,
     WindowEntry, WindowFacts, WindowLiveness, WindowOpenError, WindowProvenance, WindowRegistry,
-    WindowRenameError, resolve_existing_dir,
+    WindowRenameError, resolve_existing_dir, settled_saved_name,
 };
 use yagura_protocol::holder::HolderViewOp;
 
@@ -1757,7 +1758,8 @@ impl IpcServer {
                 FrameOutcome::Continue
             }
             Ok(ClientMessage::RenameWindow { window_id, name }) => {
-                self.handle_rename_window(outbound, &window_id, &name).await;
+                self.handle_rename_window(outbound, state, &window_id, &name)
+                    .await;
                 FrameOutcome::Continue
             }
             Ok(ClientMessage::ReadOutput { window_id, lines }) => {
@@ -3249,18 +3251,20 @@ impl IpcServer {
             model: assignment.model.clone(),
             effort: assignment.effort.clone(),
         };
-        // Task titles pass the same window-name validation when the plan is stored.
         // A name the caller gave is refused when taken; the title is a default.
+        // A title stored under an earlier, looser rule is settled first, and
+        // one with nothing left leaves the profile's display name to name the
+        // window.
         let (name, on_name_taken) = match name {
-            Some(name) => (name, OnNameTaken::Refuse),
-            None => (prelude.title, OnNameTaken::Number),
+            Some(name) => (Some(name), OnNameTaken::Refuse),
+            None => (settle_window_name(&prelude.title), OnNameTaken::Number),
         };
         let has_instruction = prelude.instruction.is_some();
 
         let planned = match self.plan_from_profile(
             &assignment.profile,
             Some(prelude.cwd),
-            Some(name),
+            name,
             on_name_taken,
             options,
         ) {
@@ -3330,7 +3334,23 @@ impl IpcServer {
     /// applies does not appear here -- a label change never touches the child,
     /// and gating it would leave an exited window stuck with a name nobody can
     /// correct.
-    async fn handle_rename_window(&self, outbound: &Outbound, window_id: &str, name: &str) {
+    async fn handle_rename_window(
+        &self,
+        outbound: &Outbound,
+        state: &ConnectionState,
+        window_id: &str,
+        name: &str,
+    ) {
+        // Only the GUI renames, and a child that renames another window could
+        // swap names with a window the user trusts. Refused before the lookup,
+        // so a caller that is not the approver learns nothing about the window.
+        if !matches!(state.origin, RequestOrigin::Approver) {
+            outbound.reply(&error_msg(
+                "auth_failed",
+                "only the approver may rename a window",
+            ));
+            return;
+        }
         let Some(entry) = self.registry.get(window_id) else {
             outbound.reply(&window_not_found_msg());
             return;
@@ -4492,15 +4512,28 @@ fn read_lost_windows(db_path: &Path) -> Result<Vec<LostWindow>, StoreError> {
     store::read_lost_windows(&conn)
 }
 
-/// Converts one stored row into its wire form. A pure field mapping: the
-/// store's row type stays free of the protocol crate, and the protocol's
-/// candidate stays free of the store's own bounds.
+/// The name of a restore candidate when neither its saved name nor its
+/// command's name passes the window-name rule. Not the old window's id: the
+/// new window gets another, and its mark would sit beside a name that reads
+/// as a different window's id.
+const RESTORED_NAME_FALLBACK: &str = "window";
+
+/// Converts one stored row into its wire form: a field mapping, except that
+/// the saved name is settled under the current window-name rule so the GUI
+/// can open the candidate with it. The store's row type stays free of the
+/// protocol crate, and the protocol's candidate stays free of the store's
+/// own bounds.
 fn to_restore_candidate(row: LostWindow) -> RestoreCandidate {
+    let name = settled_saved_name(
+        &row.name,
+        row.command.first().map(String::as_str),
+        RESTORED_NAME_FALLBACK,
+    );
     RestoreCandidate {
         position: row.position,
         command: row.command,
         cwd: row.cwd,
-        name: row.name,
+        name,
         vendor: row.vendor,
         detection: row.detection,
         layout_json: row.layout_json,
@@ -6353,18 +6386,27 @@ fn approval_limits(config: &DaemonConfig) -> ApprovalLimits {
 /// name.
 fn requester_for(registry: &WindowRegistry, origin: &RequestOrigin) -> ApprovalRequester {
     if let RequestOrigin::Window(window_id) = origin
-        && let Some(window) = window_info(registry, window_id)
+        && let Some(entry) = registry.get(window_id)
     {
+        let window = entry.window_info();
         return ApprovalRequester {
             kind: ApprovalRequesterKind::Window,
+            // The mark comes from the identified window's own id: the approver
+            // matches it against that window's header.
+            mark: Some(window_mark(window_id)),
             window_id: Some(window_id.clone()),
             name: Some(window.name),
+            status: Some(window.status),
+            profile: entry.launch_profile().map(str::to_string),
         };
     }
     ApprovalRequester {
         kind: ApprovalRequesterKind::External,
         window_id: None,
         name: None,
+        mark: None,
+        status: None,
+        profile: None,
     }
 }
 

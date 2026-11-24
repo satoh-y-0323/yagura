@@ -33,14 +33,22 @@ use common::open_exited_window_via_ipc;
 // broadcasts on the same connection.
 
 /// Starts a fresh daemon (`WindowRegistry` + `IpcServer`) on a unique endpoint and
-/// returns a connected client.
-async fn start_daemon_and_connect(tag: &str) -> Connection {
-    let config = common::opening_config();
+/// returns that endpoint.
+async fn start_daemon(tag: &str) -> String {
+    let config = common::approver_base_config();
     let registry = Arc::new(WindowRegistry::new(config.clone()));
     let endpoint = unique_endpoint_name("yagura-test-rename", tag);
     let server = Arc::new(IpcServer::new(registry, endpoint.clone(), config));
     let _server_task = tokio::spawn(server.run());
-    connect_with_retry(&endpoint).await
+    endpoint
+}
+
+/// Starts a fresh daemon and returns a client registered as the approver, the one
+/// connection a rename is answered for.
+async fn start_daemon_and_connect(tag: &str) -> Connection {
+    let mut client = connect_with_retry(&start_daemon(tag).await).await;
+    common::register_approver(&mut client).await;
+    client
 }
 
 /// Opens an `echo_child` window via IPC `OpenWindow` and returns its `window_id`.
@@ -394,5 +402,65 @@ async fn open_window_without_name_rejects_forbidden_char_in_command_file_stem() 
         !windows.iter().any(|w| w.name.contains(BIDI_OVERRIDE)),
         "a rejected open must not leave a window whose display name carries the \
          bidi-override character: {windows:?}"
+    );
+}
+
+/// Every window's id and name, as `list_windows` reports them.
+async fn names_by_id(client: &mut Connection) -> Vec<(String, String)> {
+    let mut names: Vec<(String, String)> = list_windows_via_ipc(client)
+        .await
+        .into_iter()
+        .map(|w| (w.window_id, w.name))
+        .collect();
+    names.sort();
+    names
+}
+
+#[tokio::test]
+async fn rename_from_any_connection_but_the_approver_is_refused_before_the_window_is_looked_up() {
+    let endpoint = start_daemon("origin").await;
+    let mut approver = connect_with_retry(&endpoint).await;
+    common::register_approver(&mut approver).await;
+    let own = open_window_via_ipc(&mut approver).await;
+    let other = open_window_via_ipc(&mut approver).await;
+    let before = names_by_id(&mut approver).await;
+
+    let mut unidentified = connect_with_retry(&endpoint).await;
+    let mut identified = connect_with_retry(&endpoint).await;
+    common::identify(&mut identified, &own).await;
+
+    for (who, client) in [
+        ("an unidentified connection", &mut unidentified),
+        ("the window's own connection", &mut identified),
+    ] {
+        for target in [own.as_str(), other.as_str(), "w-does-not-exist"] {
+            send_client_message(
+                client,
+                &ClientMessage::RenameWindow {
+                    window_id: target.to_string(),
+                    name: "taken over".to_string(),
+                },
+            )
+            .await;
+            match read_status_skipping_message(client)
+                .await
+                .expect_message("rename_window answer to a connection that is not the approver")
+            {
+                DaemonMessage::Error { code, .. } => assert_eq!(
+                    code, "auth_failed",
+                    "a rename of {target} from {who} must be refused as auth_failed, \
+                     whether or not the window exists"
+                ),
+                other => panic!(
+                    "a rename of {target} from {who} must be refused as auth_failed, got {other:?}"
+                ),
+            }
+        }
+    }
+
+    assert_eq!(
+        names_by_id(&mut approver).await,
+        before,
+        "a refused rename leaves every window's name as it was"
     );
 }

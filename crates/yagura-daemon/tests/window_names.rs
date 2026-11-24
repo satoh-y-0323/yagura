@@ -512,6 +512,7 @@ async fn rename_is_refused_onto_a_live_name_and_allowed_onto_its_own_or_an_exite
     let dir = unique_temp_dir("names-rename");
     let h = start("names-rename", &dir).await;
     let mut client = h.connect().await;
+    register_approver(&mut client).await;
     let alpha = expect_opened(
         open_command(&mut client, echo_child_command(), &dir, Some("Alpha"), None).await,
     );
@@ -547,6 +548,7 @@ async fn rename_onto_a_reserved_mention_name_is_refused() {
     let dir = unique_temp_dir("names-rename-reserved");
     let h = start("names-rename-reserved", &dir).await;
     let mut client = h.connect().await;
+    register_approver(&mut client).await;
     let id = expect_opened(
         open_command(&mut client, echo_child_command(), &dir, Some("Alpha"), None).await,
     );
@@ -566,6 +568,7 @@ async fn a_name_with_a_double_quote_is_refused_on_open_and_rename() {
     let dir = unique_temp_dir("names-quote");
     let h = start("names-quote", &dir).await;
     let mut client = h.connect().await;
+    register_approver(&mut client).await;
     let id = expect_opened(
         open_command(&mut client, echo_child_command(), &dir, Some("Alpha"), None).await,
     );

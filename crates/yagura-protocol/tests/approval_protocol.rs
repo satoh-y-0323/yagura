@@ -17,7 +17,7 @@
 use yagura_protocol::{
     ApprovalRequest, ApprovalRequester, ApprovalRequesterKind, ApprovalTarget, ClientMessage,
     DaemonMessage, MessageError, WindowStatus, WithdrawReason, decode_client_message,
-    decode_daemon_message, encode_client_message, encode_daemon_message,
+    decode_daemon_message, encode_client_message, encode_daemon_message, window_mark,
 };
 
 /// A requester that is a window: `kind = window` with both optional fields
@@ -28,6 +28,9 @@ fn window_requester() -> ApprovalRequester {
         kind: ApprovalRequesterKind::Window,
         window_id: Some("w1-abc".to_string()),
         name: Some("agent A".to_string()),
+        mark: Some(window_mark("w1-abc")),
+        status: Some(WindowStatus::Running),
+        profile: None,
     }
 }
 
@@ -38,6 +41,9 @@ fn external_requester() -> ApprovalRequester {
         kind: ApprovalRequesterKind::External,
         window_id: None,
         name: None,
+        mark: None,
+        status: None,
+        profile: None,
     }
 }
 
@@ -46,6 +52,8 @@ fn target() -> ApprovalTarget {
         window_id: "w2-abc".to_string(),
         name: "agent B".to_string(),
         status: WindowStatus::Idle,
+        mark: window_mark("w2-abc"),
+        profile: None,
     }
 }
 
