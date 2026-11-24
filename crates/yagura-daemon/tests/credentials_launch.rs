@@ -20,9 +20,15 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use common::door_relay::{Printed, relay_door_with, unique_instance};
 use common::real_daemon::{RunningDaemon, Sandbox, daemon_bin};
-use common::{VALID_TOKEN, launch_args_logged_in, read_response, send};
+use common::{Harness, VALID_TOKEN, launch_args_logged_in, read_response, send};
+use yagura_daemon::DaemonConfig;
+use yagura_daemon::child_env::ChildBaseEnv;
+use yagura_daemon::profile::ProfileOs;
 use yagura_protocol::{ClientMessage, DaemonMessage, Declaration, WindowStatus};
+use yagura_test_support::ipc::Connection;
+use yagura_test_support::paths::TempDir;
 use yagura_test_support::process::{
     COMPOSER_CONTINUATION_PREFIX, COMPOSER_MARKER, COMPOSER_SEPARATOR,
 };
@@ -97,8 +103,17 @@ async fn open_reply(
     name: Option<&str>,
     on_name_taken: yagura_protocol::OnNameTaken,
 ) -> DaemonMessage {
+    open_reply_on(&mut daemon.client, profile, name, on_name_taken).await
+}
+
+async fn open_reply_on(
+    client: &mut Connection,
+    profile: &str,
+    name: Option<&str>,
+    on_name_taken: yagura_protocol::OnNameTaken,
+) -> DaemonMessage {
     send(
-        &mut daemon.client,
+        client,
         &ClientMessage::OpenWindowFromProfile {
             profile: profile.to_string(),
             cwd: None,
@@ -109,11 +124,25 @@ async fn open_reply(
         },
     )
     .await;
-    read_response(&mut daemon.client).await
+    read_response(client).await
 }
 
 async fn open(daemon: &mut RunningDaemon, profile: &str) -> String {
-    match open_reply(daemon, profile, None, Default::default()).await {
+    opened(
+        open_reply(daemon, profile, None, Default::default()).await,
+        profile,
+    )
+}
+
+async fn open_on(client: &mut Connection, profile: &str) -> String {
+    opened(
+        open_reply_on(client, profile, None, Default::default()).await,
+        profile,
+    )
+}
+
+fn opened(reply: DaemonMessage, profile: &str) -> String {
+    match reply {
         DaemonMessage::WindowOpened { window_id, .. } => window_id,
         other => panic!("expected window_opened for {profile}, got {other:?}"),
     }
@@ -731,36 +760,57 @@ pub(crate) fn unchanged_convert() -> Vec<String> {
     ]
 }
 
+/// The text of a window's output with its line breaks removed, so a value the terminal
+/// wrapped reads as one run.
+fn flat(text: &str) -> String {
+    text.chars().filter(|c| !matches!(c, '\r' | '\n')).collect()
+}
+
+/// Whether `flat_text` holds the whole of the overlay report an `env_probe` window prints.
+fn overlay_report_done(flat_text: &str) -> bool {
+    let marker = format!("<<{OVERLAY_VAR}");
+    flat_text
+        .rfind(&marker)
+        .is_some_and(|start| flat_text[start..].contains(">>"))
+}
+
+/// The overlay the report in `flat_text` carries, as JSON; `context` says what to show of the
+/// daemon when the window was handed none.
+fn parse_overlay_report(flat_text: &str, context: impl FnOnce() -> String) -> serde_json::Value {
+    let marker = format!("<<{OVERLAY_VAR}");
+    let rest = &flat_text[flat_text.rfind(&marker).unwrap() + marker.len()..];
+    let value = rest.strip_prefix('=').unwrap_or_else(|| {
+        panic!(
+            "the window's CLI was handed no {OVERLAY_VAR}: {rest:?}; daemon log:\n{}",
+            context()
+        )
+    });
+    let value = &value[..value.find(">>").unwrap()];
+    serde_json::from_str(value)
+        .unwrap_or_else(|err| panic!("{OVERLAY_VAR} must be a JSON object: {err}; got {value:?}"))
+}
+
 /// The overlay the `env_probe` window `window_id` reports in [`OVERLAY_VAR`], as JSON.
 pub(crate) async fn reported_overlay(
     daemon: &mut RunningDaemon,
     sandbox: &Sandbox,
     window_id: &str,
 ) -> serde_json::Value {
-    let flat = |text: &str| {
-        text.chars()
-            .filter(|c| !matches!(c, '\r' | '\n'))
-            .collect::<String>()
-    };
-    let marker = format!("<<{OVERLAY_VAR}");
     let text = daemon
         .output_until(window_id, "the overlay report", |text| {
-            let text = flat(text);
-            text.rfind(&marker)
-                .is_some_and(|start| text[start..].contains(">>"))
+            overlay_report_done(&flat(text))
         })
         .await;
-    let text = flat(&text);
-    let rest = &text[text.rfind(&marker).unwrap() + marker.len()..];
-    let value = rest.strip_prefix('=').unwrap_or_else(|| {
-        panic!(
-            "the window's CLI was handed no {OVERLAY_VAR}: {rest:?}; daemon log:\n{}",
-            sandbox.daemon_log()
-        )
-    });
-    let value = &value[..value.find(">>").unwrap()];
-    serde_json::from_str(value)
-        .unwrap_or_else(|err| panic!("{OVERLAY_VAR} must be a JSON object: {err}; got {value:?}"))
+    parse_overlay_report(&flat(&text), || sandbox.daemon_log())
+}
+
+/// [`reported_overlay`] for a window of an in-process daemon.
+async fn reported_overlay_in(h: &Harness, window_id: &str) -> serde_json::Value {
+    until("the overlay report", || {
+        overlay_report_done(&h.flattened_scrollback(window_id))
+    })
+    .await;
+    parse_overlay_report(&h.flattened_scrollback(window_id), String::new)
 }
 
 /// The names the overlay drops from the window's tools.
@@ -924,7 +974,18 @@ pub(crate) async fn claims(
     token: &str,
     times: usize,
 ) -> (Vec<DaemonMessage>, bool) {
-    let mut client = yagura_test_support::ipc::connect_with_retry(sandbox.endpoint()).await;
+    claims_at(sandbox.endpoint(), window_id, profile, token, times).await
+}
+
+/// [`claims`] on a new connection to the daemon serving `endpoint`.
+async fn claims_at(
+    endpoint: &str,
+    window_id: &str,
+    profile: &str,
+    token: &str,
+    times: usize,
+) -> (Vec<DaemonMessage>, bool) {
+    let mut client = yagura_test_support::ipc::connect_with_retry(endpoint).await;
     let mut answers = Vec::new();
     for _ in 0..times {
         send(
@@ -946,8 +1007,8 @@ pub(crate) async fn claims(
 }
 
 /// What a door taking the inbox of `window_id` with `token` is answered.
-async fn door_take(sandbox: &Sandbox, window_id: &str, token: &str) -> DaemonMessage {
-    let mut client = yagura_test_support::ipc::connect_with_retry(sandbox.endpoint()).await;
+async fn door_take(endpoint: &str, window_id: &str, token: &str) -> DaemonMessage {
+    let mut client = yagura_test_support::ipc::connect_with_retry(endpoint).await;
     send(
         &mut client,
         &ClientMessage::DoorRead {
@@ -1003,18 +1064,19 @@ const DIRECT: &str = "overlay-gate-direct";
 const GUEST: &str = "overlay-gate-guest";
 const PLAIN: &str = "overlay-gate-plain";
 
-/// A sandbox with the profiles [`DIRECT`], [`GUEST`] and [`PLAIN`], whose CLIs keep their
-/// windows open.
-fn overlay_sandbox(tag: &str) -> Sandbox {
-    let sandbox = Sandbox::new(tag);
+/// The tree and profiles directory of the profiles [`DIRECT`], [`GUEST`] and [`PLAIN`],
+/// whose CLIs keep their windows open.
+fn overlay_profiles(tag: &str) -> (TempDir, PathBuf) {
+    let tree = TempDir::new("yagura-cli-test", tag);
+    let profiles_dir = tree.make_dir("profiles");
     let convert = unchanged_convert();
     for (id, shipped, convert) in [
         (DIRECT, "grok-build", None),
         (GUEST, "wsl-grok-build", Some(convert.as_slice())),
     ] {
-        let cli = quiet_cli(&logs_dir(&sandbox, id));
+        let cli = quiet_cli(&tree.make_dir(id));
         common::write_profile(
-            &sandbox.profiles_dir,
+            &profiles_dir,
             id,
             &shipped_with_command(id, shipped, &cli, convert, &[]),
         );
@@ -1027,23 +1089,44 @@ fn overlay_sandbox(tag: &str) -> Sandbox {
             .join(", ")
     };
     common::write_profile(
-        &sandbox.profiles_dir,
+        &profiles_dir,
         PLAIN,
         &format!(
             "schema = 1\ndisplay_name = \"{PLAIN}\"\n\n\
              [command]\ndefault = [{}]\n\n[host_paths]\nconvert = [{}]\n",
-            quoted(quiet_cli(&logs_dir(&sandbox, PLAIN))),
+            quoted(quiet_cli(&tree.make_dir(PLAIN))),
             quoted(convert)
         ),
     );
-    sandbox
+    (tree, profiles_dir)
 }
 
-/// Starts the daemon of an [`overlay_sandbox`] with `env` beside the token.
-async fn start_overlay_daemon(sandbox: &Sandbox, env: &[(&str, &str)]) -> RunningDaemon {
-    let mut all = vec![("YAGURA_STATUS_TOKEN_OVERRIDE", VALID_TOKEN)];
-    all.extend_from_slice(env);
-    sandbox.start_from(&all).await
+/// An in-process daemon serving `profiles_dir`, whose windows' children see `env` beside the
+/// test's own and whose user home is an empty directory of `tree`.
+async fn start_overlay_daemon(
+    tag: &str,
+    tree: &TempDir,
+    profiles_dir: PathBuf,
+    env: &[(&str, &str)],
+) -> Harness {
+    Harness::start(
+        tag,
+        DaemonConfig {
+            profiles_dir: Some(profiles_dir),
+            home_dir: Some(tree.make_dir("home")),
+            child_base_env: ChildBaseEnv::from_pairs(
+                env.iter()
+                    .map(|(name, value)| ((*name).into(), (*value).into()))
+                    .collect(),
+            ),
+            host_os: ProfileOs::host(),
+            program_lookup: common::empty_lookup(),
+            program_is_executable: |path| path.is_file(),
+            default_shell: None,
+            ..common::approver_base_config()
+        },
+    )
+    .await
 }
 
 /// In a window whose profile declares an overlay and whose CLI runs in another
@@ -1056,53 +1139,51 @@ async fn start_overlay_daemon(sandbox: &Sandbox, env: &[(&str, &str)]) -> Runnin
 async fn a_window_declaring_an_overlay_is_not_spoken_for_before_its_overlay_is_made() {
     // More claims than `IDENTIFY_FAILURE_LIMIT` (`ipc.rs`) lets one connection fail.
     const CLAIMS: usize = 5;
-    let sandbox = overlay_sandbox("cred-overlay-gate");
-    let mut daemon = start_overlay_daemon(&sandbox, &[]).await;
-    let direct = open(&mut daemon, DIRECT).await;
-    let guest = open(&mut daemon, GUEST).await;
-    let plain = open(&mut daemon, PLAIN).await;
+    let (tree, profiles_dir) = overlay_profiles("cred-overlay-gate");
+    let h = start_overlay_daemon("cred-overlay-gate", &tree, profiles_dir, &[]).await;
+    let mut client = h.connect().await;
+    let direct = open_on(&mut client, DIRECT).await;
+    let guest = open_on(&mut client, GUEST).await;
+    let plain = open_on(&mut client, PLAIN).await;
 
     for (window_id, profile) in [(&direct, DIRECT), (&plain, PLAIN)] {
-        let (answers, _) = claims(&sandbox, window_id, profile, VALID_TOKEN, 1).await;
+        let (answers, _) = claims_at(&h.endpoint, window_id, profile, VALID_TOKEN, 1).await;
         assert!(
             matches!(answers[0], DaemonMessage::Identified { .. }),
-            "{profile}: the window is spoken for by its credentials, got {:?}; daemon log:\n{}",
-            answers[0],
-            sandbox.daemon_log()
+            "{profile}: the window is spoken for by its credentials, got {:?}",
+            answers[0]
         );
-        let refusal =
-            crate::window_recovery::status_event_refusal(&mut daemon, window_id, VALID_TOKEN).await;
+        let refusal = common::status_event_refusal(&mut client, window_id, VALID_TOKEN).await;
         assert!(refusal.is_none(), "{profile}: got {refusal:?}");
-        let door = door_take(&sandbox, window_id, VALID_TOKEN).await;
+        let door = door_take(&h.endpoint, window_id, VALID_TOKEN).await;
         assert!(
             matches!(door, DaemonMessage::Delivery { .. }),
             "{profile}: the door is answered, got {door:?}"
         );
     }
 
-    let (answers, ponged) = claims(&sandbox, &guest, GUEST, VALID_TOKEN, CLAIMS).await;
+    let (answers, ponged) = claims_at(&h.endpoint, &guest, GUEST, VALID_TOKEN, CLAIMS).await;
     for answer in &answers {
         assert!(
             refused_as_pending(answer),
-            "a claim before the overlay is refused as pending, got {answer:?}; daemon log:\n{}",
-            sandbox.daemon_log()
+            "a claim before the overlay is refused as pending, got {answer:?}"
         );
     }
     assert!(
         ponged,
         "claims refused for a missing overlay are not counted against the connection"
     );
-    let refusal =
-        crate::window_recovery::status_event_refusal(&mut daemon, &guest, VALID_TOKEN).await;
+    let refusal = common::status_event_refusal(&mut client, &guest, VALID_TOKEN).await;
     assert!(
         refusal.as_ref().is_some_and(refused_as_pending),
         "a status event before the overlay is refused as pending, got {refusal:?}"
     );
-    let door = door_take(&sandbox, &guest, VALID_TOKEN).await;
+    let door = door_take(&h.endpoint, &guest, VALID_TOKEN).await;
     assert!(
         silent(&door),
         "a door before the overlay is answered with silence, got {door:?}"
     );
+    h.registry.terminate_all().await;
 }
 
 /// The wire form of a request for the overlay of `window_id`, with the guest's facts.
@@ -1136,8 +1217,8 @@ fn answered_overlay(answer: &DaemonMessage) -> Option<serde_json::Value> {
 }
 
 /// What the daemon answers a request for the overlay of `window_id` on a new connection.
-async fn ask_overlay(sandbox: &Sandbox, message: &ClientMessage) -> DaemonMessage {
-    let mut client = yagura_test_support::ipc::connect_with_retry(sandbox.endpoint()).await;
+async fn ask_overlay(endpoint: &str, message: &ClientMessage) -> DaemonMessage {
+    let mut client = yagura_test_support::ipc::connect_with_retry(endpoint).await;
     send(&mut client, message).await;
     read_response(&mut client).await
 }
@@ -1150,10 +1231,10 @@ async fn ask_overlay(sandbox: &Sandbox, message: &ClientMessage) -> DaemonMessag
 async fn the_overlay_built_for_a_guest_is_the_one_a_direct_window_gets_for_the_same_facts() {
     const INLINE: &str = r#"{"models":{"default_reasoning_effort":"high"},"shell_environment_policy":{"exclude":["BETA_*"]}}"#;
     const PROBE: &str = "overlay-ipc-direct";
-    let sandbox = overlay_sandbox("cred-overlay-ipc");
+    let (tree, profiles_dir) = overlay_profiles("cred-overlay-ipc");
     let probe = env_probe_path().display().to_string();
     common::write_profile(
-        &sandbox.profiles_dir,
+        &profiles_dir,
         PROBE,
         &shipped_with_command(
             PROBE,
@@ -1163,19 +1244,21 @@ async fn the_overlay_built_for_a_guest_is_the_one_a_direct_window_gets_for_the_s
             &[],
         ),
     );
-    let home = sandbox.tree.make_dir("home").display().to_string();
-    let mut env = vec![("GROK_CONFIG", INLINE)];
-    if cfg!(windows) {
-        env.push(("USERPROFILE", &home));
-    }
-    let mut daemon = start_overlay_daemon(&sandbox, &env).await;
-    let direct = open(&mut daemon, PROBE).await;
-    let expected = reported_overlay(&mut daemon, &sandbox, &direct).await;
-    let guest = open(&mut daemon, GUEST).await;
+    let h = start_overlay_daemon(
+        "cred-overlay-ipc",
+        &tree,
+        profiles_dir,
+        &[("GROK_CONFIG", INLINE)],
+    )
+    .await;
+    let mut client = h.connect().await;
+    let direct = open_on(&mut client, PROBE).await;
+    let expected = reported_overlay_in(&h, &direct).await;
+    let guest = open_on(&mut client, GUEST).await;
     let facts = serde_json::json!({ "GROK_CONFIG": INLINE });
 
     let refused = ask_overlay(
-        &sandbox,
+        &h.endpoint,
         &build_launch_overlay(&guest, &"f".repeat(32), facts.clone()),
     )
     .await;
@@ -1183,72 +1266,52 @@ async fn the_overlay_built_for_a_guest_is_the_one_a_direct_window_gets_for_the_s
         matches!(refused, DaemonMessage::Error { .. }),
         "a request without the window's credentials is refused, got {refused:?}"
     );
-    let (answers, _) = claims(&sandbox, &guest, GUEST, VALID_TOKEN, 1).await;
+    let (answers, _) = claims_at(&h.endpoint, &guest, GUEST, VALID_TOKEN, 1).await;
     assert!(
         refused_as_pending(&answers[0]),
         "a refused request builds nothing, got {:?}",
         answers[0]
     );
 
-    let answer = ask_overlay(&sandbox, &build_launch_overlay(&guest, VALID_TOKEN, facts)).await;
+    let answer = ask_overlay(
+        &h.endpoint,
+        &build_launch_overlay(&guest, VALID_TOKEN, facts),
+    )
+    .await;
     let built = answered_overlay(&answer)
         .unwrap_or_else(|| panic!("the daemon answers with the overlay, got {answer:?}"));
     assert_eq!(
         built, expected,
         "the guest's overlay is the one a direct window gets for the same facts"
     );
-    let (answers, _) = claims(&sandbox, &guest, GUEST, VALID_TOKEN, 1).await;
+    let (answers, _) = claims_at(&h.endpoint, &guest, GUEST, VALID_TOKEN, 1).await;
     assert!(
         matches!(answers[0], DaemonMessage::Identified { .. }),
-        "the window is spoken for once its overlay was built, got {:?}; daemon log:\n{}",
-        answers[0],
-        sandbox.daemon_log()
+        "the window is spoken for once its overlay was built, got {:?}",
+        answers[0]
     );
+    h.registry.terminate_all().await;
 }
 
-/// Runs the daemon `bin` as the overlay door with `args` after `--launch-overlay`, the
-/// credentials `credentials` in its environment and `input` on its stdin, against the
-/// instance of `sandbox`.
-pub(crate) fn run_overlay_door(
-    sandbox: &Sandbox,
-    args: &[&str],
-    credentials: Option<(&str, &str)>,
+/// Runs the overlay door with the credentials `credentials` in its environment and `input`
+/// on its stdin, through a relay to `h`'s daemon.
+async fn run_overlay_door(
+    h: &Harness,
+    credentials: (&str, &str),
     input: &[u8],
 ) -> std::process::Output {
-    use std::io::Write as _;
-    let mut command = std::process::Command::new(daemon_bin());
-    command
-        .arg("--launch-overlay")
-        .args(args)
-        .env("YAGURA_INSTANCE", &sandbox.instance)
-        .env_remove(WINDOW_ID_VAR)
-        .env_remove(TOKEN_VAR)
-        .env_remove("YAGURA_STORE_DB")
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped());
-    if cfg!(windows) {
-        command.env("LOCALAPPDATA", &sandbox.state_home);
-    } else {
-        command
-            .env("XDG_STATE_HOME", &sandbox.state_home)
-            .env("XDG_DATA_HOME", sandbox.tree.make_dir("data"))
-            .env("XDG_CONFIG_HOME", sandbox.tree.make_dir("config"))
-            .env("HOME", sandbox.tree.make_dir("home"));
-    }
-    if let Some((window_id, token)) = credentials {
-        command.env(WINDOW_ID_VAR, window_id).env(TOKEN_VAR, token);
-    }
-    let mut child = command.spawn().expect("start the overlay door");
-    let mut stdin = child.stdin.take().expect("the door's stdin");
-    let input = input.to_vec();
-    // The door may end before it has read everything: a broken pipe is its answer.
-    let writer = std::thread::spawn(move || {
-        let _ = stdin.write_all(&input);
-    });
-    let output = child.wait_with_output().expect("the overlay door ends");
-    let _ = writer.join();
-    output
+    relay_door_with(
+        h,
+        &unique_instance(),
+        Some(credentials),
+        &["--launch-overlay"],
+        input.to_vec(),
+        Printed::Forward,
+    )
+    .await
+    .finish_dropping_upstream()
+    .await
+    .0
 }
 
 /// Whether the door failed the way a statement can tell: a non-zero end, nothing on
@@ -1271,22 +1334,23 @@ pub(crate) fn assert_door_failed(output: &std::process::Output, what: &str, toke
 /// refused as pending.
 #[tokio::test]
 async fn the_overlay_door_fails_loudly_on_a_refusal_and_on_too_much_input_and_builds_nothing() {
-    let sandbox = overlay_sandbox("cred-overlay-door");
-    let mut daemon = start_overlay_daemon(&sandbox, &[]).await;
-    let guest = open(&mut daemon, GUEST).await;
+    let (tree, profiles_dir) = overlay_profiles("cred-overlay-door");
+    let h = start_overlay_daemon("cred-overlay-door", &tree, profiles_dir, &[]).await;
+    let mut client = h.connect().await;
+    let guest = open_on(&mut client, GUEST).await;
     let wrong = "f".repeat(32);
 
-    let refused = run_overlay_door(&sandbox, &[], Some((&guest, &wrong)), b"");
+    let refused = run_overlay_door(&h, (&guest, &wrong), b"").await;
     assert_door_failed(&refused, "a daemon that refuses the credentials", &wrong);
     let too_much = vec![b'x'; yagura_protocol::MAX_FRAME_BODY_LEN + 1];
-    let overflowed = run_overlay_door(&sandbox, &[], Some((&guest, VALID_TOKEN)), &too_much);
+    let overflowed = run_overlay_door(&h, (&guest, VALID_TOKEN), &too_much).await;
     assert_door_failed(&overflowed, "more input than the door reads", VALID_TOKEN);
 
-    let (answers, _) = claims(&sandbox, &guest, GUEST, VALID_TOKEN, 1).await;
+    let (answers, _) = claims_at(&h.endpoint, &guest, GUEST, VALID_TOKEN, 1).await;
     assert!(
         refused_as_pending(&answers[0]),
-        "neither door built the overlay, got {:?}; daemon log:\n{}",
-        answers[0],
-        sandbox.daemon_log()
+        "neither door built the overlay, got {:?}",
+        answers[0]
     );
+    h.registry.terminate_all().await;
 }

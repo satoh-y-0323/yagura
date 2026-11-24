@@ -1645,6 +1645,36 @@ pub async fn report_status(client: &mut Connection, window_id: &str, status: Win
     query_status(client, window_id).await;
 }
 
+/// Sends a status event for `window_id` with `token` and then a ping: the refusal the
+/// daemon answered before the pong, if any.
+pub async fn status_event_refusal(
+    client: &mut Connection,
+    window_id: &str,
+    token: &str,
+) -> Option<DaemonMessage> {
+    send(
+        client,
+        &ClientMessage::StatusEvent {
+            source: "cli".to_owned(),
+            status: WindowStatus::Running,
+            window_id: Some(window_id.to_owned()),
+            token: token.to_owned(),
+        },
+    )
+    .await;
+    send(client, &ClientMessage::Ping).await;
+    match read_response(client).await {
+        DaemonMessage::Pong => None,
+        refusal => {
+            match read_response(client).await {
+                DaemonMessage::Pong => {}
+                other => panic!("expected pong after the refusal, got {other:?}"),
+            }
+            Some(refusal)
+        }
+    }
+}
+
 pub async fn query_status(client: &mut Connection, window_id: &str) -> WindowStatus {
     send(
         client,
