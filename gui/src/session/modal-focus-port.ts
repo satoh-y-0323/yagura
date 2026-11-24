@@ -16,9 +16,9 @@ export interface ModalFocusPort {
    *
    * @param subject the window the dialog is about, or null
    */
-  opened(subject: string | null): ModalFocusToken;
+  opened: (subject: string | null) => ModalFocusToken;
   /** Called once per opening, whether the dialog was closed or torn down while open. */
-  closed(token: ModalFocusToken): void;
+  closed: (token: ModalFocusToken) => void;
 }
 
 const MODAL_FOCUS_PORT = Symbol('modal-focus-port');

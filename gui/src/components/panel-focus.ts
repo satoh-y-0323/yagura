@@ -58,7 +58,7 @@ export function bodyEscapePanel<P>(event: PanelKeyLike, context: BodyEscapeConte
 export function closeOnEscape(
   node: EventTarget,
   onClose: () => void
-): { update(next: () => void): void; destroy(): void } {
+): { update: (next: () => void) => void; destroy: () => void } {
   let close = onClose;
   const handleKeydown = (event: Event): void => {
     if (isPanelCloseKey(event as KeyboardEvent)) {

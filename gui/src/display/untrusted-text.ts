@@ -5,6 +5,8 @@
  * resources); the types, `MessagesTextContract` and the `yagura/display-text`
  * and `yagura/no-brand-forging` lint rules hold that, except in an input's `value`.
  */
+// `yagura/no-brand-forging` checks an assertion here only for keeping one set of foreign brands
+// (`UiText`), not where they sit: add no assertion touching one.
 import type { UiText } from './ui-text';
 
 declare const displayLineBrand: unique symbol;

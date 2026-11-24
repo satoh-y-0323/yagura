@@ -41,9 +41,9 @@ export function readStoredSidebarWidth(raw: string | null): number {
 /** The sidebar width as it survives a restart, always within the declared range. */
 export interface SidebarWidthStorage {
   /** The persisted width, or the default when none is readable. */
-  load(): number;
+  load: () => number;
   /** Persists a width, rounded into range. Best effort, like the storage under it. */
-  save(px: number): void;
+  save: (px: number) => void;
 }
 
 /**

@@ -95,7 +95,8 @@ function createBrandReader(program, brands) {
   }
 
   // A key declared without a value (`declare const k: unique symbol`) only marks a type:
-  // nothing can be stored under it, so what it is typed as is no place for a value.
+  // nothing can be stored under it. Outside a brand's own declaration that holds only while
+  // the member is typed `never`, so a member of any other type is a place like any other.
   function isPhantomKey(property) {
     return (property.declarations ?? []).some((declaration) => {
       if (
@@ -106,20 +107,42 @@ function createBrandReader(program, brands) {
         return false;
       }
       const key = checker.getSymbolAtLocation(declaration.name.expression)?.valueDeclaration;
+      if (
+        key === undefined ||
+        !ts.isVariableDeclaration(key) ||
+        key.getSourceFile().isDeclarationFile ||
+        (ts.getCombinedModifierFlags(key) & ts.ModifierFlags.Ambient) === 0
+      ) {
+        return false;
+      }
+      const keyFile = key.getSourceFile().fileName;
       return (
-        key !== undefined &&
-        ts.isVariableDeclaration(key) &&
-        !key.getSourceFile().isDeclarationFile &&
-        (ts.getCombinedModifierFlags(key) & ts.ModifierFlags.Ambient) !== 0
+        brands.some((brand) => isFile(keyFile, brand.declaredIn)) ||
+        (checker.getTypeOfSymbol(property).flags & ts.TypeFlags.Never) !== 0
       );
     });
   }
 
-  function isLibraryType(type) {
-    const declarations = (type.aliasSymbol ?? type.getSymbol())?.declarations ?? [];
+  function isLibraryFile(file) {
     return (
+      program.isSourceFileDefaultLibrary(file) || program.isSourceFileFromExternalLibrary(file)
+    );
+  }
+
+  /**
+   * True for an interface or class a library declares (`Map`, `Promise`, `HTMLElement`).
+   * Such a type is walked by what it was instantiated with: its members are many, and walking
+   * them all runs the lint out of memory. A library's unnamed types and the repository's own
+   * declaration files are walked like any other type.
+   */
+  function isNamedLibraryType(type) {
+    const symbol = type.getSymbol();
+    const declarations = symbol?.declarations ?? [];
+    return (
+      symbol !== undefined &&
+      (symbol.flags & (ts.SymbolFlags.Interface | ts.SymbolFlags.Class)) !== 0 &&
       declarations.length > 0 &&
-      declarations.every((declaration) => declaration.getSourceFile().isDeclarationFile)
+      declarations.every((declaration) => isLibraryFile(declaration.getSourceFile()))
     );
   }
 
@@ -147,40 +170,84 @@ function createBrandReader(program, brands) {
     }
   }
 
-  /** The types inside an object type where a value of a brand could sit. */
-  function innerTypesOf(type) {
-    // A library type is walked by what it was instantiated with, not its members.
-    if (isLibraryType(type) || checker.isArrayType(type) || checker.isTupleType(type)) {
-      return typeArgumentsOf(type);
-    }
-    return [
-      ...checker
-        .getPropertiesOfType(type)
-        .filter((property) => !isPhantomKey(property))
-        .map((property) => checker.getTypeOfSymbol(property)),
-      ...checker.getIndexInfosOfType(type).map((info) => info.type),
-      ...[...type.getCallSignatures(), ...type.getConstructSignatures()].map((signature) =>
-        signature.getReturnType()
-      ),
-      ...typeArgumentsOf(type),
-    ];
+  function everyBrand(found) {
+    brands.forEach((brand) => found.add(brand));
   }
 
-  function visitObject(type, depth, seen, found) {
-    for (const property of checker.getPropertiesOfType(type)) {
+  // What a setter takes may differ from what the getter gives, and no public API reads it.
+  function setterTypesOf(property) {
+    return (property.declarations ?? [])
+      .filter((declaration) => ts.isSetAccessorDeclaration(declaration))
+      .flatMap((setter) =>
+        setter.parameters.length > 0 ? [checker.getTypeAtLocation(setter.parameters[0])] : []
+      );
+  }
+
+  function visitSignature(signature, depth, seen, found, unseen) {
+    const next = (inner) => visit(inner, depth + 1, seen, found, unseen);
+    next(signature.getReturnType());
+    const predicate = checker.getTypePredicateOfSignature(signature);
+    if (predicate?.type !== undefined) {
+      next(predicate.type);
+    }
+    for (const parameter of signature.getParameters()) {
+      parameterTypesOf(parameter).forEach(next);
+    }
+    if (signature.thisParameter !== undefined) {
+      next(checker.getTypeOfSymbol(signature.thisParameter));
+    }
+    for (const parameter of signature.getTypeParameters() ?? []) {
+      const constraint = parameter.getConstraint();
+      if (constraint !== undefined) {
+        next(constraint);
+      }
+    }
+  }
+
+  function visitObject(type, depth, seen, found, unseen) {
+    const next = (inner) => visit(inner, depth + 1, seen, found, unseen);
+    if (isNamedLibraryType(type) || checker.isArrayType(type) || checker.isTupleType(type)) {
+      typeArgumentsOf(type).forEach(next);
+      return;
+    }
+    const properties = checker.getPropertiesOfType(type);
+    const indexes = checker.getIndexInfosOfType(type);
+    // A mapped type over a type parameter resolves no member, so what it maps to is unseen.
+    if (
+      (ts.getObjectFlags(type) & ts.ObjectFlags.Mapped) !== 0 &&
+      properties.length === 0 &&
+      indexes.length === 0 &&
+      unseen
+    ) {
+      everyBrand(found);
+    }
+    for (const property of properties) {
       const brand = brandOfProperty(property);
       if (brand !== undefined) {
         found.add(brand);
       }
+      if (!isPhantomKey(property)) {
+        next(checker.getTypeOfSymbol(property));
+        setterTypesOf(property).forEach(next);
+      }
     }
-    for (const inner of innerTypesOf(type)) {
-      visit(inner, depth + 1, seen, found);
+    indexes.forEach((info) => next(info.type));
+    for (const signature of [...type.getCallSignatures(), ...type.getConstructSignatures()]) {
+      visitSignature(signature, depth, seen, found, unseen);
     }
+    typeArgumentsOf(type).forEach(next);
   }
 
-  function visit(type, depth, seen, found) {
+  /**
+   * Walks every place of `type` with no regard to which way a value flows through it.
+   * `unseen` counts what the walk cannot see into (a type parameter, `never`, a mapped type
+   * over a type parameter, the depth limit) as every brand that could be there.
+   */
+  function visit(type, depth, seen, found, unseen) {
     if (depth > MAX_DEPTH) {
-      brands.forEach((brand) => found.add(brand));
+      if (unseen) {
+        everyBrand(found);
+      }
       return;
     }
     if (seen.has(type) || (type.flags & (OPAQUE_FLAGS | STRING_SHAPED_FLAGS)) !== 0) {
@@ -189,20 +256,40 @@ function createBrandReader(program, brands) {
     seen.add(type);
     if ((type.flags & ts.TypeFlags.Never) !== 0) {
       // `never` flows into any brand's place.
-      brands.forEach((brand) => found.add(brand));
+      if (unseen) {
+        everyBrand(found);
+      }
     } else if (type.isUnionOrIntersection()) {
-      type.types.forEach((member) => visit(member, depth + 1, seen, found));
+      type.types.forEach((member) => visit(member, depth + 1, seen, found, unseen));
     } else if ((type.flags & ts.TypeFlags.Instantiable) !== 0) {
-      brandsAcceptedBy(type, found);
+      const constraint = checker.getBaseConstraintOfType(type);
+      if (constraint !== undefined && constraint !== type) {
+        visit(constraint, depth + 1, seen, found, unseen);
+      }
+      if (unseen) {
+        brandsAcceptedBy(type, found);
+      }
     } else if ((type.flags & ts.TypeFlags.Object) !== 0) {
-      visitObject(type, depth, seen, found);
+      visitObject(type, depth, seen, found, unseen);
     }
   }
 
-  /** The brands `type` holds anywhere a value of a brand could sit. */
-  function brandsIn(type) {
-    const found = new Set();
-    visit(type, 0, new Set(), found);
+  // Only a whole walk is kept: a type met partway may be cut short by an ancestor in `seen`
+  // or by the depth it was met at, so its partial result is not what it holds.
+  const walks = { withUnseen: new Map(), seenOnly: new Map() };
+
+  /**
+   * The brands `type` holds anywhere a value of a brand could sit. `unseen` (the default)
+   * also counts the places the walk cannot see into as every brand that could be there.
+   */
+  function brandsIn(type, { unseen = true } = {}) {
+    const cache = unseen ? walks.withUnseen : walks.seenOnly;
+    let found = cache.get(type);
+    if (found === undefined) {
+      found = new Set();
+      visit(type, 0, new Set(), found, unseen);
+      cache.set(type, found);
+    }
     return found;
   }
 
@@ -215,7 +302,7 @@ function createBrandReader(program, brands) {
     if (checker.isTupleType(type)) {
       return type.target.readonly ? undefined : checker.getTypeArguments(type);
     }
-    return (name === 'Set' || name === 'Map') && isLibraryType(type)
+    return (name === 'Set' || name === 'Map') && isNamedLibraryType(type)
       ? typeArgumentsOf(type)
       : undefined;
   }
@@ -295,7 +382,11 @@ function createBrandReader(program, brands) {
         elements.forEach((element) => reach(element, depth + 1, true));
         return;
       }
-      if (checker.isArrayType(current) || checker.isTupleType(current) || isLibraryType(current)) {
+      if (
+        checker.isArrayType(current) ||
+        checker.isTupleType(current) ||
+        isNamedLibraryType(current)
+      ) {
         typeArgumentsOf(current).forEach((argument) => reach(argument, depth + 1, within));
         return;
       }
@@ -375,7 +466,6 @@ function createBrandReader(program, brands) {
     brandOfProperty,
     brandOfText,
     handedInBy,
-    isLibraryType,
     parameterTypesOf,
     walkContainerPath,
     writableElementsOf,
@@ -410,19 +500,60 @@ function brandNames(brands) {
   return [...brands].map((brand) => brand.type).join(', ');
 }
 
+// The calls that take a function as a bare `Function`, so the parameters it was typed with
+// no longer hold what is handed to it.
+const PARAMETER_ERASING_CALLS = [
+  ['Reflect', 'apply'],
+  ['Reflect', 'construct'],
+  ...['Function', 'CallableFunction', 'NewableFunction'].flatMap((container) =>
+    ['call', 'apply', 'bind'].map((member) => [container, member])
+  ),
+];
+
+/**
+ * `yagura/no-brand-forging`: only the maker of a brand makes a value of it.
+ *
+ * Outside every maker, an assertion or a type predicate whose source or target holds a
+ * foreign brand anywhere is refused, so a brand is neither claimed nor stripped. Inside a
+ * maker, the foreign brands its source and target hold must be the same set; its own brand
+ * is not counted. The walk has no sign and never asks whether the source is assignable to
+ * the target, so the looseness of that rule is no way around this one. A reflective write
+ * into a value holding a foreign brand, and a function holding one handed to a call that
+ * erases its parameter types, are refused too.
+ *
+ * Ways this rule cannot close, each with the case that sends it back to be closed:
+ * - Annotating a value as a weak type (every member optional) takes almost anything and
+ *   needs no assertion. Back when a branded type with only optional members appears.
+ * - A writable array is covariant, so it can be written through a wider name. Back when a
+ *   function hands a writable container of a brand to a writable container type without it.
+ * - A class method's parameters stay bivariant (`method-signature-style` rewrites only
+ *   interfaces and type literals). Back when a class method takes a foreign brand.
+ * - A script `.ts` with no import or export, or `declare global`, can add members to a
+ *   library type. Back when either appears.
+ * - A member under a key declared without a value is skipped while typed `never`; giving the
+ *   key a value on the global would make it readable. Back when such a key is given a value.
+ * - Inside a maker only the set of foreign brands is compared, not where they sit, so an
+ *   assertion moving one (or a function whose parameter takes one from its contextual type)
+ *   passes. Back when a maker holds an assertion touching a foreign brand other than typing
+ *   the message resource as `Messages`.
+ */
 const noBrandForging = {
   meta: {
     type: 'problem',
     docs: {
-      description: 'Only the maker module of a brand may claim that a value is of it.',
+      description: 'Only the maker module of a brand may make a value of it.',
     },
     schema: [BRAND_OPTIONS_SCHEMA],
     messages: {
       noTypes: 'yagura/no-brand-forging needs type information for this file.',
       assertion:
-        'This assertion claims {{brands}} for a value not of it; call the maker ({{makers}}) instead.',
+        "The source or target of this assertion holds {{brands}}; make and pass it only through the maker's functions ({{makers}}). Inside a maker, an assertion keeps the same foreign brands on both sides, adding none and dropping none.",
       predicate:
-        "A type predicate naming {{brands}} lets unchecked text pass for it; return the maker's value ({{makers}}) instead.",
+        "The narrowed or predicated type of this type predicate holds {{brands}}; make and pass it only through the maker's functions ({{makers}}). Inside a maker, a predicate keeps the same foreign brands on both sides.",
+      reflectiveWrite:
+        "This writes through a reflective function into a value holding {{brands}}; build the value anew from the maker's values ({{makers}}) instead.",
+      reflectiveCall:
+        'This hands a function holding {{brands}} to a call that erases its parameter types, so text no maker made ({{makers}}) can reach it; call the function directly instead.',
       declaration:
         'A declaration without a value naming {{brands}} claims a value no maker made ({{makers}}).',
       typeArgument:
@@ -448,10 +579,11 @@ const noBrandForging = {
     const reader = createBrandReader(services.program, brands);
     const { checker } = reader;
     const foreign = brands.filter((brand) => !isFile(context.filename, brand.maker));
+    const isMaker = foreign.length < brands.length;
     const tsNode = (node) => services.esTreeNodeToTSNodeMap.get(node);
 
-    function foreignBrandsIn(type) {
-      return [...reader.brandsIn(type)].filter((brand) => foreign.includes(brand));
+    function foreignBrandsIn(type, options) {
+      return [...reader.brandsIn(type, options)].filter((brand) => foreign.includes(brand));
     }
 
     function report(node, messageId, held) {
@@ -465,162 +597,118 @@ const noBrandForging = {
       });
     }
 
+    /**
+     * The foreign brands that make an assertion or a predicate of `source` to `target` a
+     * forgery. Outside a maker that is any the two hold. Inside one it is any only one side
+     * holds; the source does not count what it cannot see into, which would match the
+     * target's unseen brands only because the source is unseen too.
+     */
+    function forgedBrands(source, target) {
+      const targetBrands = foreignBrandsIn(target);
+      const sourceBrands = foreignBrandsIn(source, { unseen: !isMaker });
+      if (!isMaker) {
+        return [...new Set([...sourceBrands, ...targetBrands])];
+      }
+      return [
+        ...targetBrands.filter((brand) => !sourceBrands.includes(brand)),
+        ...sourceBrands.filter((brand) => !targetBrands.includes(brand)),
+      ];
+    }
+
     function checkAssertion(node) {
       const assertion = tsNode(node);
       if (ts.isConstTypeReference(assertion.type)) {
         return;
       }
-      const target = checker.getTypeFromTypeNode(assertion.type);
-      const source = checker.getTypeAtLocation(assertion.expression);
-      const claimed = claimedBrands(checker.getNonNullableType(source), target, 0);
-      if (claimed.size > 0) {
-        report(node, 'assertion', [...claimed]);
-      }
-    }
-
-    /** An object type whose members can be set beside another's, one by one. */
-    function isPlainObject(type) {
-      return (
-        (type.flags & ts.TypeFlags.Object) !== 0 &&
-        !reader.isLibraryType(type) &&
-        !checker.isArrayType(type) &&
-        !checker.isTupleType(type)
+      const held = forgedBrands(
+        checker.getTypeAtLocation(assertion.expression),
+        checker.getTypeFromTypeNode(assertion.type)
       );
+      if (held.length > 0) {
+        report(node, 'assertion', held);
+      }
     }
 
-    /**
-     * The foreign brands an assertion of `source` to `target` claims. Where the
-     * two are plain objects they are set beside each other member by member and
-     * through each signature's result, so a place where the source already holds
-     * the brand claims nothing. A union source claims what its members claim, and a
-     * union target claims nothing when the source fits one of its members; any other
-     * shape is judged as a whole.
-     */
-    function claimedBrands(source, target, depth) {
-      const held = foreignBrandsIn(target);
-      const isAny = (source.flags & ts.TypeFlags.Any) !== 0;
-      if (held.length === 0 || (!isAny && checker.isTypeAssignableTo(source, target))) {
-        return new Set();
+    /** The declared type of what a type predicate narrows: its parameter, or `this`. */
+    function predicatedSourceOf(predicate) {
+      const { parameterName } = predicate;
+      if (!ts.isIdentifier(parameterName)) {
+        return checker.getTypeAtLocation(parameterName);
       }
-      const whole = new Set(held);
-      if (isAny || depth > MAX_DEPTH) {
-        return whole;
-      }
-      // Each member of the source is a value the assertion may be handed, so each claims apart.
-      if (source.isUnion()) {
-        const claimed = new Set();
-        for (const member of source.types) {
-          claimedBrands(member, target, depth + 1).forEach((brand) => claimed.add(brand));
-        }
-        return claimed;
-      }
-      // Narrowing may later pick any member of the target, so only a member the source truly is
-      // lets the rest go unclaimed; holding no foreign brand does not make a member fit.
-      if (
-        target.isUnion() &&
-        target.types.some((member) => fitsBesideOwn(source, member, depth + 1))
-      ) {
-        return new Set();
-      }
-      if (!isPlainObject(source) || !isPlainObject(target)) {
-        return whole;
-      }
-      if (
-        checker.getIndexInfosOfType(target).length > 0 ||
-        target.getConstructSignatures().length > 0
-      ) {
-        return whole;
-      }
-      const targetCalls = target.getCallSignatures();
-      const sourceCalls = source.getCallSignatures();
-      if (targetCalls.length > 1 || targetCalls.length !== sourceCalls.length) {
-        return whole;
-      }
-      const claimed = new Set();
-      const add = (inner) => inner.forEach((brand) => claimed.add(brand));
-      for (const property of checker.getPropertiesOfType(target)) {
-        const counterpart = checker.getPropertyOfType(source, property.name);
-        if (counterpart === undefined) {
-          return whole;
-        }
-        add(
-          claimedBrands(
-            checker.getNonNullableType(checker.getTypeOfSymbol(counterpart)),
-            checker.getTypeOfSymbol(property),
-            depth + 1
+      const parameter = ts.isFunctionLike(predicate.parent)
+        ? predicate.parent.parameters.find(
+            (p) => ts.isIdentifier(p.name) && p.name.text === parameterName.text
           )
-        );
-      }
-      const [targetCall] = targetCalls;
-      const [sourceCall] = sourceCalls;
-      if (targetCall !== undefined && sourceCall !== undefined) {
-        add(claimedBrands(sourceCall.getReturnType(), targetCall.getReturnType(), depth + 1));
-      }
-      return claimed;
+        : undefined;
+      return parameter === undefined ? undefined : checker.getTypeAtLocation(parameter);
     }
 
-    /** True when `text` is a brand this file makes: a string carrying only its own brands' keys. */
-    function isOwnBrandText(text) {
-      const brand = reader.brandOfText(text);
-      return (
-        brand !== undefined &&
-        !foreign.includes(brand) &&
-        text.types.every(
-          (part) =>
-            (part.flags & ts.TypeFlags.StringLike) !== 0 ||
-            checker.getPropertiesOfType(part).every((key) => {
-              const keyBrand = reader.brandOfProperty(key);
-              return keyBrand !== undefined && !foreign.includes(keyBrand);
-            })
-        )
-      );
+    function checkPredicate(node) {
+      if (node.typeAnnotation == null) {
+        return;
+      }
+      const predicate = tsNode(node);
+      const target = checker.getTypeFromTypeNode(predicate.type);
+      const source = predicatedSourceOf(predicate);
+      // A predicate whose parameter cannot be found is judged by its target alone.
+      const held = source === undefined ? foreignBrandsIn(target) : forgedBrands(source, target);
+      if (held.length > 0) {
+        report(node, 'predicate', held);
+      }
     }
 
-    /**
-     * True when `source` is assignable to `target` once the brands this file makes are set
-     * aside; foreign brands must already be held where `target` has them.
-     */
-    function fitsBesideOwn(source, target, depth) {
-      if ((source.flags & ts.TypeFlags.Any) !== 0) {
-        return foreignBrandsIn(target).length === 0;
+    function isCallable(type) {
+      if (type.isUnion()) {
+        return type.types.some(isCallable);
       }
-      if (checker.isTypeAssignableTo(source, target)) {
-        return true;
+      if ((type.flags & ts.TypeFlags.Instantiable) !== 0) {
+        const constraint = checker.getBaseConstraintOfType(type);
+        return constraint === undefined || constraint === type || isCallable(constraint);
       }
-      if (depth > MAX_DEPTH) {
-        return false;
+      return type.getCallSignatures().length > 0 || type.getConstructSignatures().length > 0;
+    }
+
+    // What a call that erases parameter types is handed as a function: the receiver of
+    // `f.call(…)` and every argument, each only if it can be called (so not `Reflect` itself).
+    function handedFunctionsOf(node) {
+      const callee = node.callee.type === 'ChainExpression' ? node.callee.expression : node.callee;
+      const handed = [
+        ...(callee.type === 'MemberExpression' ? [callee.object] : []),
+        ...node.arguments.map((argument) =>
+          argument.type === 'SpreadElement' ? argument.argument : argument
+        ),
+      ];
+      return handed
+        .map((handedNode) => checker.getTypeAtLocation(tsNode(handedNode)))
+        .filter((type) => {
+          const inner =
+            checker.isArrayType(type) || checker.isTupleType(type)
+              ? checker.getTypeArguments(type)
+              : [type];
+          return inner.some(isCallable);
+        });
+    }
+
+    function checkReflectiveCall(node, resolved) {
+      const declaration = resolved.getDeclaration();
+      if (declaration === undefined) {
+        return;
       }
-      if (source.isUnion()) {
-        return source.types.every((member) => fitsBesideOwn(member, target, depth + 1));
-      }
-      if (target.isUnion()) {
-        return target.types.some((member) => fitsBesideOwn(source, member, depth + 1));
-      }
-      if (isOwnBrandText(target)) {
-        return target.types
-          .filter((part) => (part.flags & ts.TypeFlags.StringLike) !== 0)
-          .every((part) => checker.isTypeAssignableTo(source, part));
-      }
-      if (
-        !isPlainObject(source) ||
-        !isPlainObject(target) ||
-        checker.getIndexInfosOfType(target).length > 0 ||
-        target.getConstructSignatures().length > 0 ||
-        target.getCallSignatures().length > 0
-      ) {
-        return false;
-      }
-      return checker.getPropertiesOfType(target).every((property) => {
-        const counterpart = checker.getPropertyOfType(source, property.name);
-        if (counterpart === undefined) {
-          return (property.flags & ts.SymbolFlags.Optional) !== 0;
+      if (isMemberOf(declaration, REFLECTIVE_WRITES)) {
+        const [written] = node.arguments;
+        const held =
+          written === undefined || written.type === 'SpreadElement'
+            ? []
+            : foreignBrandsIn(checker.getTypeAtLocation(tsNode(written)));
+        if (held.length > 0) {
+          report(node, 'reflectiveWrite', held);
         }
-        return fitsBesideOwn(
-          checker.getTypeOfSymbol(counterpart),
-          checker.getTypeOfSymbol(property),
-          depth + 1
-        );
-      });
+      } else if (isMemberOf(declaration, PARAMETER_ERASING_CALLS)) {
+        const held = [...new Set(handedFunctionsOf(node).flatMap((type) => foreignBrandsIn(type)))];
+        if (held.length > 0) {
+          report(node, 'reflectiveCall', held);
+        }
+      }
     }
 
     function checkReturnTypes(node) {
@@ -742,6 +830,9 @@ const noBrandForging = {
       if (node.arguments !== undefined) {
         checkWritableArguments(node, resolved);
       }
+      if (node.type === 'CallExpression') {
+        checkReflectiveCall(node, resolved);
+      }
     }
 
     function checkFunction(node, member = false) {
@@ -827,16 +918,7 @@ const noBrandForging = {
     const visitors = {
       TSAsExpression: checkAssertion,
       TSTypeAssertion: checkAssertion,
-      TSTypePredicate(node) {
-        if (node.typeAnnotation == null) {
-          return;
-        }
-        const predicated = tsNode(node.typeAnnotation.typeAnnotation);
-        const held = foreignBrandsIn(checker.getTypeFromTypeNode(predicated));
-        if (held.length > 0) {
-          report(node, 'predicate', held);
-        }
-      },
+      TSTypePredicate: checkPredicate,
       VariableDeclaration(node) {
         const ambient = isAmbient(node);
         // A variable inside a function reaches outside only through what the checks of
@@ -1512,6 +1594,9 @@ const REFLECTIVE_WRITES = [
   ['ObjectConstructor', 'defineProperties'],
   ['Reflect', 'set'],
   ['Reflect', 'defineProperty'],
+  // An object's prototype supplies the members it does not hold itself.
+  ['ObjectConstructor', 'setPrototypeOf'],
+  ['Reflect', 'setPrototypeOf'],
 ];
 // Svelte reads what this renders as HTML and puts it in the DOM.
 const SVELTE_RAW_HTML = 'createRawSnippet';

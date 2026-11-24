@@ -1,9 +1,9 @@
 /** A `localStorage`-backed value that degrades to `null` / no-op instead of throwing. */
 export interface GuardedStorage {
   /** The persisted value, or `null` when absent, unreadable, or storage itself is denied. */
-  read(): string | null;
+  read: () => string | null;
   /** Persists a value. Best effort: a blocked or denied storage silently drops the write. */
-  write(value: string): void;
+  write: (value: string) => void;
 }
 
 /**

@@ -209,6 +209,8 @@ export const DISPLAY_GUARDS = {
     '@typescript-eslint/no-unsafe-call': ['error'],
     '@typescript-eslint/no-unsafe-member-access': ['error', { allowOptionalChaining: false }],
     '@typescript-eslint/no-explicit-any': ['error', { fixToUnknown: false, ignoreRestArgs: false }],
+    // A method signature is checked both ways; a function-valued property is held to its parameter types.
+    '@typescript-eslint/method-signature-style': ['error', 'property'],
   },
 };
 

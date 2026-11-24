@@ -1,3 +1,5 @@
+// `yagura/no-brand-forging` checks an assertion here only for keeping one set of foreign brands
+// (`DisplayLine`, `DisplayBlock`), not where they sit: add none touching them but `as Messages`.
 import { messagesEn, type HeadlineWords, type TitleWords } from './messages-en';
 import type { UiText, UiTextOf } from '../display/ui-text';
 import type { DisplayBlock, DisplayLine } from '../display/untrusted-text';

@@ -20,7 +20,7 @@ export interface KeyDownFacts {
   altKey: boolean;
   metaKey: boolean;
   isComposing: boolean;
-  getModifierState(key: string): boolean;
+  getModifierState: (key: string) => boolean;
 }
 
 /** The modifiers held (Meta never reaches a window). */

@@ -45,9 +45,9 @@ export function readStoredRoomRailWidth(raw: string | null): number {
 /** The room rail width as it survives a restart, never below the minimum. */
 export interface RoomRailWidthStorage {
   /** The persisted width, or the default when none is readable. */
-  load(): number;
+  load: () => number;
   /** Persists a width, raised to the minimum. Best effort, like the storage under it. */
-  save(px: number): void;
+  save: (px: number) => void;
 }
 
 /**

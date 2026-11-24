@@ -6,7 +6,7 @@ import type { ThemeState, ThemeStore } from './theme-store';
 
 /** An element whose CSS custom properties a palette is written to. */
 export interface PaletteTarget {
-  style: { setProperty(name: string, value: string): void };
+  style: { setProperty: (name: string, value: string) => void };
 }
 
 /** A terminal whose colours follow a palette. */

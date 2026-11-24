@@ -40,23 +40,23 @@ export interface RememberedProfile {
 /** The storage the memory reads the entry from and writes it back to. */
 export interface ProfileMemoryDeps {
   /** The persisted entry, `null` when nothing is stored. */
-  storageRead(): string | null;
+  storageRead: () => string | null;
   /** Persists an entry. */
-  storageWrite(value: string): void;
+  storageWrite: (value: string) => void;
 }
 
 /** Reader/writer pair over one {@link RememberedProfile}. */
 export interface ProfileMemory {
   /** The remembered entry; the empty entry when there is none. */
-  read(): Required<RememberedProfile>;
+  read: () => Required<RememberedProfile>;
   /** Persists `entry`, best effort. */
-  write(entry: RememberedProfile): void;
+  write: (entry: RememberedProfile) => void;
   /**
    * Forgets the remembered working directory alone, best effort. Its own
    * operation rather than a second `write`: a refused launch must not be
    * able to persist anything else the caller happens to be holding.
    */
-  dropCwd(): void;
+  dropCwd: () => void;
 }
 
 /** The field's value when it is a string, `null` for anything else. */

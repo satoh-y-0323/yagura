@@ -193,9 +193,9 @@ export interface PendingFocusDeps<M> {
  * so a move run at the first close would be undone by the next restore.
  */
 export function createPendingFocus<M>(deps: PendingFocusDeps<M>): {
-  request(move: M): void;
-  offer(move: M): void;
-  settled(): Promise<void>;
+  request: (move: M) => void;
+  offer: (move: M) => void;
+  settled: () => Promise<void>;
 } {
   let held: M | null = null;
   // Each started attempt, wrapped so a rejection is logged here and never left

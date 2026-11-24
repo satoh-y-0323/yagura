@@ -15,8 +15,8 @@ export interface KeydownLike extends KeyEventLike {
   isComposing: boolean;
   keyCode: number;
   repeat: boolean;
-  preventDefault(): void;
-  stopPropagation(): void;
+  preventDefault: () => void;
+  stopPropagation: () => void;
 }
 
 /** What the dispatcher reads on every keydown and what it runs. */

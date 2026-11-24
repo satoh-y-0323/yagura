@@ -6,7 +6,7 @@
  */
 
 interface Queryable<E> {
-  querySelector(selector: string): E | null;
+  querySelector: (selector: string) => E | null;
 }
 
 /**
@@ -15,7 +15,7 @@ interface Queryable<E> {
  * under `root`. Null when neither exists.
  */
 export function resolveOverlayHost<E>(
-  origin: { closest(selector: string): Queryable<E> | null },
+  origin: { closest: (selector: string) => Queryable<E> | null },
   root: Queryable<E>
 ): E | null {
   const modal = origin.closest('dialog[open]');

@@ -525,6 +525,8 @@ const OUTSIDE_TEMPLATE_RED_TS: readonly CaseLine[] = [
     code: "Reflect.defineProperty(el, 'textContent', { value: raw });",
     reports: 'outsideTemplate',
   },
+  { code: 'Object.setPrototypeOf(el, { textContent: raw });', reports: 'outsideTemplate' },
+  { code: 'Reflect.setPrototypeOf(el, { textContent: raw });', reports: 'outsideTemplate' },
   { code: 'internals.ariaLabel = raw;', reports: 'outsideTemplate' },
   { code: 'el.append(raw);', reports: 'outsideTemplate' },
   { code: "el.setAttribute('aria-label', raw);", reports: 'outsideTemplate' },
@@ -688,39 +690,112 @@ const DISPLAY_TEXT_GREEN: readonly CaseLine[] = [
   '<p {...lineRecord}></p>',
 ];
 
+/** A type nested deeper than the brand rule walks before it counts every brand. */
+const TOO_DEEP_TYPE = `${'ReadonlyArray<'.repeat(14)}string${'>'.repeat(14)}`;
+
+/**
+ * Linted outside every maker: an assertion or a predicate whose source or target holds a
+ * foreign brand anywhere is refused, so a brand is neither claimed nor stripped.
+ */
 const BRAND_FORGING_RED: readonly CaseLine[] = [
   "import { sanitizeForDisplay } from '../display/untrusted-text';",
   "import type { DisplayLine } from '../display/untrusted-text';",
+  "import type { IsLine, RecA, RecB } from '../test-utils/brand-forging-types';",
+  "import type { DeclaredLineHolder } from '../test-utils/brand-forging-declared';",
   '',
   'export {};',
   'function make<T>(): T | undefined { return undefined; }',
   'declare function fill(items: string[]): void;',
   "const made = sanitizeForDisplay('x');",
+  'declare const unknownValue: unknown;',
+  'function noop(): void {}',
+  'const lineHolder = { name: made };',
+  'declare const ownKey: unique symbol;',
+  'const widened: (x: never) => void = noop;',
+  'const lineSink = (line: DisplayLine): void => { void line; };',
   '',
   { code: "export const asserted = 'x' as DisplayLine;", reports: 'assertion' },
   { code: "export const orNull = 'x' as DisplayLine | null;", reports: 'assertion' },
+  { code: 'export const stripped = made as string;', reports: 'assertion' },
   {
-    code: "export const noName = { words: 'x' } as { name: DisplayLine } | { words: DisplayLine };",
+    code: 'export const deepField = ({}) as { a: { b: { c: DisplayLine } } };',
     reports: 'assertion',
   },
-  'export function oneSideClaims(v: { a: string } | { b: DisplayLine }): unknown {',
-  { code: '  return v as { a: DisplayLine } | { b: DisplayLine };', reports: 'assertion' },
-  '}',
-  // A member that holds no foreign brand is not one the value fits: narrowing picks the other.
-  'export function fitsNoMember(v: { x: string }): unknown {',
-  { code: '  return v as { x: DisplayLine } | { y: string };', reports: 'assertion' },
-  '}',
-  "export function otherKind(v: { kind: 'b'; x: string }): unknown {",
   {
-    code: "  return v as { kind: 'a'; x: string } | { kind: 'b'; x: DisplayLine };",
+    code: 'export const optionalNote = ({}) as { note?: DisplayLine | null };',
     reports: 'assertion',
   },
-  '}',
+  {
+    code: 'export const indexed = unknownValue as { [key: string]: DisplayLine };',
+    reports: 'assertion',
+  },
+  { code: 'export const emptyList = [] as readonly DisplayLine[];', reports: 'assertion' },
+  { code: "export const returnsLine = (() => 'x') as () => DisplayLine;", reports: 'assertion' },
+  { code: 'export const takesLine = noop as (x: DisplayLine) => void;', reports: 'assertion' },
+  {
+    code: 'export const thisLine = noop as (this: { name: DisplayLine }) => void;',
+    reports: 'assertion',
+  },
+  {
+    code: 'export const isLineCheck = ((x: string) => x.length > 0) as IsLine;',
+    reports: 'assertion',
+  },
+  { code: 'export function pass<T>(v: unknown): T { return v as T; }', reports: 'assertion' },
+  {
+    code: 'export function viaString<T extends string>(v: unknown): T { return v as T; }',
+    reports: 'assertion',
+  },
+  {
+    code: 'export function viaField<T extends { name: DisplayLine }>(v: unknown): T { return v as T; }',
+    reports: 'assertion',
+  },
+  { code: "export const nothing = 'x' as never;", reports: 'assertion' },
+  {
+    code: `export function tooDeep(): void { const deep = unknownValue as ${TOO_DEEP_TYPE}; void deep; }`,
+    reports: 'assertion',
+  },
+  { code: 'export const builds = (class {}) as new () => DisplayLine;', reports: 'assertion' },
+  {
+    code: "export const getter = ((k: string) => 'raw') as Map<string, DisplayLine>['get'];",
+    reports: 'assertion',
+  },
+  {
+    code: 'export const declaredHolder = unknownValue as DeclaredLineHolder;',
+    reports: 'assertion',
+  },
+  // RecA is walked first, so RecB is met again only half walked inside it.
+  { code: 'export const recA = unknownValue as RecA;', reports: 'assertion' },
+  { code: 'export const recB = unknownValue as RecB;', reports: 'assertion' },
+  { code: 'export const widenedSink = widened as (x: string) => void;', reports: 'assertion' },
+  {
+    code: 'export const setterOnly = unknownValue as { get name(): string; set name(v: DisplayLine) };',
+    reports: 'assertion',
+  },
+  { code: "Reflect.apply(lineSink, undefined, ['raw']);", reports: 'reflectiveCall' },
+  { code: "Function.prototype.call.call(lineSink, null, 'raw');", reports: 'reflectiveCall' },
+  { code: 'lineSink.call(null, made);', reports: 'reflectiveCall' },
+  {
+    code: 'export function mapped<T>(v: unknown) { return v as { [K in keyof T]: DisplayLine }; }',
+    reports: 'assertion',
+  },
+  {
+    code: 'export const ownKeyed = unknownValue as { [ownKey]: DisplayLine };',
+    reports: 'assertion',
+  },
   { code: "export const angled = <DisplayLine>'x';", reports: 'assertion' },
   {
     code: 'export function isLine(value: string): value is DisplayLine { return value.length > 0; }',
     reports: 'predicate',
   },
+  {
+    code: 'export function isNothing(value: DisplayLine | null): value is null { return value === null; }',
+    reports: 'predicate',
+  },
+  {
+    code: 'export class Holder { name = made; hasName(): this is { name: string } { return true; } }',
+    reports: 'predicate',
+  },
+  { code: "Object.assign(lineHolder, { name: 'x' });", reports: 'reflectiveWrite' },
   { code: 'export declare const declared: DisplayLine;', reports: 'declaration' },
   { code: 'export const typed = make<DisplayLine>();', reports: 'typeArgument' },
   { code: 'export const held: DisplayLine[] = [made];', reports: 'writable' },
@@ -737,39 +812,69 @@ const BRAND_FORGING_GREEN: readonly CaseLine[] = [
   '',
   'export {};',
   'declare const unknownValue: unknown;',
+  'declare const markKey: unique symbol;',
   "const made = sanitizeForDisplay('x');",
+  'const lineHolder = { name: made };',
+  'const plainRecord: Record<string, string> = {};',
   '',
   "export const fromMaker = sanitizeForDisplay('x');",
   'export const readonlyHeld: readonly DisplayLine[] = [made];',
   'export const plain = unknownValue as string;',
+  'export const marked = unknownValue as { readonly [markKey]: never };',
+  "Object.assign(plainRecord, { a: 'x' });",
+  'export const pinned = [made] as const;',
+  "Object.prototype.hasOwnProperty.call(lineHolder, 'name');",
 ];
 
 const MESSAGES_TS = `${SOURCE_PREFIX}/i18n/messages.ts`;
 
 /**
- * Linted as the maker of `UiText`, which may claim it: a union whose members each
- * already hold the same `DisplayLine` claims none, member set beside member.
+ * Linted as the maker of `UiText`, which is not counted there: an assertion whose source and
+ * target hold the same set of foreign brands neither claims nor strips one.
  */
-const BRAND_UNION_GREEN_IN_UI_TEXT_MAKER: readonly CaseLine[] = [
+const BRAND_GREEN_IN_UI_TEXT_MAKER: readonly CaseLine[] = [
   "import type { UiText } from '../display/ui-text';",
   "import type { DisplayLine } from '../display/untrusted-text';",
   '',
   'export function keepsName(v: { name: DisplayLine } | { words: string }): unknown {',
   '  return v as { name: DisplayLine } | { words: UiText };',
   '}',
+  "export const own = `${'x'}` as UiText;",
 ];
 
 /**
- * Linted as the maker of `UiText`: its own brand may be set aside, but a member holding
- * no foreign brand is not one the value fits, so the `DisplayLine` is still claimed.
+ * Linted as the maker of `UiText`: a foreign brand the target holds and the source does not
+ * is claimed, and one the source holds and the target does not is stripped. A source is
+ * not taken to hold a brand it may only stand for.
  */
-const BRAND_UNION_RED_IN_UI_TEXT_MAKER: readonly CaseLine[] = [
+const BRAND_RED_IN_UI_TEXT_MAKER: readonly CaseLine[] = [
   "import type { UiText } from '../display/ui-text';",
   "import type { DisplayLine } from '../display/untrusted-text';",
   '',
   'export function fitsNoMember(v: { x: string }): unknown {',
   { code: '  return v as { x: DisplayLine } | { y: UiText };', reports: 'assertion' },
   '}',
+  {
+    code: 'export function anyName<T>(v: T): DisplayLine { return v as DisplayLine; }',
+    reports: 'assertion',
+  },
+  {
+    code: 'export function strip(take: (name: DisplayLine) => string): (name: string) => string { return take as (name: string) => string; }',
+    reports: 'assertion',
+  },
+  { code: 'export function same<T>(v: T): T { return v as T; }', reports: 'assertion' },
+];
+
+const METHOD_SIGNATURE_STYLE_RULE = '@typescript-eslint/method-signature-style';
+
+/** A method signature is checked both ways, so a parameter's brand would not be held to it. */
+const METHOD_SIGNATURE_RED: readonly CaseLine[] = [
+  "import type { DisplayLine } from '../display/untrusted-text';",
+  '',
+  {
+    code: 'export interface Taker { take(x: DisplayLine): void; }',
+    reports: METHOD_SIGNATURE_STYLE_RULE,
+  },
 ];
 
 const BAN_TS_COMMENT_RULE = '@typescript-eslint/ban-ts-comment';
@@ -862,21 +967,26 @@ describe('the display guards report what they guard', () => {
       const red = await lintCase(eslint, GUARD_CASE_TS, BRAND_FORGING_RED);
       const green = await lintCase(eslint, GUARD_CASE_TS, BRAND_FORGING_GREEN);
       const silenced = await lintCase(eslint, GUARD_CASE_TS, SILENCED_TYPE_ERROR_RED);
-      const union = await lintCase(eslint, MESSAGES_TS, BRAND_UNION_GREEN_IN_UI_TEXT_MAKER);
-      const unionRed = await lintCase(eslint, MESSAGES_TS, BRAND_UNION_RED_IN_UI_TEXT_MAKER);
+      const makerGreen = await lintCase(eslint, MESSAGES_TS, BRAND_GREEN_IN_UI_TEXT_MAKER);
+      const makerRed = await lintCase(eslint, MESSAGES_TS, BRAND_RED_IN_UI_TEXT_MAKER);
+      const methods = await lintCase(eslint, GUARD_CASE_TS, METHOD_SIGNATURE_RED);
 
       expect
         .soft([
           ...unparsed(red),
           ...unparsed(green),
           ...unparsed(silenced),
-          ...unparsed(union),
-          ...unparsed(unionRed),
+          ...unparsed(makerGreen),
+          ...unparsed(makerRed),
+          ...unparsed(methods),
         ])
         .toEqual([]);
       expect
-        .soft(reportsOf(BRAND_FORGING_RULE, BRAND_UNION_RED_IN_UI_TEXT_MAKER, unionRed))
-        .toEqual(expectedReports(BRAND_UNION_RED_IN_UI_TEXT_MAKER));
+        .soft(reportsOf(BRAND_FORGING_RULE, BRAND_RED_IN_UI_TEXT_MAKER, makerRed))
+        .toEqual(expectedReports(BRAND_RED_IN_UI_TEXT_MAKER));
+      expect
+        .soft(guardReportsOf(METHOD_SIGNATURE_RED, methods, new Set([METHOD_SIGNATURE_STYLE_RULE])))
+        .toEqual(expectedReports(METHOD_SIGNATURE_RED));
       expect
         .soft(reportsOf(BRAND_FORGING_RULE, BRAND_FORGING_RED, red))
         .toEqual(expectedReports(BRAND_FORGING_RED));
@@ -885,7 +995,7 @@ describe('the display guards report what they guard', () => {
         .soft(guardReportsOf(SILENCED_TYPE_ERROR_RED, silenced, new Set([BAN_TS_COMMENT_RULE])))
         .toEqual(expectedReports(SILENCED_TYPE_ERROR_RED));
       expect
-        .soft(reportsOf(BRAND_FORGING_RULE, BRAND_UNION_GREEN_IN_UI_TEXT_MAKER, union))
+        .soft(reportsOf(BRAND_FORGING_RULE, BRAND_GREEN_IN_UI_TEXT_MAKER, makerGreen))
         .toEqual([]);
       expect(reportsOf(BRAND_FORGING_RULE, BRAND_FORGING_GREEN, green)).toEqual([]);
     },

@@ -3,7 +3,7 @@ const AUTOFOCUS_SELECTOR = '[autofocus]:not([disabled])';
 
 /** The slice of a dialog element the refocus needs. */
 export interface AutofocusRoot {
-  querySelector(selector: string): { focus(): void } | null;
+  querySelector: (selector: string) => { focus: () => void } | null;
 }
 
 /**

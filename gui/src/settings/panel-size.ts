@@ -126,9 +126,9 @@ export function readStoredPanelSize(raw: string | null): PanelSize {
 /** A panel's chosen size as it survives a reopen. */
 export interface PanelSizeStorage {
   /** The persisted chosen size, or the default when none is readable. */
-  load(): PanelSize;
+  load: () => PanelSize;
   /** Persists the chosen size verbatim. */
-  save(size: PanelSize): void;
+  save: (size: PanelSize) => void;
 }
 
 /**

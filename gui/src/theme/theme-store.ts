@@ -22,13 +22,13 @@ const NAMED_PREFIX = 'named:';
 /** The environment the store reads the OS preference and the selection from. */
 export interface ThemeStoreDeps {
   /** Whether the OS asks for a dark colour scheme. */
-  prefersDark(): boolean;
+  prefersDark: () => boolean;
   /** Registers a listener for OS preference changes; returns its remover. */
-  onPrefersDarkChange(listener: () => void): () => void;
+  onPrefersDarkChange: (listener: () => void) => () => void;
   /** The persisted selection, `null` when nothing is stored. */
-  storageRead(): string | null;
+  storageRead: () => string | null;
   /** Persists a selection. */
-  storageWrite(value: string): void;
+  storageWrite: (value: string) => void;
 }
 
 /** Everything the view and the appliers need to paint one application state. */
@@ -47,13 +47,13 @@ export interface ThemeState extends WindowPaletteSource {
 /** Store of {@link ThemeState} with the operations the theme UI needs. */
 export interface ThemeStore {
   /** Subscribes to the state; the listener is called once, synchronously. */
-  subscribe(run: (state: ThemeState) => void): () => void;
+  subscribe: (run: (state: ThemeState) => void) => () => void;
   /** Applies and persists an application theme selection. */
-  select(selection: AppThemeSelection): void;
+  select: (selection: AppThemeSelection) => void;
   /** Overrides one window's palette, or clears it when `themeName` is `null`. */
-  setWindowOverride(windowId: string, themeName: string | null): void;
+  setWindowOverride: (windowId: string, themeName: string | null) => void;
   /** Takes in what the themes file contributed. */
-  loadUserThemes(result: LoadThemesResult): void;
+  loadUserThemes: (result: LoadThemesResult) => void;
 }
 
 /** Parses a stored selection; `null` when it is not one of the known forms. */
