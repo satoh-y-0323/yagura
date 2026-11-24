@@ -18,6 +18,8 @@ pub(crate) struct Welcome {
     pub(crate) rows: u16,
     pub(crate) exited: bool,
     pub(crate) child_pid: u32,
+    /// The child's start as its starter read it before it could be reaped.
+    pub(crate) child_start: Option<String>,
 }
 
 /// What the core sends a connection; the terminal thread sends the rest
@@ -64,6 +66,7 @@ impl Conn {
             rows: welcome.rows,
             exited: welcome.exited,
             child_pid: Some(welcome.child_pid),
+            child_start: welcome.child_start,
         });
         conn
     }

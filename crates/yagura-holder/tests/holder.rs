@@ -519,7 +519,12 @@ async fn the_child_starts_only_after_the_first_valid_hello() {
         "the record does not carry the holder's start as yagura-os reads it"
     );
 
-    let (_peer, _) = Peer::welcomed(&before.endpoint).await;
+    let mut first = Peer::connect(&before.endpoint).await;
+    first.send(hello(HOLDER_PROTOCOL)).await;
+    let welcomed_start = match first.frame().await {
+        HolderFrame::Welcome { child_start, .. } => child_start,
+        other => panic!("expected Welcome, got {other:?}"),
+    };
     let after = rig
         .record_where(|record| record.child_start.is_some())
         .await;
@@ -533,6 +538,22 @@ async fn the_child_starts_only_after_the_first_valid_hello() {
         "the record does not carry the child's start as yagura-os reads it"
     );
     assert_eq!(after.holder_start, before.holder_start);
+    assert_eq!(
+        welcomed_start,
+        Some(child_start.to_string()),
+        "the Welcome does not carry the child's start as yagura-os reads it"
+    );
+    assert_eq!(welcomed_start, after.child_start);
+
+    let mut second = Peer::connect(&before.endpoint).await;
+    second.send(hello(HOLDER_PROTOCOL)).await;
+    match second.frame().await {
+        HolderFrame::Welcome { child_start, .. } => assert_eq!(
+            child_start, welcomed_start,
+            "a later Hello's Welcome does not carry the same child start"
+        ),
+        other => panic!("expected Welcome, got {other:?}"),
+    }
 
     let daemon_endpoint = rig.daemon_endpoint();
     let text = std::fs::read_to_string(

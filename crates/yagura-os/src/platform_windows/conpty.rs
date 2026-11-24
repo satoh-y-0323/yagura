@@ -218,6 +218,18 @@ impl PtyChild {
         self.0.id()
     }
 
+    /// The child's start, in the form of [`crate::process_start`], read
+    /// through the handle the spawn returned rather than by reopening its
+    /// id, so it names this child even once the child has exited.
+    ///
+    /// # Errors
+    ///
+    /// Returns the operating system's error when the creation time cannot be
+    /// read through the handle.
+    pub fn start(&self) -> io::Result<crate::ProcessStart> {
+        self.0.start()
+    }
+
     /// Blocks until the child exits and returns its exit code.
     ///
     /// # Errors

@@ -1308,6 +1308,13 @@ struct Welcomed {
     connection: Connection,
     frames: HolderFrameBuffer,
     child_pid: Option<u32>,
+    /// The child's start as the holder's side read it before the child could
+    /// be reaped; with `child_pid`, what names the window's child.
+    #[expect(
+        dead_code,
+        reason = "read once peers are checked against the window's tree"
+    )]
+    child_start: Option<String>,
     exited: bool,
     size: (u16, u16),
     /// The launch record the holder keeps.
@@ -1354,6 +1361,7 @@ async fn handshake(
         match first {
             Some(HolderFrame::Welcome {
                 child_pid,
+                child_start,
                 cols,
                 rows,
                 record,
@@ -1364,6 +1372,7 @@ async fn handshake(
                     connection,
                     frames,
                     child_pid,
+                    child_start,
                     exited,
                     size: (cols, rows),
                     record,
@@ -1455,6 +1464,7 @@ async fn take_back_handshake(
     match next_frame(&mut connection, &mut frames).await {
         Some(HolderFrame::Welcome {
             child_pid,
+            child_start,
             cols,
             rows,
             record,
@@ -1464,6 +1474,7 @@ async fn take_back_handshake(
             connection,
             frames,
             child_pid,
+            child_start,
             exited,
             size: (cols, rows),
             record,
@@ -2108,6 +2119,7 @@ region = "bottom"
                         rows: ROWS,
                         exited: false,
                         child_pid: Some(std::process::id()),
+                        child_start: None,
                     })
                     .await;
                 holder.push(true, &[line(0, "first output")], 0).await;

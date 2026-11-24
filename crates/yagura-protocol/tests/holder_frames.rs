@@ -224,11 +224,11 @@ fn the_frames_and_launch_fields_the_daemon_link_added_round_trip() {
     }
 }
 
-/// The daemon learns the child's pid from the `Welcome`, not from the record
-/// the holder may already have removed; a `Welcome` from a holder that does
-/// not send it reads as having none.
+/// The daemon learns the child's pid and start from the `Welcome`, not from
+/// the record the holder may already have removed; a `Welcome` from a holder
+/// that does not send them, or sends them as null, reads as having none.
 #[test]
-fn welcome_carries_the_childs_pid_and_one_without_it_reads_as_none() {
+fn welcome_carries_the_childs_pid_and_start_and_one_without_them_reads_as_none() {
     let welcome = HolderFrame::Welcome {
         protocol: 3,
         record: "record".to_owned(),
@@ -236,6 +236,7 @@ fn welcome_carries_the_childs_pid_and_one_without_it_reads_as_none() {
         rows: 24,
         exited: false,
         child_pid: Some(4242),
+        child_start: Some("child-start".to_owned()),
     };
     let encoded = encode_holder_frame(&welcome);
     assert_eq!(decode_whole(&encoded), welcome);
@@ -246,22 +247,33 @@ fn welcome_carries_the_childs_pid_and_one_without_it_reads_as_none() {
         rows: 24,
         exited: true,
         child_pid: Some(4242),
+        child_start: Some("child-start".to_owned()),
     };
     assert_eq!(decode_whole(&encode_holder_frame(&after_exit)), after_exit);
 
     let welcome_type = u16::from_le_bytes(encoded[4..6].try_into().unwrap());
-    let without_pid = framed(
+    let absent = framed(
         welcome_type,
         br#"{"protocol":3,"record":"record","cols":80,"rows":24,"exited":false}"#,
     );
-    match decode_whole(&without_pid) {
-        HolderFrame::Welcome {
-            child_pid, cols, ..
-        } => {
-            assert_eq!(child_pid, None);
-            assert_eq!(cols, 80);
+    let null = framed(
+        welcome_type,
+        br#"{"protocol":3,"record":"record","cols":80,"rows":24,"exited":false,"child_pid":null,"child_start":null}"#,
+    );
+    for bytes in [absent, null] {
+        match decode_whole(&bytes) {
+            HolderFrame::Welcome {
+                child_pid,
+                child_start,
+                cols,
+                ..
+            } => {
+                assert_eq!(child_pid, None);
+                assert_eq!(child_start, None);
+                assert_eq!(cols, 80);
+            }
+            other => panic!("expected Welcome, got {other:?}"),
         }
-        other => panic!("expected Welcome, got {other:?}"),
     }
 }
 

@@ -273,6 +273,7 @@ struct Child {
     killer: PtyKiller,
     group: Arc<ProcessGroup>,
     pid: u32,
+    start: Option<String>,
     gate: Arc<ReapGate>,
     control: Arc<PtyControl>,
     terminal: Terminal,
@@ -417,6 +418,19 @@ impl SpawnError {
     }
 }
 
+/// Logs that the child's start could not be read: the daemon then refuses
+/// the window's hooks and MCP, which would otherwise go unexplained.
+fn log_unread_child_start(pid: u32, cause: Option<&dyn std::fmt::Display>) {
+    match cause {
+        Some(cause) => crate::log(format_args!(
+            "cannot read the start of the child {pid}, which the daemon is told of as none: {cause}"
+        )),
+        None => crate::log(format_args!(
+            "cannot read the start of the child {pid}, which the daemon is told of as none"
+        )),
+    }
+}
+
 fn spawn_thread(name: &str, body: impl FnOnce() + Send + 'static) -> std::io::Result<()> {
     std::thread::Builder::new()
         .name(name.to_owned())
@@ -494,6 +508,15 @@ fn spawn_child(
         writer,
     } = yagura_os::pty::spawn(&pty_command(launch), size)?;
     let pid = child.process_id();
+    // Read through the spawn's own handle before the exit monitor may end
+    // the child: the start then names this child however it ends.
+    let start = match child.start() {
+        Ok(start) => Some(start.to_string()),
+        Err(error) => {
+            log_unread_child_start(pid, Some(&error));
+            None
+        }
+    };
     let group = Arc::new(group);
     let control = Arc::new(control);
     let gate = Arc::new(ReapGate::new());
@@ -536,6 +559,7 @@ fn spawn_child(
         killer,
         group,
         pid,
+        start,
         gate,
         control,
         terminal,
@@ -611,6 +635,9 @@ fn spawn_child(
     drop(lock);
     let link = Arc::clone(&started.link);
     let (pid, start) = (started.leader, started.leader_start.clone());
+    if start.is_none() {
+        log_unread_child_start(pid, None);
+    }
     let running = {
         let shared = Arc::clone(shared);
         let control = Arc::clone(&control);
@@ -897,8 +924,8 @@ impl Core {
         }
         let id = self.next_conn;
         self.next_conn += 1;
-        let child_pid = if let Some(child) = &self.child {
-            child.pid
+        let (child_pid, child_start) = if let Some(child) = &self.child {
+            (child.pid, child.start.clone())
         } else {
             let launch = self.window.launch.clone();
             let fault = match (launch.fault, self.window.faults) {
@@ -931,7 +958,7 @@ impl Core {
                     .await;
             match spawned {
                 Ok(Ok(child)) => {
-                    let pid = child.pid;
+                    let (pid, start) = (child.pid, child.start.clone());
                     #[cfg(target_os = "linux")]
                     if let Some(scopes) = self.window.record.written_scopes() {
                         scopes::ask_for(scopes, &child.watcher, &self.shared);
@@ -943,15 +970,12 @@ impl Core {
                         Some((child.watcher.pid, child.watcher.start.clone())),
                     );
                     #[cfg(windows)]
-                    let recorded =
-                        self.window
-                            .record
-                            .set_child(pid, crate::record::start_of(pid), None);
+                    let recorded = self.window.record.set_child(pid, child.start.clone(), None);
                     self.child = Some(child);
                     if let Err(error) = recorded {
                         crate::log(format_args!("cannot update the holder record: {error}"));
                     }
-                    pid
+                    (pid, start)
                 }
                 Ok(Err(error)) => return Some(self.spawn_failed(accepted, id, &error)),
                 Err(error) => {
@@ -968,6 +992,7 @@ impl Core {
             rows,
             exited: self.exit_told,
             child_pid,
+            child_start,
         };
         let conn = Conn::welcome(accepted, id, welcome, self.events.clone());
         terminal.outlet.open(id, conn.sender());

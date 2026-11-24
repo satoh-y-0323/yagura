@@ -116,6 +116,20 @@ pub(crate) fn process_creation(pid: u32) -> io::Result<Option<(u64, ProcessStart
         .map(|read| read.map(|ticks| (ticks, ProcessStart(start_text(ticks)))))
 }
 
+/// The start of the process `handle` refers to, read from the handle itself:
+/// it names the same process however long ago that process exited.
+///
+/// # Errors
+///
+/// Returns the operating system's error when the creation time cannot be
+/// read through the handle.
+#[cfg(windows)]
+pub(crate) fn start_of_handle(
+    handle: &std::os::windows::io::OwnedHandle,
+) -> io::Result<ProcessStart> {
+    platform::created(handle).map(ProcessStart)
+}
+
 /// A Windows start: the creation time in 100 ns ticks, as a decimal string.
 #[cfg(windows)]
 fn start_text(ticks: u64) -> String {
@@ -251,7 +265,7 @@ mod platform {
     }
 
     /// The process's start: its creation time, in 100 ns ticks.
-    fn created(handle: &OwnedHandle) -> io::Result<String> {
+    pub(super) fn created(handle: &OwnedHandle) -> io::Result<String> {
         created_ticks(handle).map(super::start_text)
     }
 

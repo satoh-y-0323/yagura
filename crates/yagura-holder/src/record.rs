@@ -19,8 +19,11 @@ fn file_name(path: &Path) -> io::Result<String> {
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "no file name"))
 }
 
-/// The start of the process `pid` as a record keeps it; `None` when it
-/// cannot be read, which leaves the process to be told by its id alone.
+/// The start of the running process `pid` as a record keeps it; `None` when
+/// it cannot be read, which leaves the process to be told by its id alone.
+/// It reads by id, so it is for the holder and its watcher, which run while
+/// it reads; the child's start is read by whoever started the child, before
+/// the child could be reaped.
 pub(crate) fn start_of(pid: u32) -> Option<String> {
     match yagura_os::process_start(pid) {
         Ok(start) => start.map(|start| start.to_string()),

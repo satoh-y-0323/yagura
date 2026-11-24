@@ -178,3 +178,30 @@ pub fn leader_command(command: &PtyCommand) -> std::io::Result<LeaderCommand> {
 pub fn start_leader(command: &LeaderCommand, slave: std::os::fd::OwnedFd) -> std::io::Result<u32> {
     platform::start_leader(command, slave)
 }
+
+/// Sets this process's `SIGCHLD` to its default action with no flags, so a
+/// child it starts stays unreaped once it exits until this process reaps it,
+/// whatever action and flags were inherited: an ignored `SIGCHLD` or
+/// `SA_NOCLDWAIT` would have the kernel reap it at once, freeing its id.
+/// Leaves the signal's mask as it is.
+///
+/// # Errors
+///
+/// Returns the operating system's error when the action cannot be set.
+#[cfg(not(windows))]
+pub fn keep_exited_children_unreaped() -> std::io::Result<()> {
+    // SAFETY: zeroed is a valid `sigaction`; its handler is then `SIG_DFL`
+    // (zero), its flags none, and its mask is emptied below.
+    let mut action: libc::sigaction = unsafe { std::mem::zeroed() };
+    action.sa_sigaction = libc::SIG_DFL;
+    // SAFETY: `action` is a live local for both calls.
+    let set = unsafe {
+        libc::sigemptyset(&mut action.sa_mask);
+        libc::sigaction(libc::SIGCHLD, &action, std::ptr::null_mut())
+    };
+    if set == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}

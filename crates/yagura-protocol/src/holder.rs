@@ -136,6 +136,10 @@ pub enum HolderFrame {
         /// it; the daemon learns the pid here, not from the record, which
         /// the holder may already have removed.
         child_pid: Option<u32>,
+        /// The child's start, in the form of `yagura_os::process_start`, read
+        /// by whoever started the child before it could be reaped. `None`
+        /// from a holder that does not send it or could not read it.
+        child_start: Option<String>,
     },
     /// d -> h: write `bytes` to the child, after every earlier write. Counts
     /// as the user's input: it ends a synchronized update that holds a view.
@@ -391,6 +395,7 @@ impl std::fmt::Debug for HolderFrame {
                 rows,
                 exited,
                 child_pid,
+                child_start,
             } => f
                 .debug_struct("Welcome")
                 .field("protocol", protocol)
@@ -399,6 +404,7 @@ impl std::fmt::Debug for HolderFrame {
                 .field("rows", rows)
                 .field("exited", exited)
                 .field("child_pid", child_pid)
+                .field("child_start", child_start)
                 .finish(),
             Self::Write { id, bytes } => f
                 .debug_struct("Write")
@@ -573,6 +579,8 @@ struct WelcomeBody {
     exited: bool,
     #[serde(default)]
     child_pid: Option<u32>,
+    #[serde(default)]
+    child_start: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -717,6 +725,7 @@ pub fn encode_holder_frame(frame: &HolderFrame) -> Vec<u8> {
             rows,
             exited,
             child_pid,
+            child_start,
         } => json_frame(
             TYPE_WELCOME,
             &WelcomeBody {
@@ -726,6 +735,7 @@ pub fn encode_holder_frame(frame: &HolderFrame) -> Vec<u8> {
                 rows: *rows,
                 exited: *exited,
                 child_pid: *child_pid,
+                child_start: child_start.clone(),
             },
         ),
         HolderFrame::Write { id, bytes } => self::frame(TYPE_WRITE, &[&id.to_le_bytes(), bytes]),
@@ -988,6 +998,7 @@ fn decode_body(frame_type: u16, body: &[u8]) -> Result<HolderFrame, HolderCodecE
                 rows,
                 exited,
                 child_pid,
+                child_start,
             } = json(frame_type, body)?;
             HolderFrame::Welcome {
                 protocol,
@@ -996,6 +1007,7 @@ fn decode_body(frame_type: u16, body: &[u8]) -> Result<HolderFrame, HolderCodecE
                 rows,
                 exited,
                 child_pid,
+                child_start,
             }
         }
         TYPE_WRITE => {

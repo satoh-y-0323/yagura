@@ -11,6 +11,7 @@ use windows::Win32::System::Threading::{
 };
 
 use super::command_line::win32_error_to_io;
+use crate::ProcessStart;
 
 /// A child process started by this crate's spawn function.
 ///
@@ -39,6 +40,12 @@ impl ChildProcess {
     #[must_use]
     pub fn id(&self) -> u32 {
         self.pid
+    }
+
+    /// The child's start, read through the handle this holds, so it is the
+    /// child's own even once the child has exited.
+    pub(crate) fn start(&self) -> io::Result<ProcessStart> {
+        crate::process_identity::start_of_handle(&self.handle)
     }
 
     /// Blocks until the child exits and returns its exit code.

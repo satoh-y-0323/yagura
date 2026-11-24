@@ -304,6 +304,9 @@ fn start() -> io::Result<Watcher> {
         )
     })?;
     let command = yagura_os::pty::LeaderCommand { argv, cwd, env };
+    // The leader's start below, and its id until `finish` reaps it, hold
+    // only while the kernel leaves the exited leader to this process.
+    yagura_os::pty::keep_exited_children_unreaped()?;
     let leader = yagura_os::pty::start_leader(&command, slave)?;
     let start = yagura_os::process_start(leader)
         .ok()

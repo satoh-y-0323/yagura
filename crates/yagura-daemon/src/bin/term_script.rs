@@ -210,8 +210,7 @@ impl FakeAnswer {
                 let mut words = line.split_whitespace();
                 Some(if words.next() == Some("welcome") {
                     let child_pid = words.next().and_then(|pid| pid.parse().ok());
-                    // The frame has no field for the child's start yet.
-                    let _child_start = words.next();
+                    let child_start = words.next().map(str::to_owned);
                     HolderFrame::Welcome {
                         protocol: HOLDER_PROTOCOL,
                         record: record.clone(),
@@ -219,6 +218,7 @@ impl FakeAnswer {
                         rows: 24,
                         exited: false,
                         child_pid,
+                        child_start,
                     }
                 } else {
                     rejected
