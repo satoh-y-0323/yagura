@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { MAX_DISPLAY_FIELD_CHARS } from '../display/untrusted-text';
+import { MAX_DISPLAY_FIELD_CHARS, sanitizeForDisplay } from '../display/untrusted-text';
 import {
   SESSION_EVENT,
   MIN_PTY_COLS,
@@ -33,6 +33,21 @@ import {
  * opaque string, so only its type matters here, never its shape.
  */
 const WINDOW_ID = 'w1-k3f9xa';
+
+/** A window's mark as the daemon sends it: 15 cells and one of 12 hue steps. */
+const WINDOW_MARK = { cells: 0b011_010_110_001_101, hue: 7 };
+
+/** Marks the boundary refuses: past 15 cells, past 12 hue steps, or not a step at all. */
+const MARKS_OUT_OF_RANGE: readonly unknown[] = [
+  { cells: 1 << 15, hue: 0 },
+  { cells: 0, hue: 12 },
+  { cells: -1, hue: 0 },
+  { cells: 0.5, hue: 0 },
+  { cells: 0, hue: 1.5 },
+  { hue: 0 },
+  { cells: 0 },
+  'mark',
+];
 
 describe('SESSION_EVENT', () => {
   it('defines the five canonical session events of a window', () => {
@@ -348,6 +363,7 @@ describe('narrowWindowInfo: layout_json (conditional field)', () => {
     vendor: null,
     cwd: '/x',
     status: 'running',
+    mark: WINDOW_MARK,
   };
 
   it('does not add a layout_json own property when the wire entry omits it', () => {
@@ -379,6 +395,7 @@ function windowInfoWire(overrides: Record<string, unknown> = {}): Record<string,
     cwd: '/x',
     status: 'running',
     exit_code: null,
+    mark: WINDOW_MARK,
     ...overrides,
   };
 }
@@ -391,6 +408,7 @@ const ROOMLESS_WINDOW_INFO = {
   cwd: '/x',
   detected: { status: 'running' },
   exit_code: null,
+  mark: WINDOW_MARK,
 };
 
 /** A room both records accept. */
@@ -602,7 +620,7 @@ describe('narrowWindowInfo: the window-list route drops the reason instead of th
     }
   });
 
-  it('keeps every other window of a list when one entry carries a reason it may not', () => {
+  it('keeps every other window of a list when one entry carries a reason it may not, but not when one lacks a readable mark', () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
     try {
       const list = narrowWindowInfoList([
@@ -616,6 +634,18 @@ describe('narrowWindowInfo: the window-list route drops the reason instead of th
         { status: 'idle' },
         { status: 'unknown', reason: 'screen_lost' },
       ]);
+      // The daemon of this revision always sends a mark, so a missing one is its defect, not a value to fill in.
+      const markless = windowInfoWire({ window_id: 'w-b' });
+      delete markless['mark'];
+      expect(() => narrowWindowInfo(markless)).toThrow(BoundaryError);
+      expect(() => narrowWindowInfoList([windowInfoWire({ window_id: 'w-a' }), markless])).toThrow(
+        BoundaryError
+      );
+      for (const mark of MARKS_OUT_OF_RANGE) {
+        expect(() => narrowWindowInfo(windowInfoWire({ mark }))).toThrow(BoundaryError);
+      }
+      const edge = { cells: (1 << 15) - 1, hue: 11 };
+      expect(narrowWindowInfo(windowInfoWire({ mark: edge })).mark).toEqual(edge);
     } finally {
       warn.mockRestore();
     }
@@ -1039,13 +1069,54 @@ describe('narrowRestoreCandidateList', () => {
 // "external" carries neither).
 // ---------------------------------------------------------------------------
 
+const REQUESTER_MARK = { cells: 0b100_110_001_011_010, hue: 2 };
+const TARGET_MARK = { cells: 0b001_011_100_110_101, hue: 10 };
+
+/** A "window" requester as the wire carries it: a window opened from a command, so no profile. */
+const REQUESTER_WIRE = {
+  kind: 'window',
+  window_id: 'w-req',
+  name: 'requester window',
+  status: 'idle',
+  mark: REQUESTER_MARK,
+};
+
+/** What `REQUESTER_WIRE` narrows to. */
+const NARROWED_REQUESTER = {
+  kind: 'window',
+  window_id: 'w-req',
+  displayWindowId: 'w-req',
+  name: 'requester window',
+  profile: null,
+  status: 'idle',
+  mark: REQUESTER_MARK,
+};
+
+/** A target window as the wire carries it: opened from a command, so no profile. */
+const TARGET_WIRE = {
+  window_id: 'w-target',
+  name: 'target window',
+  status: 'running',
+  mark: TARGET_MARK,
+};
+
+/** What `TARGET_WIRE` narrows to. */
+const NARROWED_TARGET = {
+  window_id: 'w-target',
+  displayWindowId: 'w-target',
+  name: 'target window',
+  status: 'running',
+  mark: TARGET_MARK,
+  profile: null,
+};
+
 /** A well-formed ApprovalRequest wire value with a "window" requester. */
 function approvalRequestWire(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
     request_id: 'appr1',
     tool: 'close_window',
-    requester: { kind: 'window', window_id: 'w-req', name: 'requester window' },
-    target: { window_id: 'w-target', name: 'target window', status: 'running' },
+    requester: REQUESTER_WIRE,
+    target: TARGET_WIRE,
     text: null,
     ...overrides,
   };
@@ -1058,10 +1129,41 @@ describe('narrowApprovalRequest', () => {
       request_id: 'appr1',
       tool: 'close_window',
       displayTool: 'close_window',
-      requester: { kind: 'window', window_id: 'w-req', name: 'requester window' },
-      target: { window_id: 'w-target', name: 'target window', status: 'running' },
+      requester: NARROWED_REQUESTER,
+      target: NARROWED_TARGET,
       text: null,
     });
+
+    // A window opened from a launch profile names it; the ids and profiles are made fit to display.
+    const fromProfiles = narrowApprovalRequest(
+      approvalRequestWire({
+        requester: { ...REQUESTER_WIRE, window_id: 'w-\u202Ereq', profile: 'claude\u0007code' },
+        target: { ...TARGET_WIRE, window_id: 'w-\u202Etarget', profile: 'co\u202Edex' },
+      }),
+      'test'
+    );
+    expect(fromProfiles.requester).toEqual({
+      ...NARROWED_REQUESTER,
+      window_id: 'w-\u202Ereq',
+      displayWindowId: sanitizeForDisplay('w-\u202Ereq'),
+      profile: sanitizeForDisplay('claude\u0007code'),
+    });
+    expect(fromProfiles.target).toEqual({
+      ...NARROWED_TARGET,
+      window_id: 'w-\u202Etarget',
+      displayWindowId: sanitizeForDisplay('w-\u202Etarget'),
+      profile: sanitizeForDisplay('co\u202Edex'),
+    });
+    const edge = { cells: (1 << 15) - 1, hue: 11 };
+    const atEdge = narrowApprovalRequest(
+      approvalRequestWire({
+        requester: { ...REQUESTER_WIRE, mark: edge },
+        target: { ...TARGET_WIRE, mark: edge },
+      }),
+      'test'
+    );
+    expect(atEdge.requester).toEqual({ ...NARROWED_REQUESTER, mark: edge });
+    expect(atEdge.target).toEqual({ ...NARROWED_TARGET, mark: edge });
   });
 
   it('accepts a well-formed request with an "external" requester (window_id and name both absent)', () => {
@@ -1070,6 +1172,13 @@ describe('narrowApprovalRequest', () => {
       'test'
     );
     expect(request.requester).toEqual({ kind: 'external', window_id: null, name: null });
+
+    // A requester that is not a window brings in no window's identity, even when the wire carries one.
+    const dressed = narrowApprovalRequest(
+      approvalRequestWire({ requester: { ...REQUESTER_WIRE, kind: 'external', profile: 'codex' } }),
+      'test'
+    );
+    expect(dressed.requester).toEqual({ kind: 'external', window_id: null, name: null });
   });
 
   it('accepts a non-null text field (send_message full body)', () => {
@@ -1149,6 +1258,12 @@ describe('narrowApprovalRequest', () => {
       'test'
     );
     expect(request.requester.kind).toBe('unknown');
+
+    const dressed = narrowApprovalRequest(
+      approvalRequestWire({ requester: { ...REQUESTER_WIRE, kind: 'a_future_kind' } }),
+      'test'
+    );
+    expect(dressed.requester).toEqual({ kind: 'unknown', window_id: null, name: null });
   });
 
   it('rejects requester.kind "window" missing window_id', () => {
@@ -1160,16 +1275,23 @@ describe('narrowApprovalRequest', () => {
     ).toThrow(BoundaryError);
   });
 
-  it('rejects requester.kind "window" missing name', () => {
+  it('rejects requester.kind "window" missing name, status or mark', () => {
     expect(() =>
       narrowApprovalRequest(
         approvalRequestWire({ requester: { kind: 'window', window_id: 'w-req' } }),
         'test'
       )
     ).toThrow(BoundaryError);
+    for (const key of ['status', 'mark']) {
+      const requester: Record<string, unknown> = { ...REQUESTER_WIRE };
+      delete requester[key];
+      expect(() => narrowApprovalRequest(approvalRequestWire({ requester }), 'test')).toThrow(
+        BoundaryError
+      );
+    }
   });
 
-  it('rejects requester.kind "window" with a non-string window_id', () => {
+  it('rejects requester.kind "window" with a non-string window_id, an unrecognized status or a mark out of range', () => {
     expect(() =>
       narrowApprovalRequest(
         approvalRequestWire({
@@ -1178,6 +1300,20 @@ describe('narrowApprovalRequest', () => {
         'test'
       )
     ).toThrow(BoundaryError);
+    expect(() =>
+      narrowApprovalRequest(
+        approvalRequestWire({ requester: { ...REQUESTER_WIRE, status: 'not_a_status' } }),
+        'test'
+      )
+    ).toThrow(BoundaryError);
+    for (const mark of MARKS_OUT_OF_RANGE) {
+      expect(() =>
+        narrowApprovalRequest(
+          approvalRequestWire({ requester: { ...REQUESTER_WIRE, mark } }),
+          'test'
+        )
+      ).toThrow(BoundaryError);
+    }
   });
 
   it('accepts a missing target, producing a request with no target property', () => {
@@ -1196,16 +1332,21 @@ describe('narrowApprovalRequest', () => {
     ).toThrow(BoundaryError);
   });
 
-  it('rejects target missing name', () => {
+  it('rejects target missing name or mark', () => {
     expect(() =>
       narrowApprovalRequest(
         approvalRequestWire({ target: { window_id: 'w-target', status: 'running' } }),
         'test'
       )
     ).toThrow(BoundaryError);
+    const target: Record<string, unknown> = { ...TARGET_WIRE };
+    delete target['mark'];
+    expect(() => narrowApprovalRequest(approvalRequestWire({ target }), 'test')).toThrow(
+      BoundaryError
+    );
   });
 
-  it('rejects an unrecognized target.status', () => {
+  it('rejects an unrecognized target.status or a target mark out of range', () => {
     expect(() =>
       narrowApprovalRequest(
         approvalRequestWire({
@@ -1214,6 +1355,11 @@ describe('narrowApprovalRequest', () => {
         'test'
       )
     ).toThrow(BoundaryError);
+    for (const mark of MARKS_OUT_OF_RANGE) {
+      expect(() =>
+        narrowApprovalRequest(approvalRequestWire({ target: { ...TARGET_WIRE, mark } }), 'test')
+      ).toThrow(BoundaryError);
+    }
   });
 
   it('rejects a non-string, non-null text field', () => {
@@ -1550,7 +1696,7 @@ describe('narrowApprovalRequest: the room a chat post is addressed to', () => {
       request_id: 'appr1',
       tool: 'send_chat',
       displayTool: 'send_chat',
-      requester: { kind: 'window', window_id: 'w-req', name: 'requester window' },
+      requester: NARROWED_REQUESTER,
       text: 'hello everyone',
       room: { room_id: 'r-2b7c1d', name: 'yagura' },
     });
@@ -1597,7 +1743,7 @@ describe('narrowApprovalRequest: the room a chat post is addressed to', () => {
       request_id: 'appr1',
       tool: 'send_chat',
       displayTool: 'send_chat',
-      requester: { kind: 'window', window_id: 'w-req', name: 'requester window' },
+      requester: NARROWED_REQUESTER,
       text: 'hello everyone',
       room: { room_id: 'r-2b7c1d', name: 'yagura' },
     });
@@ -1621,7 +1767,7 @@ describe('a listed window and a pending request read a room the same way', () =>
       request_id: 'appr1',
       tool: 'send_chat',
       displayTool: 'send_chat',
-      requester: { kind: 'window', window_id: 'w-req', name: 'requester window' },
+      requester: NARROWED_REQUESTER,
       text: 'hello everyone',
       room: WELL_FORMED_ROOM,
     });

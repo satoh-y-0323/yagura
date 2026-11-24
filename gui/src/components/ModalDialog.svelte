@@ -17,6 +17,8 @@
   export let maxWidth: string | null = null;
   /** The dialog's accessible name; `null` leaves the dialog without one. */
   export let label: UiText | DisplayLine | null = null;
+  /** The id of the element inside that names the dialog, in place of `label`. */
+  export let labelledBy: string | null = null;
   /** `picker` is the command picker's frame: wider, near the top, and edge to edge inside. */
   export let variant: 'form' | 'picker' = 'form';
   /** The window the dialog is about, or null; decides where focus goes once it closes. */
@@ -112,6 +114,7 @@
   class="modal-dialog"
   data-variant={variant}
   aria-label={label ?? undefined}
+  aria-labelledby={labelledBy ?? undefined}
   bind:this={dialogElement}
   style:max-width={maxWidth}
   on:keydown={handleKeydown}

@@ -69,8 +69,23 @@ const WINDOW_REQUEST: ApprovalRequest = {
   request_id: 'r1',
   tool: 'send_message',
   displayTool: sanitizeForDisplay('send_message'),
-  requester: { kind: 'window', window_id: 'w-a', name: sanitizeForDisplay('alpha') },
-  target: { window_id: 'w-b', name: sanitizeForDisplay('beta'), status: 'idle' },
+  requester: {
+    kind: 'window',
+    window_id: 'w-a',
+    displayWindowId: sanitizeForDisplay('w-a'),
+    name: sanitizeForDisplay('alpha'),
+    profile: null,
+    status: 'running',
+    mark: { cells: 0b010_111_001_100_011, hue: 4 },
+  },
+  target: {
+    window_id: 'w-b',
+    displayWindowId: sanitizeForDisplay('w-b'),
+    name: sanitizeForDisplay('beta'),
+    status: 'idle',
+    profile: null,
+    mark: { cells: 0b101_000_110_011_100, hue: 9 },
+  },
   text: formatApprovalBody('hello'),
 };
 

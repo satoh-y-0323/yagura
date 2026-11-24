@@ -19,6 +19,7 @@ function makeWindowInfo(overrides: Partial<WindowInfo> = {}): WindowInfo {
     cwd: 'C:\\Users\\dev\\project',
     detected: { status: 'running' },
     exit_code: null,
+    mark: { cells: 0b010_111_001_100_011, hue: 4 },
     ...overrides,
   };
 }

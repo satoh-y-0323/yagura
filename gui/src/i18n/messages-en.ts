@@ -94,6 +94,106 @@ const NOTIFICATIONS_IN_APP_COLUMN = 'In app';
 
 const APPROVAL_TITLE = 'Approval required';
 
+/** One row per gated tool (protocol `DestructiveTool::ALL`), keyed by its wire name. */
+const APPROVAL_TOOL_INFO = {
+  open_window: {
+    name: 'Open a window',
+    description:
+      'Starts a new window that runs a command or a profile, including the windows a handoff or a plan task opens.',
+    risk: "An agent can run any command as you, outside its own CLI's permission prompts.",
+  },
+  send_chat: {
+    name: 'Post in a chat room',
+    description: "Posts a message to a chat room the agent's window takes part in.",
+    risk: 'Agents can talk to each other without you reading each post first.',
+  },
+  broadcast_chat: {
+    name: 'Broadcast to a chat room',
+    description: 'Posts a message to every participant of a chat room.',
+    risk: 'One agent can reach every window in the room at once.',
+  },
+  send_message: {
+    name: 'Send a message to a window',
+    description: 'Delivers a message to another window.',
+    risk: 'An agent can give another agent new instructions.',
+  },
+  send_handoff: {
+    name: 'Hand off work to a window',
+    description: 'Sends a reference and a note to another window, or opens a new window for it.',
+    risk: 'An agent can start work in another window or open new ones.',
+  },
+  interrupt_window: {
+    name: 'Interrupt a window',
+    description: 'Sends an interrupt (Ctrl+C unless the playbook sets another) to another window.',
+    risk: "An agent can stop another agent's work in progress.",
+  },
+  close_window: {
+    name: 'Close a window',
+    description: 'Ends another window and every process it started.',
+    risk: 'An agent can close windows you are still using.',
+  },
+};
+
+/** What an approval heading names a window by: its name, or words that stand in for one. */
+export type HeadlineParty = { name: DisplayLine } | { words: UiText };
+
+/**
+ * An approval heading in the order it reads, so a view can set each name apart
+ * from the words, and the sentence those make. Of each `*Name` and `*Words` pair
+ * at most one is set.
+ */
+export interface HeadlineParts {
+  fromName: DisplayLine | null;
+  fromWords: string | null;
+  verb: string;
+  /** A tool this build does not know, named rather than guessed at. */
+  tool: DisplayLine | null;
+  /** The words between the tool and what it would act on. */
+  toolLink: string;
+  toName: DisplayLine | null;
+  toWords: string | null;
+  sentence: string;
+}
+
+/** Builds a heading from who asks, what it would do and to what, the sentence made where the parts are. */
+function headline(
+  from: DisplayLine | null,
+  verb: string,
+  to: HeadlineParty | null,
+  tool: DisplayLine | null = null,
+  toolLink = ''
+): HeadlineParts {
+  const fromWords = from === null ? 'An external client' : null;
+  const toName = to !== null && 'name' in to ? to.name : null;
+  const toWords = to !== null && 'words' in to ? to.words : null;
+  const parts = { fromName: from, fromWords, verb, tool, toolLink, toName, toWords };
+  return { ...parts, sentence: sentenceOf(parts) };
+}
+
+// The sentence is read back from the parts the dialog draws, so a test of the sentence also covers them.
+function sentenceOf(parts: Omit<HeadlineParts, 'sentence'>): string {
+  const { fromName, fromWords, verb, tool, toolLink, toName, toWords } = parts;
+  return `${fromName ?? fromWords ?? ''}${verb}${tool ?? ''}${toolLink}${toName ?? toWords ?? ''}`;
+}
+
+/** One heading per gated tool: who asks, then what it would do to what. */
+const APPROVAL_HEADLINES = {
+  open_window: (from: DisplayLine | null, to: HeadlineParty): HeadlineParts =>
+    headline(from, ' wants to open ', to),
+  send_chat: (from: DisplayLine | null, to: HeadlineParty): HeadlineParts =>
+    headline(from, ' wants to post in ', to),
+  broadcast_chat: (from: DisplayLine | null, to: HeadlineParty): HeadlineParts =>
+    headline(from, ' wants to post to everyone in ', to),
+  send_message: (from: DisplayLine | null, to: HeadlineParty): HeadlineParts =>
+    headline(from, ' wants to send a message to ', to),
+  send_handoff: (from: DisplayLine | null, to: HeadlineParty): HeadlineParts =>
+    headline(from, ' wants to hand off work to ', to),
+  interrupt_window: (from: DisplayLine | null, to: HeadlineParty): HeadlineParts =>
+    headline(from, ' wants to interrupt ', to),
+  close_window: (from: DisplayLine | null, to: HeadlineParty): HeadlineParts =>
+    headline(from, ' wants to close ', to),
+} satisfies Record<keyof typeof APPROVAL_TOOL_INFO, unknown>;
+
 /** One settings row per notice kind; a kind added to `NoticeCategory` fails to compile until it is named here. */
 const NOTIFICATION_ROWS: Readonly<Record<NoticeCategory, { name: string; description: string }>> = {
   'needs-approval': {
@@ -277,11 +377,17 @@ export const messagesEn = {
     approvalTitleCount: (count: number): string => `${APPROVAL_TITLE} (${count})`,
     approvalRequesterExternal: 'External client',
 
-    /** Shown when the requesting window is no longer in the window list. */
-    approvalRequesterGone: (name: DisplayLine): string => `Window ${name} (closed)`,
+    /** The status a requesting window shows once it is no longer in the window list. */
+    approvalRequesterClosed: 'Closed',
 
-    /** Names a request's target window with its status when the request was submitted. */
-    approvalTargetWindow: (name: DisplayLine, status: UiText): string => `${name} (${status})`,
+    /** Heads the card of who asked. */
+    approvalFrom: 'From',
+
+    /** Heads the card of what a request would act on. */
+    approvalTo: 'To',
+
+    /** Introduces the gated tool's name beside the decision buttons. */
+    approvalToolLabel: 'Tool',
 
     /** Stands in for a target window when the request names no room either. */
     approvalTargetRoom: 'the chat room',
@@ -292,12 +398,23 @@ export const messagesEn = {
     /** Names the chat room a request is addressed to, when it names one. */
     describeApprovalRoom: (name: DisplayLine): string => `the chat room “${name}”`,
 
-    /** The approval dialog's line: who asked, the tool, then what it would act on. A requester with no name is left out. */
-    approvalRoute: (
-      requester: UiText | DisplayLine | null,
+    /** The approval dialog's heading, keyed like `settings.approvalToolInfo`. */
+    approvalHeadlines: APPROVAL_HEADLINES,
+
+    /** The heading of a tool this build does not know, which names the tool rather than guess what it does. */
+    approvalHeadlineOther: (
+      from: DisplayLine | null,
       tool: DisplayLine,
-      target: UiText
-    ): string => [requester, tool, target].filter((part) => part !== null).join(' → '),
+      to: HeadlineParty | null
+    ): HeadlineParts => headline(from, ' wants to use ', to, tool, to === null ? '' : ' on '),
+
+    /** Heads what a request would send or run. */
+    approvalBodyHeadings: {
+      message: 'Message',
+      handoff: 'Handoff',
+      command: 'Command',
+      details: 'Details',
+    },
   },
 
   forms: {
@@ -981,46 +1098,7 @@ export const messagesEn = {
     approvalPlansHeading: 'Plans',
 
     /** One row per gated tool (protocol `DestructiveTool::ALL`), keyed by its wire name. */
-    approvalToolInfo: {
-      open_window: {
-        name: 'Open a window',
-        description:
-          'Starts a new window that runs a command or a profile, including the windows a handoff or a plan task opens.',
-        risk: "An agent can run any command as you, outside its own CLI's permission prompts.",
-      },
-      send_chat: {
-        name: 'Post in a chat room',
-        description: "Posts a message to a chat room the agent's window takes part in.",
-        risk: 'Agents can talk to each other without you reading each post first.',
-      },
-      broadcast_chat: {
-        name: 'Broadcast to a chat room',
-        description: 'Posts a message to every participant of a chat room.',
-        risk: 'One agent can reach every window in the room at once.',
-      },
-      send_message: {
-        name: 'Send a message to a window',
-        description: 'Delivers a message to another window.',
-        risk: 'An agent can give another agent new instructions.',
-      },
-      send_handoff: {
-        name: 'Hand off work to a window',
-        description:
-          'Sends a reference and a note to another window, or opens a new window for it.',
-        risk: 'An agent can start work in another window or open new ones.',
-      },
-      interrupt_window: {
-        name: 'Interrupt a window',
-        description:
-          'Sends an interrupt (Ctrl+C unless the playbook sets another) to another window.',
-        risk: "An agent can stop another agent's work in progress.",
-      },
-      close_window: {
-        name: 'Close a window',
-        description: 'Ends another window and every process it started.',
-        risk: 'An agent can close windows you are still using.',
-      },
-    },
+    approvalToolInfo: APPROVAL_TOOL_INFO,
 
     approvalToolSwitchLabel: (name: UiText | DisplayLine): string =>
       `Automatically approve: ${name}`,
@@ -1211,6 +1289,8 @@ export const messagesEn = {
 
   /** The work area when it shows no window: no window is open, or the shown one ended. */
   workArea: {
+    /** Names a window's mark; the same sentence is its tooltip, so it says the ID is not the window's choice. */
+    windowMark: (id: DisplayLine): string => `Window ID ${id}, assigned by yagura`,
     noWindowsTitle: 'No windows open',
     noWindowsBody: 'Open a CLI in a project folder to get started.',
     newWindow: 'New window',

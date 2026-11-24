@@ -34,7 +34,8 @@
     formError = null;
     isSubmitting = true;
     try {
-      await onConfirm(value);
+      // Trimmed as the new-window dialog trims; the daemon still owns the name's rules.
+      await onConfirm(value.trim());
       if (current === attempt) {
         isOpen = false;
       }

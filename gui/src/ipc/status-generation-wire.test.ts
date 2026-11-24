@@ -216,6 +216,7 @@ describe('this boundary reads the generation under the key the Rust sources use'
       cwd: '/x',
       status: 'running',
       exit_code: null,
+      mark: { cells: 0b010_111_001_100_011, hue: 4 },
       [WINDOW_RECORD_KEY]: 4,
       [WINDOW_RECORD_BOOT_KEY]: { origin: 7, seq: 3 },
     });
@@ -245,6 +246,7 @@ describe('this boundary reads the generation under the key the Rust sources use'
       cwd: '/x',
       status: 'waiting_input',
       exit_code: null,
+      mark: { cells: 0b010_111_001_100_011, hue: 4 },
       [WINDOW_RECORD_TASK_REPORT_KEY]: rustSpelledMark(1, 'standing'),
     });
     expect(record.task_report).toEqual({ seq: 1, state: 'standing' });
@@ -270,6 +272,7 @@ describe('this boundary reads the generation under the key the Rust sources use'
         cwd: '/x',
         status: 'waiting_input',
         exit_code: null,
+        mark: { cells: 0b010_111_001_100_011, hue: 4 },
         [WINDOW_RECORD_TASK_REPORT_KEY]: rustSpelledMark(4, state),
       });
       expect(record.task_report, state).toEqual({ seq: 4, state });

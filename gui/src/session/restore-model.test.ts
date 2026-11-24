@@ -368,6 +368,7 @@ function makeWindowInfo(windowId: string, layoutJson?: string): WindowInfo {
     cwd: '/home/user/project',
     detected: { status: 'running' },
     exit_code: null,
+    mark: { cells: 0b010_111_001_100_011, hue: 4 },
   };
   return layoutJson === undefined ? base : { ...base, layout_json: layoutJson };
 }

@@ -48,6 +48,8 @@ describe('planPanes', () => {
 function makeEntry(windowId: string): WindowEntry {
   return {
     windowId,
+    displayWindowId: sanitizeForDisplay(windowId),
+    mark: { cells: 0b010_111_001_100_011, hue: 4 },
     name: windowId,
     displayName: sanitizeForDisplay(windowId),
     vendor: null,

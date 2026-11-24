@@ -32,6 +32,7 @@
   import StatusReportMark from './StatusReportMark.svelte';
   import { tooltip } from './tooltip';
   import WindowControls from './WindowControls.svelte';
+  import WindowMark from './WindowMark.svelte';
 
   export let entry: WindowEntry;
   export let actions: WindowActions;
@@ -100,6 +101,9 @@
     <QueuedMark count={entry.queuedCount} />
   </span>
   <span class="window-header__spacer"></span>
+  <span class="window-header__mark">
+    <WindowMark mark={entry.mark} windowId={entry.displayWindowId} size="header" />
+  </span>
   <WindowControls
     {entry}
     {actions}
@@ -114,6 +118,7 @@
   .window-header {
     flex: 0 0 auto;
     display: flex;
+    container-type: inline-size;
     align-items: center;
     gap: var(--space-2);
     min-width: 0;
@@ -198,5 +203,24 @@
 
   .window-header__spacer {
     flex: 1 1 auto;
+  }
+
+  /* The mark and its ID are drawn whole or not at all: a cut ID could pass for the start of another. */
+  .window-header__mark {
+    display: inline-flex;
+    flex: 0 0 auto;
+  }
+
+  /* Where the title and the place have shrunk as far as they go, the ID goes first, then the mark. */
+  @container (inline-size < 360px) {
+    .window-header__mark :global(.window-mark__id) {
+      display: none;
+    }
+  }
+
+  @container (inline-size < 280px) {
+    .window-header__mark {
+      display: none;
+    }
   }
 </style>

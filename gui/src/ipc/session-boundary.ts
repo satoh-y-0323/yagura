@@ -21,6 +21,7 @@ import {
 import { formatMention } from './mention-syntax';
 import { parseLayoutJson, type LayoutV1 } from '../session/restore-model';
 import type { ApprovalRequesterKind, WithdrawReason } from '../session/approval-types';
+import type { WindowMark } from '../session/approval-target';
 import type {
   ClientConfigFailure,
   DaemonRecoveryStatus,
@@ -320,26 +321,50 @@ const WINDOW_STATUS_VALUES: ReadonlySet<string> = new Set<WindowStatus>([
 
 /**
  * Who a pending approval request came from (mirrors the Rust
- * `ApprovalRequester`). `window_id` and `name` are both present exactly when
- * `kind` is `"window"`, and `null` otherwise.
+ * `ApprovalRequester`), split on `kind`: a window brings its identity, and any
+ * other kind brings none, its `window_id` and `name` both `null`.
  */
-export interface ApprovalRequester {
+export type ApprovalRequester = ApprovalWindowRequester | ApprovalOtherRequester;
+
+/** A requester that is a window, as the daemon saw it when the request was submitted. */
+export interface ApprovalWindowRequester {
+  kind: 'window';
+  /** The requesting window's id. */
+  window_id: string;
+  /** `window_id` prepared for display. */
+  displayWindowId: DisplayLine;
+  /** The requesting window's display name, prepared for display. */
+  name: DisplayLine;
+  /** The launch profile the window was opened from, prepared for display; `null` for one opened from a command. */
+  profile: DisplayLine | null;
+  /** The window's status when the request was submitted, not a live value. */
+  status: WindowStatus;
+  /** The mark the daemon drew from the window's ID. */
+  mark: WindowMark;
+}
+
+/** A requester that is not a window: an external client, or a kind this build does not know. */
+export interface ApprovalOtherRequester {
   /** The requester kind the daemon reported, normalized fail-safe. */
-  kind: ApprovalRequesterKind;
-  /** The requesting window's id, `null` when it did not come from one. */
-  window_id: string | null;
-  /** The requesting window's display name, prepared for display; `null` when it has none. */
-  name: DisplayLine | null;
+  kind: Exclude<ApprovalRequesterKind, 'window'>;
+  window_id: null;
+  name: null;
 }
 
 /** The window a pending approval request would act on. */
 export interface ApprovalTarget {
   /** The target window's id. */
   window_id: string;
+  /** `window_id` prepared for display. */
+  displayWindowId: DisplayLine;
   /** The target window's display name, prepared for display. */
   name: DisplayLine;
   /** The target's status when the request was submitted, not a live value. */
   status: WindowStatus;
+  /** The launch profile the window was opened from, prepared for display; `null` for one opened from a command. */
+  profile: DisplayLine | null;
+  /** The mark the daemon drew from the window's ID. */
+  mark: WindowMark;
 }
 
 /**
@@ -658,6 +683,8 @@ export interface WindowInfo {
   detected: DetectedStatusView;
   /** Exit code once the child has exited, `null` while it is still running. */
   exit_code: number | null;
+  /** The mark the daemon drew from `window_id`. */
+  mark: WindowMark;
   /**
    * The window's presentation layout, as the opaque JSON string the GUI last
    * reported. Omitted from the wire -- and from this object as an own property
@@ -1423,9 +1450,9 @@ function narrowRoomRef(value: unknown, context: string): RoomRef {
 }
 
 /**
- * Validates the requester of a pending request. `window_id` and `name` are
- * required for a `"window"` requester and forced to `null` for every other
- * kind, so a kind the daemon adds later cannot smuggle in an identity this
+ * Validates the requester of a pending request. A `"window"` requester must
+ * carry its id, name, status and mark; every other kind is read as carrying
+ * none, so a kind the daemon adds later cannot smuggle in an identity this
  * side would then display as a window's.
  *
  * @throws {BoundaryError} when the value does not match the contract.
@@ -1436,10 +1463,15 @@ function narrowApprovalRequester(value: unknown, context: string): ApprovalReque
   if (kind !== 'window') {
     return { kind, window_id: null, name: null };
   }
+  const windowId = requireString(record, 'window_id', context);
   return {
     kind,
-    window_id: requireString(record, 'window_id', context),
+    window_id: windowId,
+    displayWindowId: sanitizeForDisplay(windowId),
     name: sanitizeForDisplay(requireString(record, 'name', context)),
+    profile: readOptionalDisplayLine(record, 'profile', context),
+    status: requireWindowStatus(record, 'status', context),
+    mark: requireWindowMark(record, context),
   };
 }
 
@@ -1462,11 +1494,53 @@ function normalizeWithdrawReason(reason: string): WithdrawReason {
  */
 function narrowApprovalTarget(value: unknown, context: string): ApprovalTarget {
   const record = requireRecord(value, context);
+  const windowId = requireString(record, 'window_id', context);
   return {
-    window_id: requireString(record, 'window_id', context),
+    window_id: windowId,
+    displayWindowId: sanitizeForDisplay(windowId),
     name: sanitizeForDisplay(requireString(record, 'name', context)),
     status: requireWindowStatus(record, 'status', context),
+    profile: readOptionalDisplayLine(record, 'profile', context),
+    mark: requireWindowMark(record, context),
   };
+}
+
+/** How many cells of a mark are free to fill: the left three columns of five rows. */
+const WINDOW_MARK_CELL_BITS = 15;
+
+/** How many hue steps a mark's colour is drawn from. */
+const WINDOW_MARK_HUE_STEPS = 12;
+
+/**
+ * Reads the mark the daemon drew from a window's ID. A daemon of this
+ * revision always sends one, so a missing or out-of-range mark is its defect
+ * rather than a value to fill in.
+ *
+ * @throws {BoundaryError} when the mark is missing, or a part is not an
+ * integer in its range.
+ */
+function requireWindowMark(record: UntrustedRecord, context: string): WindowMark {
+  const path = `${context}.mark`;
+  const mark = requireRecord(readOwnField(record, 'mark'), path);
+  const cells = requireNonNegativeInteger(mark, 'cells', path);
+  const hue = requireNonNegativeInteger(mark, 'hue', path);
+  if (cells >= 2 ** WINDOW_MARK_CELL_BITS) {
+    throw new BoundaryError(`${path}.cells: expected fewer than ${WINDOW_MARK_CELL_BITS} bits`);
+  }
+  if (hue >= WINDOW_MARK_HUE_STEPS) {
+    throw new BoundaryError(`${path}.hue: expected fewer than ${WINDOW_MARK_HUE_STEPS} steps`);
+  }
+  return { cells, hue };
+}
+
+/** An optional string prepared for display, `null` when the record carries none. */
+function readOptionalDisplayLine(
+  record: UntrustedRecord,
+  key: string,
+  context: string
+): DisplayLine | null {
+  const value = readOptionalString(record, key, context);
+  return value === null ? null : sanitizeForDisplay(value);
 }
 
 /**
@@ -1674,6 +1748,7 @@ export function narrowWindowInfo(value: unknown, context = 'window_info'): Windo
     cwd: requireString(record, 'cwd', context),
     detected: readDetectedStatus(record, context, 'drop'),
     exit_code: readOptionalInteger(record, 'exit_code', context),
+    mark: requireWindowMark(record, context),
   };
   const rawLayoutJson = readOwnField(record, 'layout_json');
   const info =

@@ -3,8 +3,9 @@
   import type { DisplayLine } from '../display/untrusted-text';
   import type { ApprovalRequest } from '../ipc/session-boundary';
   import { isWithinGuard } from '../session/approval-queue';
-  import { describeApprovalRequester, describeApprovalTarget } from '../session/approval-target';
+  import { approvalFactsOf } from '../session/approval-target';
   import { buttons, dialogs } from '../ui-messages';
+  import ApprovalParty from './ApprovalParty.svelte';
   import Icon from './Icon.svelte';
   import ModalDialog from './ModalDialog.svelte';
 
@@ -23,13 +24,24 @@
    */
   export let decisionFailure: UiText | DisplayLine | null = null;
 
+  const headlineId = 'approval-headline';
+  const fromId = 'approval-from';
+  const toId = 'approval-to';
   const failureNoteId = 'approval-decision-failed';
-  $: describedBy = decisionFailure !== null ? failureNoteId : undefined;
+  const bodyId = 'approval-body';
 
-  $: requesterLabel = describeApprovalRequester(request, isRequesterOpen);
-  $: toolLabel = request.displayTool;
-  $: targetLabel = describeApprovalTarget(request);
-  $: title = pendingCount > 1 ? dialogs.approvalTitleCount(pendingCount) : dialogs.approvalTitle;
+  $: facts = approvalFactsOf(request, isRequesterOpen);
+  $: headline = facts.headline;
+  $: hasBody = request.text !== null && request.text !== '';
+  // What is sent decides the answer more than who sends it, so the buttons are described by the
+  // body too; it comes last, so a long body does not bury the cards and the note.
+  $: describedBy = [
+    fromId,
+    toId,
+    ...(decisionFailure !== null ? [failureNoteId] : []),
+    ...(hasBody ? [bodyId] : []),
+  ].join(' ');
+  $: eyebrow = pendingCount > 1 ? dialogs.approvalTitleCount(pendingCount) : dialogs.approvalTitle;
 
   function handleDeny(): void {
     if (isWithinGuard(openedAt, Date.now())) {
@@ -56,20 +68,58 @@
   }
 </script>
 
-<ModalDialog bind:isOpen onCancel={handleCancel} refocusKey={request.request_id}>
-  <div class="dialog-content">
-    <h2 class="dialog-title">{title}</h2>
+<ModalDialog
+  bind:isOpen
+  onCancel={handleCancel}
+  refocusKey={request.request_id}
+  labelledBy={headlineId}
+  maxWidth="560px"
+>
+  <div class="dialog-content approval">
+    <div class="approval-head">
+      <span class="approval-head__icon">
+        <Icon name="shield-exclamation-point" size="md" />
+      </span>
+      <div class="approval-head__text">
+        <span class="approval-head__eyebrow">{eyebrow}</span>
+        <!-- Names are set apart by their own element rather than quotes, which a name may hold;
+             a name can still mimic the words, so the cards' marks are what tell windows apart. -->
+        <h2 class="dialog-title approval-head__headline" id={headlineId}>
+          {#if headline.fromName !== null}<strong class="approval-name">{headline.fromName}</strong
+            >{:else if headline.fromWords !== null}{headline.fromWords}{/if}{headline.verb}{#if headline.tool !== null}<code
+              class="approval-tool-name">{headline.tool}</code
+            >{/if}{headline.toolLink}{#if headline.toName !== null}<strong class="approval-name"
+              >{headline.toName}</strong
+            >{:else if headline.toWords !== null}{headline.toWords}{/if}
+        </h2>
+      </div>
+    </div>
+    <div class="approval-parties">
+      <ApprovalParty party={facts.from} heading={dialogs.approvalFrom} id={fromId} />
+      <span class="approval-parties__arrow">
+        <Icon name="chevron-right" size="md" />
+      </span>
+      <ApprovalParty party={facts.to} heading={dialogs.approvalTo} id={toId} />
+    </div>
+    {#if hasBody}
+      <div class="approval-body" id={bodyId}>
+        {#if facts.bodyHeading !== null}
+          <span class="approval-body__heading">{facts.bodyHeading}</span>
+        {/if}
+        <pre class="approval-body__text">{request.text}</pre>
+      </div>
+    {/if}
     {#if decisionFailure !== null}
       <p class="approval-failure" id={failureNoteId}>
         <Icon name="circle-exclamation-point" size="sm" />
         {decisionFailure}
       </p>
     {/if}
-    <p class="dialog-message">{dialogs.approvalRoute(requesterLabel, toolLabel, targetLabel)}</p>
-    {#if request.text !== null && request.text !== ''}
-      <pre class="approval-body">{request.text}</pre>
-    {/if}
-    <div class="dialog-actions">
+    <div class="dialog-actions approval-actions">
+      <span class="approval-actions__tool">
+        {dialogs.approvalToolLabel}
+        <code class="approval-tool-name">{facts.tool}</code>
+      </span>
       <!-- The dialog focusing steps pick the autofocus element, so initial focus is always the
            safe choice; markup order stays Deny first for when autofocus is not honored. -->
       <!-- svelte-ignore a11y_autofocus -->
@@ -95,6 +145,102 @@
 </ModalDialog>
 
 <style>
+  .approval {
+    gap: var(--space-4);
+  }
+
+  .approval-head {
+    display: flex;
+    gap: var(--space-3);
+    align-items: flex-start;
+  }
+
+  .approval-head__icon {
+    display: inline-flex;
+    flex: 0 0 auto;
+    align-items: center;
+    justify-content: center;
+    width: 36px;
+    height: 36px;
+    border-radius: var(--radius-full);
+    background-color: var(--st-approval-tint);
+    color: var(--st-approval);
+  }
+
+  .approval-head__text {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-0_5);
+    min-width: 0;
+  }
+
+  .approval-head__eyebrow {
+    color: var(--st-approval);
+    font-size: var(--text-xs);
+    font-weight: var(--weight-semibold);
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+  }
+
+  .approval-head__headline {
+    font-size: var(--text-lg);
+    line-height: var(--leading-md);
+    overflow-wrap: anywhere;
+  }
+
+  /* A name stands apart from the words by weight and ground, neither of which its characters can draw. */
+  .approval-name {
+    padding: 0 var(--space-1);
+    border-radius: var(--radius-xs);
+    background-color: var(--bg-selected);
+    font-weight: var(--weight-semibold);
+  }
+
+  .approval-tool-name {
+    color: var(--fg-muted);
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+  }
+
+  .approval-parties {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+    gap: var(--space-2);
+    align-items: stretch;
+  }
+
+  .approval-parties__arrow {
+    display: inline-flex;
+    align-self: center;
+    color: var(--fg-faint);
+  }
+
+  .approval-body {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-1_5);
+  }
+
+  .approval-body__heading {
+    color: var(--fg-muted);
+    font-size: var(--text-xs);
+    font-weight: var(--weight-semibold);
+  }
+
+  .approval-body__text {
+    margin: 0;
+    max-height: 12rem;
+    overflow: auto;
+    padding: var(--space-3);
+    border-radius: var(--radius-md);
+    background-color: var(--bg-hover);
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    font-family: var(--font-mono);
+    font-size: var(--text-sm);
+    line-height: var(--leading-sm);
+  }
+
   .approval-failure {
     display: flex;
     align-items: center;
@@ -111,19 +257,25 @@
     color: var(--danger);
   }
 
+  .approval-actions {
+    align-items: center;
+  }
+
+  .approval-actions__tool {
+    flex: 1 1 auto;
+    min-width: 0;
+    color: var(--fg-faint);
+    font-size: var(--text-xs);
+    overflow-wrap: anywhere;
+  }
+
   @media (forced-colors: active) {
     .approval-failure {
       border-left-color: CanvasText;
     }
-  }
 
-  .approval-body {
-    margin: 0;
-    max-height: 12rem;
-    overflow: auto;
-    white-space: pre-wrap;
-    overflow-wrap: anywhere;
-    font-family: var(--font-mono);
-    font-size: var(--font-size-sm);
+    .approval-name {
+      border: var(--line-width) solid CanvasText;
+    }
   }
 </style>

@@ -54,6 +54,8 @@ const DERIVED_REQUIRED = [
   '--backdrop',
   '--shadow-popover',
   '--shadow-dialog',
+  '--window-mark-l',
+  '--window-mark-c',
   'color-scheme',
 ];
 const DERIVED_ALLOWED = [

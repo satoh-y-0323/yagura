@@ -148,6 +148,10 @@ export function deriveTokens(palette: Palette): DerivedTokens {
     '--backdrop': light ? 'rgb(20 20 24 / 0.32)' : 'rgb(0 0 0 / 0.55)',
     '--shadow-popover': `0 8px 24px rgb(0 0 0 / ${light ? '0.12' : '0.40'})`,
     '--shadow-dialog': `0 20px 48px rgb(0 0 0 / ${light ? '0.18' : '0.50'})`,
+    // Lightness and chroma of a window mark's cells; the hue comes from the mark. They aim at
+    // 3:1 against the raised ground for every hue: darker on a light ground, lighter on a dark one.
+    '--window-mark-l': light ? '0.55' : '0.76',
+    '--window-mark-c': light ? '0.14' : '0.12',
   };
 
   const statuses: [string, Rgb][] = [

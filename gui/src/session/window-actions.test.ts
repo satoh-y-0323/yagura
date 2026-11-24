@@ -31,6 +31,8 @@ function makeEntry(overrides: Partial<WindowEntry> & { status?: WindowStatus } =
   const { status = 'running', ...rest } = overrides;
   return {
     windowId: 'w-1',
+    displayWindowId: sanitizeForDisplay('w-1'),
+    mark: { cells: 0b010_111_001_100_011, hue: 4 },
     name: 'w-1',
     displayName: sanitizeForDisplay('w-1'),
     vendor: null,

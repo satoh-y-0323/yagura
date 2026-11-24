@@ -35,6 +35,7 @@ function windowInfoWire(overrides: Record<string, unknown> = {}): Record<string,
     cwd: '/x',
     status: 'running',
     exit_code: null,
+    mark: { cells: 0b010_111_001_100_011, hue: 4 },
     ...overrides,
   };
 }

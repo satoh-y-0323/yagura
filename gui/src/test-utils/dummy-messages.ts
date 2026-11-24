@@ -20,6 +20,25 @@ const windowExitedParts = (name: DisplayLine): TitleParts =>
 const windowExitedWithCodeParts = (name: DisplayLine, code: number): TitleParts =>
   titleParts('DUMMY_workArea_windowExitedWithCode(', name, `,${code})`);
 
+type HeadlineParts = ReturnType<MessagesSource['dialogs']['approvalHeadlineOther']>;
+type HeadlineParty = Parameters<MessagesSource['dialogs']['approvalHeadlineOther']>[2];
+
+/** Each dummy heading is its parts put together, as in the English locale. */
+function dummyHeadline(
+  key: string,
+  from: DisplayLine | null,
+  to: HeadlineParty,
+  tool: DisplayLine | null = null
+): HeadlineParts {
+  const fromWords = from === null ? 'DUMMY_external' : null;
+  const verb = `DUMMY_approvalHeadline_${key}(`;
+  const toName = to !== null && 'name' in to ? to.name : null;
+  const toWords = to !== null && 'words' in to ? to.words : null;
+  const toolLink = ',';
+  const sentence = `${from ?? fromWords ?? ''}${verb}${tool ?? ''}${toolLink}${toName ?? toWords ?? ''}`;
+  return { fromName: from, fromWords, verb, tool, toolLink, toName, toWords, sentence };
+}
+
 // Checked against the resource's shape so a missing key stays a type error, then typed as the
 // resolved locale it stands in for.
 export const dummyMessages = {
@@ -60,8 +79,10 @@ export const dummyMessages = {
     approvalTitle: 'DUMMY_approvalTitle',
     approvalTitleCount: (count: number) => `DUMMY_approvalTitleCount(${count})`,
     approvalRequesterExternal: 'DUMMY_approvalRequesterExternal',
-    approvalRequesterGone: (name) => `DUMMY_approvalRequesterGone(${name})`,
-    approvalTargetWindow: (name, status) => `DUMMY_approvalTargetWindow(${name},${status})`,
+    approvalRequesterClosed: 'DUMMY_approvalRequesterClosed',
+    approvalFrom: 'DUMMY_approvalFrom',
+    approvalTo: 'DUMMY_approvalTo',
+    approvalToolLabel: 'DUMMY_approvalToolLabel',
     // Shown in place of a target window's name when a request carries none
     // (a chat-room-wide approval has no single target window).
     approvalTargetRoom: 'DUMMY_approvalTargetRoom',
@@ -69,8 +90,22 @@ export const dummyMessages = {
     approvalTargetNewWindow: 'DUMMY_approvalTargetNewWindow',
     // Names the chat room a post would go to, when the request carries one.
     describeApprovalRoom: (name) => `DUMMY_describeApprovalRoom(${name})`,
-    approvalRoute: (requester, tool, target) =>
-      `DUMMY_approvalRoute(${requester},${tool},${target})`,
+    approvalHeadlines: {
+      open_window: (from, to) => dummyHeadline('open_window', from, to),
+      send_chat: (from, to) => dummyHeadline('send_chat', from, to),
+      broadcast_chat: (from, to) => dummyHeadline('broadcast_chat', from, to),
+      send_message: (from, to) => dummyHeadline('send_message', from, to),
+      send_handoff: (from, to) => dummyHeadline('send_handoff', from, to),
+      interrupt_window: (from, to) => dummyHeadline('interrupt_window', from, to),
+      close_window: (from, to) => dummyHeadline('close_window', from, to),
+    },
+    approvalHeadlineOther: (from, tool, to) => dummyHeadline('other', from, to, tool),
+    approvalBodyHeadings: {
+      message: 'DUMMY_approvalBodyHeadings_message',
+      handoff: 'DUMMY_approvalBodyHeadings_handoff',
+      command: 'DUMMY_approvalBodyHeadings_command',
+      details: 'DUMMY_approvalBodyHeadings_details',
+    },
   },
   forms: {
     commandLabel: 'DUMMY_commandLabel',
@@ -542,6 +577,7 @@ export const dummyMessages = {
     awaitingPermission: 'DUMMY_sidebar_awaitingPermission',
   },
   workArea: {
+    windowMark: (id) => `DUMMY_windowMark(${id})`,
     noWindowsTitle: 'DUMMY_workArea_noWindowsTitle',
     noWindowsBody: 'DUMMY_workArea_noWindowsBody',
     newWindow: 'DUMMY_workArea_newWindow',

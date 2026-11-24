@@ -239,7 +239,7 @@
   import * as approvalQueue from '../session/approval-queue';
   import { appHidden } from '../session/app-visibility';
   import { isApprovalDialogAllowed } from '../session/modal-state';
-  import { approvalTargetName } from '../session/approval-target';
+  import { approvalFactsOf } from '../session/approval-target';
   import type { WithdrawReason } from '../session/approval-types';
   import {
     plansAttention,
@@ -2046,15 +2046,13 @@
   function withdrawApproval(requestId: string, reason: WithdrawReason): void {
     const request = approvals.items.find((entry) => entry.request_id === requestId);
     if (request !== undefined) {
+      // The notice names the request from the same facts the dialog draws it from.
+      const facts = approvalFactsOf(request, isRequesterWindowOpen(request, $registry.windows));
       noticeState = recordApprovalExpiredUnseen(
         noticeState,
         approvalQueue.wasShown(approvals, requestId),
         reason,
-        {
-          requester: request.requester.name ?? dialogs.approvalRequesterExternal,
-          tool: request.displayTool,
-          target: approvalTargetName(request),
-        }
+        { requester: facts.from.label, tool: facts.tool, target: facts.to.label }
       );
     }
     approvals = approvalQueue.withdraw(approvals, requestId);

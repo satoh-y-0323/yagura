@@ -37,21 +37,33 @@ import type { ApprovalRequest } from '../ipc/session-boundary';
 /** The line a failed decision is shown with; passed through untouched. */
 const LINE = sanitizeForDisplay('Could not send the decision.');
 
+/** A window requester as the boundary narrows one. */
+function requesterWindow(windowId: string): ApprovalRequest['requester'] {
+  return {
+    kind: 'window',
+    window_id: windowId,
+    displayWindowId: sanitizeForDisplay(windowId),
+    name: sanitizeForDisplay('requester window'),
+    profile: null,
+    status: 'running',
+    mark: { cells: 0b101_000_110_011_100, hue: 9 },
+  };
+}
+
 function makeRequest(requestId: string, overrides: Partial<ApprovalRequest> = {}): ApprovalRequest {
   const tool = overrides.tool ?? 'close_window';
   return {
     request_id: requestId,
     tool,
     displayTool: sanitizeForDisplay(tool),
-    requester: {
-      kind: 'window',
-      window_id: 'w-req',
-      name: sanitizeForDisplay('requester window'),
-    },
+    requester: requesterWindow('w-req'),
     target: {
       window_id: 'w-target',
+      displayWindowId: sanitizeForDisplay('w-target'),
       name: sanitizeForDisplay('target window'),
       status: 'running',
+      profile: null,
+      mark: { cells: 0b010_111_001_100_011, hue: 4 },
     },
     text: null,
     ...overrides,
@@ -377,9 +389,7 @@ describe('markInFlight / failDecision: head() and size()', () => {
 // ---------------------------------------------------------------------------
 
 describe('settleDecision: the answer to a decision that was sent', () => {
-  const from = (windowId: string) => ({
-    requester: { kind: 'window' as const, window_id: windowId, name: null },
-  });
+  const from = (windowId: string) => ({ requester: requesterWindow(windowId) });
 
   /** A (from w-1) and B (from w-2) pending, A's decision in flight. */
   function sendingA(): ApprovalQueueState {
@@ -685,7 +695,10 @@ describe('isWithinGuard: the boundary', () => {
 
 describe('windowsAwaitingPermission: which windows wear the permission mark', () => {
   const from = (windowId: string | null) => ({
-    requester: { kind: 'window' as const, window_id: windowId, name: null },
+    requester:
+      windowId === null
+        ? { kind: 'external' as const, window_id: null, name: null }
+        : requesterWindow(windowId),
   });
 
   it('holds the window that asked, and leaves out a request that did not come from a window', () => {

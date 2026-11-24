@@ -26,6 +26,7 @@ import {
   type TaskReportMark,
 } from '../ipc/session-boundary';
 import type { WindowEventHandlers, WindowInfo } from '../ipc/session-client';
+import type { WindowMark } from '../session/approval-target';
 
 /** Screen position of a window pane. */
 type Position = { x: number; y: number };
@@ -55,6 +56,10 @@ export interface WindowDisplay {
 export interface WindowEntry {
   /** Opaque window id assigned by the daemon. */
   windowId: string;
+  /** `windowId` prepared for display. */
+  displayWindowId: DisplayLine;
+  /** The mark the daemon drew from `windowId`; it never changes for one window. */
+  mark: WindowMark;
   /** Name of the window as the daemon sent it; for operations, never drawn. */
   name: string;
   /** `name` prepared for display; the only form a view draws. */
@@ -518,6 +523,8 @@ function snapshotFields(
 function toEntry(info: WindowInfo, zOrder: number): WindowEntry {
   const entry: WindowEntry = {
     windowId: info.window_id,
+    displayWindowId: sanitizeForDisplay(info.window_id),
+    mark: info.mark,
     ...snapshotFields(info),
     vendor: info.vendor,
     displayVendor: displayOrNull(info.vendor),

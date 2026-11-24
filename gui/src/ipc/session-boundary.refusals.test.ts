@@ -6,6 +6,8 @@
  */
 import { describe, it, expect, vi, afterEach } from 'vitest';
 
+import blankLookingChars from '../../../crates/yagura-protocol/tests/fixtures/blank-looking-chars.json';
+
 import {
   formatApprovalBody,
   formatChatBody,
@@ -56,8 +58,10 @@ function messageOf(action: () => unknown): string {
   throw new Error('the value was accepted');
 }
 
+const MARK = { cells: 0b000_111_010_101_011, hue: 5 };
+
 function requesterWire(overrides: Wire = {}): Wire {
-  return { kind: 'window', window_id: 'w1', name: 'one', ...overrides };
+  return { kind: 'window', window_id: 'w1', name: 'one', status: 'idle', mark: MARK, ...overrides };
 }
 
 function requestWire(overrides: Wire = {}): Wire {
@@ -70,6 +74,7 @@ function windowInfoWire(overrides: Wire = {}): Wire {
     name: 'one',
     cwd: '/repo',
     status: 'running',
+    mark: MARK,
     ...overrides,
   };
 }
@@ -344,12 +349,19 @@ describe('the pieces of an approval request', () => {
   it('keeps the target and room when present, and omits them when null or absent', () => {
     const full = narrowApprovalRequest(
       requestWire({
-        target: { window_id: 'w2', name: 'two', status: 'idle' },
+        target: { window_id: 'w2', name: 'two', status: 'idle', mark: MARK },
         room: { room_id: 'r', name: 'Room' },
         text: 'why',
       })
     );
-    expect(full.target).toEqual({ window_id: 'w2', name: 'two', status: 'idle' });
+    expect(full.target).toEqual({
+      window_id: 'w2',
+      displayWindowId: 'w2',
+      name: 'two',
+      status: 'idle',
+      mark: MARK,
+      profile: null,
+    });
     expect(full.room).toEqual({ room_id: 'r', name: 'Room' });
     expect(full.text).toBe('why');
     const bare = narrowApprovalRequest(requestWire({ target: null, room: null }));
@@ -768,6 +780,24 @@ describe('formatPathForDisplay', () => {
     expect(formatPathForDisplay('C:\\a b')).toBe('C:\\a b');
     const shown = formatPathForDisplay(`${'a'.repeat(MAX_DISPLAY_FIELD_CHARS - 1)}\u202Etail`);
     expect(shown).toBe(`${'a'.repeat(MAX_DISPLAY_FIELD_CHARS - 1)}\\u{202E}…`);
+  });
+
+  // The characters a window name may not start or end with are the ones a name draws but a path
+  // writes out: the protocol's fixture lists them, so the Rust rule and this drawing agree.
+  it('writes out exactly the characters a name draws as they are and the protocol calls blank-looking', () => {
+    const drawnInNameWrittenInPath: string[] = [];
+    for (let code = 0; code <= 0x10ffff; code += 1) {
+      if (code >= 0xd800 && code <= 0xdfff) {
+        continue;
+      }
+      // Between the same base letters, so a mark that joins its neighbours is judged alike.
+      const text = `a${String.fromCodePoint(code)}b`;
+      if (sanitizeForDisplay(text) === text && formatPathForDisplay(text) !== text) {
+        drawnInNameWrittenInPath.push(String.fromCodePoint(code));
+      }
+    }
+
+    expect(drawnInNameWrittenInPath).toEqual(blankLookingChars);
   });
 });
 

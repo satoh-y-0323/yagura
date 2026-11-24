@@ -149,6 +149,7 @@ describe('invokeListWindows and invokeOpenWindow', () => {
       cwd: 'C:\\Users\\dev\\project',
       status: 'running',
       exit_code: null,
+      mark: { cells: 0b010_111_001_100_011, hue: 4 },
     };
     invokeMock.mockResolvedValueOnce([rawWindow]);
 
@@ -182,6 +183,7 @@ describe('invokeListWindows and invokeOpenWindow', () => {
       cwd: '/home/dev/project',
       status: 'running',
       exit_code: null,
+      mark: { cells: 0b010_111_001_100_011, hue: 4 },
     };
     invokeMock.mockResolvedValueOnce([
       { ...rawWindow, queued_count: 2 },
