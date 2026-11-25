@@ -60,7 +60,7 @@ pub(super) async fn handle_list_model_choices(
     profile: String,
     request_id: u64,
 ) {
-    if let Err(refusal) = control::require_approver(&state.origin) {
+    if let Err(refusal) = control::require_approver(state.origin()) {
         outbound.reply(&approver_only_msg(refusal));
         return;
     }

@@ -288,17 +288,7 @@ impl PeerAuth for WindowsIpc {
     }
 
     fn capture_peer(&self, conn: &Self::Connection) -> Option<CapturedPeer> {
-        let pid = client_process_id(conn)?;
-        let start = crate::process_start(pid).ok().flatten()?;
-        let executable = process_image_path(pid)?;
-        // The image is the peer's only if the id still names the same start
-        // once it has been read.
-        let still = crate::process_start(pid).ok().flatten()?;
-        (still == start).then_some(CapturedPeer {
-            pid,
-            start,
-            executable,
-        })
+        crate::peer_capture::capture_in_start_order(&mut PipeReads { conn })
     }
 
     fn endpoint_allows_only(&self, endpoint: &str, user_id: &str) -> Result<bool, OsError> {
@@ -665,6 +655,28 @@ fn token_user_sid(buffer: &[u64]) -> PSID {
     // SAFETY: the buffer was filled by GetTokenInformation(TokenUser), so it
     // starts with a TOKEN_USER whose `User.Sid` points inside the same buffer.
     unsafe { (*buffer.as_ptr().cast::<TOKEN_USER>()).User.Sid }
+}
+
+/// The reads `peer_capture::capture_in_start_order` makes, as Windows answers
+/// them for an accepted pipe connection.
+struct PipeReads<'a> {
+    conn: &'a NamedPipeServer,
+}
+
+impl crate::peer_capture::PeerPidReads for PipeReads<'_> {
+    fn peer_pid(&mut self) -> Option<u32> {
+        client_process_id(self.conn)
+    }
+}
+
+impl crate::peer_capture::ProcessReads for PipeReads<'_> {
+    fn start_of(&mut self, pid: u32) -> Option<crate::ProcessStart> {
+        crate::process_start(pid).ok().flatten()
+    }
+
+    fn executable_of(&mut self, pid: u32) -> Option<PathBuf> {
+        process_image_path(pid)
+    }
 }
 
 /// Process id of the client at the other end of an accepted pipe connection.

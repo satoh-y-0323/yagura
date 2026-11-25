@@ -1,7 +1,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-//! The order in which macOS and Linux read a connection's peer, with the
-//! operating system's reads replaced by a script. The peer is captured only when the
+//! The order in which macOS, Linux and Windows read a connection's peer, with
+//! the operating system's reads replaced by a script. The peer is captured only when the
 //! token read, the peer's start and the other end of the socket in its
 //! descriptors all agree, and the token and start read again afterwards are
 //! the same: a process that ended and had its id reused, or that holds no end
@@ -47,17 +47,19 @@ impl Script {
     }
 }
 
-impl yagura_os::peer_capture::OrderReads for Script {
-    fn peer_token(&mut self) -> Result<(u32, u32), i32> {
-        self.tokens.pop_front().unwrap_or(Err(ENOTCONN))
-    }
-
+impl yagura_os::peer_capture::ProcessReads for Script {
     fn start_of(&mut self, _pid: u32) -> Option<ProcessStart> {
         self.starts.pop_front().flatten()
     }
 
     fn executable_of(&mut self, _pid: u32) -> Option<PathBuf> {
         Some(PathBuf::from("/opt/peer"))
+    }
+}
+
+impl yagura_os::peer_capture::OrderReads for Script {
+    fn peer_token(&mut self) -> Result<(u32, u32), i32> {
+        self.tokens.pop_front().unwrap_or(Err(ENOTCONN))
     }
 
     fn own_peer_pcb(&mut self) -> Option<u64> {
@@ -189,11 +191,20 @@ impl yagura_os::peer_capture::PidfdReads for LinuxScript {
         self.pidfd
     }
 
+    fn pidfd_has_exited(&mut self) -> Result<bool, i32> {
+        self.asked.push(Read::HasExited);
+        self.has_exited
+    }
+}
+
+impl yagura_os::peer_capture::PeerPidReads for LinuxScript {
     fn peer_pid(&mut self) -> Option<u32> {
         self.asked.push(Read::Pid);
         self.pid
     }
+}
 
+impl yagura_os::peer_capture::ProcessReads for LinuxScript {
     fn start_of(&mut self, pid: u32) -> Option<ProcessStart> {
         assert_eq!(Some(pid), self.pid, "start is read for the pid just read");
         self.asked.push(Read::Start);
@@ -208,11 +219,6 @@ impl yagura_os::peer_capture::PidfdReads for LinuxScript {
         );
         self.asked.push(Read::Executable);
         self.executable.clone()
-    }
-
-    fn pidfd_has_exited(&mut self) -> Result<bool, i32> {
-        self.asked.push(Read::HasExited);
-        self.has_exited
     }
 }
 
@@ -275,4 +281,97 @@ fn a_pidfd_peer_with_a_read_that_fails_is_not_captured() {
         break_read(&mut script);
         assert!(capture_pidfd(&mut script).is_none(), "breaker {index}");
     }
+}
+
+/// The Windows reads: the pipe's client id, then the start, the executable
+/// and the start again of the process it names.
+struct PipeScript {
+    pid: Option<u32>,
+    starts: VecDeque<Option<ProcessStart>>,
+    executable: Option<PathBuf>,
+    asked: Vec<Read>,
+}
+
+impl PipeScript {
+    fn steady() -> Self {
+        Self {
+            pid: Some(PEER),
+            starts: VecDeque::from([Some(start("100")), Some(start("100"))]),
+            executable: Some(PathBuf::from(r"C:\peer.exe")),
+            asked: Vec::new(),
+        }
+    }
+}
+
+impl yagura_os::peer_capture::PeerPidReads for PipeScript {
+    fn peer_pid(&mut self) -> Option<u32> {
+        self.asked.push(Read::Pid);
+        self.pid
+    }
+}
+
+impl yagura_os::peer_capture::ProcessReads for PipeScript {
+    fn start_of(&mut self, pid: u32) -> Option<ProcessStart> {
+        assert_eq!(Some(pid), self.pid, "start is read for the pid just read");
+        self.asked.push(Read::Start);
+        self.starts.pop_front().flatten()
+    }
+
+    fn executable_of(&mut self, pid: u32) -> Option<PathBuf> {
+        assert_eq!(
+            Some(pid),
+            self.pid,
+            "executable is read for the pid just read"
+        );
+        self.asked.push(Read::Executable);
+        self.executable.clone()
+    }
+}
+
+fn capture_pipe(script: &mut PipeScript) -> Option<yagura_os::peer_capture::CapturedPeer> {
+    yagura_os::peer_capture::capture_in_start_order(script)
+}
+
+#[test]
+fn a_pipe_peer_whose_start_reads_the_same_after_its_executable_is_captured() {
+    let mut script = PipeScript::steady();
+    let captured = capture_pipe(&mut script).expect("both starts agree");
+    assert_eq!(captured.pid, PEER);
+    assert_eq!(captured.start, start("100"));
+    assert_eq!(captured.executable, PathBuf::from(r"C:\peer.exe"));
+    assert_eq!(
+        script.asked,
+        [Read::Pid, Read::Start, Read::Executable, Read::Start],
+        "the start is read again after the executable"
+    );
+}
+
+/// The id named another process by the second read: the executable read
+/// between may be either one's.
+#[test]
+fn a_pipe_peer_whose_start_changes_by_the_second_read_is_not_captured() {
+    let mut script = PipeScript::steady();
+    script.starts = VecDeque::from([Some(start("100")), Some(start("101"))]);
+    assert!(capture_pipe(&mut script).is_none());
+    assert_eq!(script.asked.last(), Some(&Read::Start));
+}
+
+#[test]
+fn a_pipe_peer_with_a_read_that_fails_is_not_captured() {
+    let breakers: [fn(&mut PipeScript); 4] = [
+        |s| s.pid = None,
+        |s| s.starts = VecDeque::from([None, Some(start("100"))]),
+        |s| s.executable = None,
+        |s| s.starts = VecDeque::from([Some(start("100")), None]),
+    ];
+    for (index, break_read) in breakers.into_iter().enumerate() {
+        let mut script = PipeScript::steady();
+        break_read(&mut script);
+        assert!(capture_pipe(&mut script).is_none(), "breaker {index}");
+    }
+
+    let mut no_client = PipeScript::steady();
+    no_client.pid = None;
+    assert!(capture_pipe(&mut no_client).is_none());
+    assert_eq!(no_client.asked, [Read::Pid], "read on after no client id");
 }

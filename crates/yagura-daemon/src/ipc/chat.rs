@@ -963,14 +963,14 @@ async fn post_chat(
     // The room is settled before anything is composed or gated, but after
     // the body is judged: a post whose body could never be accepted must not
     // create a room row on its way to being refused.
-    let resolved = match resolve_room(chat, &state.origin, room_id.as_deref(), registry, true).await
-    {
-        Ok(resolved) => resolved,
-        Err(err) => {
-            outbound.reply(&room_error_msg(&err));
-            return;
-        }
-    };
+    let resolved =
+        match resolve_room(chat, state.origin(), room_id.as_deref(), registry, true).await {
+            Ok(resolved) => resolved,
+            Err(err) => {
+                outbound.reply(&room_error_msg(&err));
+                return;
+            }
+        };
     let room_id = resolved.room_id.clone();
     let room_name = resolved.name.clone().unwrap_or_else(|| room_id.clone());
 
@@ -990,7 +990,7 @@ async fn post_chat(
         .collect();
 
     let (from_kind, from_name, from_window_id, envelope_from) =
-        poster_identity(registry, &state.origin);
+        poster_identity(registry, state.origin());
     let self_window_id = from_window_id.clone().unwrap_or_default();
     let mut mentions = room::parse_mentions(&body, &roster, &self_window_id);
     resolve_parent_mention(
@@ -1061,7 +1061,7 @@ async fn post_chat(
     match control::policy_gate(
         live_policy::policy_source(&policy_snapshot),
         tool,
-        &state.origin,
+        state.origin(),
         None,
     ) {
         Ok(GateVerdict::Allow) => {
@@ -1089,7 +1089,7 @@ async fn submit_for_approval(
     state: &super::ConnectionState,
     post: PendingChatPost,
 ) {
-    let requester = requester_for(registry, &state.origin);
+    let requester = requester_for(registry, state.origin());
     let draft = ApprovalDraft {
         tool: post.tool,
         requester,
@@ -1524,7 +1524,7 @@ pub(super) async fn handle_read_chat(
         ));
         return;
     }
-    if after_seq.is_none() && matches!(state.origin, RequestOrigin::External) {
+    if after_seq.is_none() && matches!(state.origin(), RequestOrigin::External) {
         outbound.reply(&error_msg(
             "invalid_argument",
             "after_seq is required for an unidentified connection",
@@ -1533,7 +1533,7 @@ pub(super) async fn handle_read_chat(
     }
     // A reader is never shown a name, so the listing is not read for it.
     let resolved =
-        match resolve_room(chat, &state.origin, room_id.as_deref(), registry, false).await {
+        match resolve_room(chat, state.origin(), room_id.as_deref(), registry, false).await {
             Ok(resolved) => resolved,
             Err(err) => {
                 outbound.reply(&room_error_msg(&err));
@@ -1543,7 +1543,7 @@ pub(super) async fn handle_read_chat(
     let room_id = resolved.room_id.clone();
 
     let limit_i64 = i64::from(limit);
-    let origin = state.origin.clone();
+    let origin = state.origin().clone();
     let room_id_for_store = room_id.clone();
     let room_id_for_status = room_id.clone();
     type ReadAndStatus = (
@@ -1698,7 +1698,7 @@ pub(super) async fn handle_list_chat_rooms(
     outbound: &Arc<Outbound>,
     state: &super::ConnectionState,
 ) {
-    if let Err(refusal) = control::require_approver(&state.origin) {
+    if let Err(refusal) = control::require_approver(state.origin()) {
         outbound.reply(&super::approver_only_msg(refusal));
         return;
     }
@@ -1833,7 +1833,7 @@ async fn handle_room_removal(
     room_id: String,
     removal: RoomRemoval,
 ) {
-    if let Err(refusal) = control::require_approver(&state.origin) {
+    if let Err(refusal) = control::require_approver(state.origin()) {
         outbound.reply(&super::approver_only_msg(refusal));
         return;
     }

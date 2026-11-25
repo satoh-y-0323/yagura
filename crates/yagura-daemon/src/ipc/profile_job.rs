@@ -38,7 +38,7 @@ pub(super) async fn run_profile_job(
     needs: ProfileJobNeeds,
     job: impl FnOnce(DaemonConfig) -> DaemonMessage + Send + 'static,
 ) {
-    if let Err(refusal) = control::require_approver(&state.origin) {
+    if let Err(refusal) = control::require_approver(state.origin()) {
         outbound.reply(&approver_only_msg(refusal));
         return;
     }

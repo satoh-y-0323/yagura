@@ -77,7 +77,7 @@ pub(super) async fn handle_list_mcp_registrations(
     state: &ConnectionState,
     request_id: u64,
 ) {
-    if let Err(refusal) = control::require_approver(&state.origin) {
+    if let Err(refusal) = control::require_approver(state.origin()) {
         outbound.reply(&approver_only_msg(refusal));
         return;
     }
@@ -1640,7 +1640,7 @@ pub(super) async fn handle_run_mcp_registration(
         action,
         request_id,
     } = request;
-    if let Err(refusal) = control::require_approver(&state.origin) {
+    if let Err(refusal) = control::require_approver(state.origin()) {
         outbound.reply(&approver_only_msg(refusal));
         return;
     }

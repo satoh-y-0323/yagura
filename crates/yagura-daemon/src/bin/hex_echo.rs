@@ -19,6 +19,11 @@
 
 use std::io::{self, Read, Write};
 
+#[path = "../../../yagura-test-support/fixtures/hex_argv.rs"]
+mod hex_argv;
+
+use hex_argv::decode_hex;
+
 const READY_MARKER: &[u8] = b"CTRL-READY\r\n";
 const EMITTED_MARKER: &[u8] = b"\r\nQUERIES-EMITTED\r\n";
 const FLOODED_MARKER: &[u8] = b"\r\nQUERIES-FLOODED\r\n";
@@ -40,13 +45,13 @@ fn main() -> io::Result<()> {
     match args.first().map(String::as_str) {
         Some("--emit") => {
             for query in &args[1..] {
-                stdout.write_all(&decode_hex(query))?;
+                stdout.write_all(&decode_hex(query.as_bytes()))?;
             }
             stdout.write_all(EMITTED_MARKER)?;
             stdout.flush()?;
         }
         Some("--flood") => {
-            let query = decode_hex(args.get(1).map_or("", String::as_str));
+            let query = decode_hex(args.get(1).map_or(&[][..], String::as_bytes));
             let count: usize = args.get(2).and_then(|n| n.parse().ok()).unwrap_or(0);
             for _ in 0..count {
                 stdout.write_all(&query)?;
@@ -57,7 +62,12 @@ fn main() -> io::Result<()> {
         _ => {}
     }
     let mut emit_on_input: Option<Vec<Vec<u8>>> = match args.first().map(String::as_str) {
-        Some("--emit-on-input") => Some(args[1..].iter().map(|arg| decode_hex(arg)).collect()),
+        Some("--emit-on-input") => Some(
+            args[1..]
+                .iter()
+                .map(|arg| decode_hex(arg.as_bytes()))
+                .collect(),
+        ),
         _ => None,
     };
 
@@ -83,15 +93,4 @@ fn main() -> io::Result<()> {
     }
 
     Ok(())
-}
-
-fn decode_hex(text: &str) -> Vec<u8> {
-    text.as_bytes()
-        .chunks(2)
-        .filter_map(|pair| {
-            std::str::from_utf8(pair)
-                .ok()
-                .and_then(|digits| u8::from_str_radix(digits, 16).ok())
-        })
-        .collect()
 }

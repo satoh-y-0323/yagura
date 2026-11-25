@@ -3,10 +3,9 @@
 //! when the operating system cannot name that process for certain.
 //!
 //! The capture itself is [`PeerAuth::capture_peer`](crate::PeerAuth::capture_peer).
-//! This module holds what it returns, the orders macOS and Linux read a peer
+//! This module holds what it returns, the orders each platform reads a peer
 //! in (kept free of the operating system so they compile and are measured
-//! everywhere),
-//! and the startup check that the capture is available at all.
+//! everywhere), and the startup check that the capture is available at all.
 
 use std::io;
 use std::path::PathBuf;
@@ -27,12 +26,48 @@ pub struct CapturedPeer {
     pub executable: PathBuf,
 }
 
+/// The reads of a named process every capture makes.
+pub trait ProcessReads {
+    /// The start of the process `pid`; `None` when it cannot be read.
+    fn start_of(&mut self, pid: u32) -> Option<ProcessStart>;
+
+    /// The executable the process `pid` runs; `None` when it cannot be read.
+    fn executable_of(&mut self, pid: u32) -> Option<PathBuf>;
+}
+
+/// The reads [`capture_in_start_order`] makes: the connection's peer id and
+/// then the process it names.
+pub trait PeerPidReads: ProcessReads {
+    /// The id the kernel recorded for the connection's peer; `None` when it
+    /// cannot be read.
+    fn peer_pid(&mut self) -> Option<u32>;
+}
+
+/// Captures a peer through `reads`: its id, its start, its executable, then
+/// its start again, which must be the same. Any read that fails or disagrees
+/// captures nothing.
+///
+/// On Windows the id is all the connection names, so the executable read by
+/// it is the peer's only if the id still names the same start afterwards.
+#[must_use]
+pub fn capture_in_start_order<R: PeerPidReads + ?Sized>(reads: &mut R) -> Option<CapturedPeer> {
+    let pid = reads.peer_pid()?;
+    let start = reads.start_of(pid)?;
+    let executable = reads.executable_of(pid)?;
+    let still = reads.start_of(pid)?;
+    (still == start).then_some(CapturedPeer {
+        pid,
+        start,
+        executable,
+    })
+}
+
 /// The reads [`capture_in_order`] makes, in the order it makes them.
 ///
 /// On macOS each read is a system call on the accepted socket or on the
 /// process the socket's token names; the trait lets the order be run against
 /// a script instead.
-pub trait OrderReads {
+pub trait OrderReads: ProcessReads {
     /// The `(pid, pidversion)` of the connection's peer token, or the
     /// `errno` the operating system answered with.
     ///
@@ -41,12 +76,6 @@ pub trait OrderReads {
     /// Returns the `errno` of a token that cannot be read (for instance
     /// `ENOTCONN` once the peer is gone).
     fn peer_token(&mut self) -> Result<(u32, u32), i32>;
-
-    /// The start of the process `pid`; `None` when it cannot be read.
-    fn start_of(&mut self, pid: u32) -> Option<ProcessStart>;
-
-    /// The executable the process `pid` runs; `None` when it cannot be read.
-    fn executable_of(&mut self, pid: u32) -> Option<PathBuf>;
 
     /// The kernel's handle on the other end of this process's own socket;
     /// `None` when the socket names none.
@@ -94,20 +123,10 @@ pub fn capture_in_order<R: OrderReads + ?Sized>(reads: &mut R) -> Option<Capture
 /// `SO_PEERCRED` and the process the credentials name; the implementation
 /// keeps the pidfd it took so the last read can poll it. The trait lets the
 /// order be run against a script instead.
-pub trait PidfdReads {
+pub trait PidfdReads: PeerPidReads {
     /// Takes the pidfd of the process that connected; `false` when the
     /// connection yields none.
     fn peer_pidfd(&mut self) -> bool;
-
-    /// The id the kernel recorded for the connection's peer; `None` when it
-    /// cannot be read.
-    fn peer_pid(&mut self) -> Option<u32>;
-
-    /// The start of the process `pid`; `None` when it cannot be read.
-    fn start_of(&mut self, pid: u32) -> Option<ProcessStart>;
-
-    /// The executable the process `pid` runs; `None` when it cannot be read.
-    fn executable_of(&mut self, pid: u32) -> Option<PathBuf>;
 
     /// Whether the process the taken pidfd refers to has exited, from one
     /// look that does not wait.

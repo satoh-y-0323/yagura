@@ -807,6 +807,7 @@ fn run_take_back(
                 // token admits finds the link let in and the child named.
                 let (cols, rows) = welcomed.size;
                 link.welcomed(cols, rows, &welcomed);
+                warn_if_unanchored(&window_id, &welcomed);
                 on_welcome(&welcomed.record);
                 let mut reader = Reader {
                     window_id: &window_id,
@@ -1215,6 +1216,18 @@ fn read_notice(mut stdout: std::fs::File) -> std::io::Result<bool> {
     Ok(false)
 }
 
+/// Says, when a window is opened or taken back, that its running child
+/// cannot anchor its process tree, so every process of the tree is refused.
+fn warn_if_unanchored(window_id: &str, welcomed: &Welcomed) {
+    if welcomed.running_child().is_some() && welcomed.anchor().is_none() {
+        tracing::warn!(
+            window_id,
+            "the window's holder did not name its child's start; hooks and MCP \
+             bridges of this window are refused until it is opened again"
+        );
+    }
+}
+
 // Each argument is one part of the connection the window is served over.
 #[allow(clippy::too_many_arguments)]
 fn serve(
@@ -1239,13 +1252,7 @@ fn serve(
         link.welcomed(cols, rows, &welcomed);
         let opening = match welcomed.child_pid {
             Some(_) => {
-                if welcomed.running_child().is_some() && welcomed.anchor().is_none() {
-                    tracing::warn!(
-                        window_id = holder.window_id,
-                        "the window's holder did not name its child's start; hooks and MCP \
-                         bridges of this window are refused until it is opened again"
-                    );
-                }
+                warn_if_unanchored(holder.window_id, &welcomed);
                 Some(Opening { opened })
             }
             None => {

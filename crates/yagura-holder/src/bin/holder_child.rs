@@ -79,6 +79,11 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
+#[path = "../../../yagura-test-support/fixtures/hex_argv.rs"]
+mod hex_argv;
+
+use hex_argv::{decode_hex, spawn_argv};
+
 const READY_MARKER: &[u8] = b"HOLDER-CHILD-READY\r\n";
 const FLOODED_MARKER: &[u8] = b"\r\nHOLDER-CHILD-FLOODED\r\n";
 const TREE_MARKER: &[u8] = b"HOLDER-CHILD-TREE\r\n";
@@ -257,7 +262,7 @@ fn script(input_log: &Path, gated: Option<(&Path, &str)>) -> io::Result<()> {
                 b'{' => spawn = Some(Vec::new()),
                 b'}' => {
                     if let Some(digits) = spawn.take() {
-                        spawn_own_child(&decode_hex(&digits));
+                        spawn_argv(&decode_hex(&digits));
                     }
                 }
                 b'0'..=b'9' | b'a'..=b'f' => {
@@ -269,35 +274,6 @@ fn script(input_log: &Path, gated: Option<(&Path, &str)>) -> io::Result<()> {
             }
         }
     }
-}
-
-/// Starts the argv `decoded` (one element per line) as a child of this process,
-/// reaped in the background, with no stdio of its own.
-fn spawn_own_child(decoded: &[u8]) {
-    let text = String::from_utf8_lossy(decoded);
-    let mut argv = text.lines();
-    let Some(program) = argv.next() else { return };
-    let spawned = Command::new(program)
-        .args(argv)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn();
-    if let Ok(mut child) = spawned {
-        std::thread::spawn(move || child.wait());
-    }
-}
-
-fn decode_hex(digits: &[u8]) -> Vec<u8> {
-    let value = |digit: u8| match digit {
-        b'0'..=b'9' => digit - b'0',
-        _ => digit - b'a' + 10,
-    };
-    let (pairs, _) = digits.as_chunks::<2>();
-    pairs
-        .iter()
-        .map(|[high, low]| (value(*high) << 4) | value(*low))
-        .collect()
 }
 
 fn flood(count_file: &Path, total_bytes: Option<u64>) -> io::Result<()> {

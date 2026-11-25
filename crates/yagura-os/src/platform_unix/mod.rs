@@ -1112,22 +1112,28 @@ impl crate::peer_capture::PidfdReads for PidfdSocketReads<'_> {
         self.pidfd.is_some()
     }
 
+    fn pidfd_has_exited(&mut self) -> Result<bool, i32> {
+        let pidfd = self.pidfd.as_ref().ok_or(libc::EBADF)?;
+        crate::process_identity::pidfd_has_exited(pidfd)
+            .map_err(|error| error.raw_os_error().unwrap_or(libc::EINVAL))
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl crate::peer_capture::PeerPidReads for PidfdSocketReads<'_> {
     fn peer_pid(&mut self) -> Option<u32> {
         peer_pid(self.conn)
     }
+}
 
+#[cfg(target_os = "linux")]
+impl crate::peer_capture::ProcessReads for PidfdSocketReads<'_> {
     fn start_of(&mut self, pid: u32) -> Option<crate::ProcessStart> {
         crate::process_start(pid).ok().flatten()
     }
 
     fn executable_of(&mut self, pid: u32) -> Option<PathBuf> {
         executable_path(pid)
-    }
-
-    fn pidfd_has_exited(&mut self) -> Result<bool, i32> {
-        let pidfd = self.pidfd.as_ref().ok_or(libc::EBADF)?;
-        crate::process_identity::pidfd_has_exited(pidfd)
-            .map_err(|error| error.raw_os_error().unwrap_or(libc::EINVAL))
     }
 }
 
@@ -1167,7 +1173,7 @@ mod macos_peer {
     use std::path::PathBuf;
 
     use crate::ProcessStart;
-    use crate::peer_capture::OrderReads;
+    use crate::peer_capture::{OrderReads, ProcessReads};
 
     /// `PROC_PIDFDSOCKETINFO` in `sys/proc_info.h`.
     const PROC_PIDFDSOCKETINFO: libc::c_int = 3;
@@ -1259,6 +1265,16 @@ mod macos_peer {
         pub(super) fd: RawFd,
     }
 
+    impl ProcessReads for SocketReads {
+        fn start_of(&mut self, pid: u32) -> Option<ProcessStart> {
+            crate::process_start(pid).ok().flatten()
+        }
+
+        fn executable_of(&mut self, pid: u32) -> Option<PathBuf> {
+            super::executable_path(pid)
+        }
+    }
+
     impl OrderReads for SocketReads {
         fn peer_token(&mut self) -> Result<(u32, u32), i32> {
             let mut token = AuditToken { val: [0; 8] };
@@ -1287,14 +1303,6 @@ mod macos_peer {
                 unsafe { (audit_token_to_pid(token), audit_token_to_pidversion(token)) };
             let pid = u32::try_from(pid).map_err(|_| libc::EINVAL)?;
             Ok((pid, u32::from_ne_bytes(version.to_ne_bytes())))
-        }
-
-        fn start_of(&mut self, pid: u32) -> Option<ProcessStart> {
-            crate::process_start(pid).ok().flatten()
-        }
-
-        fn executable_of(&mut self, pid: u32) -> Option<PathBuf> {
-            super::executable_path(pid)
         }
 
         fn own_peer_pcb(&mut self) -> Option<u64> {

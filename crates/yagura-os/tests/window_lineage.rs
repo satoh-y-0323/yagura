@@ -485,6 +485,223 @@ fn a_unix_parent_read_holds_only_when_the_child_reads_the_same_on_both_sides() {
     assert!(!unix_link_holds((40, &later), (40, &earlier)));
 }
 
+/// What a process id answers each time it is read on Unix: its
+/// `(ppid, start, sid)`, an error, or nothing for an id no process has. A
+/// queue answers its entries in turn and then its last one; every id read is
+/// recorded in order.
+#[derive(Default)]
+struct ParentScript {
+    answers: std::collections::HashMap<u32, std::collections::VecDeque<ParentAnswer>>,
+    read: Vec<u32>,
+}
+
+#[derive(Clone)]
+enum ParentAnswer {
+    Facts(u32, String, u32),
+    Fails,
+    Gone,
+}
+
+fn facts(ppid: u32, start_text: &str, sid: u32) -> ParentAnswer {
+    ParentAnswer::Facts(ppid, start_text.to_owned(), sid)
+}
+
+impl ParentScript {
+    fn answering(mut self, pid: u32, answers: &[ParentAnswer]) -> Self {
+        self.answers.insert(pid, answers.iter().cloned().collect());
+        self
+    }
+
+    fn with(self, pid: u32, ppid: u32, start_text: &str, sid: u32) -> Self {
+        self.answering(pid, &[facts(ppid, start_text, sid)])
+    }
+}
+
+impl yagura_os::window_lineage::ParentReads for ParentScript {
+    fn parent_start_and_session(
+        &mut self,
+        pid: u32,
+    ) -> std::io::Result<Option<(u32, ProcessStart, u32)>> {
+        self.read.push(pid);
+        let Some(queue) = self.answers.get_mut(&pid) else {
+            return Ok(None);
+        };
+        let answer = if queue.len() > 1 {
+            queue.pop_front().unwrap()
+        } else {
+            queue.front().cloned().unwrap()
+        };
+        match answer {
+            ParentAnswer::Facts(ppid, start_text, sid) => Ok(Some((ppid, start(&start_text), sid))),
+            ParentAnswer::Fails => Err(std::io::Error::other("no answer for this process")),
+            ParentAnswer::Gone => Ok(None),
+        }
+    }
+}
+
+/// The lineage walked from `peer` through `script` on Unix, for the anchor
+/// `anchor_pid` and the daemon [`DAEMON`].
+fn walk_unix(
+    script: &mut ParentScript,
+    peer: u32,
+    anchor_pid: u32,
+) -> yagura_os::window_lineage::Lineage {
+    yagura_os::window_lineage::walk_parents(script, peer, anchor_pid, DAEMON)
+}
+
+/// Unix: each child is read again after its parent, and the walk stops at
+/// the anchor without reading above it.
+#[test]
+fn the_unix_walk_reads_each_child_again_after_its_parent() {
+    let mut script = ParentScript::default()
+        .with(31, 21, "131", 5)
+        .with(21, 13, "121", 5)
+        .with(13, 40, "113", 13)
+        .with(40, 1, "140", 40);
+    let lineage = walk_unix(&mut script, 31, 13);
+    assert_eq!(
+        lineage.steps(),
+        [
+            unix_step(31, "131", 5),
+            unix_step(21, "121", 5),
+            unix_step(13, "113", 13)
+        ]
+    );
+    assert_eq!(lineage.end(), None);
+    assert_eq!(script.read, [31, 21, 31, 13, 21], "read order");
+}
+
+/// Unix: a child that does not read the same before and after its parent
+/// was handed to another parent, or its id to another process, between the
+/// reads: the parent read is not linked and the walk stops there.
+#[test]
+fn a_unix_child_that_reads_otherwise_after_its_parent_stops_the_walk_reused() {
+    use yagura_os::window_lineage::LineageEnd;
+
+    let changed_child = [
+        ("handed to PID 1", facts(1, "131", 5)),
+        ("another parent", facts(22, "131", 5)),
+        ("another start", facts(21, "999", 5)),
+    ];
+    for (case, again) in changed_child {
+        let mut script = ParentScript::default()
+            .answering(31, &[facts(21, "131", 5), again])
+            .with(21, 13, "121", 5)
+            .with(13, 40, "113", 13);
+        let lineage = walk_unix(&mut script, 31, 13);
+        assert_eq!(lineage.steps(), [unix_step(31, "131", 5)], "{case}");
+        assert_eq!(lineage.end(), Some(LineageEnd::Reused), "{case}");
+        assert_eq!(script.read, [31, 21, 31], "{case}");
+    }
+
+    // A link further up is checked the same way.
+    let mut script = ParentScript::default()
+        .with(31, 21, "131", 5)
+        .answering(21, &[facts(13, "121", 5), facts(1, "121", 5)])
+        .with(13, 40, "113", 13);
+    let lineage = walk_unix(&mut script, 31, 13);
+    assert_eq!(
+        lineage.steps(),
+        [unix_step(31, "131", 5), unix_step(21, "121", 5)]
+    );
+    assert_eq!(lineage.end(), Some(LineageEnd::Reused));
+}
+
+/// Unix: how the walk ends besides a changed child. PID 0 and 1 are no
+/// parent of a child's own; whatever cannot be read ends it unanswered; the
+/// daemon and the anchor's session end it without reading above them.
+#[test]
+fn the_unix_walk_ends_at_the_top_unanswered_or_where_the_search_ends() {
+    use ParentAnswer::{Fails, Gone};
+    use yagura_os::window_lineage::LineageEnd;
+
+    for ppid in [0, 1] {
+        let mut script = ParentScript::default().with(31, ppid, "131", 5);
+        let lineage = walk_unix(&mut script, 31, 13);
+        assert_eq!(lineage.steps(), [unix_step(31, "131", 5)], "ppid {ppid}");
+        assert_eq!(lineage.end(), Some(LineageEnd::Top), "ppid {ppid}");
+        assert_eq!(script.read, [31], "ppid {ppid}");
+    }
+
+    let mut gone_parent = ParentScript::default().with(31, 21, "131", 5);
+    let lineage = walk_unix(&mut gone_parent, 31, 13);
+    assert_eq!(lineage.steps(), [unix_step(31, "131", 5)]);
+    assert_eq!(
+        lineage.end(),
+        Some(LineageEnd::Top),
+        "a parent id no process has"
+    );
+
+    let mut unread_parent = ParentScript::default()
+        .with(31, 21, "131", 5)
+        .answering(21, &[Fails]);
+    let lineage = walk_unix(&mut unread_parent, 31, 13);
+    assert_eq!(lineage.steps(), [unix_step(31, "131", 5)]);
+    assert_eq!(
+        lineage.end(),
+        Some(LineageEnd::Unanswered),
+        "a parent not read"
+    );
+
+    for (case, again) in [("fails", Fails), ("gone", Gone)] {
+        let mut script = ParentScript::default()
+            .answering(31, &[facts(21, "131", 5), again])
+            .with(21, 13, "121", 5);
+        let lineage = walk_unix(&mut script, 31, 13);
+        assert_eq!(
+            lineage.steps(),
+            [unix_step(31, "131", 5)],
+            "child read again {case}"
+        );
+        assert_eq!(
+            lineage.end(),
+            Some(LineageEnd::Unanswered),
+            "child read again {case}"
+        );
+    }
+
+    for (case, peer) in [("fails", Fails), ("gone", Gone)] {
+        let mut script = ParentScript::default().answering(31, &[peer]);
+        let lineage = walk_unix(&mut script, 31, 13);
+        assert!(
+            lineage.steps().is_empty(),
+            "peer {case}: {:?}",
+            lineage.steps()
+        );
+        assert_eq!(lineage.end(), Some(LineageEnd::Unanswered), "peer {case}");
+    }
+
+    let mut to_daemon = ParentScript::default()
+        .with(31, DAEMON, "131", 5)
+        .with(DAEMON, 40, "1", 7)
+        .with(40, 1, "140", 40);
+    let lineage = walk_unix(&mut to_daemon, 31, 13);
+    assert_eq!(
+        lineage.steps(),
+        [unix_step(31, "131", 5), unix_step(DAEMON, "1", 7)]
+    );
+    assert_eq!(lineage.end(), None);
+    assert_eq!(to_daemon.read, [31, DAEMON, 31], "read above the daemon");
+
+    let mut in_session = ParentScript::default()
+        .with(31, 21, "131", 13)
+        .with(21, 1, "121", 21);
+    let lineage = walk_unix(&mut in_session, 31, 13);
+    assert_eq!(lineage.steps(), [unix_step(31, "131", 13)]);
+    assert_eq!(lineage.end(), None);
+    assert_eq!(in_session.read, [31], "read above the anchor's session");
+
+    // A chain longer than the steps looked at stops at 33 of them, each of
+    // the 32 links read as a parent and its child again.
+    let mut deep = (0..40_u32).fold(ParentScript::default(), |script, at| {
+        script.with(1000 + at, 1001 + at, &format!("s{at}"), 5)
+    });
+    let lineage = walk_unix(&mut deep, 1000, 13);
+    assert_eq!(lineage.steps().len(), 33);
+    assert_eq!(lineage.end(), None);
+    assert_eq!(deep.read.len(), 1 + 32 * 2, "read past the steps looked at");
+}
+
 const IDLE_CHILD: &str = "lineage_idle_child";
 const IDLE_CHILD_ENV: &str = "YAGURA_OS_TEST_LINEAGE_IDLE_CHILD";
 

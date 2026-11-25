@@ -115,6 +115,9 @@ pub(crate) struct VerifiedPeer {
 pub(crate) struct PeerProcess {
     pid: u32,
     start: ProcessStart,
+    /// The executable it ran when it was captured, as the operating system
+    /// reported it: what a refusal of it logs.
+    executable: PathBuf,
 }
 
 /// The buffer of one internal connection, each way: it only paces the bytes
@@ -223,9 +226,9 @@ struct ConnectionState {
     /// aborted when the connection ends -- a waiter that outlived its
     /// connection would write into a dead queue.
     waiters: Vec<JoinHandle<()>>,
-    /// Who this connection acts as, which is what the destructive gate judges
-    /// a request against. Starts out unproven and only ever widens.
-    origin: RequestOrigin,
+    /// Whether this connection registered as an approver. Who it acts as
+    /// otherwise is its caller's record alone: see [`ConnectionState::origin`].
+    approver: bool,
     /// Held from the moment this connection identifies as a window until it
     /// ends, however it ends, so that window's `mcp_connected` stays exact.
     mcp_claim: Option<McpConnectionClaim>,
@@ -276,8 +279,13 @@ pub(crate) struct Caller {
     /// The window this caller identified as, written once when an `identify`
     /// of its own is accepted: the one record every connection of the
     /// caller acts on.
-    window: Arc<OnceLock<String>>,
+    window: Arc<OnceLock<RequestOrigin>>,
 }
+
+/// The origin of a caller that has not identified.
+static EXTERNAL: RequestOrigin = RequestOrigin::External;
+/// The origin of a connection registered as an approver.
+static APPROVER: RequestOrigin = RequestOrigin::Approver;
 
 impl Caller {
     fn new(id: u64) -> Self {
@@ -290,21 +298,24 @@ impl Caller {
 
     /// The window this caller identified as.
     pub(crate) fn window(&self) -> Option<&str> {
-        self.window.get().map(String::as_str)
+        match self.window.get() {
+            Some(RequestOrigin::Window(window_id)) => Some(window_id),
+            _ => None,
+        }
     }
 
     /// Who a connection of this caller acts as: the window it identified
     /// as, or no one proven.
-    fn origin(&self) -> RequestOrigin {
-        self.window().map_or(RequestOrigin::External, |window_id| {
-            RequestOrigin::Window(window_id.to_owned())
-        })
+    fn origin(&self) -> &RequestOrigin {
+        self.window.get().unwrap_or(&EXTERNAL)
     }
 
     /// Records that this caller identified as `window_id`; `false` when it
     /// already identified as another window.
     fn settle_window(&self, window_id: &str) -> bool {
-        self.window.get_or_init(|| window_id.to_owned()) == window_id
+        self.window
+            .get_or_init(|| RequestOrigin::Window(window_id.to_owned()))
+            == &RequestOrigin::Window(window_id.to_owned())
     }
 }
 
@@ -322,7 +333,7 @@ impl ConnectionState {
     ) -> Self {
         Self {
             conn_id,
-            origin: caller.origin(),
+            approver: false,
             caller,
             attachment: None,
             frames_failed: Arc::new(Notify::new()),
@@ -344,6 +355,18 @@ impl ConnectionState {
     /// `caller`, acting as the window the caller identified as, with no window
     /// claim of its own and no peer executable, so it never becomes an
     /// approver. Its peer is the relay connection's.
+    /// Who this connection acts as, which is what the destructive gate
+    /// judges a request against: an approver once it registered as one, and
+    /// otherwise whatever its caller's record says. Starts out unproven and
+    /// only ever widens.
+    fn origin(&self) -> &RequestOrigin {
+        if self.approver {
+            &APPROVER
+        } else {
+            self.caller.origin()
+        }
+    }
+
     fn internal(
         conn_id: u64,
         caller: Caller,
@@ -1409,6 +1432,7 @@ impl IpcServer {
             process: captured.as_ref().map(|peer| PeerProcess {
                 pid: peer.pid,
                 start: peer.start.clone(),
+                executable: peer.executable.clone(),
             }),
         };
         let peer_executable = captured.and_then(|peer| peer.executable.canonicalize().ok());
@@ -2559,7 +2583,7 @@ impl IpcServer {
             &self.registry,
             &self.broker,
             outbound,
-            &state.origin,
+            state.origin(),
             request,
         )
         .await;
@@ -2786,7 +2810,7 @@ impl IpcServer {
         request: OpenWindowRequest,
     ) {
         let provenance = WindowProvenance {
-            opener: opener_of(&state.origin),
+            opener: opener_of(state.origin()),
             ..WindowProvenance::default()
         };
         let cwd = match self.registry.check_open_request(&request) {
@@ -3153,7 +3177,7 @@ impl IpcServer {
         };
         let description = OpenDescription::for_profile(&profile, Some(&cwd), None);
         let provenance = WindowProvenance {
-            opener: opener_of(&state.origin),
+            opener: opener_of(state.origin()),
             ..WindowProvenance::default()
         };
         let registry = Arc::clone(&self.registry);
@@ -3201,7 +3225,7 @@ impl IpcServer {
             outbound.reply(&plan::unsupported_msg());
             return;
         }
-        if matches!(state.origin, RequestOrigin::External) {
+        if matches!(state.origin(), RequestOrigin::External) {
             outbound.reply(&plan::auth_failed_msg());
             return;
         }
@@ -3224,7 +3248,7 @@ impl IpcServer {
         let roles = roles_result.ok();
 
         let guard = self.ledger.locks().lock(&plan_id).await;
-        let origin = state.origin.clone();
+        let origin = state.origin().clone();
         let registry = Arc::clone(&self.registry);
         let task_id_for_read = task_id.clone();
         let prelude_result = self
@@ -3408,7 +3432,7 @@ impl IpcServer {
     ) {
         // Only the GUI renames, and a child that renames another window could
         // swap names with a window the user trusts.
-        if let Err(refusal) = control::require_approver(&state.origin) {
+        if let Err(refusal) = control::require_approver(state.origin()) {
             outbound.reply(&approver_only_msg(refusal));
             return;
         }
@@ -3537,7 +3561,7 @@ impl IpcServer {
             });
             return;
         }
-        let requester = requester_window(&self.registry, &state.origin);
+        let requester = requester_window(&self.registry, state.origin());
         let sender = sender_from(requester.as_ref(), state);
         let envelope = compose_message_envelope(&envelope_from(requester.as_ref()), &id, text);
         if !entry.inbox().fits(&envelope) {
@@ -3606,7 +3630,7 @@ impl IpcServer {
             return;
         }
         let interrupt = self.window_interrupt(&entry).await;
-        let Some(means) = interrupt_means(interrupt, &state.origin) else {
+        let Some(means) = interrupt_means(interrupt, state.origin()) else {
             outbound.reply(&interrupt_unsupported_msg());
             return;
         };
@@ -3731,7 +3755,7 @@ impl IpcServer {
             return;
         }
 
-        let requester = requester_window(&self.registry, &state.origin);
+        let requester = requester_window(&self.registry, state.origin());
         let id = handoff::new_envelope_id();
         let envelope =
             compose_identified_envelope(&envelope_from(requester.as_ref()), &id, &reference, &note);
@@ -3872,7 +3896,7 @@ impl IpcServer {
                 match control::policy_gate(
                     live_policy::policy_source(&policy_snapshot),
                     DestructiveTool::SendHandoff,
-                    &state.origin,
+                    state.origin(),
                     None,
                 ) {
                     Ok(GateVerdict::Allow) => {}
@@ -3907,14 +3931,14 @@ impl IpcServer {
                 let job = ProfileHandoffOpen {
                     planned,
                     provenance: WindowProvenance {
-                        opener: opener_of(&state.origin),
+                        opener: opener_of(state.origin()),
                         ..WindowProvenance::default()
                     },
                     outbound: Arc::clone(outbound),
                     registry: Arc::clone(&self.registry),
                     broker: Arc::clone(&self.broker),
                     config: self.config.clone(),
-                    origin: state.origin.clone(),
+                    origin: state.origin().clone(),
                     caller_id: state.caller.id,
                     closed: RequestWatch::connection_only(&self.registry, outbound, state).left,
                     approval_text: format!("{}\n{}", description.text(), envelope.text),
@@ -4009,13 +4033,12 @@ impl IpcServer {
             }
         };
 
-        match &state.origin {
+        match state.origin() {
             // Re-claiming the same window is the same statement twice, not a
             // conflict: a client that reconnects its own claim must not have
             // to track whether it already made it.
             RequestOrigin::Window(claimed) if claimed == entry.window_id() => {}
             RequestOrigin::External if state.caller.settle_window(entry.window_id()) => {
-                state.origin = state.caller.origin();
                 state.mcp_claim = Some(entry.claim_mcp_connection());
             }
             _ => {
@@ -4060,14 +4083,14 @@ impl IpcServer {
             ));
             return;
         }
-        if let RequestOrigin::Window(_) = state.origin {
+        if let RequestOrigin::Window(_) = state.origin() {
             outbound.reply(&error_msg(
                 "invalid_state",
                 "this connection has already claimed a different origin",
             ));
             return;
         }
-        state.origin = RequestOrigin::Approver;
+        state.approver = true;
         // The connection's side, not this request's: what the ledger pushes
         // answers no request.
         let sink: Arc<dyn ApproverSink> = Arc::<ConnectionOutbound>::clone(outbound.connection());
@@ -4108,7 +4131,7 @@ impl IpcServer {
             config: &self.config,
             broker: &self.broker,
             registry: &self.registry,
-            origin: &state.origin,
+            origin: state.origin(),
             caller_id: state.caller.id,
             policy: &self.policy,
         }
@@ -5068,10 +5091,19 @@ mod credentialed {
     impl LineageGate {
         pub(super) fn new(max_windows: usize) -> Self {
             let daemon_pid = std::process::id();
+            let read = yagura_os::process_start(daemon_pid);
+            let daemon_start = read.as_ref().ok().and_then(Option::clone);
+            if daemon_start.is_none() {
+                tracing::warn!(
+                    error = read.err().map(tracing::field::display),
+                    "the daemon could not read its own start; requests in a window's name \
+                     that the daemon relays itself are refused"
+                );
+            }
             Self {
                 reads: Semaphore::new(max_windows),
                 daemon_pid,
-                daemon_start: yagura_os::process_start(daemon_pid).ok().flatten(),
+                daemon_start,
             }
         }
 
@@ -5098,7 +5130,11 @@ mod credentialed {
             peer: Option<&PeerProcess>,
         ) -> Result<Credentialed, LineageRefused> {
             let Some(peer) = peer else {
-                return Err(refuse(&entry, "the requester's process could not be named"));
+                return Err(refuse(
+                    &entry,
+                    None,
+                    "the requester's process could not be named",
+                ));
             };
             if self.is_daemon(peer) {
                 return Ok(Credentialed(entry));
@@ -5106,11 +5142,16 @@ mod credentialed {
             let Some((anchor_pid, anchor_start)) = entry.session().child_anchor() else {
                 return Err(refuse(
                     &entry,
+                    Some(peer),
                     "the window's holder named no running child with its start",
                 ));
             };
             let Ok(_permit) = self.reads.acquire().await else {
-                return Err(refuse(&entry, "the judgment could not be admitted"));
+                return Err(refuse(
+                    &entry,
+                    Some(peer),
+                    "the judgment could not be admitted",
+                ));
             };
             let (pid, start) = (peer.pid, peer.start.clone());
             let daemon_pid = self.daemon_pid;
@@ -5127,21 +5168,36 @@ mod credentialed {
             match verdict {
                 Ok(LineageVerdict::Member) => Ok(Credentialed(entry)),
                 Ok(LineageVerdict::NotMember(refusal)) => {
-                    Err(refuse(&entry, refusal_reason(refusal)))
+                    Err(refuse(&entry, Some(peer), refusal_reason(refusal)))
                 }
-                Err(_) => Err(refuse(&entry, "the judgment did not finish")),
+                Err(_) => Err(refuse(&entry, Some(peer), "the judgment did not finish")),
             }
         }
     }
 
-    /// Logs a refusal of a request in `entry`'s name for `reason`: the first
-    /// for the window as a warning, every later one at debug.
-    fn refuse(entry: &WindowEntry, reason: &str) -> LineageRefused {
+    /// Logs a refusal of a request in `entry`'s name from `peer` for
+    /// `reason`: the first for the window as a warning, every later one at
+    /// debug. Each names the peer's id and executable, when captured.
+    fn refuse(entry: &WindowEntry, peer: Option<&PeerProcess>, reason: &str) -> LineageRefused {
         let window_id = entry.window_id();
+        let peer_pid = peer.map(|peer| peer.pid);
+        let peer_executable = peer.map(|peer| tracing::field::display(peer.executable.display()));
         if entry.first_lineage_note() {
-            tracing::warn!(window_id, reason, "{LINEAGE_REFUSED}");
+            tracing::warn!(
+                window_id,
+                peer_pid,
+                peer_executable,
+                reason,
+                "{LINEAGE_REFUSED}"
+            );
         } else {
-            tracing::debug!(window_id, reason, "{LINEAGE_REFUSED}");
+            tracing::debug!(
+                window_id,
+                peer_pid,
+                peer_executable,
+                reason,
+                "{LINEAGE_REFUSED}"
+            );
         }
         LineageRefused
     }
@@ -6797,7 +6853,7 @@ mod request_watch {
             Self::watching(
                 registry,
                 outbound,
-                &state.origin,
+                state.origin(),
                 state.closed.0.subscribe(),
                 Watching {
                     turn_end: false,
@@ -6823,7 +6879,7 @@ mod request_watch {
             Self::watching(
                 registry,
                 outbound,
-                &state.origin,
+                state.origin(),
                 state.closed.0.subscribe(),
                 Watching {
                     turn_end: true,
@@ -6843,7 +6899,7 @@ mod request_watch {
             Self::watching(
                 registry,
                 outbound,
-                &state.origin,
+                state.origin(),
                 state.closed.0.subscribe(),
                 Watching {
                     turn_end: true,
@@ -7111,7 +7167,7 @@ fn sender_from(requester: Option<&WindowInfo>, state: &ConnectionState) -> Sende
 
 /// [`sender_from`] for a request that composes no envelope.
 fn sender_of(registry: &WindowRegistry, state: &ConnectionState) -> Sender {
-    sender_from(requester_window(registry, &state.origin).as_ref(), state)
+    sender_from(requester_window(registry, state.origin()).as_ref(), state)
 }
 
 /// Turns the requester's registry record into the envelope's `from` value.
@@ -7264,7 +7320,11 @@ mod tests {
             .expect("this process's start is read")
             .expect("this process runs");
         VerifiedPeer {
-            process: Some(PeerProcess { pid, start }),
+            process: Some(PeerProcess {
+                pid,
+                start,
+                executable: std::env::current_exe().expect("this process's executable is read"),
+            }),
         }
     }
 

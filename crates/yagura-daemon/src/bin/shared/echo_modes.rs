@@ -5,10 +5,14 @@
 //! there.
 
 use std::io::{self, Read, Write};
-use std::process::{Command, Stdio};
 use std::sync::Arc;
 
 use crate::composer_paint::{ComposerStyle, Output, Reflect, Scan, accept_byte, spawn_reflector};
+
+#[path = "../../../../yagura-test-support/fixtures/hex_argv.rs"]
+mod hex_argv;
+
+use hex_argv::{decode_hex, spawn_argv};
 
 /// Writes every byte read straight back out, flushing each read so a line
 /// still being typed shows at once.
@@ -64,37 +68,6 @@ pub(crate) fn echo_spawning_until_end_of_input() -> io::Result<()> {
     }
 
     Ok(())
-}
-
-fn decode_hex(digits: &[u8]) -> Vec<u8> {
-    let value = |digit: u8| match digit {
-        b'0'..=b'9' => digit - b'0',
-        _ => digit - b'a' + 10,
-    };
-    let (pairs, _) = digits.as_chunks::<2>();
-    pairs
-        .iter()
-        .map(|[high, low]| (value(*high) << 4) | value(*low))
-        .collect()
-}
-
-/// Starts `decoded` (one argv element per line), reaped in the background.
-// Test-only fixture, not the daemon's production spawn path: it starts the child its
-// input names. Only `echo_child` runs it.
-#[allow(dead_code, clippy::disallowed_methods)]
-fn spawn_argv(decoded: &[u8]) {
-    let text = String::from_utf8_lossy(decoded);
-    let mut argv = text.lines();
-    let Some(program) = argv.next() else { return };
-    let spawned = Command::new(program)
-        .args(argv)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn();
-    if let Ok(mut child) = spawned {
-        std::thread::spawn(move || child.wait());
-    }
 }
 
 /// Accumulates input in a painted composer region and echoes it as one line

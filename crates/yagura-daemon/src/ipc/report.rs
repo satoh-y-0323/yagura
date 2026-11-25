@@ -1111,7 +1111,7 @@ pub(super) async fn handle_send_report(
     state: &ConnectionState,
     body: ReportBody,
 ) {
-    let RequestOrigin::Window(window_id) = &state.origin else {
+    let RequestOrigin::Window(window_id) = state.origin() else {
         outbound.reply(&not_a_window_msg());
         return;
     };
@@ -1318,7 +1318,7 @@ pub(super) async fn handle_wait_for_report(
     state: &mut ConnectionState,
     timeout_sec: u64,
 ) {
-    let RequestOrigin::Window(window_id) = &state.origin else {
+    let RequestOrigin::Window(window_id) = state.origin() else {
         outbound.reply(&not_a_window_msg());
         return;
     };

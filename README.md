@@ -166,7 +166,8 @@ Google. If you registered yagura with Antigravity CLI before, remove it as descr
   not instructions from you. yagura delivers them as such.
 - A window's id and token let its hooks and MCP bridge speak for it, and only from inside the
   window's process tree: a program outside it that reads them cannot (on Windows, a program
-  running as you can still get around this; see
+  running as you can still get around this, WSL windows are not kept apart from each other, and
+  on Linux this relies on `kernel.yama.ptrace_scope` being 1 or higher; see
   [Limits of the process tree check](docs/mcp-setup.md#limits-of-the-process-tree-check)). In windows of the bundled
   Claude Code and GitHub Copilot CLI profiles, and of the WSL Muse Code profile, they reach only
   those, so a CLI that one of the window's tools starts cannot speak for the window. In a Codex CLI

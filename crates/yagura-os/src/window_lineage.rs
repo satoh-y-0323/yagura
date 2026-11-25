@@ -86,6 +86,157 @@ pub trait CreatorReads {
     fn creation_and_creator(&mut self, pid: u32) -> std::io::Result<Option<(u64, u32)>>;
 }
 
+/// The one read of a process the Unix walk up the parents makes, asked of a
+/// child before and after its parent.
+pub trait ParentReads {
+    /// The `(ppid, start, sid)` of the process `pid`, all of one reading;
+    /// `None` when no process has that id.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the process is there but cannot be read.
+    fn parent_start_and_session(
+        &mut self,
+        pid: u32,
+    ) -> std::io::Result<Option<(u32, ProcessStart, u32)>>;
+}
+
+/// How one operating system's walk up a lineage reads a process and checks
+/// a link; [`walk`] is the one order both walks follow.
+trait LinkReads {
+    /// What one read of a process gives.
+    type Reading;
+    /// Reads the process `pid`; `None` when no process has that id.
+    fn read(&mut self, pid: u32) -> std::io::Result<Option<Self::Reading>>;
+    /// The step `reading` of the process `pid` puts in the lineage.
+    fn step(pid: u32, reading: &Self::Reading) -> Step;
+    /// The id to read as the parent of `child`; `None` when there is none to
+    /// follow.
+    fn parent(child: u32, reading: &Self::Reading) -> Option<u32>;
+    /// Whether the process read as `parent` is the real parent of `child`,
+    /// read as `child_reading` before it, or why not.
+    fn link(
+        &mut self,
+        child: u32,
+        child_reading: &Self::Reading,
+        parent: &Self::Reading,
+    ) -> Result<(), LineageEnd>;
+}
+
+/// Walks from `pid` up through `reads` to the anchor, its session, the
+/// daemon or the most steps looked at; each parent is stacked only once its
+/// link to the child holds.
+fn walk<L: LinkReads>(reads: &mut L, pid: u32, anchor_pid: u32, daemon_pid: u32) -> Lineage {
+    let mut steps = Vec::new();
+    let Ok(Some(mut child_reading)) = reads.read(pid) else {
+        return Lineage::new(steps, Some(LineageEnd::Unanswered));
+    };
+    steps.push(L::step(pid, &child_reading));
+    let mut child = pid;
+    while steps.len() <= MOST_STEPS {
+        if steps
+            .last()
+            .is_some_and(|step| ends_search(step, anchor_pid, daemon_pid))
+        {
+            return Lineage::new(steps, None);
+        }
+        let Some(parent) = L::parent(child, &child_reading) else {
+            return Lineage::new(steps, Some(LineageEnd::Top));
+        };
+        let parent_reading = match reads.read(parent) {
+            Ok(Some(read)) => read,
+            Ok(None) => return Lineage::new(steps, Some(LineageEnd::Top)),
+            Err(_) => return Lineage::new(steps, Some(LineageEnd::Unanswered)),
+        };
+        if let Err(end) = reads.link(child, &child_reading, &parent_reading) {
+            return Lineage::new(steps, Some(end));
+        }
+        steps.push(L::step(parent, &parent_reading));
+        child = parent;
+        child_reading = parent_reading;
+    }
+    Lineage::new(steps, None)
+}
+
+struct Creators<'a, R: ?Sized>(&'a mut R);
+
+impl<R: CreatorReads + ?Sized> LinkReads for Creators<'_, R> {
+    type Reading = (u64, u32);
+    fn read(&mut self, pid: u32) -> std::io::Result<Option<Self::Reading>> {
+        self.0.creation_and_creator(pid)
+    }
+    fn step(pid: u32, reading: &Self::Reading) -> Step {
+        creator_step(pid, reading.0)
+    }
+    fn parent(child: u32, reading: &Self::Reading) -> Option<u32> {
+        (reading.1 != 0 && reading.1 != child).then_some(reading.1)
+    }
+    fn link(
+        &mut self,
+        _: u32,
+        child: &Self::Reading,
+        parent: &Self::Reading,
+    ) -> Result<(), LineageEnd> {
+        if windows_link_holds(parent.0, child.0) {
+            Ok(())
+        } else {
+            Err(LineageEnd::Inverted)
+        }
+    }
+}
+
+struct Parents<'a, R: ?Sized>(&'a mut R);
+
+impl<R: ParentReads + ?Sized> LinkReads for Parents<'_, R> {
+    type Reading = (u32, ProcessStart, u32);
+    fn read(&mut self, pid: u32) -> std::io::Result<Option<Self::Reading>> {
+        self.0.parent_start_and_session(pid)
+    }
+    fn step(pid: u32, reading: &Self::Reading) -> Step {
+        Step {
+            pid,
+            start: reading.1.clone(),
+            sid: Some(reading.2),
+        }
+    }
+    fn parent(_: u32, reading: &Self::Reading) -> Option<u32> {
+        // PID 1 takes in what loses its parent, so it is no parent of the
+        // child's own.
+        (reading.0 > 1).then_some(reading.0)
+    }
+    fn link(
+        &mut self,
+        child: u32,
+        before: &Self::Reading,
+        _: &Self::Reading,
+    ) -> Result<(), LineageEnd> {
+        match self.0.parent_start_and_session(child) {
+            Ok(Some(after)) if unix_link_holds((before.0, &before.1), (after.0, &after.1)) => {
+                Ok(())
+            }
+            Ok(Some(_)) => Err(LineageEnd::Reused),
+            Ok(None) | Err(_) => Err(LineageEnd::Unanswered),
+        }
+    }
+}
+
+/// Unix: walks from the process `pid` up its parents through `reads`, to
+/// the anchor `anchor_pid` or its session, the daemon `daemon_pid` or the
+/// most steps looked at, whichever comes first. Each child is read again
+/// after its parent; one that reads otherwise ends the walk
+/// [`LineageEnd::Reused`], unstacked. A ppid of 0 or 1 ends it
+/// [`LineageEnd::Top`]. Never fails: whatever cannot be read ends it
+/// [`LineageEnd::Unanswered`].
+#[must_use]
+pub fn walk_parents<R: ParentReads + ?Sized>(
+    reads: &mut R,
+    pid: u32,
+    anchor_pid: u32,
+    daemon_pid: u32,
+) -> Lineage {
+    walk(&mut Parents(reads), pid, anchor_pid, daemon_pid)
+}
+
 /// Windows: walks from the process `pid` up its creators through `reads`,
 /// to the anchor `anchor_pid`, the daemon `daemon_pid` or the most steps
 /// looked at, whichever comes first. A creator id that now names a process
@@ -98,36 +249,7 @@ pub fn walk_creators<R: CreatorReads + ?Sized>(
     anchor_pid: u32,
     daemon_pid: u32,
 ) -> Lineage {
-    let mut steps = Vec::new();
-    let Ok(Some((mut child_created, mut creator))) = reads.creation_and_creator(pid) else {
-        return Lineage::new(steps, Some(LineageEnd::Unanswered));
-    };
-    steps.push(creator_step(pid, child_created));
-    let mut child = pid;
-    while steps.len() <= MOST_STEPS {
-        if steps
-            .last()
-            .is_some_and(|step| ends_search(step, anchor_pid, daemon_pid))
-        {
-            return Lineage::new(steps, None);
-        }
-        if creator == 0 || creator == child {
-            return Lineage::new(steps, Some(LineageEnd::Top));
-        }
-        let (parent_created, parent_creator) = match reads.creation_and_creator(creator) {
-            Ok(Some(read)) => read,
-            Ok(None) => return Lineage::new(steps, Some(LineageEnd::Top)),
-            Err(_) => return Lineage::new(steps, Some(LineageEnd::Unanswered)),
-        };
-        if !windows_link_holds(parent_created, child_created) {
-            return Lineage::new(steps, Some(LineageEnd::Inverted));
-        }
-        steps.push(creator_step(creator, parent_created));
-        child = creator;
-        child_created = parent_created;
-        creator = parent_creator;
-    }
-    Lineage::new(steps, None)
+    walk(&mut Creators(reads), pid, anchor_pid, daemon_pid)
 }
 
 fn creator_step(pid: u32, created: u64) -> Step {
@@ -228,8 +350,8 @@ pub fn judge_lineage(
     NotMember(match lineage.end {
         Some(LineageEnd::Top) => Refusal::NoParent,
         Some(LineageEnd::Inverted) => Refusal::Inverted,
-        // Not in the design: a link that did not read the same twice is
-        // taken as no reading of it.
+        // A link that did not read the same twice gives no reading of the
+        // parent, as one that could not be read does.
         Some(LineageEnd::Reused | LineageEnd::Unanswered) => Refusal::Unreadable,
         None if lineage.steps.len() > MOST_STEPS => Refusal::TooDeep,
         None => Refusal::Unreadable,
@@ -292,54 +414,23 @@ mod platform {
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod platform {
-    use super::{Lineage, LineageEnd, MOST_STEPS, Step, ends_search, unix_link_holds};
-    use crate::process_identity::{ProcessFacts, process_facts};
+    use super::{Lineage, ParentReads, walk_parents};
+    use crate::ProcessStart;
+    use crate::process_identity::process_facts;
 
-    fn step_of(pid: u32, facts: &ProcessFacts) -> Step {
-        Step {
-            pid,
-            start: facts.start.clone(),
-            sid: Some(facts.sid),
+    struct OsReads;
+
+    impl ParentReads for OsReads {
+        fn parent_start_and_session(
+            &mut self,
+            pid: u32,
+        ) -> std::io::Result<Option<(u32, ProcessStart, u32)>> {
+            Ok(process_facts(pid)?.map(|facts| (facts.ppid, facts.start, facts.sid)))
         }
     }
 
-    /// Reads the child, then its parent, then the child again: the parent
-    /// read is the real one only when the child reads the same both times.
     pub(super) fn read_lineage(pid: u32, anchor_pid: u32, daemon_pid: u32) -> Lineage {
-        let mut steps = Vec::new();
-        let Ok(Some(mut before)) = process_facts(pid) else {
-            return Lineage::new(steps, Some(LineageEnd::Unanswered));
-        };
-        steps.push(step_of(pid, &before));
-        let mut child = pid;
-        while steps.len() <= MOST_STEPS {
-            if steps
-                .last()
-                .is_some_and(|step| ends_search(step, anchor_pid, daemon_pid))
-            {
-                return Lineage::new(steps, None);
-            }
-            // PID 1 takes in what loses its parent, so it is no parent of
-            // the child's own.
-            if before.ppid <= 1 {
-                return Lineage::new(steps, Some(LineageEnd::Top));
-            }
-            let parent = match process_facts(before.ppid) {
-                Ok(Some(facts)) => facts,
-                Ok(None) => return Lineage::new(steps, Some(LineageEnd::Top)),
-                Err(_) => return Lineage::new(steps, Some(LineageEnd::Unanswered)),
-            };
-            let Ok(Some(after)) = process_facts(child) else {
-                return Lineage::new(steps, Some(LineageEnd::Unanswered));
-            };
-            if !unix_link_holds((before.ppid, &before.start), (after.ppid, &after.start)) {
-                return Lineage::new(steps, Some(LineageEnd::Reused));
-            }
-            child = before.ppid;
-            steps.push(step_of(child, &parent));
-            before = parent;
-        }
-        Lineage::new(steps, None)
+        walk_parents(&mut OsReads, pid, anchor_pid, daemon_pid)
     }
 }
 

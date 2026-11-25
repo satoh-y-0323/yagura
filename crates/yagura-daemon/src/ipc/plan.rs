@@ -208,8 +208,8 @@ pub(super) async fn handle_create_plan(
     }
 
     let issued = match ticket {
-        Some(number) => plan_permit::issue_create_from_ticket(&state.origin, registry, number),
-        None => plan_permit::issue_create(&state.origin, registry),
+        Some(number) => plan_permit::issue_create_from_ticket(state.origin(), registry, number),
+        None => plan_permit::issue_create(state.origin(), registry),
     };
     let create_permit = match issued {
         Ok(permit) => permit,
@@ -321,7 +321,7 @@ pub(super) async fn handle_update_plan(
         outbound.reply(&unsupported_msg());
         return;
     }
-    if matches!(state.origin, RequestOrigin::External) {
+    if matches!(state.origin(), RequestOrigin::External) {
         outbound.reply(&auth_failed_msg());
         return;
     }
@@ -377,7 +377,7 @@ pub(super) async fn handle_update_plan(
     };
 
     let guard = ledger.locks().lock(&plan_id).await;
-    let origin = state.origin.clone();
+    let origin = state.origin().clone();
     let registry = Arc::clone(registry);
     let result = ledger
         .with_store(move |store| -> Result<PlanDetail, UpdateOutcome> {
@@ -474,14 +474,14 @@ pub(super) async fn handle_get_plan(
         outbound.reply(&unsupported_msg());
         return;
     }
-    if matches!(state.origin, RequestOrigin::External) {
+    if matches!(state.origin(), RequestOrigin::External) {
         outbound.reply(&auth_failed_msg());
         return;
     }
 
     let (roles_result, _profiles) = load_role_and_profile_state_blocking(config, permits).await;
 
-    let origin = state.origin.clone();
+    let origin = state.origin().clone();
     let registry = Arc::clone(registry);
     let result = ledger
         .with_store(move |store| -> Result<PlanDetail, ReadOutcome> {
@@ -519,11 +519,11 @@ pub(super) async fn handle_list_plans(
         outbound.reply(&unsupported_msg());
         return;
     }
-    if matches!(state.origin, RequestOrigin::External) {
+    if matches!(state.origin(), RequestOrigin::External) {
         outbound.reply(&auth_failed_msg());
         return;
     }
-    let origin = state.origin.clone();
+    let origin = state.origin().clone();
     let result = ledger
         .with_store(move |store| list_visible_plans(store, &origin))
         .await;
@@ -676,7 +676,7 @@ pub(super) async fn handle_delete_plan(
         outbound.reply(&unsupported_msg());
         return;
     }
-    if matches!(state.origin, RequestOrigin::External) {
+    if matches!(state.origin(), RequestOrigin::External) {
         outbound.reply(&auth_failed_msg());
         return;
     }
@@ -694,7 +694,7 @@ pub(super) async fn handle_delete_plan(
     }
 
     let guard = ledger.locks().lock(&plan_id).await;
-    let origin = state.origin.clone();
+    let origin = state.origin().clone();
     let registry = Arc::clone(registry);
     let result = ledger
         .with_store(move |store| -> Result<Option<i64>, ChangeOutcome> {
@@ -830,7 +830,7 @@ pub(super) async fn handle_set_task_assignment(
         outbound.reply(&unsupported_msg());
         return;
     }
-    if let Err(refusal) = control::require_approver(&state.origin) {
+    if let Err(refusal) = control::require_approver(state.origin()) {
         outbound.reply(&approver_only_msg(refusal));
         return;
     }
@@ -863,7 +863,7 @@ pub(super) async fn handle_set_task_assignment(
     }
 
     let guard = ledger.locks().lock(&plan_id).await;
-    let origin = state.origin.clone();
+    let origin = state.origin().clone();
     let registry = Arc::clone(registry);
     let task_id_for_write = task_id.clone();
     let result = ledger
@@ -908,7 +908,7 @@ pub(super) async fn handle_clear_task_assignment(
         outbound.reply(&unsupported_msg());
         return;
     }
-    if let Err(refusal) = control::require_approver(&state.origin) {
+    if let Err(refusal) = control::require_approver(state.origin()) {
         outbound.reply(&approver_only_msg(refusal));
         return;
     }
@@ -928,7 +928,7 @@ pub(super) async fn handle_clear_task_assignment(
     let (roles_result, _profiles) = load_role_and_profile_state_blocking(config, permits).await;
 
     let guard = ledger.locks().lock(&plan_id).await;
-    let origin = state.origin.clone();
+    let origin = state.origin().clone();
     let registry = Arc::clone(registry);
     let task_id_for_write = task_id.clone();
     let result = ledger
@@ -974,7 +974,7 @@ pub(super) async fn handle_set_plan_owner(
         outbound.reply(&unsupported_msg());
         return;
     }
-    if let Err(refusal) = control::require_approver(&state.origin) {
+    if let Err(refusal) = control::require_approver(state.origin()) {
         outbound.reply(&approver_only_msg(refusal));
         return;
     }
@@ -994,7 +994,7 @@ pub(super) async fn handle_set_plan_owner(
     let (roles_result, _profiles) = load_role_and_profile_state_blocking(config, permits).await;
 
     let guard = ledger.locks().lock(&plan_id).await;
-    let origin = state.origin.clone();
+    let origin = state.origin().clone();
     let registry = Arc::clone(registry);
     let result = ledger
         .with_store(move |store| -> Result<PlanDetail, UpdateOutcome> {
@@ -1058,7 +1058,7 @@ pub(super) async fn handle_approve_plan(
         outbound.reply(&unsupported_msg());
         return;
     }
-    if let Err(refusal) = control::require_approver(&state.origin) {
+    if let Err(refusal) = control::require_approver(state.origin()) {
         outbound.reply(&approver_only_msg(refusal));
         return;
     }
@@ -1078,7 +1078,7 @@ pub(super) async fn handle_approve_plan(
     let (roles_result, _profiles) = load_role_and_profile_state_blocking(config, permits).await;
 
     let guard = ledger.locks().lock(&plan_id).await;
-    let origin = state.origin.clone();
+    let origin = state.origin().clone();
     let registry_for_store = Arc::clone(registry);
     let result = ledger
         .with_store(move |store| -> Result<ApproveResult, ApproveWriteOutcome> {
@@ -1216,7 +1216,7 @@ pub(super) async fn handle_mark_plan_seen(
         outbound.reply(&unsupported_msg());
         return;
     }
-    if let Err(refusal) = control::require_approver(&state.origin) {
+    if let Err(refusal) = control::require_approver(state.origin()) {
         outbound.reply(&approver_only_msg(refusal));
         return;
     }
@@ -1236,7 +1236,7 @@ pub(super) async fn handle_mark_plan_seen(
     let (roles_result, _profiles) = load_role_and_profile_state_blocking(config, permits).await;
 
     let guard = ledger.locks().lock(&plan_id).await;
-    let origin = state.origin.clone();
+    let origin = state.origin().clone();
     let registry = Arc::clone(registry);
     let result = ledger
         .with_store(
@@ -1331,7 +1331,7 @@ pub(super) async fn handle_list_roles(
     outbound: &Arc<Outbound>,
     state: &super::ConnectionState,
 ) {
-    if matches!(state.origin, RequestOrigin::External) {
+    if matches!(state.origin(), RequestOrigin::External) {
         outbound.reply(&auth_failed_msg());
         return;
     }
@@ -1384,7 +1384,7 @@ pub(super) async fn handle_save_roles(
     roles: Vec<RoleEntry>,
     default_role: Option<String>,
 ) {
-    if let Err(refusal) = control::require_approver(&state.origin) {
+    if let Err(refusal) = control::require_approver(state.origin()) {
         outbound.reply(&approver_only_msg(refusal));
         return;
     }

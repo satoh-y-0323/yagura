@@ -29,7 +29,7 @@ pub(super) fn handle_get_approval_settings(
     outbound: &Arc<Outbound>,
     state: &ConnectionState,
 ) {
-    if let Err(refusal) = control::require_approver(&state.origin) {
+    if let Err(refusal) = control::require_approver(state.origin()) {
         outbound.reply(&approver_only_msg(refusal));
         return;
     }
@@ -48,7 +48,7 @@ pub(super) async fn handle_set_auto_approve(
     tool: String,
     auto_approve: bool,
 ) {
-    if let Err(refusal) = control::require_approver(&state.origin) {
+    if let Err(refusal) = control::require_approver(state.origin()) {
         outbound.reply(&approver_only_msg(refusal));
         return;
     }
@@ -76,7 +76,7 @@ pub(super) async fn handle_set_plan_approval_required(
     state: &ConnectionState,
     required: bool,
 ) {
-    if let Err(refusal) = control::require_approver(&state.origin) {
+    if let Err(refusal) = control::require_approver(state.origin()) {
         outbound.reply(&approver_only_msg(refusal));
         return;
     }
