@@ -117,6 +117,10 @@ going to change, and when you are done restore it and compare it byte for byte w
   variables to keep (Muse Code's `managed_hooks_env_vars`, or a server's `env`), and print the
   hook's environment once to confirm it. A profile in `mode = "launch"` avoids the question: its
   hooks and bridge are handed the credentials file's path in their arguments.
+- The hooks and the bridge must reach the daemon from inside the window's process tree, as the
+  CLI's descendants. A hook that a long-lived server of the CLI's own runs, or anything else
+  started outside the window, is refused whatever credentials it carries (see
+  [Limits of the process tree check](mcp-setup.md#limits-of-the-process-tree-check)).
 - A CLI's own launcher can lose arguments: Muse Code's Windows `muse.cmd` runs PowerShell 5.1,
   which drops `"` and `--`. Check what reaches the CLI itself, not what you passed, and record the
   result as a limit with guidance rather than leave the option to fail at launch (see the last

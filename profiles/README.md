@@ -987,6 +987,18 @@ mode = "launch"
   [Arguments for starting a window only](#arguments-for-starting-a-window-only)),
   which is for a start-up flag rather than for the credentials.
 
+**Holding the credentials is not enough, in either mode.** The daemon takes a
+request in a window's name only when it comes from the window's process tree:
+the window's command and the processes it starts, and on macOS and Linux the
+processes in the session that command leads. A process outside the tree that
+reads the window's environment, or its `launch` file, cannot claim the window,
+and a hook written to read the credentials itself and send them from outside
+the window is refused as well. A CLI started by one of the window's tools is
+inside the tree, so in `env` mode it still reports as the window. A hook that
+runs after the window's command has ended -- the CLI, or the shell the profile
+starts it through -- is refused too. See
+[Limits of the process tree check](../docs/mcp-setup.md#limits-of-the-process-tree-check).
+
 A `[credentials]` table with another key, or a `mode` other than `"env"` and
 `"launch"`, or `{credentials_file}` in a profile whose mode is not `"launch"`,
 excludes the profile with a warning.
@@ -1307,6 +1319,9 @@ The same hooks carry the doors a CLI reads its inbox through,
 `--report-session` (see [Delivery](#delivery)). A hook can instead call
 `yagura-daemon --hook <profile-id> <Event>`, which does whatever the
 profile's [`[hook_events]`](#hook-events) table says for that event.
+A door speaks for the window only while it runs in the window's process
+tree, so a hook that runs after the window's command has ended, or that is
+started so that it leaves the tree, is refused (see [Credentials](#credentials)).
 It follows the `[mcp]` rules above -- the same `args`, `config_file` and
 `config_dir` keys, the same settings directory, argv order and drop rules --
 with these differences:

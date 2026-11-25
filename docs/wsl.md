@@ -238,6 +238,10 @@ Fill the field in when the starting directory matters.
   With the Linux build of Codex CLI installed through nvm, a window opened from `wsl-codex-cli`
   identified itself to the daemon and called a yagura tool; a window opened from `wsl-claude-code`
   identified itself as well.
+- **WSL windows are not kept apart from each other.** The daemon takes a window's hooks and bridge
+  as the window's only when they run in its process tree, and a process inside WSL can place a
+  Windows program in another WSL window's tree; see
+  [Limits of the process tree check](mcp-setup.md#limits-of-the-process-tree-check).
 
 ## What Does Work Like Any Other Window
 

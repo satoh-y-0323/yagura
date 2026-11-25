@@ -11,6 +11,8 @@ provided yet, or to work on yagura itself.
   [Tauri's prerequisites](https://v2.tauri.app/start/prerequisites/). On Windows this is the
   WebView2 runtime (preinstalled on Windows 11); on Linux it includes the WebKitGTK development
   packages.
+- On Linux, a kernel and system yagura supports, as listed under [Install](../README.md#install):
+  a build runs on an older kernel, but its daemon does not start there.
 
 ## Build Steps
 

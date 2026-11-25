@@ -652,11 +652,13 @@ value, repeated or not a registration name is left to the command line, as
 one it cannot parse.
 
 For the event to authenticate and be attributed to the right window, the hook
-must either run somewhere inside that window's child process tree, where it
-inherits the `YAGURA_STATUS_TOKEN` and `YAGURA_WINDOW_ID` environment variables
-the daemon injected when it spawned that window, or be handed the window's
-credentials file with `--credentials`; `--emit-status` forwards the pair along
-with the report (see [StatusEvent Authentication](../../../docs/mcp-setup.md#statusevent-authentication)).
+must run inside that window's child process tree, and either inherit the
+`YAGURA_STATUS_TOKEN` and `YAGURA_WINDOW_ID` environment variables the daemon
+injected when it spawned that window or be handed the window's credentials file
+with `--credentials`; `--emit-status` forwards the pair along with the report
+(see [StatusEvent Authentication](../../../docs/mcp-setup.md#statusevent-authentication)).
+A hook started outside the tree is refused even with the window's credentials
+(see [Limits of the process tree check](../../../docs/mcp-setup.md#limits-of-the-process-tree-check)).
 
 ```
 yagura-daemon --hook <profile-id> <Event> [--for-instance <server>] [--credentials <path>]

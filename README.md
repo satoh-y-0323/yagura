@@ -79,7 +79,10 @@ allow it.
 | Other systems, Intel Macs | Build from source -- see [docs/building.md](docs/building.md). |
 
 yagura supports the operating system releases their vendors still update: macOS 15 (Sequoia) or later,
-and on Linux WebKitGTK 2.50 or later, as Ubuntu 22.04 and later ship it. A release that its vendor
+and on Linux WebKitGTK 2.50 or later, as Ubuntu 22.04 and later ship it, and Linux kernel 6.5 or
+later. Ubuntu 22.04 therefore needs its hardware enablement (HWE) kernel, and Debian 12, whose
+kernel is 6.1, is not supported. On an older kernel the daemon does not start, and the GUI starts
+without it and says why. A release that its vendor
 stops updating is dropped in the next yagura release. Keep the system and its web engine (Safari on
 macOS, WebKitGTK on Linux) up to date: yagura draws its window with them.
 
@@ -161,7 +164,10 @@ Google. If you registered yagura with Antigravity CLI before, remove it as descr
   command line; use the CLI's own login, or an environment variable set outside yagura, instead.
 - Messages one agent sends another -- handoffs, chat and reports -- are data from another agent,
   not instructions from you. yagura delivers them as such.
-- A window's id and token let its hooks and MCP bridge speak for it. In windows of the bundled
+- A window's id and token let its hooks and MCP bridge speak for it, and only from inside the
+  window's process tree: a program outside it that reads them cannot (on Windows, a program
+  running as you can still get around this; see
+  [Limits of the process tree check](docs/mcp-setup.md#limits-of-the-process-tree-check)). In windows of the bundled
   Claude Code and GitHub Copilot CLI profiles, and of the WSL Muse Code profile, they reach only
   those, so a CLI that one of the window's tools starts cannot speak for the window. In a Codex CLI
   window the tools Codex runs get them empty. Other windows -- Grok Build, Muse Code outside WSL, a
