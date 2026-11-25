@@ -92,6 +92,22 @@ fn main() -> anyhow::Result<()> {
                 }
             }
 
+            // A lone Alt would put the window into its menu mode, where it
+            // answers the webview nothing until the next key or click.
+            #[cfg(windows)]
+            if let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) {
+                match window.hwnd() {
+                    Ok(hwnd) => {
+                        if let Err(error) =
+                            yagura_os::webview::keep_lone_alt_out_of_menu_mode(hwnd.0 as isize)
+                        {
+                            eprintln!("{error}");
+                        }
+                    }
+                    Err(error) => eprintln!("failed to reach the main window's handle: {error}"),
+                }
+            }
+
             daemon_supervisor::install(app.handle(), supervisor_pool, &startup);
             app.manage(startup);
             Ok(())
