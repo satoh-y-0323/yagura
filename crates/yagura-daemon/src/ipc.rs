@@ -313,9 +313,11 @@ impl Caller {
     /// Records that this caller identified as `window_id`; `false` when it
     /// already identified as another window.
     fn settle_window(&self, window_id: &str) -> bool {
-        self.window
-            .get_or_init(|| RequestOrigin::Window(window_id.to_owned()))
-            == &RequestOrigin::Window(window_id.to_owned())
+        matches!(
+            self.window
+                .get_or_init(|| RequestOrigin::Window(window_id.to_owned())),
+            RequestOrigin::Window(settled) if settled == window_id
+        )
     }
 }
 
@@ -351,10 +353,6 @@ impl ConnectionState {
         }
     }
 
-    /// The state of a relay session's own connection for the session's
-    /// `caller`, acting as the window the caller identified as, with no window
-    /// claim of its own and no peer executable, so it never becomes an
-    /// approver. Its peer is the relay connection's.
     /// Who this connection acts as, which is what the destructive gate
     /// judges a request against: an approver once it registered as one, and
     /// otherwise whatever its caller's record says. Starts out unproven and
@@ -367,6 +365,10 @@ impl ConnectionState {
         }
     }
 
+    /// The state of a relay session's own connection for the session's
+    /// `caller`, acting as the window the caller identified as, with no window
+    /// claim of its own and no peer executable, so it never becomes an
+    /// approver. Its peer is the relay connection's.
     fn internal(
         conn_id: u64,
         caller: Caller,
