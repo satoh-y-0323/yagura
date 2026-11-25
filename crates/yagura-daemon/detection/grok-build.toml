@@ -5,9 +5,9 @@
 # vocabulary).
 schema_version = 1
 name = "grok-build"
-# Captured against Grok Build 1.0.70 on 2026-10-28 at 100x30; see
-# tests/fixtures/grok-build/README.md for the extraction rule. The rules read
-# the composer box's lower rule, the blank row and the footer under it.
+# Captured against Grok Build 1.0.70 (2026-10-28) and 1.0.92 (2026-11-25); see
+# tests/fixtures/grok-build/README.md for the captures. The rules read the
+# composer box's lower rule, the blank row and the footer under it.
 bottom_line_count = 3
 
 [debounce]
@@ -39,10 +39,12 @@ priority = 20
 region = "bottom"
 
 # The composer box's lower rule. The box is drawn during a turn too, hence below
-# running; a permission box has no such corner (1.0.70).
+# running; a permission box has no such corner (1.0.70, 1.0.92). On Windows,
+# 1.0.89 and later draw square corners when they do not recognise the terminal,
+# and the daemon takes the launching terminal's names away, so both are read.
 [[rules]]
 status = "waiting_input"
-pattern = '^\s*╰─+.*─╯\s*$'
+pattern = '^\s*(╰─+.*─╯|└─+.*─┘)\s*$'
 priority = 10
 region = "bottom"
 
@@ -55,9 +57,9 @@ pattern = '^\s*Do you trust the contents of this directory\?\s*$'
 priority = 5
 region = "screen"
 
-# The composer is a `│ > ` row (`│ ❯ ` under WSL; what picks the mark is not
-# known) inside a box. A wrapped draft continues on rows indented by three
-# columns (1.0.70).
+# The composer is a `│ > ` or `│ ❯ ` row inside a box; 1.0.92 draws `❯` with the
+# rounded corners and `>` with the square ones. A wrapped draft continues on
+# rows indented by three columns (1.0.70).
 [composer]
 marker = '^\s*│ [>❯]'
 separator = " "

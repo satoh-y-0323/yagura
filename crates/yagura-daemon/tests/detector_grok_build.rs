@@ -1,9 +1,8 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-//! Judges `detection/grok-build.toml` against real Grok Build screen captures (1.0.70).
-//! See `tests/fixtures/grok-build/README.md` for fixture provenance, the
-//! `reading::bottom_lines(16)` extraction rule, and the note that these captures
-//! are to be replaced by ones taken from a daemon-opened window.
+//! Judges `detection/grok-build.toml` against real Grok Build screen captures (1.0.70 and 1.0.92).
+//! See `tests/fixtures/grok-build/README.md` for fixture provenance and the
+//! `reading::bottom_lines(16)` extraction rule.
 
 use crate::common;
 
@@ -13,37 +12,28 @@ use yagura_protocol::WindowStatus;
 
 const DEFINITION: &str = "grok-build.toml";
 
-const FIXTURE_IDLE_STARTUP: &str = include_str!("fixtures/grok-build/100x30-idle-startup.txt");
 const FIXTURE_DRAFT: &str = include_str!("fixtures/grok-build/100x30-draft.txt");
-const FIXTURE_RUNNING: &str = include_str!("fixtures/grok-build/100x30-running.txt");
-const FIXTURE_AFTER_TURN: &str = include_str!("fixtures/grok-build/100x30-after-turn.txt");
-const FIXTURE_APPROVAL: &str = include_str!("fixtures/grok-build/100x30-approval.txt");
 const FIXTURE_APPROVAL_HISTORY_FOCUS: &str =
     include_str!("fixtures/grok-build/100x30-approval-history-focus.txt");
 const FIXTURE_INTERRUPTED_HISTORY_FOCUS: &str =
     include_str!("fixtures/grok-build/100x30-interrupted-history-focus.txt");
-const FIXTURE_DAEMON_IDLE_VERSION_FOOTER: &str =
-    include_str!("fixtures/grok-build/daemon-idle-version-footer.txt");
-const FIXTURE_DAEMON_TRUST_SCREEN: &str =
-    include_str!("fixtures/grok-build/daemon-trust-screen.txt");
 const FIXTURE_WSL_IDLE: &str = include_str!("fixtures/grok-build/100x30-wsl-idle.txt");
 const FIXTURE_WSL_RUNNING: &str = include_str!("fixtures/grok-build/100x30-wsl-running.txt");
 const FIXTURE_WSL_AFTER_TURN: &str = include_str!("fixtures/grok-build/100x30-wsl-after-turn.txt");
+const FIXTURE_DAEMON_IDLE: &str = include_str!("fixtures/grok-build/daemon-1092-idle.txt");
+const FIXTURE_DAEMON_RUNNING: &str = include_str!("fixtures/grok-build/daemon-1092-running.txt");
+const FIXTURE_DAEMON_AFTER_TURN: &str =
+    include_str!("fixtures/grok-build/daemon-1092-after-turn.txt");
+const FIXTURE_DAEMON_APPROVAL: &str = include_str!("fixtures/grok-build/daemon-1092-approval.txt");
+const FIXTURE_DAEMON_TRUST_SCREEN: &str =
+    include_str!("fixtures/grok-build/daemon-1092-trust-screen.txt");
 
 /// The real fixtures with their expected verdict, per `tests/fixtures/grok-build/README.md`.
 /// A permission box keeps the turn's `Ctrl+c:cancel` on screen, so it holds only if the
 /// approval rule outranks running; a history-focused screen shows no composer the daemon
 /// could type into, so it must read Unknown rather than the waiting-input a box suggests.
 const CASES: &[(&str, &str, WindowStatus)] = &[
-    (
-        "idle-startup",
-        FIXTURE_IDLE_STARTUP,
-        WindowStatus::WaitingInput,
-    ),
     ("draft", FIXTURE_DRAFT, WindowStatus::WaitingInput),
-    ("running", FIXTURE_RUNNING, WindowStatus::Running),
-    ("after-turn", FIXTURE_AFTER_TURN, WindowStatus::WaitingInput),
-    ("approval", FIXTURE_APPROVAL, WindowStatus::WaitingApproval),
     (
         "approval-history-focus",
         FIXTURE_APPROVAL_HISTORY_FOCUS,
@@ -64,16 +54,33 @@ const CASES: &[(&str, &str, WindowStatus)] = &[
 ];
 
 /// The size of the window the daemon opened when the `daemon-*` fixtures were taken.
-const DAEMON_WINDOW: (u16, u16) = (88, 23);
+const DAEMON_WINDOW: (u16, u16) = (80, 24);
 
-/// Screens read from a daemon-opened window, judged at that window's size.
+/// Screens read from a daemon-opened window on Windows, judged at that window's size.
+/// Grok draws them with the square-cornered composer box it uses on Windows when it
+/// does not recognise the terminal, which is every daemon-opened window there.
 const DAEMON_CASES: &[(&str, &str, WindowStatus)] = &[
-    // After the trust question the start screen keeps the version-only footer under the
-    // composer box, so that footer alone does not mean the trust question.
+    // The start screen keeps the version-only footer under the composer box, so that
+    // footer alone does not mean the trust question.
     (
-        "daemon-idle-version-footer",
-        FIXTURE_DAEMON_IDLE_VERSION_FOOTER,
+        "daemon-idle",
+        FIXTURE_DAEMON_IDLE,
         WindowStatus::WaitingInput,
+    ),
+    (
+        "daemon-running",
+        FIXTURE_DAEMON_RUNNING,
+        WindowStatus::Running,
+    ),
+    (
+        "daemon-after-turn",
+        FIXTURE_DAEMON_AFTER_TURN,
+        WindowStatus::WaitingInput,
+    ),
+    (
+        "daemon-approval",
+        FIXTURE_DAEMON_APPROVAL,
+        WindowStatus::WaitingApproval,
     ),
     (
         "daemon-trust-screen",

@@ -1,0 +1,23 @@
+
+  main D:\y\t1079\repo                               1.9k / 256k │ [Dashboard]
+
+
+     > Write a poem of about 40 lines about rivers. Do not use any  10:42 PM
+       tools.
+
+                                        ▲
+     and answers only with a lower voice,
+     the one that stones have practiced all their lives.
+
+     In flood it climbs the steps of its own banks
+     and writes across the fields in muddy script,
+     then draws the letters back
+
+
+   / Responding… 3.1s                                       5.2s ↓1.95k [stop]
+
+  ┌──────────────────────────────────────────────────────────────────────────┐
+  │ >                                                                        │
+  └─────────────────────────────────────────────────── Grok 4.7 Fast (high) ─┘
+
+  Shift+Tab:mode  │  Ctrl+c:cancel  │  Ctrl+x:shortcuts

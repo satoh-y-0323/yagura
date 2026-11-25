@@ -1,0 +1,23 @@
+
+  ≡ main D:\y\t1079\repo
+
+
+               Resume session                               ctrl+r
+               New worktree                                 ctrl+w
+               Changelog
+               Quit                                         ctrl+q
+
+               New /learn skill!
+               Ask Grok to /learn from your past traces and tune
+               Grok Build to how you work.
+
+
+
+   Tip: Start Grok in a fresh worktree with `-w`; add `-r <session-id>` to
+   resume an existing session there.
+
+  ┌──────────────────────────────────────────────────────────────────────────┐
+  │ >                                                                        │
+  └──────────────────────────────────────────────────────── Grok 4.7 (high) ─┘
+
+                                                   Grok Build  1.0.92 [stable]

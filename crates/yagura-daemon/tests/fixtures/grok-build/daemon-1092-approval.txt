@@ -1,0 +1,23 @@
+
+  main D:\y\t1079\repo                  - MCP (0/1) │ 18k / 256k │ [Dashboard]
+
+
+     > Use your shell tool to run exactly this command: del a.txt   10:39 PM
+
+
+
+
+   ♦ Delete a.txt with del… 8.6s                          13s ↓18.8k [↓][stop]
+
+  │
+  │  >  Delete a.txt with del
+  │  │ del a.txt
+  │  ← widen scope · e edit pattern
+  │  Auto-review blocked this action.  Ctrl+F to view explanation
+  │  1 (○) Always allow: del a.txt
+  │  3 (•) Yes, proceed
+  │  4 (○) No, reject (type to add feedback)
+  │  5 (○) Never allow: del a.txt
+  │    (○) Yes, and don't ask again for anything (always-approve mode)
+
+  1/5:select  │  Tab:next option  │  ←:scope  │  e:edit pattern

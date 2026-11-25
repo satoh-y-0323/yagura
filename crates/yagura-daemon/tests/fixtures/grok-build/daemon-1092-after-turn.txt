@@ -1,0 +1,23 @@
+
+  main D:\y\t1079\repo                                18k / 256k │ [Dashboard]
+
+
+     > Write a poem of about 40 lines about rivers. Do not use any  10:42 PM
+       tools.
+
+                                        ▲
+     the earth remembering how to move.
+
+     It will arrive. It always has arrived.
+     The sea receives it without ceremony,
+     and somewhere in the hills a cloud lets go,
+     and somewhere else a river starts again.
+
+     Worked for 11s
+
+
+  ┌──────────────────────────────────────────────────────────────────────────┐
+  │ >                                                                        │
+  └─────────────────────────────────────────────────── Grok 4.7 Fast (high) ─┘
+
+  Shift+Tab:mode  │  Ctrl+x:shortcuts
