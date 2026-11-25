@@ -103,17 +103,25 @@ pub(crate) fn pidfd_has_exited(pidfd: &std::os::fd::OwnedFd) -> io::Result<bool>
     platform::poll_exit(pidfd, 0)
 }
 
-/// The creation time of the process `pid` as the raw 100 ns ticks, which
-/// order processes, and as its start; `None` when no process has that id.
+/// The creation time of the process `pid` as raw 100 ns ticks, the same
+/// value its start is shown from, and the id of the process that created
+/// it, both read through one handle so both are of one process; `None` when
+/// no process has that id.
 ///
 /// # Errors
 ///
-/// Returns the operating system's error when the process is there but its
-/// creation time cannot be read.
+/// Returns the operating system's error when the process is there but it
+/// cannot be opened, or its creation time or creator cannot be read.
 #[cfg(windows)]
-pub(crate) fn process_creation(pid: u32) -> io::Result<Option<(u64, ProcessStart)>> {
-    platform::creation_of(pid)
-        .map(|read| read.map(|ticks| (ticks, ProcessStart(start_text(ticks)))))
+pub(crate) fn process_creation_and_creator(pid: u32) -> io::Result<Option<(u64, u32)>> {
+    platform::creation_and_creator_of(pid)
+}
+
+impl ProcessStart {
+    /// A Windows start from the raw creation ticks it is shown from.
+    pub(crate) fn from_creation_ticks(ticks: u64) -> Self {
+        Self(start_text(ticks))
+    }
 }
 
 /// The start of the process `handle` refers to, read from the handle itself:
@@ -131,7 +139,6 @@ pub(crate) fn start_of_handle(
 }
 
 /// A Windows start: the creation time in 100 ns ticks, as a decimal string.
-#[cfg(windows)]
 fn start_text(ticks: u64) -> String {
     ticks.to_string()
 }
@@ -227,10 +234,14 @@ mod platform {
     use std::os::windows::io::{AsRawHandle as _, FromRawHandle as _, OwnedHandle};
 
     use windows::Win32::Foundation::{
-        ERROR_INVALID_PARAMETER, FILETIME, HANDLE, WAIT_OBJECT_0, WAIT_TIMEOUT,
+        ERROR_INVALID_PARAMETER, ERROR_SUCCESS, FILETIME, HANDLE, WAIT_OBJECT_0, WAIT_TIMEOUT,
+    };
+    use windows::Win32::System::Diagnostics::ProcessSnapshotting::{
+        HPSS, PSS_CAPTURE_NONE, PSS_PROCESS_INFORMATION, PSS_QUERY_PROCESS_INFORMATION,
+        PssCaptureSnapshot, PssFreeSnapshot, PssQuerySnapshot,
     };
     use windows::Win32::System::Threading::{
-        GetProcessTimes, INFINITE, OpenProcess, PROCESS_ACCESS_RIGHTS,
+        GetCurrentProcess, GetProcessTimes, INFINITE, OpenProcess, PROCESS_ACCESS_RIGHTS,
         PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE, PROCESS_TERMINATE,
         TerminateProcess, WaitForSingleObject,
     };
@@ -325,11 +336,54 @@ mod platform {
         }
     }
 
-    pub(super) fn creation_of(pid: u32) -> io::Result<Option<u64>> {
-        match open_process(pid, PROCESS_QUERY_LIMITED_INFORMATION)? {
-            Some(handle) => created_ticks(&handle).map(Some),
-            None => Ok(None),
+    pub(super) fn creation_and_creator_of(pid: u32) -> io::Result<Option<(u64, u32)>> {
+        let Some(handle) = open_process(pid, PROCESS_QUERY_LIMITED_INFORMATION)? else {
+            return Ok(None);
+        };
+        Ok(Some((created_ticks(&handle)?, creator_of(&handle)?)))
+    }
+
+    fn pss_result(code: u32) -> io::Result<()> {
+        if code == ERROR_SUCCESS.0 {
+            Ok(())
+        } else {
+            Err(io::Error::from_raw_os_error(code as i32))
         }
+    }
+
+    /// A snapshot captured into this process, freed when dropped on every
+    /// path, the failed reads of it included.
+    struct Snapshot(HPSS);
+
+    impl Drop for Snapshot {
+        fn drop(&mut self) {
+            // SAFETY: the snapshot was captured into this process and is freed
+            // once, here; the current process pseudo-handle needs no closing.
+            let _ = unsafe { PssFreeSnapshot(GetCurrentProcess(), self.0) };
+        }
+    }
+
+    /// The id of the process that created the one `handle` refers to.
+    fn creator_of(handle: &OwnedHandle) -> io::Result<u32> {
+        let mut captured = HPSS::default();
+        // SAFETY: the handle is open for the call and `captured` is a live
+        // out-parameter.
+        pss_result(unsafe { PssCaptureSnapshot(raw(handle), PSS_CAPTURE_NONE, 0, &mut captured) })?;
+        let snapshot = Snapshot(captured);
+        let mut info = PSS_PROCESS_INFORMATION::default();
+        let size = u32::try_from(std::mem::size_of::<PSS_PROCESS_INFORMATION>())
+            .map_err(|_| io::Error::other("PSS_PROCESS_INFORMATION does not fit its size"))?;
+        // SAFETY: the snapshot is live until `snapshot` drops, and `info` is a
+        // live local of exactly `size` bytes, as the information class reads.
+        pss_result(unsafe {
+            PssQuerySnapshot(
+                snapshot.0,
+                PSS_QUERY_PROCESS_INFORMATION,
+                std::ptr::from_mut(&mut info).cast(),
+                size,
+            )
+        })?;
+        Ok(info.ParentProcessId)
     }
 
     impl Handle {

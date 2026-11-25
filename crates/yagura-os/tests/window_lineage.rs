@@ -293,11 +293,53 @@ fn a_member_of_the_running_anchors_session_is_a_member() {
     assert!(!is_member(&sessionless), "no session read: {sessionless:?}");
 }
 
+/// What each process id answers when it is opened: its creation ticks and
+/// its creator's id, an error, or nothing for an id no process has. Every id
+/// opened is recorded in order.
+#[derive(Default)]
+struct CreatorScript {
+    answers: std::collections::HashMap<u32, Result<(u64, u32), ()>>,
+    opened: Vec<u32>,
+}
+
+impl CreatorScript {
+    fn with(mut self, pid: u32, created: u64, creator: u32) -> Self {
+        self.answers.insert(pid, Ok((created, creator)));
+        self
+    }
+
+    fn failing(mut self, pid: u32) -> Self {
+        self.answers.insert(pid, Err(()));
+        self
+    }
+}
+
+impl yagura_os::window_lineage::CreatorReads for CreatorScript {
+    fn creation_and_creator(&mut self, pid: u32) -> std::io::Result<Option<(u64, u32)>> {
+        self.opened.push(pid);
+        match self.answers.get(&pid) {
+            None => Ok(None),
+            Some(Ok(read)) => Ok(Some(*read)),
+            Some(Err(())) => Err(std::io::Error::other("no answer for this process")),
+        }
+    }
+}
+
+/// The lineage walked from `peer` through `script`, for the anchor
+/// `anchor_pid` and the daemon [`DAEMON`].
+fn walk(
+    script: &mut CreatorScript,
+    peer: u32,
+    anchor_pid: u32,
+) -> yagura_os::window_lineage::Lineage {
+    yagura_os::window_lineage::walk_creators(script, peer, anchor_pid, DAEMON)
+}
+
 /// Windows: a snapshot keeps a parent's id after the parent exits, so a
 /// "parent" created after the child is another process that took the id.
 #[test]
 fn a_windows_parent_created_after_its_child_is_not_its_parent() {
-    use yagura_os::window_lineage::windows_link_holds;
+    use yagura_os::window_lineage::{LineageEnd, windows_link_holds};
     assert!(windows_link_holds(100, 200));
     assert!(
         windows_link_holds(200, 200),
@@ -310,6 +352,115 @@ fn a_windows_parent_created_after_its_child_is_not_its_parent() {
     let high = 1_u64 << 60;
     assert!(windows_link_holds(high, high + 1));
     assert!(!windows_link_holds(high + 1, high));
+
+    // The walk: a creator created after its child stops it, unstacked.
+    let mut later = CreatorScript::default().with(31, 200, 21).with(21, 201, 0);
+    let inverted = walk(&mut later, 31, 13);
+    assert_eq!(inverted.steps(), [step(31, "200")]);
+    assert_eq!(inverted.end(), Some(LineageEnd::Inverted));
+
+    let mut equal = CreatorScript::default().with(31, 200, 21).with(21, 200, 0);
+    let through = walk(&mut equal, 31, 13);
+    assert_eq!(
+        through.steps(),
+        [step(31, "200"), step(21, "200")],
+        "an equal creation time was not followed"
+    );
+    assert_eq!(through.end(), Some(LineageEnd::Top));
+
+    // A step's start is its creation ticks in decimal, as `process_start`.
+    let mut wide = CreatorScript::default()
+        .with(31, high + 1, 21)
+        .with(21, high, 0);
+    assert_eq!(
+        walk(&mut wide, 31, 13).steps(),
+        [
+            step(31, &(high + 1).to_string()),
+            step(21, &high.to_string())
+        ]
+    );
+}
+
+/// Windows: how the walk up the creators ends. Whatever cannot be read ends
+/// it unanswered, a creator that is none or no process ends it at the top,
+/// and the anchor and the daemon end it without their creators being read.
+#[test]
+fn the_windows_walk_ends_at_the_top_unanswered_or_where_the_search_ends() {
+    use yagura_os::window_lineage::LineageEnd;
+
+    for creator in [0, 31] {
+        let mut script = CreatorScript::default().with(31, 200, creator);
+        let lineage = walk(&mut script, 31, 13);
+        assert_eq!(lineage.steps(), [step(31, "200")], "creator {creator}");
+        assert_eq!(lineage.end(), Some(LineageEnd::Top), "creator {creator}");
+        assert_eq!(script.opened, [31], "creator {creator} was opened");
+    }
+
+    let mut gone = CreatorScript::default().with(31, 200, 21);
+    let lineage = walk(&mut gone, 31, 13);
+    assert_eq!(lineage.steps(), [step(31, "200")]);
+    assert_eq!(
+        lineage.end(),
+        Some(LineageEnd::Top),
+        "a creator id no process has"
+    );
+    assert_eq!(gone.opened, [31, 21]);
+
+    let mut unread_creator = CreatorScript::default().with(31, 200, 21).failing(21);
+    let lineage = walk(&mut unread_creator, 31, 13);
+    assert_eq!(lineage.steps(), [step(31, "200")]);
+    assert_eq!(
+        lineage.end(),
+        Some(LineageEnd::Unanswered),
+        "a creator that could not be read"
+    );
+
+    let mut unread_peer = CreatorScript::default().failing(31);
+    let lineage = walk(&mut unread_peer, 31, 13);
+    assert!(lineage.steps().is_empty(), "{:?}", lineage.steps());
+    assert_eq!(
+        lineage.end(),
+        Some(LineageEnd::Unanswered),
+        "a peer not read"
+    );
+
+    let mut no_peer = CreatorScript::default();
+    let lineage = walk(&mut no_peer, 31, 13);
+    assert!(lineage.steps().is_empty(), "{:?}", lineage.steps());
+    assert_eq!(
+        lineage.end(),
+        Some(LineageEnd::Unanswered),
+        "no peer process"
+    );
+
+    // The search ends at the anchor and at the daemon: above them nothing is
+    // opened.
+    let mut to_anchor = CreatorScript::default()
+        .with(31, 200, 13)
+        .with(13, 150, 40)
+        .with(40, 100, 0);
+    let lineage = walk(&mut to_anchor, 31, 13);
+    assert_eq!(lineage.steps(), [step(31, "200"), step(13, "150")]);
+    assert_eq!(lineage.end(), None);
+    assert_eq!(to_anchor.opened, [31, 13], "read above the anchor");
+
+    let mut to_daemon = CreatorScript::default()
+        .with(31, 200, DAEMON)
+        .with(DAEMON, 150, 40)
+        .with(40, 100, 0);
+    let lineage = walk(&mut to_daemon, 31, 13);
+    assert_eq!(lineage.steps(), [step(31, "200"), step(DAEMON, "150")]);
+    assert_eq!(lineage.end(), None);
+    assert_eq!(to_daemon.opened, [31, DAEMON], "read above the daemon");
+
+    // A chain longer than the steps looked at stops at 33 of them.
+    let mut deep = (0..40_u32).fold(CreatorScript::default(), |script, at| {
+        script.with(1000 + at, u64::from(10_000 - at), 1001 + at)
+    });
+    let lineage = walk(&mut deep, 1000, 13);
+    assert_eq!(lineage.steps().len(), 33);
+    assert_eq!(lineage.end(), None);
+    assert_eq!(deep.opened.len(), 33, "opened past the steps looked at");
 }
 
 /// Unix: the parent read is the child's real parent only when the child's

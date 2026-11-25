@@ -59,6 +59,83 @@ impl Lineage {
     pub fn new(steps: Vec<Step>, end: Option<LineageEnd>) -> Self {
         Self { steps, end }
     }
+
+    /// The steps read, the peer first.
+    #[must_use]
+    pub fn steps(&self) -> &[Step] {
+        &self.steps
+    }
+
+    /// Why the read stopped before the anchor; `None` as for [`Lineage::new`].
+    #[must_use]
+    pub fn end(&self) -> Option<LineageEnd> {
+        self.end
+    }
+}
+
+/// The one read of a process the Windows walk up the creators makes.
+pub trait CreatorReads {
+    /// The creation time of the process `pid` as raw 100 ns ticks and the id
+    /// of the process that created it, both of one process; `None` when no
+    /// process has that id.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the process is there but either cannot be
+    /// read.
+    fn creation_and_creator(&mut self, pid: u32) -> std::io::Result<Option<(u64, u32)>>;
+}
+
+/// Windows: walks from the process `pid` up its creators through `reads`,
+/// to the anchor `anchor_pid`, the daemon `daemon_pid` or the most steps
+/// looked at, whichever comes first. A creator id that now names a process
+/// created after its child ends the walk [`LineageEnd::Inverted`], unstacked.
+/// Never fails: whatever cannot be read ends it [`LineageEnd::Unanswered`].
+#[must_use]
+pub fn walk_creators<R: CreatorReads + ?Sized>(
+    reads: &mut R,
+    pid: u32,
+    anchor_pid: u32,
+    daemon_pid: u32,
+) -> Lineage {
+    let mut steps = Vec::new();
+    let Ok(Some((mut child_created, mut creator))) = reads.creation_and_creator(pid) else {
+        return Lineage::new(steps, Some(LineageEnd::Unanswered));
+    };
+    steps.push(creator_step(pid, child_created));
+    let mut child = pid;
+    while steps.len() <= MOST_STEPS {
+        if steps
+            .last()
+            .is_some_and(|step| ends_search(step, anchor_pid, daemon_pid))
+        {
+            return Lineage::new(steps, None);
+        }
+        if creator == 0 || creator == child {
+            return Lineage::new(steps, Some(LineageEnd::Top));
+        }
+        let (parent_created, parent_creator) = match reads.creation_and_creator(creator) {
+            Ok(Some(read)) => read,
+            Ok(None) => return Lineage::new(steps, Some(LineageEnd::Top)),
+            Err(_) => return Lineage::new(steps, Some(LineageEnd::Unanswered)),
+        };
+        if !windows_link_holds(parent_created, child_created) {
+            return Lineage::new(steps, Some(LineageEnd::Inverted));
+        }
+        steps.push(creator_step(creator, parent_created));
+        child = creator;
+        child_created = parent_created;
+        creator = parent_creator;
+    }
+    Lineage::new(steps, None)
+}
+
+fn creator_step(pid: u32, created: u64) -> Step {
+    Step {
+        pid,
+        start: ProcessStart::from_creation_ticks(created),
+        sid: None,
+    }
 }
 
 /// Why a process is not a member of a window's tree. For the log alone.
@@ -160,9 +237,10 @@ pub fn judge_lineage(
 }
 
 /// Windows: whether a process created at `parent_created` can be the creator
-/// of one created at `child_created` (raw creation ticks). A snapshot keeps
-/// a creator's id after the creator exits, so a "creator" created after the
-/// child is another process that took the id; an equal time is let through.
+/// of one created at `child_created` (raw creation ticks). A process keeps
+/// its creator's id after the creator exits, so a "creator" created after
+/// the child is another process that took the id; an equal time is let
+/// through.
 #[must_use]
 pub fn windows_link_holds(parent_created: u64, child_created: u64) -> bool {
     parent_created <= child_created
@@ -195,57 +273,20 @@ pub fn judge_peer(
 
 #[cfg(windows)]
 mod platform {
-    use super::{Lineage, LineageEnd, MOST_STEPS, Step, ends_search, windows_link_holds};
-    use crate::platform_windows::process_snapshot;
-    use crate::process_identity::process_creation;
+    use super::{CreatorReads, Lineage, walk_creators};
+    use crate::process_identity::process_creation_and_creator;
 
-    /// Walks one snapshot from `pid` up, each creator opened for its
-    /// creation time after the snapshot: an id that names another process by
-    /// then was created after its child and is not followed.
-    pub(super) fn read_lineage(pid: u32, anchor_pid: u32, daemon_pid: u32) -> Lineage {
-        let mut steps = Vec::new();
-        let Ok(creators) = process_snapshot() else {
-            return Lineage::new(steps, Some(LineageEnd::Unanswered));
-        };
-        let Ok(Some((mut child_created, start))) = process_creation(pid) else {
-            return Lineage::new(steps, Some(LineageEnd::Unanswered));
-        };
-        steps.push(Step {
-            pid,
-            start,
-            sid: None,
-        });
-        let mut child = pid;
-        while steps.len() <= MOST_STEPS {
-            if steps
-                .last()
-                .is_some_and(|step| ends_search(step, anchor_pid, daemon_pid))
-            {
-                return Lineage::new(steps, None);
-            }
-            let Some(&parent) = creators.get(&child) else {
-                return Lineage::new(steps, Some(LineageEnd::Unanswered));
-            };
-            if parent == 0 || parent == child || !creators.contains_key(&parent) {
-                return Lineage::new(steps, Some(LineageEnd::Top));
-            }
-            let (parent_created, start) = match process_creation(parent) {
-                Ok(Some(read)) => read,
-                Ok(None) => return Lineage::new(steps, Some(LineageEnd::Top)),
-                Err(_) => return Lineage::new(steps, Some(LineageEnd::Unanswered)),
-            };
-            if !windows_link_holds(parent_created, child_created) {
-                return Lineage::new(steps, Some(LineageEnd::Inverted));
-            }
-            steps.push(Step {
-                pid: parent,
-                start,
-                sid: None,
-            });
-            child = parent;
-            child_created = parent_created;
+    /// Each process read through one handle of its own.
+    struct OsReads;
+
+    impl CreatorReads for OsReads {
+        fn creation_and_creator(&mut self, pid: u32) -> std::io::Result<Option<(u64, u32)>> {
+            process_creation_and_creator(pid)
         }
-        Lineage::new(steps, None)
+    }
+
+    pub(super) fn read_lineage(pid: u32, anchor_pid: u32, daemon_pid: u32) -> Lineage {
+        walk_creators(&mut OsReads, pid, anchor_pid, daemon_pid)
     }
 }
 
