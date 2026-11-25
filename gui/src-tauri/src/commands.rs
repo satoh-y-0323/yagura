@@ -8,7 +8,7 @@
 
 use std::sync::Arc;
 
-use tauri::{AppHandle, Manager, State, UserAttentionType};
+use tauri::{AppHandle, LogicalSize, Manager, State, UserAttentionType};
 use yagura_protocol::{
     CHAT_READ_LIMIT_MAX, ClientMessage, DEFAULT_PALETTES_MAX_VENDORS, DefaultPalettes, Frame,
     MAX_LAYOUT_JSON_BYTES, OnNameTaken, Palette, TerminalSize, check_input_bounds,
@@ -736,6 +736,45 @@ pub fn get_daemon_compatibility(
     pool: State<'_, Arc<ConnectionPool>>,
 ) -> DaemonCompatibilityPayload {
     pool.daemon_compatibility()
+}
+
+/// Largest side, in logical pixels, a minimum size the WebView asks for may have.
+const MAX_MIN_WINDOW_SIDE: f64 = 16_384.0;
+
+/// Gives the main window the smallest size, in logical pixels, its shell lays
+/// out in, so shrinking it never pushes the shell off screen. Only two numbers
+/// cross the boundary.
+///
+/// Does nothing when there is no main window.
+///
+/// # Errors
+/// Returns a human-readable message when a side is not a finite number in
+/// `1..=16384`, or when the main window refuses the size.
+#[tauri::command(rename_all = "snake_case")]
+pub fn set_main_window_min_size(app: AppHandle, width: f64, height: f64) -> Result<(), String> {
+    check_min_window_side(width)?;
+    check_min_window_side(height)?;
+    let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) else {
+        return Ok(());
+    };
+    window
+        .set_min_size(Some(LogicalSize::new(width, height)))
+        .map_err(|error| error.to_string())
+}
+
+/// Accepts a minimum window side the WebView asked for.
+///
+/// # Errors
+/// Returns a human-readable message when `side` is not a finite number in
+/// `1..=16384` (NaN and the infinities included).
+pub(crate) fn check_min_window_side(side: f64) -> Result<(), String> {
+    if (1.0..=MAX_MIN_WINDOW_SIDE).contains(&side) {
+        Ok(())
+    } else {
+        Err(format!(
+            "a minimum window side must be between 1 and {MAX_MIN_WINDOW_SIDE}, got {side}"
+        ))
+    }
 }
 
 /// Shows how many things wait for the user outside the WebView: the count in
@@ -1863,6 +1902,26 @@ mod tests {
     #[test]
     fn validate_window_id_rejects_the_empty_string() {
         assert!(validate_window_id("").is_err());
+    }
+
+    #[test]
+    fn a_minimum_window_side_is_taken_only_as_a_finite_number_in_range() {
+        for side in [1.0, 929.0, MAX_MIN_WINDOW_SIDE] {
+            assert!(
+                check_min_window_side(side).is_ok(),
+                "{side} is a usable side"
+            );
+        }
+        for side in [
+            f64::NAN,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            0.0,
+            -1.0,
+            MAX_MIN_WINDOW_SIDE + 1.0,
+        ] {
+            assert!(check_min_window_side(side).is_err(), "{side} is refused");
+        }
     }
 
     #[test]

@@ -81,6 +81,7 @@ export const LOCAL_COMMAND_NAMES = [
   'load_themes',
   'save_keymap',
   'set_attention_summary',
+  'set_main_window_min_size',
 ] as const;
 
 /** The name of a command that reaches the daemon. */

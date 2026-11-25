@@ -155,7 +155,8 @@ fn main() -> anyhow::Result<()> {
             commands::get_recovery_status,
             commands::get_daemon_connection,
             commands::get_daemon_compatibility,
-            commands::set_attention_summary
+            commands::set_attention_summary,
+            commands::set_main_window_min_size
         ])
         .run(tauri::generate_context!())
         .context("failed to run the yagura GUI")

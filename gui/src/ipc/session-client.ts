@@ -1228,6 +1228,16 @@ export async function invokeSetAttentionSummary(
   });
 }
 
+/**
+ * Gives the main window a minimum size, in CSS pixels.
+ *
+ * @throws when the core rejects a side (not a finite number in 1..=16384) or
+ * the main window refuses the size.
+ */
+export async function invokeSetMainWindowMinSize(width: number, height: number): Promise<void> {
+  await invokeLocalCommand('set_main_window_min_size', { width, height });
+}
+
 /** One reason `load_keymap` could not produce keys from the keymap file. */
 export type KeymapLoadFailure = 'not_found' | 'read_failed' | 'invalid_toml' | 'too_large';
 

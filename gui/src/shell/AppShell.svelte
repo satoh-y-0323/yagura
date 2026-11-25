@@ -238,6 +238,7 @@
   } from '../profile/model-aliases-model';
   import * as approvalQueue from '../session/approval-queue';
   import { appHidden } from '../session/app-visibility';
+  import { fitAppMinSize } from '../session/app-min-size';
   import { isApprovalDialogAllowed } from '../session/modal-state';
   import { approvalFactsOf } from '../session/approval-target';
   import type { WithdrawReason } from '../session/approval-types';
@@ -3932,7 +3933,7 @@
     onRestore={handleRestoreSelected}
   />
 
-  <div class="layout">
+  <div class="layout" use:fitAppMinSize>
     <AppRail
       windowsSummary={summarizeWindowStatuses($registry.windows)}
       onWindowsSelect={focusCurrentTerminal}
