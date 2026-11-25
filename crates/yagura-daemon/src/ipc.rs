@@ -7387,6 +7387,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_request_whose_process_could_not_be_captured_is_refused_by_the_lineage_gate() {
+        let registry = Arc::new(WindowRegistry::new(DaemonConfig::default()));
+        let (opened, _holder) = registry
+            .open_played(OpenWindowRequest {
+                command: vec!["played-child".to_owned()],
+                cwd: None,
+                name: None,
+                vendor: None,
+                detection: None,
+                on_name_taken: OnNameTaken::default(),
+            })
+            .await;
+        let entry = registry.get(&opened.window_id).expect("registered");
+        let gate = credentialed::LineageGate::new(DaemonConfig::default().max_windows);
+
+        let daemon = this_process();
+        assert!(
+            gate.judge(Arc::clone(&entry), daemon.process.as_ref())
+                .await
+                .is_ok(),
+            "the daemon itself is let through, so a refusal below is the missing peer's"
+        );
+        assert_eq!(
+            gate.judge(entry, None).await.err(),
+            Some(credentialed::LineageRefused)
+        );
+    }
+
+    #[tokio::test]
     async fn a_push_handed_to_a_request_answer_carries_no_correlation_id_and_spends_no_answer() {
         let push = DaemonMessage::ModelChoices {
             request_id: 1,
