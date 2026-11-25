@@ -34,8 +34,36 @@ pub fn script_command(bytes: &[u8]) -> Vec<u8> {
 /// Opens a `term_script` window and waits until it is reading commands.
 pub async fn open_script_window(h: &Harness) -> String {
     let window_id = h.open(script_argv(), None).await;
-    super::wait_until_model_shows(h, &window_id, SCRIPT_READY).await;
+    wait_until_copy_shows(h, &window_id, SCRIPT_READY).await;
     window_id
+}
+
+/// Waits until the daemon's copy of the window's screen shows `marker`. The
+/// copy trails the holder's model, so a test that then reads the copy with
+/// [`model_screen`] waits on the copy rather than on the holder.
+pub async fn wait_until_copy_shows(h: &Harness, window_id: &str, marker: &[u8]) {
+    let marker = String::from_utf8_lossy(marker).into_owned();
+    let session = h
+        .registry
+        .get(window_id)
+        .expect("window must exist in registry")
+        .session()
+        .clone();
+    let mut arrivals = session.output_arrivals();
+    let deadline = Instant::now() + HANG_GUARD;
+    loop {
+        arrivals.borrow_and_update();
+        let shown = session.read_screen(reading::screen_text).await;
+        if shown.as_deref().is_some_and(|text| text.contains(&marker)) {
+            return;
+        }
+        tokio::time::timeout_at(deadline, arrivals.changed())
+            .await
+            .unwrap_or_else(|_| {
+                panic!("the window's copy never showed {marker:?}; it shows {shown:?}")
+            })
+            .expect("the arrivals channel must stay open while the session lives");
+    }
 }
 
 /// Makes the window's child write `bytes` to its terminal.
@@ -52,11 +80,11 @@ pub async fn entry_script_write(entry: &yagura_daemon::WindowEntry, bytes: &[u8]
         .expect("write a term_script command");
 }
 
-/// Makes the child write `bytes`, then waits until the window's model shows
+/// Makes the child write `bytes`, then waits until the window's copy shows
 /// `marker`, which `bytes` must end with.
 pub async fn script_write_and_wait(h: &Harness, window_id: &str, bytes: &[u8], marker: &str) {
     script_write(h, window_id, bytes).await;
-    super::wait_until_model_shows(h, window_id, marker.as_bytes()).await;
+    wait_until_copy_shows(h, window_id, marker.as_bytes()).await;
 }
 
 /// The window's model as a reader of the daemon sees it.

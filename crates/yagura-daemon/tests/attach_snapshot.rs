@@ -124,7 +124,7 @@ async fn open_alternate_screen_window(h: &Harness) -> (String, std::sync::Arc<Pt
         )
         .await;
     let session = session(h, &window_id);
-    common::wait_until_model_shows(h, &window_id, LAST_TEXT.as_bytes()).await;
+    common::views::wait_until_copy_shows(h, &window_id, LAST_TEXT.as_bytes()).await;
     (window_id, session)
 }
 
@@ -257,7 +257,7 @@ async fn a_burst_that_outruns_the_acknowledgements_ends_on_the_latest_screen() {
         text: String::from_utf8(cr_burst_payload("burst-tail;")).unwrap(),
     })
     .await;
-    common::wait_until_model_shows(&h, &window_id, b"burst-tail;").await;
+    common::views::wait_until_copy_shows(&h, &window_id, b"burst-tail;").await;
     view.assert_no_frame("the first frame is unacknowledged however much the window wrote")
         .await;
 

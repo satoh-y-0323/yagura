@@ -142,7 +142,7 @@ async fn output_while_a_frame_is_unacknowledged_goes_out_as_one_latest_state_at_
         bytes.extend_from_slice(format!("BURST-{burst}").as_bytes());
         script_write(&h, &window_id, &bytes).await;
     }
-    common::wait_until_model_shows(&h, &window_id, b"BURST-3").await;
+    common::views::wait_until_copy_shows(&h, &window_id, b"BURST-3").await;
     view.assert_no_frame("the first frame is still unacknowledged")
         .await;
 
