@@ -1057,7 +1057,7 @@ fn registered_hook_timeouts(id: &str) -> Vec<(String, Option<u64>)> {
 #[tokio::test]
 async fn the_daemon_names_each_hook_door_the_time_its_registration_gives_the_cli() {
     use crate::hook_events_door::{door_answer, open_from_profile};
-    let instance = crate::hook_events_door::unique_instance();
+    let instance = crate::common::door_relay::unique_instance();
     let profiles_dir = common::unique_temp_dir("bundled-hook-deadline");
     std::fs::create_dir_all(&profiles_dir).expect("create the profiles directory");
     let config = yagura_daemon::DaemonConfig {

@@ -283,34 +283,20 @@ async fn the_credentials_file_is_an_absolute_path_naming_the_window_and_a_token_
         serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
     assert_eq!(contents["window_id"], window_id);
     let token = contents["token"].as_str().unwrap_or_default().to_string();
-    // The window was opened from `launch`, whose hooks the daemon arranged, so only a
-    // claim that declares that profile is the window's; and this test process is not of
-    // the window's tree, so even that claim is refused for its lineage.
-    let declaring = |profile: &str| {
-        Some(Declaration {
-            profile: profile.to_string(),
-        })
-    };
-    for (what, candidate, declaration, refused_as) in [
+    // This test process is not of the window's tree, so even the window's own token with
+    // its profile declared is refused for its lineage; another window's token is refused
+    // for the credential before the tree is looked at. The declaration is measured by
+    // `relay_session.rs`.
+    let declared = Some(Declaration {
+        profile: "launch".to_string(),
+    });
+    for (what, candidate, refused_as) in [
         (
-            "its token, declaring its profile, from outside the window's tree",
+            "its token, from outside the window's tree",
             token.as_str(),
-            declaring("launch"),
-            Some("lineage_refused"),
+            "lineage_refused",
         ),
-        ("another token", VALID_TOKEN, declaring("launch"), None),
-        (
-            "its token, declaring another profile",
-            token.as_str(),
-            declaring("other"),
-            None,
-        ),
-        (
-            "its token, declaring no profile",
-            token.as_str(),
-            None,
-            None,
-        ),
+        ("another token", VALID_TOKEN, "auth_failed"),
     ] {
         let mut client = yagura_test_support::ipc::connect_with_retry(sandbox.endpoint()).await;
         send(
@@ -318,22 +304,16 @@ async fn the_credentials_file_is_an_absolute_path_naming_the_window_and_a_token_
             &ClientMessage::Identify {
                 window_id: window_id.clone(),
                 token: candidate.to_string(),
-                declaration,
+                declaration: declared.clone(),
             },
         )
         .await;
         let reply = read_response(&mut client).await;
-        assert!(
-            !matches!(reply, DaemonMessage::Identified { .. }),
-            "{what}: the claim must not be the window's; reply {reply:?}"
-        );
-        if let Some(expected) = refused_as {
-            match &reply {
-                DaemonMessage::Error { code, .. } => {
-                    assert_eq!(code, expected, "{what}: reply {reply:?}");
-                }
-                other => panic!("{what}: expected the error {expected}, got {other:?}"),
+        match &reply {
+            DaemonMessage::Error { code, .. } => {
+                assert_eq!(code, refused_as, "{what}: reply {reply:?}");
             }
+            other => panic!("{what}: expected the error {refused_as}, got {other:?}"),
         }
     }
 

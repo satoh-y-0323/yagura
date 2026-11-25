@@ -19,11 +19,11 @@ use crate::common;
 use crate::common::bins;
 use crate::common::door_relay::{
     Printed, claim_endpoint, door_command, read_json_frame, relay_door, run_door, run_with_input,
+    unique_instance,
 };
 
 use std::path::PathBuf;
 use std::process::Output;
-use std::sync::atomic::{AtomicU32, Ordering};
 
 use std::time::Duration;
 
@@ -68,16 +68,6 @@ const EVENT_FORM_PROFILE_ID: &str = "hook-door-event-form";
 /// whenever no reported turn is open, and `running` while one is.
 const READY_SCREEN: &str = "STOP-DOOR-READY";
 const MARKED_DETECTION: &str = "hook-door-marked";
-
-static COUNTER: AtomicU32 = AtomicU32::new(0);
-
-pub(crate) fn unique_instance() -> String {
-    format!(
-        "hevt{:x}{}",
-        std::process::id(),
-        COUNTER.fetch_add(1, Ordering::Relaxed)
-    )
-}
 
 /// A profile with every kind of `[hook_events]` entry in one event, and a `[delivery]`
 /// whose output form is told apart from plain text.

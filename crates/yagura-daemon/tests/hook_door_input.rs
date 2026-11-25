@@ -15,11 +15,12 @@
 //! directory, so it never reaches a running daemon of the user.
 
 use crate::common;
-use crate::common::door_relay::{door_command, run_door, run_door_as, run_with_input};
+use crate::common::door_relay::{
+    door_command, run_door, run_door_as, run_with_input, unique_instance,
+};
 
 use std::path::{Path, PathBuf};
 use std::process::{Output, Stdio};
-use std::sync::atomic::{AtomicU32, Ordering};
 
 use yagura_daemon::inbox::Parcel;
 use yagura_test_support::ipc::InstanceEndpoint;
@@ -29,16 +30,6 @@ use common::{Harness, VALID_TOKEN, approver_base_config, detection_config, uniqu
 
 const SKIP_IF_SUBAGENT: [&str; 2] = ["--skip-if", "/subagentType"];
 const LARGE_INPUT_BYTES: usize = 1024 * 1024;
-
-static COUNTER: AtomicU32 = AtomicU32::new(0);
-
-fn unique_instance() -> String {
-    format!(
-        "door{:x}{}",
-        std::process::id(),
-        COUNTER.fetch_add(1, Ordering::Relaxed)
-    )
-}
 
 /// Every door as a hook file names it, with the arguments it takes.
 fn every_door() -> Vec<Vec<&'static str>> {
@@ -401,7 +392,7 @@ async fn a_take_for_another_instance_leaves_the_parcels_and_one_for_this_instanc
         .deposit(Parcel::new("a", "PARCEL-FOR-THIS-INSTANCE"));
     let other = server_of(Some("other"));
     // The door's `YAGURA_INSTANCE` is the relay's instance, which its hook names as its own.
-    let relay_instance = common::door_relay::unique_instance();
+    let relay_instance = unique_instance();
     let own = server_of(Some(&relay_instance));
 
     let (skipped, written) = setup

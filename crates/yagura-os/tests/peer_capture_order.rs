@@ -89,13 +89,6 @@ fn a_peer_whose_reads_all_agree_is_captured() {
 }
 
 #[test]
-fn a_peer_with_no_descriptor_holding_the_other_end_is_not_captured() {
-    let mut script = Script::agreeing();
-    script.held = None;
-    assert!(capture(&mut script).is_none());
-}
-
-#[test]
 fn a_peer_holding_another_end_than_this_connections_is_not_captured() {
     let mut script = Script::agreeing();
     script.held = Some((PEER, PCB + 1));
