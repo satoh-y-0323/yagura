@@ -253,40 +253,63 @@ async fn a_contract_the_daemon_does_not_speak_is_refused_naming_its_contracts_an
 // Identification
 // =====================================================================
 
+/// A relay's claim of a window is refused both for a wrong token and, with the window's
+/// own token, from a process outside the window's tree (here the test's own process):
+/// either way the session acts as no window and marks none.
 #[tokio::test]
-async fn a_relay_hello_with_a_wrong_token_marks_nothing_and_its_tool_answers_carry_the_warning() {
-    let h = Harness::start("relay-wrong-token", config()).await;
-    let window_id = h.open(bins::echo_child_command(), None).await;
-    let other = h.open(bins::echo_child_command(), None).await;
-
-    let (mut client, _) =
-        RelayClient::welcomed(&h.endpoint, hello(Some((&window_id, WRONG_TOKEN)), None)).await;
-    initialize(&mut client).await;
-    let seq = client
-        .request(&tool_call_line(
-            1,
-            "close_window",
-            json!({"window_id": other, "force": true}),
-            false,
-        ))
+async fn a_relay_hello_with_a_wrong_token_or_from_outside_the_windows_tree_marks_nothing_and_its_tool_answers_carry_the_warning()
+ {
+    let sandbox = common::real_daemon::Sandbox::new("relay-refused-claim");
+    let mut daemon = sandbox
+        .start_from(&[("YAGURA_STATUS_TOKEN_OVERRIDE", VALID_TOKEN)])
         .await;
-    let closed = tool_json(&client.answer(seq).await);
+    let window_id = common::call_open_window(&mut daemon.client, bins::echo_child_command()).await;
 
-    assert_eq!(
-        closed["requester"], "external",
-        "a refused identification acts as no window, got {closed}"
-    );
-    assert!(
-        closed["identity_warning"]
-            .as_str()
-            .is_some_and(|warning| !warning.is_empty()),
-        "the answer must say the identification was refused, got {closed}"
-    );
-    assert_eq!(
-        mcp_connected(&h, &window_id),
-        Some(false),
-        "a refused identification marks no window"
-    );
+    for (case, token) in [
+        ("a wrong token", WRONG_TOKEN),
+        ("the window's token from outside its tree", VALID_TOKEN),
+    ] {
+        let other = common::call_open_window(&mut daemon.client, bins::echo_child_command()).await;
+        let (mut client, _) =
+            RelayClient::welcomed(sandbox.endpoint(), hello(Some((&window_id, token)), None)).await;
+        initialize(&mut client).await;
+        let seq = client
+            .request(&tool_call_line(
+                1,
+                "close_window",
+                json!({"window_id": other, "force": true}),
+                false,
+            ))
+            .await;
+        let closed = tool_json(&client.answer(seq).await);
+
+        assert_eq!(
+            closed["requester"], "external",
+            "a refused identification ({case}) acts as no window, got {closed}"
+        );
+        let warning = closed["identity_warning"].as_str().unwrap_or_default();
+        assert!(
+            !warning.is_empty(),
+            "the answer must say the identification ({case}) was refused, got {closed}"
+        );
+        if token == VALID_TOKEN {
+            assert!(
+                warning.contains("lineage_refused"),
+                "a claim from outside the window's tree is refused as lineage_refused, got {closed}"
+            );
+        }
+        let connected = common::call_list_windows(&mut daemon.client)
+            .await
+            .into_iter()
+            .find(|info| info.window_id == window_id)
+            .unwrap_or_else(|| panic!("window {window_id} is missing from the window list"))
+            .mcp_connected;
+        assert_eq!(
+            connected,
+            Some(false),
+            "a refused identification ({case}) marks no window"
+        );
+    }
 }
 
 /// A window opened from a profile whose hooks the daemon arranged is claimed only by a
