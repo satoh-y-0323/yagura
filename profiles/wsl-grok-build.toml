@@ -91,6 +91,9 @@ launch_prompt = ["--", "{prompt}"]
 # the daemon its hook entries run.
 [host_paths]
 convert = ["wsl", "-e", "wslpath", "-u", "{path}"]
+# The guest's home as Windows reaches it: a window opened without a folder
+# starts there, as a WSL terminal does.
+home = ["wsl", "-e", "sh", "-c", 'wslpath -w "$HOME"']
 # `{file}` is a positional argument to `sh`, resolved against $HOME inside
 # the script -- never spliced into the script string itself. The replace
 # tool follows a symlinked file to its target and keeps its mode, as in

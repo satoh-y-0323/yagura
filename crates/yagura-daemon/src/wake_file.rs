@@ -19,7 +19,7 @@
 //! its folder.
 
 use std::collections::BTreeMap;
-use std::ffi::{OsStr, OsString};
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -27,10 +27,9 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use tokio::sync::Semaphore;
-use tokio::time::Instant;
 
 use crate::config::DaemonConfig;
-use crate::pty::{self, lock_recover};
+use crate::pty::lock_recover;
 
 /// The file a window's CLI watches to be woken.
 pub const WAKE_FILE_NAME: &str = "yagura_wake";
@@ -478,28 +477,19 @@ fn write_wake_file(path: &Path, text: &str) -> std::io::Result<()> {
     std::fs::write(path, text)
 }
 
-/// How a window's open reads a guest's state base: the profile's
-/// `[host_paths] state_base` argv and environment, under the launch slots a
-/// path conversion takes.
-pub(crate) struct StateBaseTool {
-    pub(crate) argv: Vec<String>,
-    pub(crate) env: Vec<(OsString, OsString)>,
-    pub(crate) permits: Arc<Semaphore>,
-}
-
 /// The instance's folder in the guest's state base `tool` prints, or `None`
 /// (with one warning) when it cannot be had within
 /// `config.mcp_listing_timeout`: the window then opens without a wake record.
 pub(crate) async fn read_guest_base(
     config: &DaemonConfig,
     profile: &str,
-    tool: StateBaseTool,
+    tool: crate::guest_tool::GuestTool,
 ) -> Option<GuestBase> {
     let read = guest_base(config, tool).await;
     if let Err(reason) = &read {
         tracing::warn!(
             profile,
-            reason,
+            %reason,
             "the guest's state base could not be had; the window opens without a wake file, so \
              a message for it waits for its CLI's next event"
         );
@@ -507,62 +497,17 @@ pub(crate) async fn read_guest_base(
     read.ok()
 }
 
-async fn guest_base(config: &DaemonConfig, tool: StateBaseTool) -> Result<GuestBase, &'static str> {
+async fn guest_base(
+    config: &DaemonConfig,
+    tool: crate::guest_tool::GuestTool,
+) -> Result<GuestBase, String> {
     let namespace = yagura_os::resolve_instance_from(config.instance_id.as_deref().map(OsStr::new))
-        .map_err(|_| "the instance has no name a guest folder can be given")?;
-    // The same bound and slots as a conversion: both run the guest's tools
-    // as the window opens.
-    let deadline = Instant::now() + config.mcp_listing_timeout;
-    let Ok(Ok(_slot)) = tokio::time::timeout_at(deadline, tool.permits.acquire()).await else {
-        return Err("no slot to run the state base tool in");
-    };
-    let resolve_config = config.clone();
-    let argv = tool.argv;
-    let (spawn_argv, cwd) = tokio::task::spawn_blocking(move || {
-        let spawn_argv = crate::profile::resolve_spawn_argv(&resolve_config, &argv)?;
-        // An empty directory, as a conversion starts in: the guest reads no
-        // project's settings from it.
-        let cwd: Option<PathBuf> = resolve_config
-            .registration_cwd
-            .as_ref()
-            .filter(|dir| dir.ensure().is_ok())
-            .map(|dir| dir.path().to_path_buf());
-        Ok::<_, &'static str>((spawn_argv, cwd))
-    })
-    .await
-    .map_err(|_| "the state base tool could not be resolved")??;
-    let captured = pty::spawn_one_shot(
-        spawn_argv,
-        cwd,
-        pty::CaptureChildEnv::Based {
-            base: config.child_base_env.clone(),
-            overlay: tool.env,
-        },
-        None,
-    )
-    .await
-    .map_err(|_| "the state base tool could not be started")?;
-    let limits = yagura_os::CaptureLimits {
-        timeout: deadline.saturating_duration_since(Instant::now()),
-        max_output_bytes: config.mcp_registration_max_output_bytes,
-    };
-    // A timeout ends the tool's whole tree before returning.
-    let outcome = tokio::task::spawn_blocking(move || captured.collect(limits))
+        .map_err(|_| "the instance has no name a guest folder can be given".to_string())?;
+    let stdout = crate::guest_tool::run(config, tool)
         .await
-        .unwrap_or(yagura_os::CaptureOutcome::TimedOut);
-    match outcome {
-        yagura_os::CaptureOutcome::Exited {
-            code: Some(0),
-            stdout,
-            ..
-        } => guest_base_printed(&stdout, &namespace)
-            .ok_or("the state base tool printed no usable base"),
-        yagura_os::CaptureOutcome::Exited { .. } => Err("the state base tool failed"),
-        yagura_os::CaptureOutcome::TimedOut => Err("the state base tool timed out"),
-        yagura_os::CaptureOutcome::OutputTooLarge => {
-            Err("the state base tool's output was larger than accepted")
-        }
-    }
+        .map_err(|err| err.to_string())?;
+    guest_base_printed(&stdout, &namespace)
+        .ok_or_else(|| "the state base tool printed no usable base".to_string())
 }
 
 /// The instance's folder in the state base `stdout` names: its first line the

@@ -328,6 +328,74 @@ async fn a_profile_open_window_asks_about_the_profile_and_opens_once_approved() 
     assert_eq!(window_count(&h).await, before + 1);
 }
 
+/// A window whose CLI runs in another environment, opened without a folder, shows the
+/// approver the home its `[host_paths] home` prints, and opens there once approved.
+#[tokio::test]
+async fn a_guest_profile_open_window_shows_the_approver_the_home_it_opens_in() {
+    let dir = TempDir::new("yagura-cli-test", "open-gate-guest-home");
+    let home = dir.make_dir("guest-home");
+    let config = profile_config(dir.path(), &[]);
+    let strings = |items: Vec<String>| {
+        toml::Value::Array(items.into_iter().map(toml::Value::String).collect()).to_string()
+    };
+    let source = format!(
+        "{}\n[host_paths]\nconvert = {}\nhome = {}\n\n[env]\nMCP_CLI_STUB_PROBE_OUTPUT = {}\n",
+        ready_child_profile_source("Guest Home"),
+        strings(crate::credentials_launch::unchanged_convert()),
+        strings(vec![
+            common::bins::mcp_cli_stub_path().display().to_string(),
+            "probe".to_string(),
+            "home".to_string(),
+        ]),
+        toml::Value::String(home.display().to_string()),
+    );
+    write_profile(
+        config.profiles_dir.as_deref().expect("profiles dir"),
+        "guest-home",
+        &source,
+    );
+    let h = Harness::start("open-gate-guest-home", config).await;
+    let mut approver = approver_connection(&h).await;
+    let mut requester = window_connection(&h).await;
+    let expected = yagura_test_support::paths::strip_extended_length_prefix(
+        &home.canonicalize().expect("canonicalize the home"),
+    )
+    .display()
+    .to_string();
+
+    send(
+        &mut requester,
+        &ClientMessage::OpenWindowFromProfile {
+            profile: "guest-home".to_string(),
+            cwd: None,
+            name: None,
+            model: None,
+            effort: None,
+            on_name_taken: Default::default(),
+        },
+    )
+    .await;
+
+    let request = expect_approval_requested(&mut approver).await;
+    assert_eq!(
+        text_lines(&request)[1],
+        format!("cwd: {expected}"),
+        "the approver is shown the home"
+    );
+    decide(&mut approver, &request.request_id, true).await;
+    let window_id = expect_window_opened(read_response(&mut requester).await);
+    let opened = h
+        .registry
+        .list()
+        .into_iter()
+        .find(|window| window.window_id == window_id)
+        .expect("the window is listed");
+    assert_eq!(
+        opened.cwd, expected,
+        "the window opens where the approver was shown"
+    );
+}
+
 #[tokio::test]
 async fn a_denied_profile_open_window_opens_nothing() {
     let dir = TempDir::new("yagura-cli-test", "open-gate-profile-deny");

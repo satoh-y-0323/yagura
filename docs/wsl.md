@@ -94,6 +94,26 @@ None of the five WSL profiles names a `[command]` key for macOS or Linux, so on 
 the daemon leaves them out of every profile listing --
 see profiles/README.md's schema section for the OS-specific `[command]` selection rule.
 
+## The Folder a WSL Window Starts In
+
+A window opened from one of the five WSL profiles without a folder starts in the distribution's
+home (`~`), the way a WSL terminal does, not in the Windows folder the daemon would otherwise use:
+the profile's `[host_paths] home` prints that home as Windows reaches it (`wslpath -w "$HOME"`, a
+`\\wsl.localhost\<distribution>\...` path), and the window is opened there. That path is the
+window's recorded folder, and the one its workspace room is resolved from like any other: the
+repository it is in, or the folder itself (see [send_chat](mcp-setup.md#send_chat)). An approver
+asked about the open is shown that folder. When the home cannot be had, the window opens in the
+daemon's default folder and the daemon logs a warning. See
+[Host paths](../profiles/README.md#host-paths).
+
+A folder you choose is used as it is. Choosing your Windows home (`C:\Users\<you>`) for a WSL
+window is a different thing from the Linux home: the CLI sees it as `/mnt/c/Users/<you>`, which is
+not its home, so a CLI that reads a project's settings from the folder it starts in takes the
+settings folders kept there for the Windows build as that project's. Grok Build is one: started in
+`/mnt/c/Users/<you>`, it reads the Windows build's `.grok/config.toml` there as the project's, and
+an MCP server that file names replaces one of the same name in its own Linux settings. Open a WSL
+window without a folder, or in a project folder, rather than in your Windows home.
+
 ## Model Lists from the WSL Profiles
 
 When the GUI's Models tab asks for the model list of `wsl-codex-cli`, the daemon runs the same

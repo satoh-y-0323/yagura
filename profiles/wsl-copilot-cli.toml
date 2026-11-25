@@ -77,6 +77,9 @@ block = '{"decision":"block","reason":{text}}'
 # registration writes -- is converted with WSL's own tool first.
 [host_paths]
 convert = ["wsl", "-e", "wslpath", "-u", "{path}"]
+# The guest's home as Windows reaches it: a window opened without a folder
+# starts there, as a WSL terminal does.
+home = ["wsl", "-e", "sh", "-c", 'wslpath -w "$HOME"']
 
 # The registration commands below run the same way any other window from
 # this profile does: through the launch argv above, so they reach the same

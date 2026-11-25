@@ -99,7 +99,7 @@ table, the `[hook_events]` table, `retired` under
 top-level `subagent_pointer`, the `[hook_timeout]`, `[interrupt]` and
 `[launch_overlay]` tables, `when` or `deliver = "block"`
 in a `[hook_events]` event, `max_bytes` or a `block` output under
-`[delivery]`, `answers` under `[hooks]`, `state_base` under `[host_paths]`,
+`[delivery]`, `answers` under `[hooks]`, `state_base` or `home` under `[host_paths]`,
 `args_line` under `[mcp_registration.status]`, or a `[credentials]`, `[mcp]`
 or `[hooks]` table written per operating system -- is left out of its
 listing with a
@@ -1850,8 +1850,8 @@ absent_exit = 3
 
 - `convert` is required: a non-empty argv, at least one element of which
   contains `{path}`, the daemon-side path. No other placeholder is accepted
-  in it, and no key other than `convert`, `read`, `replace` and
-  `absent_exit` (below) is accepted in the table; either fails the table, and
+  in it, and no key other than `convert`, `read`, `replace`, `absent_exit`,
+  `state_base` and `home` (below) is accepted in the table; either fails the table, and
   the profile is left out of the listing with a warning.
 - It runs as its own standalone command -- not after the profile's launch
   argv -- with the profile's `[env]`, in the daemon's empty folder for
@@ -1918,9 +1918,29 @@ state_base = ["wsl", "-e", "sh", "-c", 'b="${XDG_STATE_HOME:-$HOME/.local/state}
 ```
 
 Without `[host_paths]` the wake file goes in the window's credentials folder.
+
+The table can also say where a window opened without a folder starts:
+
+- `home` (optional): an argv, naming no placeholder, that prints one line --
+  that environment's home folder as the daemon reaches it, an absolute path on
+  this host (for WSL, the UNC path `wslpath -w` prints). It runs as a
+  standalone command, like `state_base`, under the same slots and time limit,
+  each time a window of the profile opens with no folder from the caller or the
+  profile's own `cwd`, before the open is shown to an approver; the window then
+  starts in that folder, it is the folder an approver is shown and the window is
+  recorded with, and its [room](../docs/mcp-setup.md#send_chat) is resolved from it. Output of any other shape, a
+  failure, a run past the limit, or a folder that does not exist opens the
+  window in the daemon's own default folder, and the daemon logs one warning.
+  A folder the caller names is used as it is. The five bundled WSL profiles
+  print `wslpath -w "$HOME"`, so their windows start in the Linux home, as a
+  WSL terminal does.
+
+```toml
+home = ["wsl", "-e", "sh", "-c", 'wslpath -w "$HOME"']
+```
 A profile of your own that runs its CLI in another distribution than the
 shipped one -- a `[command]` naming `-d <distribution>` -- must name the same
-distribution in `convert`, `read` and `state_base`, or the daemon converts and
+distribution in `convert`, `read`, `state_base` and `home`, or the daemon converts and
 reads in one distribution while the CLI runs in another.
 
 ## MCP registration

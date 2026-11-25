@@ -25,6 +25,7 @@ pub struct HostPaths {
     convert: Vec<String>,
     files: Option<FileTools>,
     state_base: Option<Vec<String>>,
+    home: Option<Vec<String>>,
 }
 
 impl HostPaths {
@@ -51,6 +52,14 @@ impl HostPaths {
     #[must_use]
     pub fn state_base(&self) -> Option<&[String]> {
         self.state_base.as_deref()
+    }
+
+    /// The command that prints the CLI environment's home folder as the
+    /// daemon reaches it, where a window opened without a folder starts.
+    /// `None` when the table declares none.
+    #[must_use]
+    pub fn home(&self) -> Option<&[String]> {
+        self.home.as_deref()
     }
 }
 
@@ -140,6 +149,10 @@ pub enum HostPathsError {
     /// a placeholder.
     #[error("`state_base` must be a non-empty argv naming no placeholder")]
     InvalidStateBase,
+    /// `home` is empty, has an empty or NUL-holding element, or names a
+    /// placeholder.
+    #[error("`home` must be a non-empty argv naming no placeholder")]
+    InvalidHome,
 }
 
 /// A `[host_paths]` table before validation.
@@ -155,6 +168,8 @@ pub(crate) struct RawHostPaths {
     absent_exit: Option<i32>,
     #[serde(default)]
     state_base: Option<Vec<String>>,
+    #[serde(default)]
+    home: Option<Vec<String>>,
 }
 
 /// Validates `raw` into a [`HostPaths`] (`None` in, `None` out).
@@ -177,14 +192,15 @@ pub(crate) fn parse_host_paths(
     if !raw.convert.iter().any(|arg| arg.contains(PATH_PLACEHOLDER)) {
         return Err(HostPathsError::MissingPath);
     }
-    if let Some(state_base) = &raw.state_base
-        && (state_base.is_empty()
-            || yagura_protocol::validate_argv_elements(state_base).is_err()
-            || state_base
-                .iter()
-                .any(|arg| profile::contains_placeholder_outside(arg, &[])))
+    if raw
+        .state_base
+        .as_deref()
+        .is_some_and(|argv| !is_plain_argv(argv))
     {
         return Err(HostPathsError::InvalidStateBase);
+    }
+    if raw.home.as_deref().is_some_and(|argv| !is_plain_argv(argv)) {
+        return Err(HostPathsError::InvalidHome);
     }
     let files = match raw.read {
         Some(read) => Some(FileTools::new(read, raw.replace, raw.absent_exit)?),
@@ -197,5 +213,16 @@ pub(crate) fn parse_host_paths(
         convert: raw.convert,
         files,
         state_base: raw.state_base,
+        home: raw.home,
     }))
+}
+
+/// Whether `argv` is a non-empty argv of well-formed elements naming no
+/// placeholder: a tool run as its own command, given nothing to fill in.
+fn is_plain_argv(argv: &[String]) -> bool {
+    !argv.is_empty()
+        && yagura_protocol::validate_argv_elements(argv).is_ok()
+        && !argv
+            .iter()
+            .any(|arg| profile::contains_placeholder_outside(arg, &[]))
 }

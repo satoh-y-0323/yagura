@@ -9,6 +9,7 @@ pub mod control;
 pub mod detector;
 #[cfg(feature = "fault-injection")]
 pub mod fault_point;
+mod guest_tool;
 pub mod handoff;
 pub mod health;
 pub mod holder_host;

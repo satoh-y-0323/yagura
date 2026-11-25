@@ -2929,7 +2929,7 @@ impl IpcServer {
     // module also builds and hands straight to `reply`; boxing it here would
     // buy an allocation on the refusal path and nothing else.
     #[allow(clippy::result_large_err)]
-    fn plan_from_profile(
+    async fn plan_from_profile(
         &self,
         profile: &str,
         cwd: Option<String>,
@@ -3111,7 +3111,7 @@ impl IpcServer {
                 writes: Arc::clone(&self.mcp_registration_writes),
             });
 
-        Ok(PlannedOpen {
+        let mut planned = PlannedOpen {
             launch: LaunchIdentity {
                 profile: launch.vendor.clone(),
                 model: options.model,
@@ -3142,7 +3142,11 @@ impl IpcServer {
             bridge_scan,
             limits: launch.limits,
             chat: Arc::clone(&self.chat),
-        })
+        };
+        // Before the open is checked and described to an approver, so the
+        // folder approved is the folder the window opens in.
+        fill_guest_home(&self.config, &mut planned).await;
+        Ok(planned)
     }
 
     /// Opens a new window from a launch profile.
@@ -3163,7 +3167,10 @@ impl IpcServer {
         on_name_taken: OnNameTaken,
         options: crate::profile::LaunchOptionValues,
     ) {
-        let planned = match self.plan_from_profile(&profile, cwd, name, on_name_taken, options) {
+        let planned = match self
+            .plan_from_profile(&profile, cwd, name, on_name_taken, options)
+            .await
+        {
             Ok(planned) => planned,
             Err(message) => {
                 outbound.reply(&message);
@@ -3351,13 +3358,16 @@ impl IpcServer {
         };
         let has_instruction = prelude.instruction.is_some();
 
-        let planned = match self.plan_from_profile(
-            &assignment.profile,
-            Some(prelude.cwd),
-            name,
-            on_name_taken,
-            options,
-        ) {
+        let planned = match self
+            .plan_from_profile(
+                &assignment.profile,
+                Some(prelude.cwd),
+                name,
+                on_name_taken,
+                options,
+            )
+            .await
+        {
             Ok(planned) => planned,
             Err(message) => {
                 outbound.reply(&message);
@@ -3857,15 +3867,16 @@ impl IpcServer {
                 // Work handed over starts where it came from, so the
                 // requester's own window is the default working directory.
                 let cwd = cwd.or_else(|| requester.map(|info| info.cwd));
-                let planned =
-                    match self.plan_from_profile(&profile, cwd, name, OnNameTaken::Refuse, options)
-                    {
-                        Ok(planned) => planned,
-                        Err(message) => {
-                            outbound.reply(&message);
-                            return;
-                        }
-                    };
+                let planned = match self
+                    .plan_from_profile(&profile, cwd, name, OnNameTaken::Refuse, options)
+                    .await
+                {
+                    Ok(planned) => planned,
+                    Err(message) => {
+                        outbound.reply(&message);
+                        return;
+                    }
+                };
                 // The envelope is handed over as the launch prompt, so a
                 // profile that declares none, or whose program would pass it
                 // through the command interpreter, is refused before anything
@@ -6288,6 +6299,46 @@ async fn open_planned(
     Ok(opened)
 }
 
+/// Starts a window opened without a folder, whose CLI runs in another
+/// environment, in the home its `[host_paths] home` prints, if it can be had.
+async fn fill_guest_home(config: &DaemonConfig, planned: &mut PlannedOpen) {
+    if planned.request.cwd.is_some() {
+        return;
+    }
+    let Some(conversion) = planned.host_paths.as_ref() else {
+        return;
+    };
+    let Some(argv) = conversion.host_paths.home() else {
+        return;
+    };
+    match guest_home(config, conversion.tool(argv)).await {
+        Ok(home) => planned.request.cwd = Some(crate::window::RequestedCwd::from_profile(home)),
+        Err(reason) => tracing::warn!(
+            profile = %planned.launch.profile,
+            %reason,
+            "the guest's home could not be had; the window opens in the daemon's default folder"
+        ),
+    }
+}
+
+/// The existing directory `tool` prints as its one line.
+async fn guest_home(
+    config: &DaemonConfig,
+    tool: crate::guest_tool::GuestTool,
+) -> Result<PathBuf, String> {
+    let stdout = crate::guest_tool::run(config, tool)
+        .await
+        .map_err(|err| err.to_string())?;
+    let home = crate::guest_tool::printed_absolute_path(&stdout)
+        .ok_or_else(|| "the home tool printed no absolute path".to_string())?;
+    tokio::task::spawn_blocking(move || {
+        crate::window::resolve_existing_dir(&home, crate::window::CwdOrigin::ProfileDeclared)
+    })
+    .await
+    .map_err(|_| "the home could not be checked".to_string())?
+    .map_err(|err| err.to_string())
+}
+
 /// The answers of the `[hooks]` injection of the window `planned` opens,
 /// before where its wake file goes is decided.
 fn hook_answers_of(planned: &PlannedOpen) -> crate::wake_file::HookAnswers {
@@ -6310,7 +6361,7 @@ fn wake_state_base(
     planned: &PlannedOpen,
     answers: &crate::wake_file::HookAnswers,
     has_folder: bool,
-) -> Option<Option<crate::wake_file::StateBaseTool>> {
+) -> Option<Option<crate::guest_tool::GuestTool>> {
     if planned.hooks != HooksRoute::Injection || !answers.names_wake_paths() || !has_folder {
         return None;
     }
@@ -6325,11 +6376,7 @@ fn wake_state_base(
         );
         return None;
     };
-    Some(Some(crate::wake_file::StateBaseTool {
-        argv: argv.to_vec(),
-        env: conversion.env.clone(),
-        permits: Arc::clone(&conversion.permits),
-    }))
+    Some(Some(conversion.tool(argv)))
 }
 
 /// Where the wake file of a window goes, from [`wake_state_base`]'s plan:
@@ -6337,7 +6384,7 @@ fn wake_state_base(
 async fn wake_place(
     config: &DaemonConfig,
     profile: &str,
-    state_base: Option<Option<crate::wake_file::StateBaseTool>>,
+    state_base: Option<Option<crate::guest_tool::GuestTool>>,
 ) -> Option<crate::wake_file::WakePlace> {
     match state_base? {
         None => Some(crate::wake_file::WakePlace::Folder),

@@ -79,6 +79,9 @@ block = '{"decision":"block","reason":{text}}'
 # into it.
 [host_paths]
 convert = ["wsl", "-e", "wslpath", "-u", "{path}"]
+# The guest's home as Windows reaches it: a window opened without a folder
+# starts there, as a WSL terminal does.
+home = ["wsl", "-e", "sh", "-c", 'wslpath -w "$HOME"']
 read = ["wsl", "-e", "sh", "-c", 'f="$HOME/$1"; [ -e "$f" ] || exit 3; exec cat -- "$f"', "sh", "{file}"]
 absent_exit = 3
 

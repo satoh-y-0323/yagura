@@ -1309,3 +1309,145 @@ async fn a_guest_window_whose_state_base_cannot_be_had_opens_with_no_wake_record
     );
     h.registry.terminate_all().await;
 }
+
+/// [`wake_profile`] of a guest CLI with no state base, whose `[host_paths] home` prints
+/// `printed` and ends with `exit_code`.
+fn home_profile(id: &str, cli: &[String], printed: &str, exit_code: i32) -> String {
+    let mut document: toml::Table = toml::from_str(&wake_profile(
+        id,
+        cli,
+        &[("Plain", PLAIN_ANSWER)],
+        Some(None),
+    ))
+    .expect("parse the profile");
+    let strings = |items: &[&str]| {
+        toml::Value::Array(
+            items
+                .iter()
+                .map(|item| toml::Value::String((*item).to_string()))
+                .collect(),
+        )
+    };
+    let stub = common::bins::mcp_cli_stub_path().display().to_string();
+    let host_paths = document["host_paths"].as_table_mut().expect("host_paths");
+    host_paths.insert("home".into(), strings(&[&stub, "probe", "home"]));
+    let env = document["env"].as_table_mut().expect("env");
+    env.insert(
+        "MCP_CLI_STUB_PROBE_OUTPUT".into(),
+        toml::Value::String(printed.to_string()),
+    );
+    env.insert(
+        "MCP_CLI_STUB_PROBE_EXIT_CODE".into(),
+        toml::Value::String(exit_code.to_string()),
+    );
+    toml::to_string(&document).expect("serialize the profile")
+}
+
+/// A guest window opened without a folder starts in the home its `[host_paths] home`
+/// prints, and is recorded with it; one whose home is no existing folder, or whose tool
+/// fails, opens in the daemon's default folder as a profile without the tool does; a
+/// folder the caller names, or the profile declares, wins over the home.
+#[tokio::test]
+async fn a_guest_window_opened_without_a_folder_starts_in_the_home_its_profile_prints() {
+    let tree = TempDir::new("yagura-cli-test", "guest-home");
+    let profiles_dir = tree.make_dir("profiles");
+    let config_dir = tree.make_dir("mcp");
+    let home = tree.make_dir("guest-home");
+    let chosen = tree.make_dir("chosen");
+    let canonical = |dir: &Path| {
+        yagura_test_support::paths::strip_extended_length_prefix(
+            &dir.canonicalize().expect("canonicalize"),
+        )
+        .to_string_lossy()
+        .to_string()
+    };
+    let cli = crate::credentials_launch::quiet_cli(&tree.make_dir("logs"));
+    let home_text = home.display().to_string();
+    let missing = home.join("missing").display().to_string();
+    write_profile(
+        &profiles_dir,
+        "home-printed",
+        &home_profile("home-printed", &cli, &home_text, 0),
+    );
+    write_profile(
+        &profiles_dir,
+        "home-missing",
+        &home_profile("home-missing", &cli, &missing, 0),
+    );
+    write_profile(
+        &profiles_dir,
+        "home-fails",
+        &home_profile("home-fails", &cli, &home_text, 1),
+    );
+    let declared = tree.make_dir("declared");
+    let mut declaring: toml::Table =
+        toml::from_str(&home_profile("home-declared", &cli, &home_text, 0)).expect("parse");
+    declaring.insert(
+        "cwd".into(),
+        toml::Value::String(declared.display().to_string()),
+    );
+    write_profile(
+        &profiles_dir,
+        "home-declared",
+        &toml::to_string(&declaring).expect("serialize the profile"),
+    );
+    write_profile(
+        &profiles_dir,
+        "home-absent",
+        &wake_profile("home-absent", &cli, &[("Plain", PLAIN_ANSWER)], Some(None)),
+    );
+    let h = Harness::start("guest-home", wake_config(profiles_dir, &config_dir)).await;
+    let mut client = h.connect().await;
+    let cwd_of = |window_id: &str| {
+        h.registry
+            .list()
+            .into_iter()
+            .find(|window| window.window_id == window_id)
+            .expect("the window is listed")
+            .cwd
+    };
+
+    let printed = open_from_profile(&mut client, "home-printed", None).await;
+    assert_eq!(
+        cwd_of(&printed),
+        canonical(&home),
+        "the window starts in the home"
+    );
+    let in_declared = open_from_profile(&mut client, "home-declared", None).await;
+    assert_eq!(
+        cwd_of(&in_declared),
+        canonical(&declared),
+        "the profile's own folder wins over the home"
+    );
+    let default = cwd_of(&open_from_profile(&mut client, "home-absent", None).await);
+    for id in ["home-missing", "home-fails"] {
+        let window_id = open_from_profile(&mut client, id, None).await;
+        assert_eq!(
+            cwd_of(&window_id),
+            default,
+            "{id}: the default folder stands in"
+        );
+    }
+    send(
+        &mut client,
+        &ClientMessage::OpenWindowFromProfile {
+            profile: "home-printed".to_string(),
+            cwd: Some(chosen.display().to_string()),
+            name: None,
+            model: None,
+            effort: None,
+            on_name_taken: Default::default(),
+        },
+    )
+    .await;
+    let named = match read_response(&mut client).await {
+        DaemonMessage::WindowOpened { window_id, .. } => window_id,
+        other => panic!("expected window_opened, got {other:?}"),
+    };
+    assert_eq!(
+        cwd_of(&named),
+        canonical(&chosen),
+        "the caller's folder wins"
+    );
+    h.registry.terminate_all().await;
+}

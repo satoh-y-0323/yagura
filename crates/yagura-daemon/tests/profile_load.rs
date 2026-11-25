@@ -2765,31 +2765,39 @@ fn answers_are_read_only_from_a_launch_profiles_hooks_with_event_names_and_wake_
     }
 }
 
-/// `[host_paths] state_base` is the tool printing the guest's state base: an argv naming no
-/// placeholder, which a shell's own `${...}` is not.
+/// `[host_paths] state_base` and `home` are the tools printing the guest's state base and
+/// home: each an argv naming no placeholder, which a shell's own `${...}` is not.
 #[test]
-fn a_host_paths_state_base_is_read_only_as_an_argv_naming_no_placeholder() {
-    let profile = |state_base: &str| {
+fn a_host_paths_guest_tool_is_read_only_as_an_argv_naming_no_placeholder() {
+    let profile = |key: &str, argv: &str| {
         format!(
             "schema = 1\ndisplay_name = \"Guest\"\n\n[command]\ndefault = [\"wsl\", \"cli\"]\n\n\
              [host_paths]\nconvert = [\"wsl\", \"-e\", \"wslpath\", \"-u\", \"{{path}}\"]\n\
-             state_base = {state_base}\n"
+             {key} = {argv}\n"
         )
     };
-    let shipped = r#"["wsl", "-e", "sh", "-c", 'b="${XDG_STATE_HOME:-$HOME/.local/state}"; printf "%s\n" "$b"; wslpath -w "$b"']"#;
-    if let Err(err) = parse_profile("guest", &profile(shipped)) {
-        panic!("[host_paths] state_base is read: {err:?}");
-    }
-    for (what, state_base) in [
-        ("an empty argv", "[]"),
-        ("a NUL element", "[\"wsl\", \"a\\u0000b\"]"),
-        ("the convert placeholder", "[\"wsl\", \"{path}\"]"),
-        ("an unknown placeholder", "[\"wsl\", \"{state}\"]"),
-    ] {
-        assert!(
-            parse_profile("guest", &profile(state_base)).is_err(),
-            "a state_base with {what} is refused"
-        );
+    let shipped = [
+        (
+            "state_base",
+            r#"["wsl", "-e", "sh", "-c", 'b="${XDG_STATE_HOME:-$HOME/.local/state}"; printf "%s\n" "$b"; wslpath -w "$b"']"#,
+        ),
+        ("home", r#"["wsl", "-e", "sh", "-c", 'wslpath -w "$HOME"']"#),
+    ];
+    for (key, argv) in shipped {
+        if let Err(err) = parse_profile("guest", &profile(key, argv)) {
+            panic!("[host_paths] {key} is read: {err:?}");
+        }
+        for (what, refused) in [
+            ("an empty argv", "[]"),
+            ("a NUL element", "[\"wsl\", \"a\\u0000b\"]"),
+            ("the convert placeholder", "[\"wsl\", \"{path}\"]"),
+            ("an unknown placeholder", "[\"wsl\", \"{state}\"]"),
+        ] {
+            assert!(
+                parse_profile("guest", &profile(key, refused)).is_err(),
+                "a {key} with {what} is refused"
+            );
+        }
     }
 }
 

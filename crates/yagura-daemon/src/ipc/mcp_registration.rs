@@ -1465,6 +1465,18 @@ pub(super) struct PathConversion {
     pub(super) permits: Arc<Semaphore>,
 }
 
+impl PathConversion {
+    /// `argv`, one of the table's standalone tools, run as this conversion's
+    /// commands are.
+    pub(super) fn tool(&self, argv: &[String]) -> crate::guest_tool::GuestTool {
+        crate::guest_tool::GuestTool {
+            argv: argv.to_vec(),
+            env: self.env.clone(),
+            permits: Arc::clone(&self.permits),
+        }
+    }
+}
+
 /// Renders a launch's `[mcp]` and `[hooks]` injections, in order, with every
 /// daemon-side path they name converted through `conversion` first, and
 /// draws each whole `{daemon}` element of the window's `command` as the path
