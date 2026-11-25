@@ -109,7 +109,7 @@ pub enum InstanceIdError {
     HyphenAtBoundary,
 }
 
-/// Why a start-up that opens the store was refused.
+/// Why a start-up was refused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum StartupEnvError {
     /// The instance identifier did not pass [`resolve_instance_from`].
@@ -122,6 +122,42 @@ pub enum StartupEnvError {
          session. Unset the override to start this instance"
     )]
     StoreOverrideWithNamedInstance,
+    /// This system cannot capture a connection's peer
+    /// ([`crate::peer_capture::check_peer_capture_available`] failed), which
+    /// on Linux means a kernel older than 6.5. Only the operating system's
+    /// error number is kept, so the value stays `Copy`.
+    #[error(
+        "yagura requires Linux kernel 6.5 or later (SO_PEERPIDFD is unavailable{})",
+        OsErrorSuffix(*.raw_os_error)
+    )]
+    PeerCaptureUnavailable {
+        /// The operating system's error number, when the check returned one.
+        raw_os_error: Option<i32>,
+    },
+}
+
+impl StartupEnvError {
+    /// The refusal for a failed
+    /// [`crate::peer_capture::check_peer_capture_available`], keeping the
+    /// operating system's error number of `error`.
+    #[must_use]
+    pub fn peer_capture_unavailable(error: &std::io::Error) -> Self {
+        Self::PeerCaptureUnavailable {
+            raw_os_error: error.raw_os_error(),
+        }
+    }
+}
+
+/// Renders `: <the OS's message>` for an error number, and nothing without one.
+struct OsErrorSuffix(Option<i32>);
+
+impl std::fmt::Display for OsErrorSuffix {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.0 {
+            Some(code) => write!(f, ": {}", std::io::Error::from_raw_os_error(code)),
+            None => Ok(()),
+        }
+    }
 }
 
 /// Resolves an instance identifier into its namespace. The only way to obtain

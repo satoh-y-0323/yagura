@@ -541,6 +541,9 @@ export const messagesEn = {
       'YAGURA_INSTANCE is not a usable instance name, so yagura started without a daemon. An instance name is 1 to 16 characters of lowercase letters, digits and hyphens, and begins and ends with a letter or a digit. Correct the value, or unset YAGURA_INSTANCE to use the default instance, then start yagura again.',
     storeOverrideWithNamedInstance:
       'A named instance cannot run while YAGURA_STORE_DB is set, so yagura started without a daemon: both instances would open the same database, and whichever started last would discard the previous session saved by the other. Unset YAGURA_STORE_DB in this terminal and start yagura again.',
+    // Older kernels cannot tell the daemon which process connected to it.
+    unsupportedKernel:
+      "yagura requires Linux kernel 6.5 or later. This system's kernel is older, so yagura started without a daemon. Upgrade the kernel, then start yagura again.",
 
     // The lead of the one notice listing the windows a restore could not open.
     restoreNotRestored: (count: number, lines: UiText): string =>

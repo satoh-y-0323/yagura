@@ -255,6 +255,14 @@ async fn async_main(
                 .context("YAGURA_STORE_DB is set; unset it to start this named instance"),
         );
     }
+    // Before the endpoint is bound: a daemon that cannot capture its peers would
+    // refuse every client. The log line is for a daemon the GUI started, whose
+    // stderr nobody reads.
+    if let Err(error) = yagura_os::peer_capture::check_peer_capture_available() {
+        let refusal = yagura_os::StartupEnvError::peer_capture_unavailable(&error);
+        tracing::error!("{refusal}");
+        return Err(anyhow::Error::new(refusal));
+    }
 
     // Whether the daemon inherited a terminal decides whether the login shell
     // is read.

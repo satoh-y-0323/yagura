@@ -185,10 +185,10 @@ export const dummyMessages = {
     // The daemon does not speak this build's wire revision.
     daemonIncompatible: 'DUMMY_daemonIncompatible',
     profileNeedsNativeProgram: (names) => `DUMMY_profileNeedsNativeProgram(${names.join(',')})`,
-    // The two reasons start-up could not resolve
-    // this process's instance.
+    // The reasons start-up could not resolve this process's instance.
     invalidInstanceId: 'DUMMY_invalidInstanceId',
     storeOverrideWithNamedInstance: 'DUMMY_storeOverrideWithNamedInstance',
+    unsupportedKernel: 'DUMMY_unsupportedKernel',
     restoreNotRestored: (count, lines) => `DUMMY_restoreNotRestored(${count},${lines})`,
     restoreNotRestoredLines: (lines) => `DUMMY_restoreNotRestoredLines(${lines.join('|')})`,
     restoreNotRestoredMore: (count: number) => `DUMMY_restoreNotRestoredMore(${count})`,

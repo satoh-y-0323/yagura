@@ -16,11 +16,10 @@ use serde::Serialize;
 
 /// Why this process could not resolve which instance it belongs to.
 ///
-/// Only two variants: the specific allow-list rule an identifier broke is
-/// not carried here, because this value reaches a banner, a log line and the
-/// recovery report, none of which should echo attacker-influenced input
-/// (the same rule [`yagura_os::InstanceIdError`] already follows for its own
-/// `Display`).
+/// The specific allow-list rule an identifier broke is not carried here,
+/// because this value reaches a banner, a log line and the recovery report,
+/// none of which should echo attacker-influenced input (the same rule
+/// [`yagura_os::InstanceIdError`] already follows for its own `Display`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum StartupEnvFailure {
@@ -28,6 +27,9 @@ pub enum StartupEnvFailure {
     InvalidInstanceId,
     /// A named instance was combined with `YAGURA_STORE_DB`.
     StoreOverrideWithNamedInstance,
+    /// This system cannot capture a connection's peer (a Linux kernel older
+    /// than 6.5), so no daemon of this instance could serve this GUI.
+    UnsupportedKernel,
 }
 
 impl From<yagura_os::StartupEnvError> for StartupEnvFailure {
@@ -37,6 +39,7 @@ impl From<yagura_os::StartupEnvError> for StartupEnvFailure {
             yagura_os::StartupEnvError::StoreOverrideWithNamedInstance => {
                 Self::StoreOverrideWithNamedInstance
             }
+            yagura_os::StartupEnvError::PeerCaptureUnavailable { .. } => Self::UnsupportedKernel,
         }
     }
 }
@@ -63,15 +66,22 @@ impl StartupContext {
     /// Resolves the start-up fact from explicit inputs. Reads no
     /// environment variable: `instance_id` and `store_path_override` are
     /// compared against the allow-list and the store-override rule exactly
-    /// as `yagura_os::resolve_startup_env` defines them, and `config_base`
-    /// is used as given.
+    /// as `yagura_os::resolve_startup_env` defines them, `peer_capture` is
+    /// the result of `yagura_os::peer_capture::check_peer_capture_available`
+    /// (any error refuses the instance), and `config_base` is used as given.
     #[must_use]
     pub fn resolve_from(
         instance_id: Option<&OsStr>,
         store_path_override: Option<&OsStr>,
         config_base: Option<PathBuf>,
+        peer_capture: std::io::Result<()>,
     ) -> Self {
         let resolution = yagura_os::resolve_startup_env(instance_id, store_path_override)
+            .and_then(|namespace| {
+                peer_capture
+                    .map(|()| namespace)
+                    .map_err(|error| yagura_os::StartupEnvError::peer_capture_unavailable(&error))
+            })
             .map_err(StartupEnvFailure::from);
         Self {
             resolution,

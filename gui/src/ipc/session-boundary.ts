@@ -751,6 +751,7 @@ const CLIENT_CONFIG_FAILURE_VALUES: ReadonlySet<string> = new Set<ClientConfigFa
 const STARTUP_ENV_FAILURE_VALUES: ReadonlySet<string> = new Set<StartupEnvFailure>([
   'invalid_instance_id',
   'store_override_with_named_instance',
+  'unsupported_kernel',
 ]);
 
 /** Payload of `session://daemon-recovery`. */

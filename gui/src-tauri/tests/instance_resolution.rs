@@ -5,7 +5,7 @@
 //! `config_paths.rs`, `compose_window_title`, and the `current_endpoint_with`
 //! seam in `ipc_client.rs`. The sections below cover the config root's
 //! default-name freeze and non-default divergence, the window-title
-//! composer, the two failure reasons, and the write seams.
+//! composer, the failure reasons, and the write seams.
 //!
 //! `StartupContext::resolve_from` never reads the environment (only
 //! `main.rs` does): every input below is a literal argument, so both the
@@ -16,8 +16,8 @@ use std::path::{Path, PathBuf};
 
 use yagura_gui::client_config::{ClientConfigLoadResult, ReconnectConfig};
 use yagura_gui::config_paths::{config_root, ensure_default_playbook_in};
-use yagura_gui::instance::{StartupContext, compose_window_title};
-use yagura_gui::ipc_client::current_endpoint_with;
+use yagura_gui::instance::{StartupContext, StartupEnvFailure, compose_window_title};
+use yagura_gui::ipc_client::{IpcError, current_endpoint_with};
 use yagura_gui::recovery_state::RecoveryState;
 use yagura_os::{InstanceNamespace, resolve_instance_from};
 use yagura_test_support::paths::TempDir;
@@ -36,7 +36,7 @@ fn dev_namespace() -> InstanceNamespace {
 
 /// A `StartupContext` built from an identifier the allow-list rejects.
 fn invalid_identifier_context() -> StartupContext {
-    StartupContext::resolve_from(Some(std::ffi::OsStr::new("Not Valid!")), None, None)
+    StartupContext::resolve_from(Some(std::ffi::OsStr::new("Not Valid!")), None, None, Ok(()))
 }
 
 /// A `StartupContext` built from a named instance combined with a
@@ -46,6 +46,19 @@ fn store_override_with_named_instance_context() -> StartupContext {
         Some(std::ffi::OsStr::new("dev")),
         Some(std::ffi::OsStr::new("C:/tmp/shared.db")),
         None,
+        Ok(()),
+    )
+}
+
+/// A `StartupContext` whose inputs would otherwise resolve, built with the
+/// start-up check reporting that this system cannot capture a connection's
+/// peer (a Linux kernel older than 6.5).
+fn unsupported_kernel_context(config_base: Option<PathBuf>) -> StartupContext {
+    StartupContext::resolve_from(
+        None,
+        None,
+        config_base,
+        Err(std::io::Error::from_raw_os_error(92)),
     )
 }
 
@@ -143,6 +156,20 @@ fn resolve_from_rejects_a_named_instance_combined_with_a_store_path_override() {
 }
 
 #[test]
+fn resolve_from_rejects_a_system_whose_peer_capture_check_failed() {
+    let base = TempDir::new("yagura-gui-instance-resolution", "unsupported-kernel");
+    assert_eq!(
+        unsupported_kernel_context(Some(base.path().to_path_buf()))
+            .resolution()
+            .as_ref()
+            .err()
+            .copied(),
+        Some(StartupEnvFailure::UnsupportedKernel),
+        "a failed peer-capture check must refuse the instance even when every other input resolves"
+    );
+}
+
+#[test]
 fn the_two_failure_reasons_are_distinguishable_from_each_other() {
     let invalid_id = invalid_identifier_context()
         .resolution()
@@ -179,15 +206,30 @@ fn recovery_status_report_carries_the_startup_env_failure_it_was_built_with() {
         .as_ref()
         .err()
         .cloned();
+    let unsupported_kernel = unsupported_kernel_context(None)
+        .resolution()
+        .as_ref()
+        .err()
+        .cloned();
 
     let report_a = RecoveryState::new(config, invalid_id).snapshot();
     let report_b = RecoveryState::new(config, store_override).snapshot();
+    let report_c = RecoveryState::new(config, unsupported_kernel).snapshot();
 
     assert_eq!(report_a.startup_env_failure, invalid_id);
     assert_eq!(report_b.startup_env_failure, store_override);
+    assert_eq!(
+        report_c.startup_env_failure,
+        Some(StartupEnvFailure::UnsupportedKernel)
+    );
     assert_ne!(
         report_a.startup_env_failure, report_b.startup_env_failure,
         "the report must not collapse the two reasons into the same value"
+    );
+    assert_eq!(
+        serde_json::to_value(report_c.startup_env_failure).unwrap(),
+        serde_json::json!("unsupported_kernel"),
+        "the WebView reads the reason by its wire name"
     );
 }
 
@@ -226,9 +268,26 @@ fn a_resolution_failure_from_a_store_override_yields_no_endpoint_and_no_config_r
 }
 
 #[test]
+fn a_failed_peer_capture_check_yields_no_endpoint_and_no_config_root() {
+    let base = TempDir::new(
+        "yagura-gui-instance-resolution",
+        "unsupported-kernel-endpoint",
+    );
+    let ctx = unsupported_kernel_context(Some(base.path().to_path_buf()));
+    assert!(
+        matches!(
+            current_endpoint_with(ctx.resolution()),
+            Err(IpcError::NotConnected)
+        ),
+        "a GUI on a system that cannot capture peers must neither connect to nor spawn a daemon"
+    );
+    assert_eq!(ctx.config_root(), None);
+}
+
+#[test]
 fn a_successful_resolution_yields_an_endpoint_and_a_config_root() {
     let base = TempDir::new("yagura-gui-instance-resolution", "p12c-success");
-    let ctx = StartupContext::resolve_from(None, None, Some(base.path().to_path_buf()));
+    let ctx = StartupContext::resolve_from(None, None, Some(base.path().to_path_buf()), Ok(()));
 
     assert!(
         current_endpoint_with(ctx.resolution()).is_ok(),

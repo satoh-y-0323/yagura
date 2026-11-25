@@ -93,7 +93,7 @@ mod tests {
     use super::*;
 
     fn startup_under(base: &Path) -> StartupContext {
-        StartupContext::resolve_from(None, None, Some(base.to_path_buf()))
+        StartupContext::resolve_from(None, None, Some(base.to_path_buf()), Ok(()))
     }
 
     #[test]

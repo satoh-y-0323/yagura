@@ -297,6 +297,21 @@ export function reopenOffer(state: NoticeSourceState): ReopenOffer | null {
 }
 
 /**
+ * The body of the notice for a start-up that resolved no instance.
+ * @param failure why start-up could not resolve the instance
+ */
+function startupEnvFailureSentence(failure: StartupEnvFailure): UiText {
+  switch (failure) {
+    case 'invalid_instance_id':
+      return banners.invalidInstanceId;
+    case 'store_override_with_named_instance':
+      return banners.storeOverrideWithNamedInstance;
+    case 'unsupported_kernel':
+      return banners.unsupportedKernel;
+  }
+}
+
+/**
  * Derives the active state notices. The blocking ones come first, in the order
  * of what causes what: the cause behind the absence of the rest leads.
  * @param state the current notice-relevant application state
@@ -312,12 +327,7 @@ export function buildNotices(state: NoticeSourceState): NoticeDraft[] {
       draftOf(
         'startup-env-failure',
         {},
-        blockingText(
-          titles.startupEnvFailure,
-          state.startupEnvFailure === 'invalid_instance_id'
-            ? banners.invalidInstanceId
-            : banners.storeOverrideWithNamedInstance
-        )
+        blockingText(titles.startupEnvFailure, startupEnvFailureSentence(state.startupEnvFailure))
       )
     );
   }

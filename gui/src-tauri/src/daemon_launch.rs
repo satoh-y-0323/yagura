@@ -111,7 +111,7 @@ mod tests {
     }
 
     fn startup_under(base: &Path) -> StartupContext {
-        StartupContext::resolve_from(None, None, Some(base.to_path_buf()))
+        StartupContext::resolve_from(None, None, Some(base.to_path_buf()), Ok(()))
     }
 
     fn plain_spawn() -> Result<DetachedSpawn, OsError> {

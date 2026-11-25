@@ -20,4 +20,5 @@ export type ClientConfigFailure = 'not_found' | 'read_failed' | 'invalid_toml' |
  * (mirrors the Rust `StartupEnvFailure` enum). The rejected identifier is
  * not part of this type: the reason alone reaches the notice.
  */
-export type StartupEnvFailure = 'invalid_instance_id' | 'store_override_with_named_instance';
+export type StartupEnvFailure =
+  'invalid_instance_id' | 'store_override_with_named_instance' | 'unsupported_kernel';

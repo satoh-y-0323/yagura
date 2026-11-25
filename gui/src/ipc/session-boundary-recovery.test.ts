@@ -154,7 +154,7 @@ describe('narrowRecoveryStatusReport: startup_env_failure', () => {
     });
   });
 
-  it.each(['invalid_instance_id', 'store_override_with_named_instance'])(
+  it.each(['invalid_instance_id', 'store_override_with_named_instance', 'unsupported_kernel'])(
     'accepts a valid report with startup_env_failure "%s"',
     (failure) => {
       const result = narrowRecoveryStatusReport({

@@ -518,6 +518,7 @@ fn config_location_pairs_the_base_with_the_same_root_config_root_returns() {
         Some(OsStr::new("dev")),
         None,
         Some(base.path().to_path_buf()),
+        Ok(()),
     );
 
     let location: Option<(PathBuf, PathBuf)> = ctx.config_location();
@@ -529,7 +530,7 @@ fn config_location_pairs_the_base_with_the_same_root_config_root_returns() {
 
 #[test]
 fn config_location_is_none_without_a_base() {
-    let ctx = StartupContext::resolve_from(None, None, None);
+    let ctx = StartupContext::resolve_from(None, None, None, Ok(()));
 
     let location: Option<(PathBuf, PathBuf)> = ctx.config_location();
 
@@ -543,11 +544,13 @@ fn config_location_is_none_when_the_instance_does_not_resolve() {
         Some(OsStr::new("Not Valid!")),
         None,
         Some(base.path().to_path_buf()),
+        Ok(()),
     );
     let store_override = StartupContext::resolve_from(
         Some(OsStr::new("dev")),
         Some(OsStr::new("C:/tmp/shared.db")),
         Some(base.path().to_path_buf()),
+        Ok(()),
     );
 
     let invalid_location: Option<(PathBuf, PathBuf)> = invalid.config_location();

@@ -38,6 +38,9 @@ fn main() -> anyhow::Result<()> {
                 std::env::var_os("YAGURA_INSTANCE").as_deref(),
                 std::env::var_os("YAGURA_STORE_DB").as_deref(),
                 config_base.clone(),
+                // The daemon makes the same check before it serves; a GUI
+                // that fails it neither connects to nor starts one.
+                yagura_os::peer_capture::check_peer_capture_available(),
             );
 
             // Skipping these on a resolution failure is an optimization
