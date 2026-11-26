@@ -193,7 +193,7 @@ async fn attaching_to_an_exited_window_keeps_its_size_and_still_draws_it() {
         )
         .await;
     let session = session(&h, &window_id);
-    common::wait_until_model_shows(&h, &window_id, EXIT_MARKER.as_bytes()).await;
+    common::views::wait_until_copy_shows(&h, &window_id, EXIT_MARKER.as_bytes()).await;
     h.write_input(&window_id, b"q\r").await;
     h.wait_until_child_exited(&window_id).await;
     let size_before = session.size().await.unwrap();
